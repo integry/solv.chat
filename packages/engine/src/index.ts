@@ -1,4 +1,21 @@
-export { type App, createApp, type Env } from "./app.js";
+export { type App, type AppOptions, createApp, type Env } from "./app.js";
+export {
+  type AnswerDeps,
+  type AnswerInput,
+  answerMessage,
+  SCORE_FLOOR,
+  TOP_K,
+} from "./chat/answer.js";
+export { type CheckFailure, type CheckFailureReason, runPublicChecks } from "./chat/checks.js";
+export {
+  type BuildPromptInput,
+  buildPrompt,
+  MAX_CHUNK_CHARS,
+  MAX_OUTPUT_TOKENS,
+  MAX_TURNS,
+  SAFETY_FRAME,
+} from "./chat/prompt.js";
+export type { ChatRouteOverrides } from "./chat/route.js";
 export { type Chunk, chunkMarkdown, MAX_CHARS, OVERLAP_CHARS } from "./ingest/chunk.js";
 export { type IngestConsumerDeps, runIngestBatch } from "./ingest/consumer.js";
 export { type ResolvedChunk, resolveChunks } from "./ingest/resolve.js";

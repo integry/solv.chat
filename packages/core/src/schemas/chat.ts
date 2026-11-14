@@ -50,7 +50,10 @@ export function parseChatRequest(value: unknown): Result<ChatRequest> {
   } else if (typeof value.protocol !== "number" || !Number.isInteger(value.protocol)) {
     errors.add("protocol", "must be an integer");
   } else if (!SUPPORTED_CHAT_PROTOCOLS.includes(value.protocol)) {
-    errors.add("protocol", `unsupported protocol version ${value.protocol}`);
+    errors.add(
+      "protocol",
+      `unsupported protocol version ${value.protocol}; supported: ${SUPPORTED_CHAT_PROTOCOLS.join(", ")}`,
+    );
   } else {
     protocol = value.protocol;
   }

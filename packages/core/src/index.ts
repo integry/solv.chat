@@ -16,6 +16,11 @@ export {
   MAX_DOCUMENT_MARKDOWN_BYTES,
   parseDocumentInput,
 } from "./schemas/document.js";
+export {
+  type FeedbackRequest,
+  type FeedbackVote,
+  parseFeedbackRequest,
+} from "./schemas/feedback.js";
 export { parseSourceInput, type SourceInput, type SourceKind } from "./schemas/source.js";
 export {
   type BehaviourConfig,

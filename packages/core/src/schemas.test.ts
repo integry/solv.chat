@@ -11,6 +11,7 @@ import {
   parseChatEventLine,
   parseChatRequest,
   parseDocumentInput,
+  parseFeedbackRequest,
   parseSourceInput,
   parseVersionConfig,
   SUPPORTED_CHAT_PROTOCOLS,
@@ -332,6 +333,7 @@ describe("chat schema and protocol", () => {
     if (!unsupportedProtocol.ok) {
       expect(unsupportedProtocol.errors[0]).toContain("unsupported");
       expect(unsupportedProtocol.errors[0]).toContain("99");
+      expect(unsupportedProtocol.errors[0]).toContain("1");
     }
 
     const badFields = parseChatRequest({
@@ -390,5 +392,54 @@ describe("chat schema and protocol", () => {
       type: "unknown",
       name: "token",
     });
+  });
+});
+
+describe("parseFeedbackRequest", () => {
+  it("parses valid feedback with optional note and drops unknown keys", () => {
+    const res = parseFeedbackRequest({
+      messageId: "msg_1",
+      visitorId: "vis_1",
+      value: "up",
+      note: "  helpful  ",
+      extra: true,
+    });
+    expect(res).toEqual({
+      ok: true,
+      value: {
+        messageId: "msg_1",
+        visitorId: "vis_1",
+        value: "up",
+        note: "helpful",
+      },
+    });
+
+    const withoutNote = parseFeedbackRequest({
+      messageId: "msg_1",
+      visitorId: "vis_1",
+      value: "down",
+    });
+    expect(withoutNote).toEqual({
+      ok: true,
+      value: {
+        messageId: "msg_1",
+        visitorId: "vis_1",
+        value: "down",
+        note: "",
+      },
+    });
+  });
+
+  it("rejects invalid vote values and missing fields", () => {
+    const res = parseFeedbackRequest({
+      messageId: "",
+      visitorId: "vis_1",
+      value: "meh",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.errors.some((e) => e.startsWith("messageId:"))).toBe(true);
+      expect(res.errors.some((e) => e.startsWith("value:"))).toBe(true);
+    }
   });
 });

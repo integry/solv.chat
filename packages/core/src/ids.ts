@@ -8,6 +8,7 @@ export type IdPrefix =
   | "chk"
   | "cnv"
   | "msg"
+  | "fbk"
   | "mcp"
   | "tst";
 
