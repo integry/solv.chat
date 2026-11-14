@@ -25,6 +25,7 @@
     {
       "binding": "VECTORS",
       "index_name": "solvchat-chunks"
+      // Metadata indexes required before first ingest: org_id (string), assistant_id (string)
     }
   ],
   "r2_buckets": [

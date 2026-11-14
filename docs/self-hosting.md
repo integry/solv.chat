@@ -1,6 +1,6 @@
 # Self-hosting solv.chat
 
-You need a Cloudflare account, Node 24, and an Anthropic or OpenAI key.
+You need a Cloudflare account, Node 24, an OpenAI key (always needed for embeddings), and an Anthropic key when answers come from Anthropic (the default).
 
 ## 1. Clone, create Cloudflare resources, and migrate
 
@@ -12,12 +12,16 @@ npx wrangler login
 # Create the resources. Copy the database_id from `d1 create` into packages/engine/wrangler.jsonc.
 npx wrangler d1 create solvchat
 npx wrangler vectorize create solvchat-chunks --dimensions 1536 --metric cosine
+npx wrangler vectorize create-metadata-index solvchat-chunks --property-name=org_id --type=string
+npx wrangler vectorize create-metadata-index solvchat-chunks --property-name=assistant_id --type=string
 npx wrangler r2 bucket create solvchat-docs
 npx wrangler queues create solvchat-ingest
 npx wrangler queues create solvchat-ingest-dlq
 
 npm run migrations:apply -w @solvchat/engine
 ```
+
+The metadata indexes (`org_id` and `assistant_id`) must exist before the first `solv push`; any content pushed earlier has to be pushed again after creating them.
 
 ## 2. Set secrets
 

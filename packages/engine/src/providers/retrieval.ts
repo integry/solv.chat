@@ -130,6 +130,12 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
   };
 }
 
+/** Metadata properties that `vectorizeRetriever` upserts and filters every query on. */
+export const VECTORIZE_METADATA_PROPERTIES = {
+  orgId: "org_id",
+  assistantId: "assistant_id",
+} as const;
+
 /** Vectorize-backed `Retriever` that always filters by `org_id` and `assistant_id`. */
 export function vectorizeRetriever(index: VectorizeIndex): Retriever {
   return {
@@ -140,8 +146,8 @@ export function vectorizeRetriever(index: VectorizeIndex): Retriever {
           id: record.chunkId,
           values: record.vector,
           metadata: {
-            org_id: record.orgId,
-            assistant_id: record.assistantId,
+            [VECTORIZE_METADATA_PROPERTIES.orgId]: record.orgId,
+            [VECTORIZE_METADATA_PROPERTIES.assistantId]: record.assistantId,
           },
         })),
       );
@@ -151,8 +157,8 @@ export function vectorizeRetriever(index: VectorizeIndex): Retriever {
       const result = await index.query(vector, {
         topK,
         filter: {
-          org_id: orgId,
-          assistant_id: assistantId,
+          [VECTORIZE_METADATA_PROPERTIES.orgId]: orgId,
+          [VECTORIZE_METADATA_PROPERTIES.assistantId]: assistantId,
         },
         returnMetadata: "none",
       });
