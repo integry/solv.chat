@@ -33,16 +33,25 @@ function parseBlock(block: string): RawEventLine | null {
   return { name, data: dataLines.join("\n") };
 }
 
-async function* readEventLines(response: Response): AsyncIterable<RawEventLine> {
-  if (!response.body) return;
+async function* readEventLines(
+  response: Response,
+  signal?: AbortSignal,
+): AsyncIterable<RawEventLine> {
+  if (!response.body || signal?.aborted) return;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let finished = false;
+  const onAbort = () => {
+    void reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
     for (;;) {
+      if (signal?.aborted) break;
       const { value, done } = await reader.read();
+      if (signal?.aborted) break;
       if (done) {
         finished = true;
         buffer = (buffer + decoder.decode()).replace(/\r\n/g, "\n");
@@ -50,6 +59,7 @@ async function* readEventLines(response: Response): AsyncIterable<RawEventLine> 
       }
       buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
       for (let at = buffer.indexOf("\n\n"); at !== -1; at = buffer.indexOf("\n\n")) {
+        if (signal?.aborted) break;
         const block = buffer.slice(0, at);
         buffer = buffer.slice(at + 2);
         const parsed = parseBlock(block);
@@ -57,11 +67,12 @@ async function* readEventLines(response: Response): AsyncIterable<RawEventLine> 
       }
     }
 
-    if (buffer.trim().length > 0) {
+    if (!signal?.aborted && buffer.trim().length > 0) {
       const parsed = parseBlock(buffer);
       if (parsed !== null) yield parsed;
     }
   } finally {
+    signal?.removeEventListener("abort", onAbort);
     if (!finished) {
       await reader.cancel().catch(() => {});
     }
@@ -94,6 +105,8 @@ export async function* streamDraftChat(params: DraftChatParams): AsyncIterable<C
     ...(params.conversationId ? { conversationId: params.conversationId } : {}),
   };
 
+  if (params.signal?.aborted) return;
+
   const response = await fetch("/api/admin/chat", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -101,6 +114,8 @@ export async function* streamDraftChat(params: DraftChatParams): AsyncIterable<C
     body: JSON.stringify(body),
     ...(params.signal ? { signal: params.signal } : {}),
   });
+
+  if (params.signal?.aborted) return;
 
   if (response.status === 401) {
     notifyUnauthorized();
@@ -113,7 +128,7 @@ export async function* streamDraftChat(params: DraftChatParams): AsyncIterable<C
     return;
   }
 
-  for await (const raw of readEventLines(response)) {
+  for await (const raw of readEventLines(response, params.signal)) {
     const event = parseChatEventLine(raw.name, raw.data);
     if (event.type !== "unknown") {
       yield event;

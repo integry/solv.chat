@@ -52,6 +52,28 @@ function sseResponse(events: Array<{ event: string; data: unknown }>): Response 
   });
 }
 
+function createControlledSseResponse() {
+  const encoder = new TextEncoder();
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+    },
+  });
+  return {
+    response: new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream; charset=utf-8" },
+    }),
+    push(event: string, data: unknown) {
+      controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+    },
+    close() {
+      controller.close();
+    },
+  };
+}
+
 interface FakeServerOptions {
   signedIn?: boolean;
   assistants?: Assistant[];
@@ -93,7 +115,9 @@ function installFakeServer(options: FakeServerOptions = {}) {
   let pendingAssistantGet: Promise<void> | null = null;
   let pendingAssistantPatch: Promise<void> | null = null;
   let pendingPublish: Promise<void> | null = null;
-  let nextChatResponder: ((body: Record<string, unknown>) => Response) | null = null;
+  let nextChatResponder:
+    | ((body: Record<string, unknown>, init?: RequestInit) => Response | Promise<Response>)
+    | null = null;
   const chatBodies: Array<Record<string, unknown>> = [];
   const calls: Array<{ method: string; path: string }> = [];
 
@@ -290,7 +314,7 @@ function installFakeServer(options: FakeServerOptions = {}) {
       if (nextChatResponder) {
         const respond = nextChatResponder;
         nextChatResponder = null;
-        return respond(body);
+        return respond(body, init);
       }
       return sseResponse([
         { event: "token", data: { text: `Draft reply to: ${String(body.message)}` } },
@@ -338,7 +362,12 @@ function installFakeServer(options: FakeServerOptions = {}) {
       pendingPublish = d.promise;
       return d;
     },
-    setNextChatResponse(responder: (body: Record<string, unknown>) => Response) {
+    setNextChatResponse(
+      responder: (
+        body: Record<string, unknown>,
+        init?: RequestInit,
+      ) => Response | Promise<Response>,
+    ) {
       nextChatResponder = responder;
     },
   };
@@ -955,5 +984,214 @@ describe("admin app", () => {
         { role: "assistant", content: "r".repeat(MAX_CHAT_MESSAGE_LENGTH) },
       ]);
     }
+  });
+
+  it("F9: scopes Try it cancellation to the cleared assistant without interrupting another assistant", async () => {
+    const first = makeAssistant("ast_a", "Assistant A");
+    const second = makeAssistant("ast_b", "Assistant B");
+    const server = installFakeServer({ signedIn: true, assistants: [first, second] });
+
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const select = (await screen.findByLabelText("Assistant")) as HTMLSelectElement;
+
+    // 1. Give assistant B an existing transcript.
+    fireEvent.change(select, { target: { value: "ast_b" } });
+    server.setNextChatResponse(() =>
+      sseResponse([
+        { event: "token", data: { text: "B existing reply" } },
+        { event: "done", data: { messageId: "msg_b1", conversationId: "conv_b1" } },
+      ]),
+    );
+    fireEvent.change(screen.getByLabelText("Ask a question"), {
+      target: { value: "Question for B" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText("B existing reply")).toBeTruthy();
+
+    // 2. Switch to assistant A and send a question that streams partially before waiting.
+    fireEvent.change(select, { target: { value: "ast_a" } });
+    const streamA = createControlledSseResponse();
+    let signalA: AbortSignal | undefined;
+    server.setNextChatResponse((_body, init) => {
+      signalA = init?.signal ?? undefined;
+      return streamA.response;
+    });
+
+    fireEvent.change(screen.getByLabelText("Ask a question"), {
+      target: { value: "Question for A" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    streamA.push("token", { text: "Partial A" });
+    expect(await screen.findByText("Partial A")).toBeTruthy();
+    expect(signalA?.aborted).toBe(false);
+
+    // 3. Switch back to B while A is still streaming; B's input should stay enabled and Clear should only clear B.
+    fireEvent.change(select, { target: { value: "ast_b" } });
+    expect(await screen.findByText("B existing reply")).toBeTruthy();
+    expect((screen.getByLabelText("Ask a question") as HTMLInputElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(screen.queryByText("B existing reply")).toBeNull();
+    expect(signalA?.aborted).toBe(false);
+
+    // 4. Finish A's stream while B is selected, then switch back to A and verify full exchange and follow-up.
+    streamA.push("token", { text: " complete" });
+    streamA.push("done", { messageId: "msg_a1", conversationId: "conv_a1" });
+    streamA.close();
+
+    fireEvent.change(select, { target: { value: "ast_a" } });
+    expect(await screen.findByText("Partial A complete")).toBeTruthy();
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("Ask a question") as HTMLInputElement).disabled).toBe(false);
+    });
+
+    fireEvent.change(screen.getByLabelText("Ask a question"), {
+      target: { value: "Follow-up for A" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText("Draft reply to: Follow-up for A")).toBeTruthy();
+
+    const followUp = server.chatBodies[2];
+    expect(followUp).toMatchObject({
+      assistant: "pk_ast_a",
+      conversationId: "conv_a1",
+      history: [
+        { role: "user", content: "Question for A" },
+        { role: "assistant", content: "Partial A complete" },
+      ],
+    });
+  });
+
+  it("F9: isolates concurrent assistant requests and prevents stale cleanup after Clear and resend", async () => {
+    const first = makeAssistant("ast_a", "Assistant A");
+    const second = makeAssistant("ast_b", "Assistant B");
+    const server = installFakeServer({ signedIn: true, assistants: [first, second] });
+
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const select = (await screen.findByLabelText("Assistant")) as HTMLSelectElement;
+
+    // Start streaming on A.
+    const streamA = createControlledSseResponse();
+    let signalA: AbortSignal | undefined;
+    server.setNextChatResponse((_body, init) => {
+      signalA = init?.signal ?? undefined;
+      return streamA.response;
+    });
+    fireEvent.change(screen.getByLabelText("Ask a question"), {
+      target: { value: "A stream" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    streamA.push("token", { text: "A working" });
+    expect(await screen.findByText("A working")).toBeTruthy();
+
+    // Switch to B and start streaming on B concurrently.
+    fireEvent.change(select, { target: { value: "ast_b" } });
+    const streamB1 = createControlledSseResponse();
+    let signalB1: AbortSignal | undefined;
+    server.setNextChatResponse((_body, init) => {
+      signalB1 = init?.signal ?? undefined;
+      return streamB1.response;
+    });
+    fireEvent.change(screen.getByLabelText("Ask a question"), {
+      target: { value: "B first" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    streamB1.push("token", { text: "B partial" });
+    expect(await screen.findByText("B partial")).toBeTruthy();
+
+    // Clear B: B's first request is aborted, A's is untouched.
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(signalB1?.aborted).toBe(true);
+    expect(signalA?.aborted).toBe(false);
+    expect(screen.queryByText("B partial")).toBeNull();
+
+    // Immediately send a second request on B while B1 may still be unwinding.
+    const streamB2 = createControlledSseResponse();
+    server.setNextChatResponse(() => streamB2.response);
+    fireEvent.change(screen.getByLabelText("Ask a question"), {
+      target: { value: "B second" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    // B2 should still be sending until B2 itself finishes (B1's cleanup must not clear B2).
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "Sending…" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+    });
+    streamB2.push("token", { text: "B2 reply" });
+    streamB2.push("done", { messageId: "msg_b2", conversationId: "conv_b2" });
+    streamB2.close();
+    expect(await screen.findByText("B2 reply")).toBeTruthy();
+    expect(server.chatBodies[2]).toMatchObject({
+      assistant: "pk_ast_b",
+      message: "B second",
+    });
+    expect(server.chatBodies[2]?.history).toBeUndefined();
+    expect(server.chatBodies[2]?.conversationId).toBeUndefined();
+
+    // Complete A's stream and verify A was unaffected.
+    streamA.push("done", { messageId: "msg_a", conversationId: "conv_a" });
+    streamA.close();
+    fireEvent.change(select, { target: { value: "ast_a" } });
+    expect(await screen.findByText("A working")).toBeTruthy();
+  });
+
+  it("F9: marks retained cancelled exchanges as failed so they cannot enter subsequent history", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+
+    const RealAbortController = globalThis.AbortController;
+    const createdControllers: AbortController[] = [];
+    vi.stubGlobal(
+      "AbortController",
+      class extends RealAbortController {
+        constructor() {
+          super();
+          createdControllers.push(this);
+        }
+      },
+    );
+
+    render(<App />);
+
+    const input = (await screen.findByLabelText("Ask a question")) as HTMLInputElement;
+    const stream = createControlledSseResponse();
+    let requestSignal: AbortSignal | undefined;
+    server.setNextChatResponse((_body, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return stream.response;
+    });
+
+    fireEvent.change(input, { target: { value: "Cancelled question" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    stream.push("token", { text: "Partial cancelled reply" });
+    expect(await screen.findByText("Partial cancelled reply")).toBeTruthy();
+
+    // Abort the request controller directly without clearing turns, retaining the cancelled exchange.
+    const requestController = createdControllers.find((c) => c.signal === requestSignal);
+    expect(requestController).toBeTruthy();
+    requestController?.abort();
+
+    await waitFor(() => {
+      expect(input.disabled).toBe(false);
+    });
+    expect(screen.getByText("Cancelled question")).toBeTruthy();
+    expect(screen.getByText("Partial cancelled reply")).toBeTruthy();
+
+    // Sending a subsequent question must not include the cancelled exchange in history.
+    fireEvent.change(input, { target: { value: "Fresh question" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText("Draft reply to: Fresh question")).toBeTruthy();
+
+    expect(server.chatBodies[1]).toMatchObject({ message: "Fresh question" });
+    expect(server.chatBodies[1]?.history).toBeUndefined();
   });
 });

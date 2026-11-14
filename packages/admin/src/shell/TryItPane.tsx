@@ -3,7 +3,7 @@ import {
   MAX_CHAT_HISTORY_TURNS,
   MAX_CHAT_MESSAGE_LENGTH,
 } from "@solvchat/core";
-import { type FormEvent, useRef, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { streamDraftChat } from "../api/chat.js";
 import type { Assistant } from "../api/types.js";
 
@@ -26,6 +26,13 @@ export interface TryItPaneProps {
   assistant: Assistant;
 }
 
+function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
+}
+
 /**
  * Mounted once in the shell outside `<main>` so the owner keeps their draft
  * conversation while moving between screens.
@@ -33,32 +40,92 @@ export interface TryItPaneProps {
 export function TryItPane({ assistant }: TryItPaneProps) {
   const [turnsByAssistant, setTurnsByAssistant] = useState<Record<string, Turn[]>>({});
   const [conversationIds, setConversationIds] = useState<Record<string, string>>({});
-  const [input, setInput] = useState("");
-  const [inputError, setInputError] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const [inputsByAssistant, setInputsByAssistant] = useState<Record<string, string>>({});
+  const [inputErrorsByAssistant, setInputErrorsByAssistant] = useState<
+    Record<string, string | null>
+  >({});
+  const [sendingByAssistant, setSendingByAssistant] = useState<Record<string, boolean>>({});
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const controllers = abortControllersRef.current;
+    return () => {
+      mountedRef.current = false;
+      for (const controller of controllers.values()) {
+        controller.abort();
+      }
+      controllers.clear();
+    };
+  }, []);
 
   const turns = turnsByAssistant[assistant.id] ?? [];
   const conversationId = conversationIds[assistant.id];
+  const input = inputsByAssistant[assistant.id] ?? "";
+  const inputError = inputErrorsByAssistant[assistant.id] ?? null;
+  const sending = Boolean(sendingByAssistant[assistant.id]);
 
   function updateTurns(assistantId: string, updater: (prev: Turn[]) => Turn[]) {
-    setTurnsByAssistant((prev) => ({
-      ...prev,
-      [assistantId]: updater(prev[assistantId] ?? []),
-    }));
+    if (!mountedRef.current) return;
+    setTurnsByAssistant((prev) => {
+      const current = prev[assistantId] ?? [];
+      const next = updater(current);
+      if (next === current) return prev;
+      return {
+        ...prev,
+        [assistantId]: next,
+      };
+    });
+  }
+
+  function markTurnsFailed(
+    assistantId: string,
+    userTurnId: string,
+    assistantTurnId: string,
+    errorMessage?: string,
+  ) {
+    updateTurns(assistantId, (prev) => {
+      let changed = false;
+      const next = prev.map((t) => {
+        if (t.id === userTurnId) {
+          changed = true;
+          return { ...t, failed: true };
+        }
+        if (t.id === assistantTurnId) {
+          changed = true;
+          return errorMessage !== undefined
+            ? { ...t, error: errorMessage, failed: true }
+            : { ...t, failed: true };
+        }
+        return t;
+      });
+      return changed ? next : prev;
+    });
+  }
+
+  function clearSendingForController(assistantId: string, controller: AbortController) {
+    if (abortControllersRef.current.get(assistantId) !== controller) return;
+    abortControllersRef.current.delete(assistantId);
+    if (!mountedRef.current) return;
+    setSendingByAssistant((prev) => omitKey(prev, assistantId));
   }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
+    const assistantId = assistant.id;
     const message = input.trim();
-    if (!message || sending) return;
+    if (!message || sending || abortControllersRef.current.has(assistantId)) return;
     if (message.length > MAX_CHAT_MESSAGE_LENGTH) {
-      setInputError(`Message must be at most ${MAX_CHAT_MESSAGE_LENGTH} characters.`);
+      setInputErrorsByAssistant((prev) => ({
+        ...prev,
+        [assistantId]: `Message must be at most ${MAX_CHAT_MESSAGE_LENGTH} characters.`,
+      }));
       return;
     }
 
-    setInputError(null);
-    const assistantId = assistant.id;
+    setInputErrorsByAssistant((prev) => omitKey(prev, assistantId));
+
     const history: ChatHistoryTurn[] = turns
       .filter((t) => !t.error && !t.failed && t.content.trim() !== "")
       .slice(-MAX_CHAT_HISTORY_TURNS)
@@ -70,16 +137,17 @@ export function TryItPane({ assistant }: TryItPaneProps) {
     const userTurnId = `u_${Date.now()}_${Math.random()}`;
     const assistantTurnId = `a_${Date.now()}_${Math.random()}`;
 
-    setInput("");
-    setSending(true);
+    const controller = new AbortController();
+    abortControllersRef.current.set(assistantId, controller);
+
+    setInputsByAssistant((prev) => ({ ...prev, [assistantId]: "" }));
+    setSendingByAssistant((prev) => ({ ...prev, [assistantId]: true }));
     updateTurns(assistantId, (prev) => [
       ...prev,
       { id: userTurnId, role: "user", content: message },
       { id: assistantTurnId, role: "assistant", content: "", citations: [] },
     ]);
 
-    const controller = new AbortController();
-    abortRef.current = controller;
     let succeeded = false;
     let failed = false;
 
@@ -92,6 +160,12 @@ export function TryItPane({ assistant }: TryItPaneProps) {
         conversationId,
         signal: controller.signal,
       })) {
+        if (
+          controller.signal.aborted ||
+          abortControllersRef.current.get(assistantId) !== controller
+        ) {
+          break;
+        }
         if (ev.type === "token") {
           updateTurns(assistantId, (prev) =>
             prev.map((t) =>
@@ -118,59 +192,42 @@ export function TryItPane({ assistant }: TryItPaneProps) {
           );
         } else if (ev.type === "done") {
           succeeded = true;
-          setConversationIds((prev) => ({ ...prev, [assistantId]: ev.conversationId }));
+          if (mountedRef.current) {
+            setConversationIds((prev) => ({ ...prev, [assistantId]: ev.conversationId }));
+          }
         } else if (ev.type === "error") {
           failed = true;
-          updateTurns(assistantId, (prev) =>
-            prev.map((t) =>
-              t.id === userTurnId
-                ? { ...t, failed: true }
-                : t.id === assistantTurnId
-                  ? { ...t, error: ev.message, failed: true }
-                  : t,
-            ),
-          );
+          markTurnsFailed(assistantId, userTurnId, assistantTurnId, ev.message);
         }
       }
-      if (!succeeded && !failed && !controller.signal.aborted) {
-        updateTurns(assistantId, (prev) =>
-          prev.map((t) =>
-            t.id === userTurnId || t.id === assistantTurnId ? { ...t, failed: true } : t,
-          ),
-        );
+      if (!succeeded && !failed) {
+        markTurnsFailed(assistantId, userTurnId, assistantTurnId);
       }
     } catch (err) {
-      if (!controller.signal.aborted) {
-        const msg = err instanceof Error ? err.message : "Could not reach the assistant.";
-        updateTurns(assistantId, (prev) =>
-          prev.map((t) =>
-            t.id === userTurnId
-              ? { ...t, failed: true }
-              : t.id === assistantTurnId
-                ? { ...t, error: msg, failed: true }
-                : t,
-          ),
-        );
+      if (!succeeded && !failed) {
+        const msg = controller.signal.aborted
+          ? undefined
+          : err instanceof Error
+            ? err.message
+            : "Could not reach the assistant.";
+        markTurnsFailed(assistantId, userTurnId, assistantTurnId, msg);
       }
     } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
-      }
-      setSending(false);
+      clearSendingForController(assistantId, controller);
     }
   }
 
   function handleClear() {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setSending(false);
-    setInputError(null);
-    setTurnsByAssistant((prev) => ({ ...prev, [assistant.id]: [] }));
-    setConversationIds((prev) => {
-      const next = { ...prev };
-      delete next[assistant.id];
-      return next;
-    });
+    const assistantId = assistant.id;
+    const controller = abortControllersRef.current.get(assistantId);
+    if (controller) {
+      abortControllersRef.current.delete(assistantId);
+      controller.abort();
+    }
+    setSendingByAssistant((prev) => omitKey(prev, assistantId));
+    setInputErrorsByAssistant((prev) => omitKey(prev, assistantId));
+    setTurnsByAssistant((prev) => ({ ...prev, [assistantId]: [] }));
+    setConversationIds((prev) => omitKey(prev, assistantId));
   }
 
   return (
@@ -225,8 +282,12 @@ export function TryItPane({ assistant }: TryItPaneProps) {
           type="text"
           value={input}
           onChange={(e) => {
-            setInput(e.target.value);
-            if (inputError) setInputError(null);
+            const assistantId = assistant.id;
+            const value = e.target.value;
+            setInputsByAssistant((prev) => ({ ...prev, [assistantId]: value }));
+            if (inputError) {
+              setInputErrorsByAssistant((prev) => omitKey(prev, assistantId));
+            }
           }}
           placeholder="Ask a question…"
           disabled={sending}
