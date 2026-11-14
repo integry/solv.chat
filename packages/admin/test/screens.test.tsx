@@ -176,6 +176,27 @@ function installFakeServer(options?: {
       return response;
     }
 
+    if (path === "/api/admin/assistants" && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        name: string;
+        allowedOrigins?: string[];
+      };
+      const created: Assistant = {
+        id: "ast_created",
+        orgId: assistant.orgId,
+        name: body.name,
+        publicKey: "pk_created",
+        allowedOrigins: body.allowedOrigins ?? [],
+        hasIngestKey: true,
+        createdAt: 1_700_000_000_001,
+      };
+      return Response.json({ assistant: created, ingestKey: "ik_created_once" }, { status: 201 });
+    }
+
+    if (path === `/api/admin/assistants/${assistant.id}/ingest-key` && method === "POST") {
+      return Response.json({ ingestKey: "ik_rotated_once" });
+    }
+
     if (path === `/api/admin/assistants/${assistant.id}/install` && method === "GET") {
       const info: InstallInfo = {
         assistantId: assistant.id,
@@ -642,6 +663,38 @@ describe("admin phase 1 screens", () => {
     expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Previous" }) as HTMLButtonElement).disabled).toBe(
       false,
+    );
+  });
+
+  it("shows the one-time ingest key and assistant ID when creating an assistant", async () => {
+    installFakeServer();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New assistant" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Docs" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create assistant" }));
+
+    expect(await screen.findByText(/Copy your ingest key now/)).toBeTruthy();
+    expect((screen.getByLabelText("Assistant ID") as HTMLInputElement).value).toBe("ast_created");
+    expect((screen.getByLabelText("Ingest key") as HTMLInputElement).value).toBe("ik_created_once");
+
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.queryByText(/Copy your ingest key now/)).toBeNull();
+  });
+
+  it("rotates the ingest key on the Install screen and displays it once", async () => {
+    installFakeServer();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Install" }));
+    expect(((await screen.findByLabelText("Assistant ID")) as HTMLInputElement).value).toBe(
+      "ast_1",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rotate ingest key" }));
+    expect(await screen.findByText(/previous key stopped working immediately/)).toBeTruthy();
+    expect((screen.getByLabelText("New ingest key") as HTMLInputElement).value).toBe(
+      "ik_rotated_once",
     );
   });
 });

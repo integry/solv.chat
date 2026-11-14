@@ -6,8 +6,10 @@ questions it could not answer.
 
 Runs on Cloudflare Workers with your own Anthropic or OpenAI key.
 
-**Status: early development.** Nothing here is ready to install yet. The design
-is in [docs/architecture.md](docs/architecture.md).
+**Status: early development.** The chat engine, widget and admin work; MCP
+tools, answer tests and reports are not built yet. To run your own, follow
+[docs/self-hosting.md](docs/self-hosting.md). The design is in
+[docs/architecture.md](docs/architecture.md).
 
 ## Development
 

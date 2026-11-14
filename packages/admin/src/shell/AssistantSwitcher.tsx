@@ -20,6 +20,19 @@ export function AssistantSwitcher({
   const [originsText, setOriginsText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [createdKey, setCreatedKey] = useState<{ assistantId: string; ingestKey: string } | null>(
+    null,
+  );
+  const [copiedKey, setCopiedKey] = useState(false);
+
+  async function handleCopyKey(key: string) {
+    try {
+      await navigator.clipboard.writeText(key);
+      setCopiedKey(true);
+    } catch {
+      setCopiedKey(false);
+    }
+  }
 
   async function handleCreate(event: FormEvent) {
     event.preventDefault();
@@ -32,13 +45,20 @@ export function AssistantSwitcher({
       .filter((line) => line.length > 0);
 
     try {
-      const res = await postJson<{ assistant: Assistant }>("/api/admin/assistants", {
-        name,
-        allowedOrigins,
-      });
+      const res = await postJson<{ assistant: Assistant; ingestKey?: string }>(
+        "/api/admin/assistants",
+        {
+          name,
+          allowedOrigins,
+        },
+      );
       setName("");
       setOriginsText("");
       setCreating(false);
+      setCopiedKey(false);
+      if (typeof res.ingestKey === "string" && res.ingestKey.length > 0) {
+        setCreatedKey({ assistantId: res.assistant.id, ingestKey: res.ingestKey });
+      }
       onCreated(res.assistant);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -121,6 +141,37 @@ export function AssistantSwitcher({
             </button>
           </div>
         </form>
+      )}
+
+      {createdKey && (
+        <div className="switcher-form" role="status" aria-label="New ingest key">
+          <p className="warning-banner">Copy your ingest key now. It is shown once.</p>
+          <div className="field">
+            <label htmlFor="created-assistant-id">Assistant ID</label>
+            <input id="created-assistant-id" type="text" readOnly value={createdKey.assistantId} />
+          </div>
+          <div className="field">
+            <label htmlFor="created-ingest-key">Ingest key</label>
+            <input id="created-ingest-key" type="text" readOnly value={createdKey.ingestKey} />
+          </div>
+          <div className="actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => void handleCopyKey(createdKey.ingestKey)}
+            >
+              Copy key
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => setCreatedKey(null)}
+            >
+              Done
+            </button>
+            {copiedKey && <span className="notice-text">Copied.</span>}
+          </div>
+        </div>
       )}
     </div>
   );

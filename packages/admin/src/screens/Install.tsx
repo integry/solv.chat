@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ApiError, postJson } from "../api/client.js";
 import type { InstallInfo } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 
@@ -10,6 +11,10 @@ export function Install({ assistantId }: InstallProps) {
   const installRes = useResource<InstallInfo>(`/api/admin/assistants/${assistantId}/install`);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [rotating, setRotating] = useState(false);
+  const [rotateError, setRotateError] = useState<string | null>(null);
+  const [rotatedKey, setRotatedKey] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState(false);
 
   async function handleCopy(snippet: string) {
     setCopyError(null);
@@ -18,6 +23,33 @@ export function Install({ assistantId }: InstallProps) {
       setCopied(true);
     } catch {
       setCopyError("Could not copy. Select the snippet and copy it manually.");
+    }
+  }
+
+  async function handleRotateKey() {
+    if (rotating) return;
+    setRotating(true);
+    setRotateError(null);
+    setCopiedKey(false);
+    try {
+      const res = await postJson<{ ingestKey: string }>(
+        `/api/admin/assistants/${assistantId}/ingest-key`,
+        {},
+      );
+      setRotatedKey(res.ingestKey);
+    } catch (err) {
+      setRotateError(err instanceof ApiError ? err.message : "Could not rotate ingest key.");
+    } finally {
+      setRotating(false);
+    }
+  }
+
+  async function handleCopyKey(key: string) {
+    try {
+      await navigator.clipboard.writeText(key);
+      setCopiedKey(true);
+    } catch {
+      setCopiedKey(false);
     }
   }
 
@@ -89,6 +121,54 @@ export function Install({ assistantId }: InstallProps) {
                 ))}
               </ul>
             )}
+          </section>
+
+          <section className="source-card stack" aria-label="Ingest key">
+            <h2 className="section-heading">Ingest key</h2>
+            <p className="muted">
+              Used by <code>solv push</code> and <code>solv apply</code>. Shown once when created or
+              rotated.
+            </p>
+            <div className="field">
+              <label htmlFor="install-assistant-id">Assistant ID</label>
+              <input id="install-assistant-id" type="text" readOnly value={assistantId} />
+            </div>
+            {rotatedKey && (
+              <div className="stack" role="status">
+                <p className="warning-banner">
+                  Copy this key now. The previous key stopped working immediately.
+                </p>
+                <div className="field">
+                  <label htmlFor="rotated-ingest-key">New ingest key</label>
+                  <input id="rotated-ingest-key" type="text" readOnly value={rotatedKey} />
+                </div>
+                <div className="actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={() => void handleCopyKey(rotatedKey)}
+                  >
+                    Copy key
+                  </button>
+                  {copiedKey && <span className="notice-text">Copied.</span>}
+                </div>
+              </div>
+            )}
+            {rotateError && (
+              <p className="error-text" role="alert">
+                {rotateError}
+              </p>
+            )}
+            <div className="actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={rotating}
+                onClick={() => void handleRotateKey()}
+              >
+                {rotating ? "Rotating…" : "Rotate ingest key"}
+              </button>
+            </div>
           </section>
         </div>
       ) : null}
