@@ -7,14 +7,11 @@ import {
   type HostResolver,
   UnsafeUrlError,
 } from "../security/urlGuard.js";
+import { sha256Hex } from "../util/crypto.js";
 import { BadRequest, NotFound } from "./errors.js";
 
-const textEncoder = new TextEncoder();
-
 async function hashUrlExternalId(normalizedUrl: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", textEncoder.encode(normalizedUrl));
-  const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
-  return `sitemap:${hex}`;
+  return `sitemap:${await sha256Hex(normalizedUrl)}`;
 }
 
 // Caps chosen because the spec gives none for this path: a sitemap larger than
@@ -24,7 +21,13 @@ export const MAX_SITEMAP_BYTES = 2 * 1024 * 1024;
 export const MAX_PAGE_BYTES = MAX_DOCUMENT_MARKDOWN_BYTES;
 export const MAX_REDIRECTS = 3;
 export const MAX_URLS = 500;
-export const MAX_IMPORT_URLS = 100;
+// Pages per import request, not per import: the admin sends a larger
+// selection in batches of this size. Each page costs about six subrequests
+// (two DNS-over-HTTPS lookups, the fetch, the R2 put, the queue send, D1), and
+// Workers Free allows "50/request" (Paid: "10,000/request"), so five pages
+// leave room for redirects and the fixed lookups.
+// Source: https://developers.cloudflare.com/workers/platform/limits/ — checked 2026-11-14
+export const MAX_IMPORT_URLS = 5;
 export const FETCH_TIMEOUT_MS = 10_000;
 
 function decodeXmlEntities(text: string): string {
@@ -174,7 +177,7 @@ export async function importSitemapUrls(
     throw new BadRequest(["urls: choose at least one URL to import"]);
   }
   if (input.urls.length > MAX_IMPORT_URLS) {
-    throw new BadRequest([`urls: import at most ${MAX_IMPORT_URLS} URLs at once`]);
+    throw new BadRequest([`urls: import at most ${MAX_IMPORT_URLS} URLs per request`]);
   }
 
   const dedupedUrls: URL[] = [];

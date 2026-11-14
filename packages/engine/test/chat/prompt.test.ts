@@ -93,4 +93,69 @@ describe("chat/prompt", () => {
     expect(req.messages[MAX_TURNS - 1]?.content).toBe("turn-9");
     expect(req.messages[MAX_TURNS]?.content).toContain("latest");
   });
+
+  it("passes each chunk's heading path to the model inside the per-chunk budget", () => {
+    const req = buildPrompt({
+      behaviour: { persona: "" },
+      chunks: [
+        {
+          title: "Answers",
+          url: "https://site.example/a",
+          text: "30 days.",
+          headingPath: "How long is the refund window?",
+          sourceKind: "push",
+        },
+        {
+          title: "Long",
+          url: "https://site.example/b",
+          text: "y".repeat(MAX_CHUNK_CHARS),
+          headingPath: "Billing > Refunds",
+          sourceKind: "push",
+        },
+      ],
+      history: [],
+      question: "Refunds?",
+    });
+    const content = req.messages.at(-1)?.content ?? "";
+    expect(content).toContain("section: How long is the refund window?\n30 days.");
+    const block = (content.split("<<<source 2\n")[1] ?? "").split("\n>>>")[0] ?? "";
+    // Drop the title and url lines; what is left is the chunk's budgeted body.
+    const body = block.split("\n").slice(2).join("\n");
+    expect(body.startsWith("section: Billing > Refunds\n")).toBe(true);
+    expect(body.length).toBeLessThanOrEqual(MAX_CHUNK_CHARS);
+  });
+
+  it("leaves out the admin URL of a hand-written entry", () => {
+    const req = buildPrompt({
+      behaviour: { persona: "" },
+      chunks: [
+        {
+          title: "Refunds",
+          url: "https://worker.example/admin/sources#entry:abc",
+          text: "30 days.",
+          headingPath: "How long is the refund window?",
+          sourceKind: "entry",
+        },
+      ],
+      history: [],
+      question: "Refunds?",
+    });
+    expect(req.messages.at(-1)?.content).not.toContain("/admin/");
+  });
+
+  it("starts the history window on a visitor turn", () => {
+    const history = [
+      { role: "user" as const, content: "q1" },
+      { role: "assistant" as const, content: "a1" },
+      { role: "user" as const, content: "q2 (no reply stored)" },
+      { role: "user" as const, content: "q3" },
+      { role: "assistant" as const, content: "a3" },
+      { role: "user" as const, content: "q4" },
+      { role: "assistant" as const, content: "a4" },
+    ];
+    const req = buildPrompt({ behaviour: { persona: "" }, chunks: [], history, question: "q5" });
+    // The last six turns begin with "a1"; the window drops it.
+    expect(req.messages[0]).toEqual({ role: "user", content: "q2 (no reply stored)" });
+    expect(req.messages).toHaveLength(6);
+  });
 });

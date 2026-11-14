@@ -1,5 +1,6 @@
+import { usageFor } from "../../db/usage.js";
+import { utcDay } from "../../util/time.js";
 import type { Limits } from "../types.js";
-import { utcDay } from "./usageDaily.js";
 
 // 20 per minute per IP: a real person never notices, a script does. The spec
 // says "per-IP rate limit" and gives no number, so this one is ours.
@@ -10,17 +11,18 @@ export const DEFAULT_DAILY_CAP_MICROS = 2_000_000;
 export type CapMicrosResolver = (orgId: string, assistantId: string) => Promise<number>;
 
 async function todaysSpend(db: D1Database, orgId: string, assistantId: string): Promise<number> {
-  const day = utcDay(Date.now());
-  const row = await db
-    .prepare(
-      "SELECT cost_micros FROM usage_daily WHERE org_id = ?1 AND assistant_id = ?2 AND day = ?3",
-    )
-    .bind(orgId, assistantId, day)
-    .first<{ cost_micros: number }>();
-  return row?.cost_micros ?? 0;
+  return (await usageFor(db, orgId).costMicrosFor(assistantId, utcDay(Date.now()))) ?? 0;
 }
 
-/** Enforces per-IP chat rate limits and daily assistant spend caps. */
+/**
+ * Enforces per-IP chat rate limits and daily assistant spend caps.
+ *
+ * The spend cap applies to chat only. Ingest (`solv push`, `solv apply`) is
+ * the owner's own content and configuration: refusing it because visitors
+ * used up the day's chat budget would block the owner from fixing the very
+ * answers that are costing money. Embedding spend is still metered into
+ * `usage_daily`, so it counts towards the next chat check.
+ */
 export function basicLimits(
   db: D1Database,
   // Injected so this can land before assistant_versions exists; the admin API
@@ -42,10 +44,20 @@ export function basicLimits(
           )
           .bind(orgId, assistantId, action.ip, windowStart)
           .first<{ hits: number }>();
+        if (row?.hits === 1) {
+          // The first hit of a new window for this IP: a cheap moment to drop
+          // windows that can no longer limit anything, so the table holds
+          // roughly one minute of visitors instead of every minute ever.
+          await db
+            .prepare("DELETE FROM rate_counters WHERE org_id = ?1 AND window_start < ?2")
+            .bind(orgId, windowStart)
+            .run();
+        }
         if ((row?.hits ?? 0) > MAX_PER_WINDOW) {
           return { ok: false, reason: "rate_limit" };
         }
       }
+      if (action.kind !== "chat") return { ok: true };
       const cap = await capMicrosFor(orgId, assistantId);
       // 0 means "no cap": an owner who never set one should not be locked out.
       if (cap > 0 && (await todaysSpend(db, orgId, assistantId)) >= cap) {

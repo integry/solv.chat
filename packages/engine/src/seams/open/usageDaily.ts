@@ -1,9 +1,5 @@
+import { utcDay } from "../../util/time.js";
 import type { UsageSink } from "../types.js";
-
-/** Formats a UTC timestamp in milliseconds as `YYYY-MM-DD`. */
-export function utcDay(at: number): string {
-  return new Date(at).toISOString().slice(0, 10);
-}
 
 /** Records usage into `usage_daily` with an atomic upsert. */
 export function usageDaily(db: D1Database): UsageSink {

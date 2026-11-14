@@ -23,8 +23,7 @@
     "node": ">=24"
   },
   "dependencies": {
-    "@solvchat/core": "^0.0.0",
-    "yaml": "^2.9.1"
+    "@solvchat/core": "^0.0.0"
   },
   "scripts": {
     "pretypecheck": "npm run build -w @solvchat/core --if-present",
@@ -33,5 +32,8 @@
     "test": "vitest run",
     "prebuild": "npm run build -w @solvchat/core --if-present",
     "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2"
   }
 }

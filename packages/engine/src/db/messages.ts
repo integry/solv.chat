@@ -91,11 +91,25 @@ export function messagesFor(db: D1Database, orgId: string) {
     async list(conversationId: string): Promise<MessageRow[]> {
       const res = await prepare(
         db,
-        `SELECT ${COLUMNS} FROM messages WHERE org_id = ?1 AND conversation_id = ?2 ORDER BY created_at ASC`,
+        // rowid breaks ties: a question and its fallback answer can share a
+        // millisecond, and the order must still be the order they were written.
+        `SELECT ${COLUMNS} FROM messages WHERE org_id = ?1 AND conversation_id = ?2 ORDER BY created_at ASC, rowid ASC`,
       )
         .bind(orgId, conversationId)
         .all<Row>();
       return res.results.map(map);
+    },
+
+    /** The last `limit` messages of a conversation, oldest first. */
+    async recent(conversationId: string, limit: number): Promise<MessageRow[]> {
+      const res = await prepare(
+        db,
+        `SELECT ${COLUMNS} FROM messages WHERE org_id = ?1 AND conversation_id = ?2
+         ORDER BY created_at DESC, rowid DESC LIMIT ?3`,
+      )
+        .bind(orgId, conversationId, limit)
+        .all<Row>();
+      return res.results.map(map).reverse();
     },
 
     async get(id: string): Promise<MessageRow | null> {

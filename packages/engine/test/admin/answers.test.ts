@@ -239,7 +239,9 @@ describe("admin answers API", () => {
       {
         assistantId,
         question,
-        answer: "Yes, students get 50% off with a valid university email.",
+        // None of the embedder's words appear in the answer: only the question,
+        // which becomes the entry's heading, can make it retrievable.
+        answer: "Yes, 50% off with a valid university email.",
         fromMessageId: questionId,
       },
     );
@@ -249,12 +251,13 @@ describe("admin answers API", () => {
     const embedder = {
       dimensions: vocab.length,
       async embed(texts: readonly string[]) {
-        return texts.map((t) => {
+        const vectors = texts.map((t) => {
           const lower = t.toLowerCase();
           const vec = vocab.map((w) => (lower.includes(w) ? 1 : 0));
           const norm = Math.hypot(...vec) || 1;
           return vec.map((v) => v / norm);
         });
+        return { vectors, tokens: texts.length };
       },
     };
     const retriever = memoryRetriever();
@@ -305,11 +308,11 @@ describe("admin answers API", () => {
     }
 
     expect(capturedContext).toContain("50% off");
-    expect(events).toContainEqual({
-      type: "citation",
-      url: saved.url,
-      title: question,
-    });
+    expect(capturedContext).toContain(`section: ${question}`);
+    // The entry's URL is an admin link, so it is never shown to a visitor.
+    expect(saved.url).toContain("/admin/");
+    expect(events.some((e) => e.type === "citation")).toBe(false);
+    expect(capturedContext).not.toContain(saved.url);
     expect(events.some((e) => e.type === "token" && e.text.includes("50% off"))).toBe(true);
   });
 });

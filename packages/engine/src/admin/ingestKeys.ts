@@ -1,12 +1,7 @@
 import { newId } from "@solvchat/core";
+import { sha256Hex } from "../util/crypto.js";
 
-const encoder = new TextEncoder();
-
-/** Returns the lowercase SHA-256 hex digest of `value`. */
-export async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
+export { sha256Hex };
 
 /**
  * Returns the plaintext once and the hash to store. The plaintext is never

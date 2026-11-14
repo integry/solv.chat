@@ -1,3 +1,4 @@
+import { constantTimeEqual } from "../../util/crypto.js";
 import type { AuthProvider } from "../types.js";
 
 const COOKIE = "solv_session";
@@ -16,15 +17,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 /** Length-independent: a plain === on the password or MAC leaks how much matched through timing. */
-function equals(a: string, b: string): boolean {
-  const left = encoder.encode(a);
-  const right = encoder.encode(b);
-  let diff = left.length ^ right.length;
-  for (let i = 0; i < Math.max(left.length, right.length); i++) {
-    diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
-  }
-  return diff === 0;
-}
+const equals = constantTimeEqual;
 
 function encodeBase64Url(bytes: Uint8Array): string {
   let binary = "";
@@ -139,6 +132,17 @@ export function passwordAuth(env: PasswordAuthEnv, db: D1Database): AuthProvider
       const password = typeof body?.password === "string" ? body.password : "";
       const ip = clientIp(request);
       const now = Date.now();
+
+      // Rows for other addresses whose window and lock have both run out can
+      // no longer limit anything; dropping them here keeps the table from
+      // growing with every address that ever mistyped once.
+      await db
+        .prepare(
+          `DELETE FROM login_failures
+           WHERE org_id = ?1 AND ip <> ?2 AND window_start <= ?3 - ?4 AND locked_until <= ?3`,
+        )
+        .bind(SINGLE_ORG_ID, ip, now, LOGIN_WINDOW_MS)
+        .run();
 
       // Reserve an attempt slot atomically before verifying the password so
       // concurrent requests cannot all read a pre-threshold count and bypass

@@ -1,6 +1,7 @@
 import { newId } from "@solvchat/core";
-import { forIngestScope } from "../db/tenant.js";
-import type { Embedder, Retriever } from "../providers/retrieval.js";
+import { forQueuedIngest } from "../db/tenant.js";
+import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
+import type { UsageSink } from "../seams/types.js";
 import { chunkMarkdown } from "./chunk.js";
 import type { IngestQueueMessage } from "./documents.js";
 
@@ -9,6 +10,20 @@ export interface IngestConsumerDeps {
   docs: Pick<R2Bucket, "get">;
   embedder: Embedder;
   retriever: Retriever;
+  /** Receives the embedding spend; the open build writes it to `usage_daily`. */
+  usage?: UsageSink | undefined;
+}
+
+/**
+ * The text a chunk is embedded as: its heading path, then its body.
+ *
+ * The chunker moves headings out of `text` into `headingPath`, so embedding
+ * the body alone would drop the subject a section is about — and for a
+ * hand-written entry the heading *is* the question. The path is short (a few
+ * headings), so this stays well inside the embedding model's input limit.
+ */
+export function embeddingInput(chunk: { headingPath: string; text: string }): string {
+  return chunk.headingPath === "" ? chunk.text : `${chunk.headingPath}\n\n${chunk.text}`;
 }
 
 function isIngestMessage(body: unknown): body is IngestQueueMessage {
@@ -49,7 +64,7 @@ async function processIngestMessage(
   }
 
   const { orgId, documentId, contentHash } = message.body;
-  const tenant = forIngestScope(deps.db, { orgId, assistantId: "" });
+  const tenant = forQueuedIngest(deps.db, { orgId });
 
   const document = await tenant.documents.get(documentId);
   if (document === null || document.contentHash !== contentHash) {
@@ -81,8 +96,22 @@ async function processIngestMessage(
     headingPath: chunk.headingPath.join(" > "),
   }));
 
-  const vectors =
-    chunks.length > 0 ? await deps.embedder.embed(chunks.map((chunk) => chunk.text)) : [];
+  let vectors: number[][] = [];
+  if (chunks.length > 0) {
+    const embedded = await deps.embedder.embed(chunks.map(embeddingInput));
+    vectors = embedded.vectors;
+    // Metered as soon as the provider has billed it: a later failure retries
+    // the message and pays again, and the owner's figure should say so.
+    await deps.usage?.record({
+      orgId,
+      assistantId: source.assistantId,
+      at: Date.now(),
+      messages: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costMicros: embeddingCostMicros(embedded.tokens),
+    });
+  }
 
   if (chunks.length > 0) {
     await deps.retriever.upsert(

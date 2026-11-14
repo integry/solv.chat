@@ -68,6 +68,7 @@ export interface ResolvedChunkRow {
   headingPath: string;
   url: string;
   title: string;
+  sourceKind: "push" | "sitemap" | "entry";
 }
 
 export interface UpsertDocumentInput {
@@ -192,12 +193,16 @@ export function documentsFor(db: D1Database, orgId: string) {
     ): Promise<Map<string, ExistingDocumentState>> {
       const result = new Map<string, ExistingDocumentState>();
       if (externalIds.length === 0) return result;
-      const wanted = new Set(externalIds);
+      // Only the batch's own ids, passed as one JSON parameter: a source can
+      // hold thousands of documents, and a batch of 100 should not read them
+      // all. One parameter also stays clear of D1's 100-parameter limit.
       const rows = await prepare(
         db,
-        "SELECT id, external_id, url, content_hash, indexed_hash, body_key FROM documents WHERE org_id = ?1 AND source_id = ?2",
+        `SELECT id, external_id, url, content_hash, indexed_hash, body_key FROM documents
+         WHERE org_id = ?1 AND source_id = ?2
+           AND external_id IN (SELECT value FROM json_each(?3))`,
       )
-        .bind(orgId, sourceId)
+        .bind(orgId, sourceId, JSON.stringify([...new Set(externalIds)]))
         .all<{
           id: string;
           external_id: string;
@@ -207,15 +212,13 @@ export function documentsFor(db: D1Database, orgId: string) {
           body_key: string | null;
         }>();
       for (const row of rows.results) {
-        if (wanted.has(row.external_id)) {
-          result.set(row.external_id, {
-            id: row.id,
-            url: row.url,
-            contentHash: row.content_hash,
-            indexedHash: row.indexed_hash,
-            bodyKey: row.body_key,
-          });
-        }
+        result.set(row.external_id, {
+          id: row.id,
+          url: row.url,
+          contentHash: row.content_hash,
+          indexedHash: row.indexed_hash,
+          bodyKey: row.body_key,
+        });
       }
       return result;
     },
@@ -310,7 +313,7 @@ export function documentsFor(db: D1Database, orgId: string) {
       const placeholders = chunkIds.map((_, index) => `?${index + 3}`).join(", ");
       const res = await prepare(
         db,
-        `SELECT c.id, c.document_id, c.text, c.heading_path, d.url, d.title
+        `SELECT c.id, c.document_id, c.text, c.heading_path, d.url, d.title, s.kind
          FROM chunks c
          JOIN documents d ON d.org_id = c.org_id AND d.id = c.document_id
          JOIN sources s ON s.org_id = d.org_id AND s.id = d.source_id
@@ -326,6 +329,7 @@ export function documentsFor(db: D1Database, orgId: string) {
           heading_path: string;
           url: string;
           title: string;
+          kind: "push" | "sitemap" | "entry";
         }>();
       return res.results.map((row) => ({
         id: row.id,
@@ -334,6 +338,7 @@ export function documentsFor(db: D1Database, orgId: string) {
         headingPath: row.heading_path,
         url: row.url,
         title: row.title,
+        sourceKind: row.kind,
       }));
     },
 
@@ -360,6 +365,12 @@ export function documentsFor(db: D1Database, orgId: string) {
         return true;
       }
 
+      // One batch on purpose: the content-hash guard only protects the
+      // commit if every insert runs in the same transaction. Each statement
+      // binds 7 parameters (limit 100) and the largest document yields about
+      // 900 chunks; Cloudflare documents that "a batch containing 2,000
+      // statements executes in a single Worker invocation".
+      // Source: https://developers.cloudflare.com/d1/platform/limits/ — checked 2026-11-14
       const stmts: D1PreparedStatement[] = [
         prepare(
           db,

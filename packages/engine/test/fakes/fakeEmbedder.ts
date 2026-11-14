@@ -34,7 +34,10 @@ export function fakeEmbedder(dimensions: number = EMBEDDING_MODEL.dimensions): E
   return {
     dimensions,
     async embed(texts) {
-      return texts.map((text) => hashVector(text, dimensions));
+      // A rough, deterministic token count so metering paths have something
+      // to record.
+      const tokens = texts.reduce((sum, text) => sum + Math.ceil(text.length / 4), 0);
+      return { vectors: texts.map((text) => hashVector(text, dimensions)), tokens };
     },
   };
 }

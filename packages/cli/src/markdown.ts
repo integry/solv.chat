@@ -1,6 +1,5 @@
 import { readdir } from "node:fs/promises";
 import { join, posix } from "node:path";
-import { parse } from "yaml";
 
 export interface FrontMatter {
   title?: string;
@@ -51,6 +50,194 @@ export function externalIdFor(root: string, file: string): string {
     .join("/");
 }
 
+// YAML 1.2 core-schema scalars that are not strings: `title: 2024` or
+// `title: true` is not a title, exactly as a full YAML parser would decide.
+const NON_STRING_PLAIN_RE =
+  /^(?:~|null|Null|NULL|true|True|TRUE|false|False|FALSE|[-+]?(?:\d+|\d*\.\d+|\d+\.\d*)(?:[eE][-+]?\d+)?|0x[0-9a-fA-F]+|0o[0-7]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$/;
+
+const DOUBLE_QUOTE_ESCAPES: Record<string, string> = {
+  "0": "\0",
+  a: "\x07",
+  b: "\b",
+  t: "\t",
+  "\t": "\t",
+  n: "\n",
+  v: "\v",
+  f: "\f",
+  r: "\r",
+  e: "\x1b",
+  " ": " ",
+  '"': '"',
+  "/": "/",
+  "\\": "\\",
+  N: "\u0085",
+  _: "\u00a0",
+  L: "\u2028",
+  P: "\u2029",
+};
+
+/** Folds the lines of a multi-line flow scalar the way YAML does. */
+function foldFlowLines(lines: string[], escapedBreaks = false): string {
+  let out = "";
+  let pendingBreaks = 0;
+  let joinTight = false;
+  for (const [index, raw] of lines.entries()) {
+    let line = index === 0 ? raw.replace(/\s+$/, "") : raw.trim();
+    if (index > 0 && line === "") {
+      pendingBreaks++;
+      continue;
+    }
+    if (index > 0) out += joinTight ? "" : pendingBreaks > 0 ? "\n".repeat(pendingBreaks) : " ";
+    pendingBreaks = 0;
+    // In a double-quoted scalar, a backslash before the line break escapes
+    // it: the lines join with nothing between them.
+    joinTight = escapedBreaks && /(?:^|[^\\])(?:\\\\)*\\$/.test(line);
+    if (joinTight) line = line.slice(0, -1);
+    out += line;
+  }
+  return out;
+}
+
+function readDoubleQuoted(text: string): string | undefined {
+  let out = "";
+  for (let i = 1; i < text.length; i++) {
+    const ch = text[i] as string;
+    if (ch === '"') return out;
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+    const next = text[++i];
+    if (next === undefined) return undefined;
+    const hexLength = next === "x" ? 2 : next === "u" ? 4 : next === "U" ? 8 : 0;
+    if (hexLength > 0) {
+      const hex = text.slice(i + 1, i + 1 + hexLength);
+      if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length !== hexLength) return undefined;
+      out += String.fromCodePoint(Number.parseInt(hex, 16));
+      i += hexLength;
+      continue;
+    }
+    const mapped = DOUBLE_QUOTE_ESCAPES[next];
+    if (mapped === undefined) return undefined;
+    out += mapped;
+  }
+  return undefined;
+}
+
+function readSingleQuoted(text: string): string | undefined {
+  let out = "";
+  for (let i = 1; i < text.length; i++) {
+    const ch = text[i] as string;
+    if (ch !== "'") {
+      out += ch;
+      continue;
+    }
+    if (text[i + 1] === "'") {
+      out += "'";
+      i++;
+      continue;
+    }
+    return out;
+  }
+  return undefined;
+}
+
+/** Reads a `|` or `>` block scalar from its (indented) content lines. */
+function readBlockScalar(header: string, lines: string[]): string | undefined {
+  const match = /^([|>])([-+]?)(\d?)([-+]?)\s*(?:#.*)?$/.exec(header);
+  if (!match) return undefined;
+  const folded = match[1] === ">";
+  const chomp = match[2] || match[4];
+  const nonEmpty = lines.filter((line) => line.trim() !== "");
+  const explicit = match[3] ? Number(match[3]) : 0;
+  const indent =
+    explicit > 0
+      ? explicit
+      : nonEmpty.length === 0
+        ? 0
+        : Math.min(...nonEmpty.map((line) => line.length - line.trimStart().length));
+  const content = lines.map((line) => line.slice(indent));
+  let text = "";
+  let started = false;
+  let blankLines = 0;
+  let previous = "";
+  for (const line of content) {
+    if (line.trim() === "") {
+      blankLines++;
+      continue;
+    }
+    if (!started) {
+      text = "\n".repeat(blankLines) + line;
+    } else if (folded && !/^\s/.test(line) && !/^\s/.test(previous)) {
+      // Folding: one break between lines becomes a space; with blank lines
+      // between, the break is dropped and each blank line is a newline.
+      text += blankLines > 0 ? `${"\n".repeat(blankLines)}${line}` : ` ${line}`;
+    } else {
+      text += `${"\n".repeat(blankLines + 1)}${line}`;
+    }
+    started = true;
+    blankLines = 0;
+    previous = line;
+  }
+  if (chomp === "-") return text.replace(/\n+$/, "");
+  if (chomp === "+") return `${text}\n`;
+  return `${text.replace(/\n+$/, "")}\n`;
+}
+
+/**
+ * Reads the top-level `title:` scalar of a YAML front matter block.
+ *
+ * The CLI promises no runtime dependencies, and `title` is the only key it
+ * uses, so this reads that one key instead of shipping a YAML parser: plain,
+ * single- and double-quoted (one or more lines) and `|`/`>` block scalars.
+ * Anything it cannot read as a string yields `undefined`, so the caller falls
+ * back to the first heading.
+ */
+export function readFrontMatterTitle(block: string): string | undefined {
+  const lines = block.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^title[ \t]*:(?:[ \t]|$)/.test(line));
+  if (start === -1) return undefined;
+  if (lines.slice(start + 1).some((line) => /^title[ \t]*:(?:[ \t]|$)/.test(line))) {
+    // A duplicate key is an error in YAML; do not guess which one was meant.
+    return undefined;
+  }
+
+  const first = (lines[start] as string).replace(/^title[ \t]*:/, "").trim();
+  // Continuation lines belong to the value while they are indented or blank.
+  const rest: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() !== "" && !/^[ \t]/.test(line)) break;
+    rest.push(line);
+  }
+  while (rest.length > 0 && (rest[rest.length - 1] as string).trim() === "") rest.pop();
+
+  if (first.startsWith("|") || first.startsWith(">")) {
+    return readBlockScalar(first, rest);
+  }
+  if (first.startsWith('"') || first.startsWith("'")) {
+    const joined = foldFlowLines([first, ...rest], first.startsWith('"'));
+    return first.startsWith('"') ? readDoubleQuoted(joined) : readSingleQuoted(joined);
+  }
+  if (first === "" && rest.length === 0) return undefined;
+  if (/^[[{&*!%@`]/.test(first)) return undefined;
+
+  // A plain scalar ends at a ` #` comment, on any of its lines.
+  const stripComment = (line: string) => line.replace(/(?:^|[ \t])#.*$/, "");
+  const plainLines: string[] = [];
+  for (const [index, line] of [first, ...rest].entries()) {
+    const stripped = stripComment(line);
+    if (index > 0 && stripped.trim() === "" && line.trim().startsWith("#")) break;
+    plainLines.push(stripped);
+  }
+  const value = foldFlowLines(plainLines).trim();
+  if (value === "" || NON_STRING_PLAIN_RE.test(value)) return undefined;
+  // `title: Hello: world` is not valid YAML; a parser would reject the block.
+  if (/:(?:\s|$)/.test(value)) return undefined;
+  // A nested mapping (`title:` then `  en: ...`) is not a string either.
+  if (first === "" && /^[^\s#][^:]*:(?:\s|$)/.test(rest[0]?.trim() ?? "")) return undefined;
+  return value;
+}
+
 /**
  * Splits optional YAML front matter (`--- ... ---`) at the start of a Markdown
  * file, extracting `title` when present.
@@ -61,27 +248,12 @@ export function splitFrontMatter(raw: string): { frontMatter: FrontMatter; body:
     return { frontMatter: {}, body: raw };
   }
 
-  const block = match[1] ?? "";
   const body = raw.slice(match[0].length);
   const frontMatter: FrontMatter = {};
-
-  let parsed: unknown;
-  try {
-    parsed = parse(block);
-  } catch {
-    return { frontMatter, body };
+  const title = readFrontMatterTitle(match[1] ?? "")?.trim();
+  if (title !== undefined && title.length > 0) {
+    frontMatter.title = title;
   }
-
-  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-    const title = (parsed as Record<string, unknown>).title;
-    if (typeof title === "string") {
-      const trimmed = title.trim();
-      if (trimmed.length > 0) {
-        frontMatter.title = trimmed;
-      }
-    }
-  }
-
   return { frontMatter, body };
 }
 

@@ -7,7 +7,11 @@ import {
   parseFeedbackRequest,
   serializeChatEvent,
 } from "@solvchat/core";
-import { assistantByPublicKey, assistantForMessage } from "../db/public.js";
+import {
+  assistantByPublicKey,
+  assistantForMessage,
+  originAllowedByAnyAssistant,
+} from "../db/public.js";
 import { forPublicScope } from "../db/tenant.js";
 import { ANTHROPIC_MODELS, type ModelInfo, OPENAI_MODELS, type Tier } from "../models.js";
 import { ProviderError } from "../providers/error.js";
@@ -104,6 +108,21 @@ function preflightResponse(
     ...corsHeaders(origin),
   };
   return new Response(null, { status: 204, headers });
+}
+
+/**
+ * Preflight for a route whose assistant is named only in the body. The Origin
+ * is echoed only when some assistant allows it, so a site on no allow-list
+ * is told no as early as the browser asks.
+ */
+async function bodyKeyedPreflight(
+  request: Request,
+  db: D1Database,
+  methods: string,
+): Promise<Response> {
+  const origin = request.headers.get("origin");
+  const allowed = origin !== null && (await originAllowedByAnyAssistant(db, origin));
+  return preflightResponse(request, methods, allowed ? origin : null);
 }
 
 function readAssistantKey(body: unknown): string | null {
@@ -282,7 +301,7 @@ export async function chatRoute(
   overrides?: ChatRouteOverrides,
 ): Promise<Response> {
   if (request.method === "OPTIONS") {
-    return preflightResponse(request, "POST, OPTIONS");
+    return bodyKeyedPreflight(request, env.DB, "POST, OPTIONS");
   }
   if (request.method !== "POST") {
     return Response.json({ error: "Not found." }, { status: 404 });
@@ -313,21 +332,12 @@ export async function chatRoute(
     return eventStreamOf({ type: "error", message: "This assistant is not available." });
   }
 
-  const workerOrigin = new URL(request.url).origin;
-  const requestOrigin = request.headers.get("origin");
-  const isWorkerDraftRequest = parsed.value.target === "draft" && requestOrigin === workerOrigin;
-
-  // Recognize authenticated same-organization owner previews from the Worker's
-  // own origin before applying the visitor origin policy, since the admin
-  // does not need to be in the assistant's website allowlist.
-  const workerPrincipal = isWorkerDraftRequest ? await seams.auth.authenticate(request) : null;
-  const isWorkerOwnerPreview =
-    workerPrincipal !== null && workerPrincipal.orgId === assistant.orgId;
-
+  // The draft is never served here: owner previews go through the signed-in
+  // `/api/admin/chat`, so this public route needs no session handling at all.
+  // `target: "draft"` is ignored rather than rejected so a stale client
+  // cannot be made to fail.
   const origin = matchedOrigin(assistant, request);
-  const failure = isWorkerOwnerPreview
-    ? await checkLimits(seams.limits, assistant, request)
-    : await runPublicChecks(seams.limits, assistant, request);
+  const failure = await runPublicChecks(seams.limits, assistant, request);
   if (failure !== null) {
     return eventStreamOf({ type: "error", message: failure.message }, origin);
   }
@@ -336,21 +346,7 @@ export async function chatRoute(
     orgId: assistant.orgId,
     assistantId: assistant.id,
   });
-
-  // The draft is served only to the owner. The field is ignored rather than
-  // rejected for a visitor, so a stale widget cannot be made to fail.
-  const principal = isWorkerDraftRequest
-    ? workerPrincipal
-    : parsed.value.target === "draft"
-      ? await seams.auth.authenticate(request)
-      : null;
-  const useDraft =
-    parsed.value.target === "draft" && principal !== null && principal.orgId === assistant.orgId;
-
-  const version = useDraft
-    ? await tenant.versions.draft(assistant.id)
-    : await tenant.versions.published(assistant.id);
-
+  const version = await tenant.versions.published(assistant.id);
   if (version === null) {
     return eventStreamOf({ type: "error", message: "This assistant is not available." }, origin);
   }
@@ -368,8 +364,8 @@ export async function chatRoute(
     behaviour: version.config.behaviour,
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
-    preview: useDraft,
-    history: useDraft ? parsed.value.history : undefined,
+    preview: false,
+    history: undefined,
     origin,
   });
 }
@@ -381,7 +377,7 @@ export async function feedbackRoute(
   seams: Pick<Seams, "limits">,
 ): Promise<Response> {
   if (request.method === "OPTIONS") {
-    return preflightResponse(request, "POST, OPTIONS");
+    return bodyKeyedPreflight(request, env.DB, "POST, OPTIONS");
   }
   if (request.method !== "POST") {
     return Response.json({ error: "Not found." }, { status: 404 });

@@ -5,6 +5,7 @@ import { createApp } from "../../src/app.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { ANTHROPIC_MODELS, costMicros, OPENAI_MODELS } from "../../src/models.js";
 import { ProviderError } from "../../src/providers/error.js";
+import { embeddingCostMicros } from "../../src/providers/retrieval.js";
 import type { LlmProvider, LlmRequest } from "../../src/providers/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
@@ -30,6 +31,9 @@ function parseSseBody(text: string) {
       return parseChatEventLine(name, data);
     });
 }
+
+// What `fakeEmbedder` reports for "How do I reset my password?".
+const QUESTION_TOKENS = Math.ceil("How do I reset my password?".length / 4);
 
 describe("chat/answer", () => {
   const tenant = forPrincipal(env.DB, {
@@ -94,7 +98,9 @@ describe("chat/answer", () => {
       { id: "chk_1", ordinal: 0, text: "Click Forgot Password to reset.", headingPath: "Reset" },
     ]);
 
-    const [vec] = await embedder.embed(["How do I reset my password?"]);
+    const {
+      vectors: [vec],
+    } = await embedder.embed(["How do I reset my password?"]);
     await retriever.upsert([
       {
         chunkId: "chk_1",
@@ -221,7 +227,8 @@ describe("chat/answer", () => {
         messages: 1,
         tokensIn: 0,
         tokensOut: 0,
-        costMicros: 0,
+        // No model call, but the question was still embedded.
+        costMicros: embeddingCostMicros(QUESTION_TOKENS),
       }),
     );
 
@@ -275,7 +282,7 @@ describe("chat/answer", () => {
     expect(msgs[0]?.content).toBe("How do I reset my password?");
   });
 
-  it("answers from draft when target='draft' with an owner session, and from published without a session", async () => {
+  it("answers from the published version on /v1/chat even when target='draft' comes with an owner session", async () => {
     const draftConfig = defaultVersionConfig();
     draftConfig.behaviour.persona = "Draft-only persona";
     await tenant.versions.updateDraft("ast_1", draftConfig);
@@ -291,7 +298,7 @@ describe("chat/answer", () => {
       },
     };
 
-    // With owner session -> uses draft
+    // With owner session -> still published: drafts are served only by /api/admin/chat
     const appWithAuth = createApp(fakeSeams(), {
       chat: { embedder, retriever, provider },
     });
@@ -347,124 +354,38 @@ describe("chat/answer", () => {
     await res2.text();
     await waitOnExecutionContext(ctx2);
 
-    expect(seenSystems[0]).toContain("Draft-only persona");
+    expect(seenSystems[0]).toContain("Published persona");
+    expect(seenSystems[0]).not.toContain("Draft-only persona");
     expect(seenSystems[1]).toContain("Published persona");
     expect(seenSystems[1]).not.toContain("Draft-only persona");
   });
 
-  it("allows authenticated same-org owner draft previews from the Worker's own origin while enforcing limits and rejecting public/unauthenticated Worker-origin requests", async () => {
-    const draftConfig = defaultVersionConfig();
-    draftConfig.behaviour.persona = "Admin Try-It draft persona";
-    await tenant.versions.updateDraft("ast_1", draftConfig);
-
-    const seenSystems: string[] = [];
+  it("refuses a signed-in owner's draft request from the Worker's own origin on /v1/chat", async () => {
     const provider: LlmProvider = {
       name: "anthropic",
       model: ANTHROPIC_MODELS.balanced.id,
-      async *stream(req: LlmRequest) {
-        seenSystems.push(req.system);
+      async *stream() {
         yield { kind: "text", text: "ok" };
-        yield { kind: "usage", tokensIn: 10, tokensOut: 2 };
       },
     };
-
-    const limitsSpy = vi.fn(async () => ({ ok: true as const }));
-    const appWithAuth = createApp(fakeSeams({ limits: { check: limitsSpy } }), {
-      chat: { embedder, retriever, provider },
-    });
-
-    // 1. Authenticated same-org owner on Worker's own origin (distinct from allowedOrigins)
-    const previewCtx = createExecutionContext();
-    const previewRes = await appWithAuth.fetch(
-      new Request("https://engine.example/v1/chat", {
-        method: "POST",
-        headers: { "content-type": "application/json", origin: "https://engine.example" },
-        body: JSON.stringify({
-          protocol: 1,
-          assistant: "pk_ans_1",
-          visitorId: "vis_admin",
-          message: "How do I reset my password?",
-          target: "draft",
-        }),
-      }),
-      env,
-      previewCtx,
-    );
-    await waitOnExecutionContext(previewCtx);
-    const previewEvents = parseSseBody(await previewRes.text());
-    expect(previewEvents.some((e) => e.type === "done")).toBe(true);
-    expect(seenSystems).toHaveLength(1);
-    expect(seenSystems[0]).toContain("Admin Try-It draft persona");
-    expect(limitsSpy).toHaveBeenCalledTimes(1);
-
-    // 2. Public request (no target: "draft") from Worker's own origin is still rejected by origin check
-    const pubCtx = createExecutionContext();
-    const pubRes = await appWithAuth.fetch(
-      new Request("https://engine.example/v1/chat", {
-        method: "POST",
-        headers: { "content-type": "application/json", origin: "https://engine.example" },
-        body: JSON.stringify({
-          protocol: 1,
-          assistant: "pk_ans_1",
-          visitorId: "vis_1",
-          message: "How do I reset my password?",
-        }),
-      }),
-      env,
-      pubCtx,
-    );
-    await waitOnExecutionContext(pubCtx);
-    expect(parseSseBody(await pubRes.text())).toEqual([
-      { type: "error", message: "This assistant is not available on this page." },
-    ]);
-
-    // 3. Unauthenticated or cross-org request with target: "draft" from Worker's origin is rejected
-    const appOtherOrg = createApp(
+    const authenticate = vi.fn(async () => ({
+      orgId: TEST_ORG_ID,
+      userId: "owner",
+      role: "owner" as const,
+    }));
+    const app = createApp(
       fakeSeams({
         auth: {
-          authenticate: async () => ({
-            orgId: "org_other00000000000000",
-            userId: "u2",
-            role: "owner",
-          }),
+          authenticate,
           login: async () => Response.json({ ok: true }),
           logout: async () => Response.json({ ok: true }),
         },
       }),
       { chat: { embedder, retriever, provider } },
     );
-    const crossOrgCtx = createExecutionContext();
-    const crossOrgRes = await appOtherOrg.fetch(
-      new Request("https://engine.example/v1/chat", {
-        method: "POST",
-        headers: { "content-type": "application/json", origin: "https://engine.example" },
-        body: JSON.stringify({
-          protocol: 1,
-          assistant: "pk_ans_1",
-          visitorId: "vis_1",
-          message: "How do I reset my password?",
-          target: "draft",
-        }),
-      }),
-      env,
-      crossOrgCtx,
-    );
-    await waitOnExecutionContext(crossOrgCtx);
-    expect(parseSseBody(await crossOrgRes.text())).toEqual([
-      { type: "error", message: "This assistant is not available on this page." },
-    ]);
 
-    // 4. Limits still apply to authenticated owner draft previews
-    const rateLimitedApp = createApp(
-      fakeSeams({
-        limits: {
-          check: async () => ({ ok: false, reason: "rate_limit" }),
-        },
-      }),
-      { chat: { embedder, retriever, provider } },
-    );
-    const limitedCtx = createExecutionContext();
-    const limitedRes = await rateLimitedApp.fetch(
+    const ctx = createExecutionContext();
+    const res = await app.fetch(
       new Request("https://engine.example/v1/chat", {
         method: "POST",
         headers: { "content-type": "application/json", origin: "https://engine.example" },
@@ -477,12 +398,14 @@ describe("chat/answer", () => {
         }),
       }),
       env,
-      limitedCtx,
+      ctx,
     );
-    await waitOnExecutionContext(limitedCtx);
-    expect(parseSseBody(await limitedRes.text())).toEqual([
-      { type: "error", message: "Too many questions just now. Please wait a moment." },
+    await waitOnExecutionContext(ctx);
+    expect(parseSseBody(await res.text())).toEqual([
+      { type: "error", message: "This assistant is not available on this page." },
     ]);
+    // The public route never consults the session.
+    expect(authenticate).not.toHaveBeenCalled();
   });
 
   it("returns a sanitized SSE error event with CORS headers when embeddingKey initialization fails", async () => {
@@ -665,7 +588,7 @@ describe("chat/answer", () => {
 
     const previewCtx = createExecutionContext();
     const previewRes = await previewApp.fetch(
-      new Request("https://engine.example/v1/chat", {
+      new Request("https://engine.example/api/admin/chat", {
         method: "POST",
         headers: { "content-type": "application/json", origin: "https://engine.example" },
         body: JSON.stringify({
@@ -735,7 +658,7 @@ describe("chat/answer", () => {
     expect(seenRequests[1]?.messages[0]?.content).not.toContain("Injected prior turn");
   });
 
-  it("meters a failed model stream only when usage was reported before failing", async () => {
+  it("meters a failed stream's model usage only when reported, and always the question's embedding", async () => {
     const usageWithTokens = vi.fn(async () => {});
     const failingWithUsage: LlmProvider = {
       name: "anthropic",
@@ -775,7 +698,8 @@ describe("chat/answer", () => {
       expect.objectContaining({
         tokensIn: 120,
         tokensOut: 30,
-        costMicros: costMicros(ANTHROPIC_MODELS.fast, 120, 30),
+        costMicros:
+          costMicros(ANTHROPIC_MODELS.fast, 120, 30) + embeddingCostMicros(QUESTION_TOKENS),
       }),
     );
 
@@ -812,7 +736,17 @@ describe("chat/answer", () => {
 
     const events2 = parseSseBody(await res2.text());
     expect(events2.map((e) => e.type)).toEqual(["token", "error"]);
-    expect(usageWithoutTokens).not.toHaveBeenCalled();
+    // No model usage to meter, but the question's embedding was billed: it is
+    // recorded without counting a message.
+    expect(usageWithoutTokens).toHaveBeenCalledTimes(1);
+    expect(usageWithoutTokens).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: 0,
+        tokensIn: 0,
+        tokensOut: 0,
+        costMicros: embeddingCostMicros(QUESTION_TOKENS),
+      }),
+    );
   });
 
   it("F5: /api/admin/chat serves draft for authenticated owner and returns 401 on expired session even when Worker origin is allowed", async () => {

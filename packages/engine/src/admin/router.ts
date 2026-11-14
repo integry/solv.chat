@@ -1,3 +1,4 @@
+import { isPlainObject } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
 import type { Retriever } from "../providers/retrieval.js";
@@ -34,10 +35,6 @@ export interface AdminRouteDeps {
   retriever: Pick<Retriever, "remove">;
   publicBaseUrl: string;
   fetchImpl?: typeof fetch | undefined;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function readEntryFields(body: unknown): { question: string; answer: string } {

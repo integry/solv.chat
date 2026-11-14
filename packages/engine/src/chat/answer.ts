@@ -3,10 +3,10 @@ import type { Tenant } from "../db/tenant.js";
 import { type ResolvedChunk, resolveChunks } from "../ingest/resolve.js";
 import { costMicros, type ModelInfo } from "../models.js";
 import { ProviderError } from "../providers/error.js";
-import type { Embedder, Retriever } from "../providers/retrieval.js";
+import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
 import type { LlmMessage, LlmProvider } from "../providers/types.js";
 import type { UsageSink } from "../seams/types.js";
-import { buildPrompt } from "./prompt.js";
+import { buildPrompt, MAX_TURNS } from "./prompt.js";
 
 // A chunk below the floor is noise; including it would make the model answer
 // from unrelated pages, which is worse than admitting the gap. The numbers are
@@ -36,10 +36,15 @@ export interface AnswerInput {
   history?: readonly LlmMessage[] | undefined;
 }
 
-function dedupeByUrl(chunks: readonly ResolvedChunk[]): ResolvedChunk[] {
+/**
+ * The chunks a visitor can follow. Hand-written entries are excluded: their
+ * URL points into the admin, where a visitor meets a sign-in screen.
+ */
+function citableByUrl(chunks: readonly ResolvedChunk[]): ResolvedChunk[] {
   const seen = new Set<string>();
   const out: ResolvedChunk[] = [];
   for (const chunk of chunks) {
+    if (chunk.sourceKind === "entry") continue;
     if (seen.has(chunk.url)) continue;
     seen.add(chunk.url);
     out.push(chunk);
@@ -68,7 +73,9 @@ async function ensureConversation(
       existing.assistantId === input.assistantId &&
       existing.visitorId === input.visitorId
     ) {
-      const prior = await deps.tenant.messages.list(existing.id);
+      // Only what the prompt can use: a long conversation should not cost a
+      // full read on every turn.
+      const prior = await deps.tenant.messages.recent(existing.id, MAX_TURNS);
       return {
         conversationId: existing.id,
         history: prior.map((m) => ({ role: m.role, content: m.content })),
@@ -109,6 +116,28 @@ async function recordMessageUsage(
 }
 
 /**
+ * Records spend that is not a message — the question was embedded but no
+ * answer was produced — so `usage_daily.messages` keeps counting answers only.
+ */
+async function recordEmbeddingOnly(
+  deps: AnswerDeps,
+  input: AnswerInput,
+  at: number,
+  cost: number,
+): Promise<void> {
+  if (cost === 0) return;
+  await deps.usage.record({
+    orgId: input.orgId,
+    assistantId: input.assistantId,
+    at,
+    messages: 0,
+    tokensIn: 0,
+    tokensOut: 0,
+    costMicros: cost,
+  });
+}
+
+/**
  * Runs the retrieval, prompt, streaming, citation, persistence, and usage
  * pipeline for one visitor message.
  */
@@ -137,8 +166,13 @@ export async function* answerMessage(
     });
   }
 
-  const [vector] = await deps.embedder.embed([input.message]);
+  const embedded = await deps.embedder.embed([input.message]);
+  // The question's embedding is billed whatever happens next, so its cost
+  // rides on this message's usage event rather than vanishing.
+  const queryCost = embeddingCostMicros(embedded.tokens);
+  const [vector] = embedded.vectors;
   if (!vector) {
+    await recordEmbeddingOnly(deps, input, clock(), queryCost);
     yield { type: "error", message: "The assistant could not complete this response." };
     return;
   }
@@ -172,7 +206,7 @@ export async function* answerMessage(
         createdAt: clock(),
       });
     }
-    await recordMessageUsage(deps, input, clock(), 0, 0, 0);
+    await recordMessageUsage(deps, input, clock(), 0, 0, queryCost);
     yield { type: "done", messageId, conversationId };
     return;
   }
@@ -211,8 +245,10 @@ export async function* answerMessage(
           clock(),
           tokensIn,
           tokensOut,
-          costMicros(deps.model, tokensIn, tokensOut),
+          costMicros(deps.model, tokensIn, tokensOut) + queryCost,
         );
+      } else {
+        await recordEmbeddingOnly(deps, input, clock(), queryCost);
       }
       yield { type: "error", message: "The assistant could not complete this response." };
       return;
@@ -222,7 +258,7 @@ export async function* answerMessage(
 
   // Citations after the text: the widget renders them under the answer, and
   // emitting them first would show links before there is anything to link to.
-  const cited = dedupeByUrl(chunks);
+  const cited = citableByUrl(chunks);
   for (const chunk of cited) {
     yield { type: "citation", url: chunk.url, title: chunk.title };
   }
@@ -250,7 +286,7 @@ export async function* answerMessage(
     clock(),
     tokensIn,
     tokensOut,
-    costMicros(deps.model, tokensIn, tokensOut),
+    costMicros(deps.model, tokensIn, tokensOut) + queryCost,
   );
 
   yield { type: "done", messageId, conversationId };

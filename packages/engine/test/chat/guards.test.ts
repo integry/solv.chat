@@ -369,4 +369,40 @@ describe("chat/guards", () => {
     expect(post.headers.get("access-control-allow-origin")).toBe("https://site.example");
     expect(post.headers.get("access-control-allow-origin")).not.toBe("*");
   });
+
+  it.each(["/v1/chat", "/v1/feedback"])(
+    "%s preflight echoes only an Origin that some assistant allows",
+    async (path) => {
+      const app = createApp(fakeSeams());
+      const ask = async (origin: string) => {
+        const ctx = createExecutionContext();
+        const res = await app.fetch(
+          new Request(`https://engine.example${path}`, { method: "OPTIONS", headers: { origin } }),
+          env,
+          ctx,
+        );
+        await waitOnExecutionContext(ctx);
+        return res;
+      };
+
+      const allowed = await ask("https://site.example");
+      expect(allowed.status).toBe(204);
+      expect(allowed.headers.get("access-control-allow-origin")).toBe("https://site.example");
+
+      const other = await ask("https://evil.example");
+      expect(other.status).toBe(204);
+      expect(other.headers.get("access-control-allow-origin")).toBeNull();
+    },
+  );
+
+  it.each(["/v1/assistants/%E0%A4%A", "/v1/ingest/%E0%A4%A/documents"])(
+    "answers 404 for malformed percent-encoding in %s",
+    async (path) => {
+      const app = createApp(fakeSeams());
+      const ctx = createExecutionContext();
+      const res = await app.fetch(new Request(`https://engine.example${path}`), env, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(res.status).toBe(404);
+    },
+  );
 });

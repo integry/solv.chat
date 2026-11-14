@@ -24,6 +24,7 @@ export {
   type FeedbackVote,
   parseFeedbackRequest,
 } from "./schemas/feedback.js";
+export { isPlainObject } from "./schemas/shared.js";
 export {
   type EntryInput,
   formatEntryMarkdown,
@@ -41,3 +42,4 @@ export {
   type WidgetConfig,
   type WidgetPosition,
 } from "./schemas/versionConfig.js";
+export { parseSseBlock, type ReadSseOptions, readSseBlocks, type SseBlock } from "./sse.js";

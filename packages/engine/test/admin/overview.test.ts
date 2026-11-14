@@ -1,7 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
-import { utcDay } from "../../src/seams/open/usageDaily.js";
+import { utcDay } from "../../src/util/time.js";
 import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
 const ORG_A = TEST_ORG_ID;

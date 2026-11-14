@@ -363,6 +363,26 @@ describe("admin Sources screen", () => {
     expect(await screen.findByText("docs.example.com")).toBeTruthy();
   });
 
+  it("imports a large selection in batches the engine accepts and reports the total", async () => {
+    const previewUrls = Array.from({ length: 12 }, (_, i) => `https://docs.example.com/p${i}`);
+    const server = installSourcesFakeServer({ previewUrls });
+    window.history.replaceState(null, "", "/admin/sources");
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Sources" });
+    fireEvent.change(screen.getByLabelText("Sitemap URL"), {
+      target: { value: "https://docs.example.com/sitemap.xml" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch URLs" }));
+    await screen.findByLabelText("https://docs.example.com/p11");
+
+    fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
+    expect(await screen.findByText("Imported 12 pages.")).toBeTruthy();
+    expect(server.importedPayloads.map((p) => p.urls.length)).toEqual([5, 5, 2]);
+    expect(server.importedPayloads.flatMap((p) => p.urls)).toEqual(previewUrls);
+    expect(new Set(server.importedPayloads.map((p) => p.sourceId)).size).toBe(1);
+  });
+
   it("retains and reuses sourceId when retrying a failed sitemap import", async () => {
     let attempts = 0;
     const server = installSourcesFakeServer({

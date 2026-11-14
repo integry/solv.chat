@@ -66,6 +66,13 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     questionsText: string;
   } | null>(null);
   const prevSavedBehaviourRef = useRef<BehaviourConfig | undefined>(undefined);
+  // What the fields held when Publish was pressed. Publishing replaces the
+  // draft with a new one (new id), which would otherwise reset every field;
+  // a field the owner changed while the publish was in flight keeps its edit.
+  const publishSnapshotRef = useRef<{
+    assistantId: string;
+    fields: { greeting: string; persona: string; fallbackText: string; questionsText: string };
+  } | null>(null);
 
   useEffect(() => {
     if (mutation.tick === lastTickRef.current) return;
@@ -94,11 +101,28 @@ export function Behaviour({ assistantId }: BehaviourProps) {
       syncOnLoadRef.current = false;
       syncSnapshotRef.current = null;
       prevSavedBehaviourRef.current = savedBehaviour;
-      setGreeting(savedBehaviour.greeting);
-      setPersona(savedBehaviour.persona);
-      setFallbackText(savedBehaviour.fallbackText);
-      setQuestionsText(savedBehaviour.suggestedQuestions.join("\n"));
+      const published = publishSnapshotRef.current;
+      publishSnapshotRef.current = null;
+      const keep =
+        published !== null && published.assistantId === assistantId ? published.fields : null;
+      const latest = latestRef.current;
+      if (!keep || latest.greeting === keep.greeting) setGreeting(savedBehaviour.greeting);
+      if (!keep || latest.persona === keep.persona) setPersona(savedBehaviour.persona);
+      if (!keep || latest.fallbackText === keep.fallbackText) {
+        setFallbackText(savedBehaviour.fallbackText);
+      }
+      if (!keep || latest.questionsText === keep.questionsText) {
+        setQuestionsText(savedBehaviour.suggestedQuestions.join("\n"));
+      }
       setInitializedFor(key);
+    } else if (
+      publishSnapshotRef.current !== null &&
+      savedBehaviour !== prevSavedBehaviourRef.current
+    ) {
+      // The publish reload came back with the same draft id, so nothing was
+      // replaced and there is nothing to preserve.
+      publishSnapshotRef.current = null;
+      prevSavedBehaviourRef.current = savedBehaviour;
     } else if (shouldSyncReload) {
       const snapshot = syncSnapshotRef.current;
       syncOnLoadRef.current = false;
@@ -186,14 +210,18 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   }
 
   async function handlePublish() {
-    if (busy) return;
+    // Publishing sends the saved draft, not the form: with unsaved edits the
+    // owner would publish something other than what they see.
+    if (busy || unsaved) return;
     setFormError(null);
     setStatusMessage(null);
+    const snapshot = { assistantId, fields: { ...latestRef.current } };
     try {
       await mutation.run("publishing", async () => {
         const res = await postJson<{ version: VersionRow }>(
           `/api/admin/assistants/${assistantId}/publish`,
         );
+        publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
         setStatusMessage(
           `Published (${new Date(res.version.publishedAt ?? Date.now()).toLocaleString()}).`,
@@ -227,13 +255,19 @@ export function Behaviour({ assistantId }: BehaviourProps) {
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={busy}
+            disabled={busy || unsaved}
+            aria-describedby={unsaved ? "behaviour-publish-hint" : undefined}
             onClick={handlePublish}
           >
             {publishing ? "Publishing…" : "Publish"}
           </button>
         </div>
       </div>
+      {unsaved && !busy && (
+        <p id="behaviour-publish-hint" className="field-hint">
+          Save your changes before publishing.
+        </p>
+      )}
 
       {statusMessage && (
         <p className="notice-text" role="status">

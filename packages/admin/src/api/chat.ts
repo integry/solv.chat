@@ -4,81 +4,9 @@ import {
   type ChatHistoryTurn,
   type ChatRequest,
   parseChatEventLine,
+  readSseBlocks,
 } from "@solvchat/core";
 import { notifyUnauthorized } from "./client.js";
-
-interface RawEventLine {
-  name: string;
-  data: string;
-}
-
-function parseBlock(block: string): RawEventLine | null {
-  let name = "message";
-  const dataLines: string[] = [];
-
-  for (const line of block.split("\n")) {
-    if (line === "" || line.startsWith(":")) continue;
-    const colon = line.indexOf(":");
-    const field = colon === -1 ? line : line.slice(0, colon);
-    let value = colon === -1 ? "" : line.slice(colon + 1);
-    if (value.startsWith(" ")) value = value.slice(1);
-    if (field === "event") {
-      name = value;
-    } else if (field === "data") {
-      dataLines.push(value);
-    }
-  }
-
-  if (dataLines.length === 0) return null;
-  return { name, data: dataLines.join("\n") };
-}
-
-async function* readEventLines(
-  response: Response,
-  signal?: AbortSignal,
-): AsyncIterable<RawEventLine> {
-  if (!response.body || signal?.aborted) return;
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let finished = false;
-  const onAbort = () => {
-    void reader.cancel().catch(() => {});
-  };
-  signal?.addEventListener("abort", onAbort, { once: true });
-
-  try {
-    for (;;) {
-      if (signal?.aborted) break;
-      const { value, done } = await reader.read();
-      if (signal?.aborted) break;
-      if (done) {
-        finished = true;
-        buffer = (buffer + decoder.decode()).replace(/\r\n/g, "\n");
-        break;
-      }
-      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
-      for (let at = buffer.indexOf("\n\n"); at !== -1; at = buffer.indexOf("\n\n")) {
-        if (signal?.aborted) break;
-        const block = buffer.slice(0, at);
-        buffer = buffer.slice(at + 2);
-        const parsed = parseBlock(block);
-        if (parsed !== null) yield parsed;
-      }
-    }
-
-    if (!signal?.aborted && buffer.trim().length > 0) {
-      const parsed = parseBlock(buffer);
-      if (parsed !== null) yield parsed;
-    }
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
-    if (!finished) {
-      await reader.cancel().catch(() => {});
-    }
-    reader.releaseLock();
-  }
-}
 
 export interface DraftChatParams {
   assistantPublicKey: string;
@@ -127,9 +55,10 @@ export async function* streamDraftChat(params: DraftChatParams): AsyncIterable<C
     yield { type: "error", message: `Chat request failed (${response.status}).` };
     return;
   }
+  if (!response.body) return;
 
-  for await (const raw of readEventLines(response, params.signal)) {
-    const event = parseChatEventLine(raw.name, raw.data);
+  for await (const raw of readSseBlocks(response.body, { signal: params.signal })) {
+    const event = parseChatEventLine(raw.event ?? "message", raw.data);
     if (event.type !== "unknown") {
       yield event;
     }

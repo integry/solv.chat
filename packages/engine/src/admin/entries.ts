@@ -1,15 +1,11 @@
 import { formatEntryMarkdown, newId, parseEntryInput } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { type IngestCounts, type PushDeps, pushDocuments } from "../ingest/documents.js";
+import { sha256Hex } from "../util/crypto.js";
 import { BadRequest, NotFound } from "./errors.js";
 
-const textEncoder = new TextEncoder();
-
 async function shortHash(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", textEncoder.encode(value));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 16);
+  return (await sha256Hex(value)).slice(0, 16);
 }
 
 /**

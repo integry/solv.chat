@@ -11,6 +11,9 @@ export interface SourcesProps {
 
 const DOCS_PAGE_SIZE = 20;
 const MAX_IMPORT_URLS = 100;
+// The engine imports at most this many pages per request so one request
+// stays inside the Workers subrequest limit; a selection goes in batches.
+export const IMPORT_BATCH_URLS = 5;
 
 const KIND_LABELS: Record<SourceKind, string> = {
   push: "Pushed from your site",
@@ -122,15 +125,27 @@ function SitemapImport({
         setImportSourceId(sourceId);
       }
 
-      const res = await postJson<{ total: number }>(
-        `/api/admin/assistants/${assistantId}/sitemap-import`,
-        { sitemapUrl: preview.url, urls: chosen, sourceId },
-      );
+      let total = 0;
+      for (let at = 0; at < chosen.length; at += IMPORT_BATCH_URLS) {
+        const batch = chosen.slice(at, at + IMPORT_BATCH_URLS);
+        const res = await postJson<{ total: number }>(
+          `/api/admin/assistants/${assistantId}/sitemap-import`,
+          { sitemapUrl: preview.url, urls: batch, sourceId },
+        );
+        total += res.total;
+        // A failure later on leaves only the pages not yet imported selected,
+        // so trying again does not fetch the finished ones twice.
+        setSelected((prev) => {
+          const next = new Set(prev);
+          for (const url of batch) next.delete(url);
+          return next;
+        });
+      }
       setPreview(null);
       setSelected(new Set());
       setImportSourceId(null);
       setSitemapUrl("");
-      setNotice(res.total === 1 ? "Imported 1 page." : `Imported ${res.total} pages.`);
+      setNotice(total === 1 ? "Imported 1 page." : `Imported ${total} pages.`);
       onImported();
     } catch (err) {
       if (err instanceof ApiError) {

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
-import { newId } from "@solvchat/core";
-import { describe, expect, it } from "vitest";
+import { formatEntryMarkdown, newId } from "@solvchat/core";
+import { describe, expect, it, vi } from "vitest";
 import { forIngestScope } from "../../src/db/tenant.js";
 import { runIngestBatch } from "../../src/ingest/consumer.js";
 import {
@@ -12,6 +12,7 @@ import {
 } from "../../src/ingest/documents.js";
 import { resolveChunks } from "../../src/ingest/resolve.js";
 import type { Embedder, Retriever } from "../../src/providers/retrieval.js";
+import type { UsageEvent } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { TEST_ORG_ID } from "../helpers/app.js";
@@ -112,6 +113,74 @@ describe("ingest consumer", () => {
     expect(vectors.every((v) => v.orgId === TEST_ORG_ID && v.assistantId === assistantId)).toBe(
       true,
     );
+  });
+
+  it("embeds each chunk with its heading path, so an entry's question is searchable", async () => {
+    const { sourceId } = await seedOrgAndAssistant();
+    const { documentId, hash } = await seedDocument(
+      sourceId,
+      "How long is the refund window?",
+      formatEntryMarkdown("How long is the refund window?", "30 days."),
+    );
+    const inner = fakeEmbedder();
+    const seen: string[] = [];
+    const embedder: Embedder = {
+      dimensions: inner.dimensions,
+      async embed(texts) {
+        seen.push(...texts);
+        return inner.embed(texts);
+      },
+    };
+
+    await runIngestBatch(
+      { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash })] },
+      { db: env.DB, docs: env.DOCS, embedder, retriever: memoryRetriever() },
+    );
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain("How long is the refund window?");
+    expect(seen[0]).toContain("30 days.");
+  });
+
+  it("drops a queued message whose org does not own the document", async () => {
+    const { sourceId } = await seedOrgAndAssistant();
+    await seedOrgAndAssistant("org_other");
+    const { documentId, hash, tenant } = await seedDocument(sourceId, "Doc", "# A\n\nBody.");
+    const embedder = fakeEmbedder();
+    const embedSpy = vi.fn(embedder.embed);
+    const retriever = memoryRetriever();
+    const msg = makeMessage({ orgId: "org_other", documentId, contentHash: hash });
+
+    await runIngestBatch(
+      { messages: [msg] },
+      { db: env.DB, docs: env.DOCS, embedder: { ...embedder, embed: embedSpy }, retriever },
+    );
+
+    expect(msg.acked).toBe(true);
+    expect(embedSpy).not.toHaveBeenCalled();
+    expect(retriever.all()).toHaveLength(0);
+    expect(await tenant.documents.listChunks(documentId)).toHaveLength(0);
+  });
+
+  it("meters the embedding spend for the document's assistant", async () => {
+    const { assistantId, sourceId } = await seedOrgAndAssistant();
+    const { documentId, hash } = await seedDocument(sourceId, "Doc", "# A\n\nBody text.");
+    const events: UsageEvent[] = [];
+
+    await runIngestBatch(
+      { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash })] },
+      {
+        db: env.DB,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever: memoryRetriever(),
+        usage: { record: async (event) => void events.push(event) },
+      },
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ orgId: TEST_ORG_ID, assistantId, messages: 0 });
+    expect(events[0]?.costMicros).toBeGreaterThan(0);
   });
 
   it("replaces chunk rows with fresh chunk ids and removes stale vectors on re-index", async () => {
@@ -618,6 +687,7 @@ describe("ingest consumer", () => {
         text: "Beta.",
         headingPath: "Section 2",
         url: "https://a.test/1",
+        sourceKind: "push",
         title: "Title A1",
       },
       {
@@ -627,6 +697,7 @@ describe("ingest consumer", () => {
         text: "Alpha.",
         headingPath: "Section 1",
         url: "https://a.test/1",
+        sourceKind: "push",
         title: "Title A1",
       },
     ]);

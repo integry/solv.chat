@@ -277,6 +277,9 @@ function installFakeServer(options: FakeServerOptions = {}) {
       };
       list.unshift(published);
       versions.set(id, list);
+      // Like the engine: the draft is promoted and a fresh draft with the same
+      // config takes its place under a new id.
+      drafts.set(id, { ...draft, id: `ver_draft_${id}_${list.length}` });
       return Response.json({ version: published });
     }
 
@@ -633,16 +636,21 @@ describe("admin app", () => {
     saveDeferred.resolve();
     expect(await screen.findByText("Draft saved.")).toBeTruthy();
 
-    fireEvent.change(greeting, { target: { value: "Another unsaved edit" } });
     const publishDeferred = server.holdNextPublish();
     fireEvent.click(screen.getByRole("button", { name: "Publish" }));
 
+    fireEvent.change(greeting, { target: { value: "Another unsaved edit" } });
     const saveBtn = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
     await waitFor(() => {
       expect(saveBtn.disabled).toBe(true);
     });
     publishDeferred.resolve();
     expect(await screen.findByText(/^Published \(/)).toBeTruthy();
+    // The edit typed while publishing survives the replacement draft.
+    await waitFor(() => {
+      expect(greeting.value).toBe("Another unsaved edit");
+    });
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
 
     // Verify the same serialization on Widget.
     fireEvent.click(screen.getByRole("link", { name: "Widget" }));
@@ -659,16 +667,54 @@ describe("admin app", () => {
     widgetSaveDeferred.resolve();
     expect(await screen.findByText("Draft saved.")).toBeTruthy();
 
-    fireEvent.change(widgetTitle, { target: { value: "Unsaved Widget" } });
     const widgetPublishDeferred = server.holdNextPublish();
     fireEvent.click(screen.getByRole("button", { name: "Publish" }));
 
+    fireEvent.change(widgetTitle, { target: { value: "Unsaved Widget" } });
     const widgetSaveBtn = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
     await waitFor(() => {
       expect(widgetSaveBtn.disabled).toBe(true);
     });
     widgetPublishDeferred.resolve();
     expect(await screen.findByText(/^Published \(/)).toBeTruthy();
+    await waitFor(() => {
+      expect(widgetTitle.value).toBe("Unsaved Widget");
+    });
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+  });
+
+  it.each([
+    ["/admin/behaviour", "First thing it says"],
+    ["/admin/widget", "Title"],
+  ])("disables Publish on %s while there are unsaved changes", async (route, label) => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", route);
+    render(<App />);
+
+    const field = (await screen.findByLabelText(label)) as HTMLInputElement;
+    const publishBtn = screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement;
+    expect(publishBtn.disabled).toBe(false);
+
+    fireEvent.change(field, { target: { value: "Not saved yet" } });
+    expect(publishBtn.disabled).toBe(true);
+    expect(screen.getByText("Save your changes before publishing.")).toBeTruthy();
+    fireEvent.click(publishBtn);
+    expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/publish"))).toBe(
+      false,
+    );
+
+    // After saving, Publish sends what was saved and the field keeps it.
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Draft saved.")).toBeTruthy();
+    expect(publishBtn.disabled).toBe(false);
+    fireEvent.click(publishBtn);
+    expect(await screen.findByText(/^Published \(/)).toBeTruthy();
+    await waitFor(() => {
+      expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/publish"))).toBe(
+        true,
+      );
+    });
+    expect(field.value).toBe("Not saved yet");
   });
 
   it("F3: keeps the owner signed in with a retryable error when logout fails, then signs out on retry", async () => {

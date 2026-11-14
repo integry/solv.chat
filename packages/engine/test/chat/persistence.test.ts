@@ -91,7 +91,9 @@ describe("chat/persistence", () => {
       { id: "chk_1", ordinal: 0, text: "Invoices are sent monthly.", headingPath: "Billing" },
     ]);
 
-    const [vec] = await embedder.embed(["How does billing work?"]);
+    const {
+      vectors: [vec],
+    } = await embedder.embed(["How does billing work?"]);
     await retriever.upsert([
       {
         chunkId: "chk_1",

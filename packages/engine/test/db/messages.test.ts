@@ -103,4 +103,26 @@ describe("db/messages", () => {
     expect(fetched?.toolCalls).toEqual([]);
     expect(fetched?.answered).toBe(true);
   });
+
+  it("orders same-millisecond messages by insertion, and recent() returns the last N oldest first", async () => {
+    // Ids chosen so that sorting by id would give the wrong order.
+    const ids = ["msg_z", "msg_y", "msg_x", "msg_w"];
+    for (const [i, id] of ids.entries()) {
+      await tenant.messages.create({
+        id,
+        conversationId: "cnv_1",
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: `turn ${i}`,
+        citations: [],
+        toolCalls: null,
+        tokensIn: 0,
+        tokensOut: 0,
+        answered: true,
+        createdAt: 5000,
+      });
+    }
+
+    expect((await tenant.messages.list("cnv_1")).map((m) => m.id)).toEqual(ids);
+    expect((await tenant.messages.recent("cnv_1", 3)).map((m) => m.id)).toEqual(ids.slice(1));
+  });
 });

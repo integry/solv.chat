@@ -1,17 +1,6 @@
-import { sha256Hex } from "../admin/ingestKeys.js";
+import { assistantIngestKeyHash } from "../db/public.js";
 import type { IngestScope } from "../db/tenant.js";
-
-const encoder = new TextEncoder();
-
-function constantTimeEqual(a: string, b: string): boolean {
-  const left = encoder.encode(a);
-  const right = encoder.encode(b);
-  let diff = left.length ^ right.length;
-  for (let i = 0; i < Math.max(left.length, right.length); i++) {
-    diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
-  }
-  return diff === 0;
-}
+import { constantTimeEqual, sha256Hex } from "../util/crypto.js";
 
 function extractBearerToken(request: Request): string | null {
   const header = request.headers.get("authorization");
@@ -36,19 +25,10 @@ export async function ingestScopeFor(
   if (presented === null || assistantIdFromUrl === "") return null;
 
   const presentedHash = await sha256Hex(presented);
-  // This is the one statement in the engine that filters on `id` before it
-  // knows `org_id`, because the bearer key *is* the authentication; callers
-  // build a `Tenant` from its result via `forIngestScope`.
-  const row = await db
-    .prepare(
-      "SELECT id, org_id, ingest_key_hash FROM assistants WHERE id = ?1 AND ingest_key_hash IS NOT NULL",
-    )
-    .bind(assistantIdFromUrl)
-    .first<{ id: string; org_id: string; ingest_key_hash: string }>();
-
-  if (row === null || !constantTimeEqual(presentedHash, row.ingest_key_hash)) {
+  const row = await assistantIngestKeyHash(db, assistantIdFromUrl);
+  if (row === null || !constantTimeEqual(presentedHash, row.ingestKeyHash)) {
     return null;
   }
 
-  return { orgId: row.org_id, assistantId: row.id };
+  return { orgId: row.orgId, assistantId: row.id };
 }

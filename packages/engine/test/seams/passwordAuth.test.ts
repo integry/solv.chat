@@ -122,6 +122,30 @@ describe("passwordAuth", () => {
     expect(setCookie).toContain("Max-Age=0");
   });
 
+  it("drops other addresses' failure rows once their window and lock have both expired", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const auth = passwordAuth(ENV, env.DB);
+
+    await auth.login(loginRequest("wrong", "198.51.100.20"));
+    for (let i = 0; i < 5; i++) await auth.login(loginRequest("wrong", "198.51.100.21"));
+
+    // Ten minutes on: neither window has run out, so both rows still count.
+    vi.advanceTimersByTime(10 * 60 * 1000);
+    await auth.login(loginRequest("wrong", "198.51.100.22"));
+    const ips = async () =>
+      (
+        await env.DB.prepare("SELECT ip FROM login_failures ORDER BY ip").all<{ ip: string }>()
+      ).results.map((r) => r.ip);
+    expect(await ips()).toEqual(["198.51.100.20", "198.51.100.21", "198.51.100.22"]);
+
+    // Sixteen minutes after the first failures: .20's window and .21's lock
+    // have both ended, so a sign-in attempt from anywhere removes them.
+    vi.advanceTimersByTime(6 * 60 * 1000);
+    await auth.login(loginRequest("wrong", "198.51.100.23"));
+    expect(await ips()).toEqual(["198.51.100.22", "198.51.100.23"]);
+  });
+
   it("throttles after 5 failures per IP for 15 minutes without affecting other IPs", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));

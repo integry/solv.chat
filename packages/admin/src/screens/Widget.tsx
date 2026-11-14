@@ -72,6 +72,13 @@ export function Widget({ assistantId }: WidgetProps) {
   const syncOriginsSnapshotRef = useRef<string | null>(null);
   const prevSavedWidgetRef = useRef<WidgetConfig | undefined>(undefined);
   const prevSavedAssistantRef = useRef<Assistant | undefined>(undefined);
+  // What the draft fields held when Publish was pressed. Publishing replaces
+  // the draft with a new one (new id), which would otherwise reset them; a
+  // field changed while the publish was in flight keeps its edit.
+  const publishSnapshotRef = useRef<{
+    assistantId: string;
+    fields: { title: string; accentColor: string; position: WidgetPosition };
+  } | null>(null);
 
   useEffect(() => {
     if (mutation.tick === lastTickRef.current) return;
@@ -109,10 +116,22 @@ export function Widget({ assistantId }: WidgetProps) {
       syncWidgetOnLoadRef.current = false;
       syncWidgetSnapshotRef.current = null;
       prevSavedWidgetRef.current = savedWidget;
-      setTitle(savedWidget.title);
-      setAccentColor(savedWidget.accentColor);
-      setPosition(savedWidget.position);
+      const published = publishSnapshotRef.current;
+      publishSnapshotRef.current = null;
+      const keep =
+        published !== null && published.assistantId === assistantId ? published.fields : null;
+      const latest = latestRef.current;
+      if (!keep || latest.title === keep.title) setTitle(savedWidget.title);
+      if (!keep || latest.accentColor === keep.accentColor) {
+        setAccentColor(savedWidget.accentColor);
+      }
+      if (!keep || latest.position === keep.position) setPosition(savedWidget.position);
       setInitWidgetKey(key);
+    } else if (publishSnapshotRef.current !== null && savedWidget !== prevSavedWidgetRef.current) {
+      // The publish reload came back with the same draft id, so nothing was
+      // replaced and there is nothing to preserve.
+      publishSnapshotRef.current = null;
+      prevSavedWidgetRef.current = savedWidget;
     } else if (shouldSyncReload) {
       const snapshot = syncWidgetSnapshotRef.current;
       syncWidgetOnLoadRef.current = false;
@@ -256,14 +275,19 @@ export function Widget({ assistantId }: WidgetProps) {
   }
 
   async function handlePublish() {
-    if (busy) return;
+    // Publishing sends the saved draft, not the form: with unsaved edits the
+    // owner would publish something other than what they see.
+    if (busy || unsaved) return;
     setFormError(null);
     setStatusMessage(null);
+    const { title: t, accentColor: a, position: p } = latestRef.current;
+    const snapshot = { assistantId, fields: { title: t, accentColor: a, position: p } };
     try {
       await mutation.run("publishing", async () => {
         const res = await postJson<{ version: VersionRow }>(
           `/api/admin/assistants/${assistantId}/publish`,
         );
+        publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
         setStatusMessage(
           `Published (${new Date(res.version.publishedAt ?? Date.now()).toLocaleString()}).`,
@@ -297,13 +321,19 @@ export function Widget({ assistantId }: WidgetProps) {
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={busy}
+            disabled={busy || unsaved}
+            aria-describedby={unsaved ? "widget-publish-hint" : undefined}
             onClick={handlePublish}
           >
             {publishing ? "Publishing…" : "Publish"}
           </button>
         </div>
       </div>
+      {unsaved && !busy && (
+        <p id="widget-publish-hint" className="field-hint">
+          Save your changes before publishing.
+        </p>
+      )}
 
       {statusMessage && (
         <p className="notice-text" role="status">

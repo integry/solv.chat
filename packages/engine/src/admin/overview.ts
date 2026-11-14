@@ -1,6 +1,6 @@
 import type { TopQuestionRow } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
-import { utcDay } from "../seams/open/usageDaily.js";
+import { utcDay } from "../util/time.js";
 import { NotFound } from "./errors.js";
 
 export interface AssistantOverview {

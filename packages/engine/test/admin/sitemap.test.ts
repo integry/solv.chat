@@ -3,6 +3,7 @@ import { newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   importSitemapUrls,
+  MAX_IMPORT_URLS,
   MAX_REDIRECTS,
   MAX_SITEMAP_BYTES,
   previewSitemap,
@@ -162,6 +163,28 @@ describe("admin sitemap preview and import", () => {
       UnsafeUrlError,
     );
     expect(hops).toBe(MAX_REDIRECTS + 1);
+  });
+
+  it("refuses more pages in one request than fit the Workers subrequest budget, before fetching", async () => {
+    const assistantId = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    let fetches = 0;
+    const urls = Array.from(
+      { length: MAX_IMPORT_URLS + 1 },
+      (_, i) => `https://docs.example.com/p${i}`,
+    );
+    await expect(
+      importSitemapUrls(
+        { tenant, docs: env.DOCS, queue: makeQueue() },
+        { orgId: ORG_A, assistantId },
+        { urls },
+        async () => {
+          fetches++;
+          return new Response("x");
+        },
+      ),
+    ).rejects.toThrow(/at most 5 URLs per request/);
+    expect(fetches).toBe(0);
   });
 
   it("imports only the chosen URLs through pushDocuments and produces chunks via the consumer", async () => {

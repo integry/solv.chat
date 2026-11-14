@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
+import { isPlainObject } from "@solvchat/core";
 import { assertValidHeaderValue, CliError, normalizeEndpoint, requestJson } from "./http.js";
 import { externalIdFor, firstHeading, markdownFiles, splitFrontMatter } from "./markdown.js";
 
@@ -43,10 +44,6 @@ function resolveDocumentUrl(externalId: string, baseUrl: string): string {
   const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
   const encodedPath = externalId.split("/").map(encodeURIComponent).join("/");
   return new URL(encodedPath, normalizedBase).href;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function loadFromDir(dir: string, baseUrl: string): Promise<PushDocument[]> {

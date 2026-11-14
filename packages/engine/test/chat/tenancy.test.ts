@@ -152,7 +152,9 @@ describe("chat/tenancy", () => {
       createdAt: 1000,
     });
 
-    const [vec] = await embedder.embed(["shared question"]);
+    const {
+      vectors: [vec],
+    } = await embedder.embed(["shared question"]);
     await retriever.upsert([
       { chunkId: "chk_a", vector: vec ?? [], orgId: TEST_ORG_ID, assistantId: "ast_a" },
       { chunkId: "chk_b", vector: vec ?? [], orgId: ORG_B, assistantId: "ast_b" },

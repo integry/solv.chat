@@ -53,10 +53,14 @@ export async function updateDraft(
 }
 
 /**
- * Publishing copies rather than relabels: the published row is the snapshot a
- * visitor saw, so History stays truthful and rollback has something to go back
- * to. One db.batch, so a crash between the archive and the insert cannot leave
- * the assistant with no published version.
+ * Publishing promotes the current draft row to `published` (it keeps its id,
+ * so a "Try it" conversation started against the draft still resolves) and
+ * inserts a fresh draft with the same config under a new id. The promoted row
+ * is never edited again, so it stays the snapshot visitors saw: History stays
+ * truthful and rollback has something to go back to. Archive, promote and the
+ * new draft run in one db.batch, so a crash part-way cannot leave the
+ * assistant with no published version or no draft. See
+ * `versionsFor().publishDraft` for the guards.
  *
  * The spec says Publish runs the tests. Answer tests are phase 2; that step
  * slots in at the top of this function.

@@ -14,6 +14,20 @@ import { openAIEmbedder, vectorizeRetriever } from "./providers/retrieval.js";
 import type { Seams } from "./seams/types.js";
 import { WIDGET_BUNDLE } from "./widgetBundle.js";
 
+/**
+ * Decodes one path segment, or returns null when the percent-encoding is
+ * malformed (`%E0%A4%A`), so the route can answer 404 instead of throwing.
+ */
+function decodeSegment(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
+
+const notFound = (): Response => Response.json({ error: "Not found." }, { status: 404 });
+
 function widgetAsset(): Response {
   return new Response(WIDGET_BUNDLE, {
     status: 200,
@@ -62,7 +76,9 @@ export function createApp(seams: Seams, options?: AppOptions): App {
       }
       const publicConfigMatch = /^\/v1\/assistants\/([^/]+)$/.exec(url.pathname);
       if (publicConfigMatch?.[1]) {
-        return publicConfigRoute(request, env, seams, decodeURIComponent(publicConfigMatch[1]));
+        const publicKey = decodeSegment(publicConfigMatch[1]);
+        if (publicKey === null) return notFound();
+        return publicConfigRoute(request, env, seams, publicKey);
       }
       if (request.method === "GET" && url.pathname === "/widget.js") {
         // Long cache: the owner embeds a stable URL, so a long max-age keeps
@@ -73,18 +89,15 @@ export function createApp(seams: Seams, options?: AppOptions): App {
       }
       const ingestMatch = /^\/v1\/ingest\/([^/]+)\/(documents|config)$/.exec(url.pathname);
       if (ingestMatch?.[1] && ingestMatch[2]) {
-        return ingestRoutes(
-          request,
-          decodeURIComponent(ingestMatch[1]),
-          ingestMatch[2] as "documents" | "config",
-          {
-            db: env.DB,
-            docs: env.DOCS,
-            queue: env.INGEST_QUEUE,
-            retriever: vectorizeRetriever(env.VECTORS),
-            limits: seams.limits,
-          },
-        );
+        const assistantId = decodeSegment(ingestMatch[1]);
+        if (assistantId === null) return notFound();
+        return ingestRoutes(request, assistantId, ingestMatch[2] as "documents" | "config", {
+          db: env.DB,
+          docs: env.DOCS,
+          queue: env.INGEST_QUEUE,
+          retriever: vectorizeRetriever(env.VECTORS),
+          limits: seams.limits,
+        });
       }
       if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
         if (request.method !== "GET" && request.method !== "HEAD") {
@@ -125,7 +138,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         return adminAsset(url);
       }
       void ctx; // Later tasks add their routes above this line.
-      return Response.json({ error: "Not found." }, { status: 404 });
+      return notFound();
     },
     async queue(batch, env, ctx) {
       void ctx;
@@ -154,6 +167,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
             docs: env.DOCS,
             embedder: openAIEmbedder({ apiKey }),
             retriever,
+            usage: seams.usage,
           },
         );
       }

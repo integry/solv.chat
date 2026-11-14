@@ -1,13 +1,9 @@
-import { newId, parseSourceInput } from "@solvchat/core";
+import { isPlainObject, newId, parseSourceInput } from "@solvchat/core";
 import type { DocumentSummaryRow } from "../db/documents.js";
 import type { SourceRow, SourceWithStatsRow } from "../db/sources.js";
 import type { Tenant } from "../db/tenant.js";
 import { type DeleteDeps, deleteDocuments } from "../ingest/documents.js";
 import { BadRequest, NotFound } from "./errors.js";
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** Lists all sources for an assistant with document counts and newest `updated_at`. */
 export async function listSources(

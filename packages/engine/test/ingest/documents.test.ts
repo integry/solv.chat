@@ -156,6 +156,60 @@ describe("ingest documents", () => {
     expect(queue.sent).toHaveLength(3);
   });
 
+  it("treats a title/body split that concatenates to the same text as a change", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+    const push = (title: string, markdown: string) =>
+      pushDocuments({ tenant, docs, queue }, scope, {
+        documents: [{ externalId: "split", url: "https://example.com/split", title, markdown }],
+      });
+
+    expect(await push("A\nB", "C")).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    await runIngestBatch(
+      {
+        messages: queue.sent.map((body) => ({
+          id: newId("msg"),
+          timestamp: new Date(),
+          attempts: 1,
+          body,
+          ack() {},
+          retry() {},
+        })),
+      },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever: memoryRetriever() },
+    );
+
+    expect(await push("A", "B\nC")).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    expect(queue.sent).toHaveLength(2);
+    const saved = await tenant.documents.getByExternalId(
+      (await tenant.sources.getDefaultPush(assistantId))?.id ?? "",
+      "split",
+    );
+    expect(saved?.title).toBe("A");
+  });
+
+  it("existingFor reads only the requested external ids", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    await pushDocuments({ tenant, docs: countingDocs(env.DOCS), queue: countingQueue() }, scope, {
+      documents: ["a", "b", "c"].map((externalId) => ({
+        externalId,
+        url: `https://example.com/${externalId}`,
+        title: externalId,
+        markdown: `# ${externalId}`,
+      })),
+    });
+    const sourceId = (await tenant.sources.getDefaultPush(assistantId))?.id ?? "";
+
+    const found = await tenant.documents.existingFor(sourceId, ["c", "a", "a", "missing"]);
+    expect([...found.keys()].sort()).toEqual(["a", "c"]);
+    expect(found.get("a")?.url).toBe("https://example.com/a");
+  });
+
   it("prunes unpushed documents along with their chunks, R2 bodies, and vectors", async () => {
     const { id: assistantId } = await createAssistantWithKey();
     const scope = { orgId: TEST_ORG_ID, assistantId };

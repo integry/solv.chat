@@ -9,6 +9,8 @@ export interface ResolvedChunk {
   headingPath: string;
   url: string;
   title: string;
+  /** `entry` answers live in the admin, so their URL is not a visitor link. */
+  sourceKind: "push" | "sitemap" | "entry";
 }
 
 /**
@@ -39,6 +41,7 @@ export async function resolveChunks(
       headingPath: row.headingPath,
       url: row.url,
       title: row.title,
+      sourceKind: row.sourceKind,
     });
   }
   return out;

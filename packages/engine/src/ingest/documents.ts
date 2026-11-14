@@ -1,5 +1,6 @@
 import {
   type DocumentInput,
+  isPlainObject,
   MAX_DOCUMENT_MARKDOWN_BYTES,
   newId,
   parseDocumentInput,
@@ -9,6 +10,7 @@ import type { DocumentRow } from "../db/documents.js";
 import type { SourceRow } from "../db/sources.js";
 import type { IngestScope, Tenant } from "../db/tenant.js";
 import type { Retriever } from "../providers/retrieval.js";
+import { sha256Hex } from "../util/crypto.js";
 
 export const MAX_BATCH_DOCUMENTS = 100;
 
@@ -43,18 +45,16 @@ export interface DeleteDeps {
 
 const encoder = new TextEncoder();
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /**
  * SHA-256 of title and body. The title is included because retitling a page
  * is a real change the retriever should see; hashing the body alone would make
  * it a no-op.
+ *
+ * The pair is JSON-encoded rather than joined with a delimiter: titles may
+ * contain newlines, and `"A\nB" + "C"` must not hash like `"A" + "B\nC"`.
  */
 export async function contentHash(title: string, markdown: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(`${title}\n${markdown}`));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(JSON.stringify([title, markdown]));
 }
 
 /** Returns a fresh, never-reused R2 object key for a document's Markdown body. */

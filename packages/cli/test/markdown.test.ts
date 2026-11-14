@@ -52,6 +52,34 @@ meta:
     expect(splitFrontMatter(nestedOnly).frontMatter.title).toBeUndefined();
   });
 
+  it("reads every title form a YAML parser would, without one", () => {
+    const title = (block: string) => splitFrontMatter(`---\n${block}\n---\n`).frontMatter.title;
+    expect(title("title: |\n  Line one\n  Line two")).toBe("Line one\nLine two");
+    expect(title("title: >\n  a\n  b\n\n  c")).toBe("a b\nc");
+    expect(title("title: Multi\n  line plain")).toBe("Multi line plain");
+    expect(title('title: "multi\n  line quoted"')).toBe("multi line quoted");
+    expect(title('title: "\\u00e9t\\xe9"')).toBe("été");
+    expect(title("other: 1\ntitle: Second\nlast: 2")).toBe("Second");
+    expect(title("title: a#b")).toBe("a#b");
+    expect(title("title: Guide\r\nother: 1")).toBe("Guide");
+  });
+
+  it("ignores titles that are not strings or not valid YAML", () => {
+    const title = (block: string) => splitFrontMatter(`---\n${block}\n---\n`).frontMatter.title;
+    for (const block of [
+      "title: 2024",
+      "title: true",
+      "title: ~",
+      "title:",
+      "title: [a, b]",
+      "title:\n  en: English",
+      "title: Hello: world",
+      "title: One\ntitle: Two",
+    ]) {
+      expect(title(block), block).toBeUndefined();
+    }
+  });
+
   it("extracts first heading outside fenced code blocks", () => {
     const raw = `Intro paragraph.
 
