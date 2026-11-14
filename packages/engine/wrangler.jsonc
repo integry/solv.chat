@@ -1,0 +1,46 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "solvchat-engine",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // Secrets (set via `wrangler secret put` or `.dev.vars` locally; never commit values):
+  //   SOLV_ADMIN_PASSWORD
+  //   SOLV_SECRET_KEY
+  //   SOLV_ANTHROPIC_KEY
+  //   SOLV_OPENAI_KEY
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "solvchat",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "VECTORS",
+      "index_name": "solvchat-chunks"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "DOCS",
+      "bucket_name": "solvchat-docs"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "INGEST_QUEUE",
+        "queue": "solvchat-ingest"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "solvchat-ingest",
+        "dead_letter_queue": "solvchat-ingest-dlq"
+      }
+    ]
+  }
+}

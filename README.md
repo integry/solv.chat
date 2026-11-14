@@ -18,6 +18,21 @@ npm run verify
 
 Requires Node 24.
 
+### Engine (`packages/engine`)
+
+```
+npm run typecheck -w @solvchat/engine
+npm run test -w @solvchat/engine
+npm run build -w @solvchat/engine
+```
+
+Required Worker secrets (set with `wrangler secret put` or `.dev.vars` locally):
+
+- `SOLV_ADMIN_PASSWORD` — admin sign-in password
+- `SOLV_SECRET_KEY` — HMAC signing key for session cookies and secret encryption
+- `SOLV_ANTHROPIC_KEY` — Anthropic API key
+- `SOLV_OPENAI_KEY` — OpenAI API key (models and embeddings)
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).

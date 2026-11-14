@@ -1,0 +1,28 @@
+{
+  "name": "@solvchat/engine",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "migrations"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.21",
+    "@cloudflare/workers-types": "^5.20261114.1",
+    "wrangler": "^4.162.0"
+  }
+}
