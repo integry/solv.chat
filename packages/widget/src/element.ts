@@ -128,7 +128,6 @@ export class SolvChat extends HTMLElement {
     panel.className = "solv-panel";
     panel.id = "solv-panel";
     panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-modal", "true");
     panel.setAttribute("aria-labelledby", "solv-title");
     panel.hidden = true;
     panel.addEventListener("keydown", (event) => {
@@ -427,33 +426,49 @@ export class SolvChat extends HTMLElement {
       ack.textContent = "Thanks for the feedback.";
     }
 
-    const submit = (value: "up" | "down") => {
-      if (turn.feedback || !turn.messageId) return;
-      turn.feedback = value;
+    let submitting = false;
+
+    const submit = async (value: "up" | "down") => {
+      if (submitting || turn.feedback || !turn.messageId) return;
+      submitting = true;
       upBtn.disabled = true;
       downBtn.disabled = true;
-      upBtn.setAttribute("aria-pressed", value === "up" ? "true" : "false");
-      downBtn.setAttribute("aria-pressed", value === "down" ? "true" : "false");
-      ack.textContent = "Thanks for the feedback.";
-      this.#persist();
+      ack.textContent = "";
 
-      void fetch(`${this.#endpoint()}/v1/feedback`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          protocol: CHAT_PROTOCOL_VERSION,
-          assistant: this.#assistant(),
-          visitorId: visitorId(),
-          messageId: turn.messageId,
-          value,
-        }),
-      }).catch(() => {
-        // Ignore network failures on feedback submission.
-      });
+      try {
+        const response = await fetch(`${this.#endpoint()}/v1/feedback`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            protocol: CHAT_PROTOCOL_VERSION,
+            assistant: this.#assistant(),
+            visitorId: visitorId(),
+            messageId: turn.messageId,
+            value,
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(`Feedback request failed with status ${response.status}`);
+        }
+
+        turn.feedback = value;
+        upBtn.setAttribute("aria-pressed", value === "up" ? "true" : "false");
+        downBtn.setAttribute("aria-pressed", value === "down" ? "true" : "false");
+        ack.textContent = "Thanks for the feedback.";
+        this.#persist();
+      } catch {
+        upBtn.disabled = false;
+        downBtn.disabled = false;
+        upBtn.setAttribute("aria-pressed", "false");
+        downBtn.setAttribute("aria-pressed", "false");
+        ack.textContent = "Could not send feedback. Try again.";
+      } finally {
+        submitting = false;
+      }
     };
 
-    upBtn.addEventListener("click", () => submit("up"));
-    downBtn.addEventListener("click", () => submit("down"));
+    upBtn.addEventListener("click", () => void submit("up"));
+    downBtn.addEventListener("click", () => void submit("down"));
 
     row.append(upBtn, downBtn, ack);
     bubble.append(row);

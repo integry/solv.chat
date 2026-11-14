@@ -232,7 +232,6 @@ textarea:focus-visible {
   font: inherit;
   font-size: 12px;
   cursor: pointer;
-  transition: background-color 120ms ease;
 }
 
 .solv-fb-btn[aria-pressed="true"] {
@@ -272,7 +271,6 @@ textarea:focus-visible {
   font-size: 12px;
   cursor: pointer;
   text-align: left;
-  transition: border-color 120ms ease;
 }
 
 .solv-chip:hover {
@@ -311,7 +309,6 @@ textarea:focus-visible {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity 120ms ease;
 }
 
 .solv-send:disabled {

@@ -1,1 +1,1 @@
-export { SolvChat } from "./element.js";
+import "./element.js";

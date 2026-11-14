@@ -69,7 +69,7 @@ describe("<solv-chat>", () => {
 
     expect(panel.hidden).toBe(true);
     expect(panel.getAttribute("role")).toBe("dialog");
-    expect(panel.getAttribute("aria-modal")).toBe("true");
+    expect(panel.hasAttribute("aria-modal")).toBe(false);
     expect(launcher.getAttribute("aria-expanded")).toBe("false");
 
     launcher.click();
@@ -306,6 +306,95 @@ describe("<solv-chat>", () => {
     expect(ack.textContent).toBe("Thanks for the feedback.");
   });
 
+  it("restores feedback controls on HTTP 500 or network error without persisting, and allows retry", async () => {
+    let feedbackAttempt = 0;
+    let resolveInFlight: ((res: Response) => void) | undefined;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        return new Response(
+          sseStream([
+            'event: token\ndata: {"text":"Answer"}\n\n',
+            'event: done\ndata: {"messageId":"msg_fb_err","conversationId":"conv_fb_err"}\n\n',
+          ]),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/v1/feedback")) {
+        feedbackAttempt += 1;
+        if (feedbackAttempt === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveInFlight = resolve;
+          });
+        }
+        if (feedbackAttempt === 2) {
+          throw new Error("Network failure");
+        }
+        return Response.json({ ok: true });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const el = mountWidget("pk_fb_retry");
+    await flushAsync();
+    const root = shadow(el);
+
+    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Test";
+    mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    const upBtn = mustQuery<HTMLButtonElement>(root, 'button[aria-label="Helpful"]');
+    const downBtn = mustQuery<HTMLButtonElement>(root, 'button[aria-label="Not helpful"]');
+    const ack = mustQuery<HTMLSpanElement>(root, ".solv-fb-ack");
+
+    // First click: in-flight disables buttons, does not acknowledge yet.
+    upBtn.click();
+    expect(upBtn.disabled).toBe(true);
+    expect(downBtn.disabled).toBe(true);
+    expect(ack.textContent).toBe("");
+
+    // Resolve first attempt with HTTP 500.
+    resolveInFlight?.(new Response("Server error", { status: 500 }));
+    await flushAsync();
+
+    expect(upBtn.disabled).toBe(false);
+    expect(downBtn.disabled).toBe(false);
+    expect(upBtn.getAttribute("aria-pressed")).toBe("false");
+    expect(downBtn.getAttribute("aria-pressed")).toBe("false");
+    expect(ack.textContent).toBe("Could not send feedback. Try again.");
+
+    // Reloading must not restore failed feedback as submitted.
+    el.remove();
+    const reloaded = mountWidget("pk_fb_retry");
+    await flushAsync();
+    const reloadedRoot = shadow(reloaded);
+    const reloadedUp = mustQuery<HTMLButtonElement>(reloadedRoot, 'button[aria-label="Helpful"]');
+    const reloadedDown = mustQuery<HTMLButtonElement>(
+      reloadedRoot,
+      'button[aria-label="Not helpful"]',
+    );
+    const reloadedAck = mustQuery<HTMLSpanElement>(reloadedRoot, ".solv-fb-ack");
+    expect(reloadedUp.disabled).toBe(false);
+    expect(reloadedDown.disabled).toBe(false);
+    expect(reloadedAck.textContent).toBe("");
+
+    // Second attempt: network error also restores controls.
+    reloadedDown.click();
+    await flushAsync();
+    expect(reloadedUp.disabled).toBe(false);
+    expect(reloadedDown.disabled).toBe(false);
+    expect(reloadedAck.textContent).toBe("Could not send feedback. Try again.");
+
+    // Third attempt: HTTP 200 persists and disables controls.
+    reloadedDown.click();
+    await flushAsync();
+    expect(reloadedUp.disabled).toBe(true);
+    expect(reloadedDown.disabled).toBe(true);
+    expect(reloadedDown.getAttribute("aria-pressed")).toBe("true");
+    expect(reloadedAck.textContent).toBe("Thanks for the feedback.");
+  });
+
   it("disables open transition when prefers-reduced-motion: reduce matches", async () => {
     globalThis.fetch = vi.fn(async () => new Response("{}", { status: 200 })) as typeof fetch;
 
@@ -334,13 +423,35 @@ describe("<solv-chat>", () => {
           String((rule as CSSMediaRule).conditionText).includes("prefers-reduced-motion: reduce"),
       );
       expect(reducedRule).toBeDefined();
-      const panelReduced = Array.from(reducedRule?.cssRules ?? []).find(
-        (rule): rule is CSSStyleRule =>
-          "selectorText" in rule && (rule as CSSStyleRule).selectorText.includes(".solv-panel"),
+      const reducedRules = Array.from(reducedRule?.cssRules ?? []).filter(
+        (rule): rule is CSSStyleRule => "selectorText" in rule,
       );
-      expect(panelReduced?.style.transition).toBe("none");
+      for (const selector of [
+        ".solv-panel",
+        ".solv-launcher",
+        ".solv-chip",
+        ".solv-send",
+        ".solv-fb-btn",
+      ]) {
+        const match = reducedRules.find((rule) => rule.selectorText.includes(selector));
+        expect(match?.style.transition).toBe("none");
+      }
+
+      // No unconditional top-level rule may set `transition` and override reduced motion.
+      const topLevelTransitions = rules
+        .filter(
+          (rule): rule is CSSStyleRule => "selectorText" in rule && !("conditionText" in rule),
+        )
+        .filter((rule) => rule.style.transition !== "");
+      expect(topLevelTransitions).toEqual([]);
     } finally {
       window.matchMedia = originalMatchMedia;
     }
+  });
+
+  it("registers <solv-chat> as a side-effect-only module with no named exports", async () => {
+    const mod = await import("../src/widget.js");
+    expect(Object.keys(mod)).toEqual([]);
+    expect(customElements.get("solv-chat")).toBeDefined();
   });
 });
