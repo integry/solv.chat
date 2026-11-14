@@ -100,7 +100,11 @@ Action), imported once from a sitemap, or written by hand as an entry.
 
 ## Admin API
 
-`/api/admin/*`, JSON, always behind the auth seam. Resources mirror the admin
+`/api/admin/*`, JSON, always behind the auth seam. Every request that changes
+something must carry an `Origin` header equal to the Worker's own origin; the
+session cookie alone is not enough. Login attempts are limited per IP (five
+failures, then a fifteen-minute wait) and failures are answered with one
+identical message. Resources mirror the admin
 navigation: assistants, versions (draft, publish, history, rollback), sources and
 documents, MCP servers and tools, tests and runs, conversations, gaps, overview
 numbers, install snippet.
@@ -222,7 +226,8 @@ breaking installed widgets.
 A custom element, `<solv-chat assistant="pk_...">`, loaded with one script tag.
 No framework, no dependencies, Shadow DOM, one file, under 30 kB gzipped.
 Streams tokens, renders citations as links, restores the open conversation after a
-page change or reload (conversation id and open state in localStorage), thumbs up and down, keyboard and
+page change or reload (conversation id, transcript and open state in sessionStorage,
+so it ends with the tab), thumbs up and down, keyboard and
 screen-reader usable, respects `prefers-reduced-motion` and `prefers-color-scheme`.
 It sets no cookies and loads nothing from third parties.
 
