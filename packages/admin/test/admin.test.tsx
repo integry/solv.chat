@@ -724,4 +724,56 @@ describe("admin app", () => {
     expect(server.calls.some((c) => c.path === "/v1/chat")).toBe(false);
     expect(server.chatBodies).toHaveLength(0);
   });
+
+  it("F6: preserves unsaved Behaviour edits when restoring a version from History", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
+    const persona = screen.getByLabelText("How it should sound") as HTMLTextAreaElement;
+    fireEvent.change(greeting, { target: { value: "Unsaved greeting" } });
+    fireEvent.change(persona, { target: { value: "Unsaved persona" } });
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    const restoreButtons = await screen.findAllByRole("button", { name: "Restore" });
+    fireEvent.click(restoreButtons[0] as HTMLElement);
+
+    expect(await screen.findByText("Restored earlier version.")).toBeTruthy();
+    expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/rollback"))).toBe(
+      true,
+    );
+    expect(greeting.value).toBe("Unsaved greeting");
+    expect(persona.value).toBe("Unsaved persona");
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+  });
+
+  it("F6: preserves unsaved Widget settings and allowed origins when restoring a version from History", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/widget");
+    render(<App />);
+
+    const title = (await screen.findByLabelText("Title")) as HTMLInputElement;
+    const accent = screen.getByLabelText("Accent colour") as HTMLInputElement;
+    const origins = screen.getByLabelText("Allowed origins") as HTMLTextAreaElement;
+
+    fireEvent.change(title, { target: { value: "Unsaved Widget Title" } });
+    fireEvent.change(accent, { target: { value: "#123456" } });
+    fireEvent.change(origins, { target: { value: "https://unsaved.example.com" } });
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    const restoreButtons = await screen.findAllByRole("button", { name: "Restore" });
+    fireEvent.click(restoreButtons[0] as HTMLElement);
+
+    expect(await screen.findByText("Restored earlier version.")).toBeTruthy();
+    expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/rollback"))).toBe(
+      true,
+    );
+    expect(title.value).toBe("Unsaved Widget Title");
+    expect(accent.value).toBe("#123456");
+    expect(origins.value).toBe("https://unsaved.example.com");
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+  });
 });

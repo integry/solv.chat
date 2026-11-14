@@ -74,12 +74,15 @@ export function Widget({ assistantId }: WidgetProps) {
       ignoreNextTickRef.current = false;
       return;
     }
+    if (mutation.lastKind !== "saving") {
+      return;
+    }
     syncWidgetOnLoadRef.current = true;
     syncOriginsOnLoadRef.current = true;
     assistantRes.reload();
     draftRes.reload();
     setHistoryTick((n) => n + 1);
-  }, [mutation.tick, assistantRes.reload, draftRes.reload]);
+  }, [mutation.tick, mutation.lastKind, assistantRes.reload, draftRes.reload]);
 
   useEffect(() => {
     if (!savedWidget) return;

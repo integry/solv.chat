@@ -18,6 +18,8 @@ export interface AssistantMutationState {
   busy: boolean;
   /** Increments each time a mutation completes successfully for this assistant. */
   tick: number;
+  /** Kind of the most recent mutation that completed successfully for this assistant. */
+  lastKind: AssistantMutationKind | null;
 }
 
 export type MutationRunResult<T> = { ran: true; value: T } | { ran: false };
@@ -42,18 +44,22 @@ function useLocalCoordinator(): Coordinator {
   const [activeByAssistant, setActiveByAssistant] = useState<Record<string, AssistantMutationKind>>(
     {},
   );
-  const [ticksByAssistant, setTicksByAssistant] = useState<Record<string, number>>({});
+  const [ticksByAssistant, setTicksByAssistant] = useState<
+    Record<string, { tick: number; lastKind: AssistantMutationKind }>
+  >({});
 
   const getState = useCallback(
     (assistantId: string): AssistantMutationState => {
       const active = activeByAssistant[assistantId] ?? null;
+      const entry = ticksByAssistant[assistantId];
       return {
         active,
         saving: active === "saving",
         publishing: active === "publishing",
         restoring: active === "restoring",
         busy: active !== null,
-        tick: ticksByAssistant[assistantId] ?? 0,
+        tick: entry?.tick ?? 0,
+        lastKind: entry?.lastKind ?? null,
       };
     },
     [activeByAssistant, ticksByAssistant],
@@ -74,7 +80,10 @@ function useLocalCoordinator(): Coordinator {
         const value = await fn();
         setTicksByAssistant((prev) => ({
           ...prev,
-          [assistantId]: (prev[assistantId] ?? 0) + 1,
+          [assistantId]: {
+            tick: (prev[assistantId]?.tick ?? 0) + 1,
+            lastKind: kind,
+          },
         }));
         return { ran: true, value };
       } finally {

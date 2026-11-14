@@ -68,10 +68,13 @@ export function Behaviour({ assistantId }: BehaviourProps) {
       ignoreNextTickRef.current = false;
       return;
     }
+    if (mutation.lastKind !== "saving") {
+      return;
+    }
     syncOnLoadRef.current = true;
     draft.reload();
     setHistoryTick((n) => n + 1);
-  }, [mutation.tick, draft.reload]);
+  }, [mutation.tick, mutation.lastKind, draft.reload]);
 
   useEffect(() => {
     if (!savedBehaviour) return;
