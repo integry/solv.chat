@@ -80,3 +80,29 @@ export async function requestJson<T>(
 export function normalizeEndpoint(endpoint: string): string {
   return endpoint.replace(/\/+$/, "");
 }
+
+function hasInvalidHeaderChar(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if ((code < 0x20 && code !== 0x09) || code === 0x7f || code > 0xff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Validates that a credential header value can be passed to `fetch` without
+ * triggering a `TypeError` that echoes the secret, throwing a `CliError` that
+ * names only the source environment variable.
+ */
+export function assertValidHeaderValue(name: string, value: string, envVar: string): void {
+  if (hasInvalidHeaderChar(value)) {
+    throw new CliError(`Invalid ${envVar} environment variable`);
+  }
+  try {
+    new Headers({ [name]: value });
+  } catch {
+    throw new CliError(`Invalid ${envVar} environment variable`);
+  }
+}

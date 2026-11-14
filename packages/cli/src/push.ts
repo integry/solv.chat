@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
-import { CliError, normalizeEndpoint, requestJson } from "./http.js";
+import { assertValidHeaderValue, CliError, normalizeEndpoint, requestJson } from "./http.js";
 import { externalIdFor, firstHeading, markdownFiles, splitFrontMatter } from "./markdown.js";
 
 // One request per 50 documents: the ingest API caps a batch at 100, and staying
@@ -151,8 +151,10 @@ export async function push(options: PushOptions, deps: CliDeps): Promise<void> {
 
   const endpoint = normalizeEndpoint(options.endpoint);
   const url = `${endpoint}/v1/ingest/${encodeURIComponent(options.assistant)}/documents`;
+  const authHeader = `Bearer ${options.ingestKey}`;
+  assertValidHeaderValue("Authorization", authHeader, "SOLV_INGEST_KEY");
   const headers = {
-    Authorization: `Bearer ${options.ingestKey}`,
+    Authorization: authHeader,
     "Content-Type": "application/json",
   };
 
@@ -161,9 +163,10 @@ export async function push(options: PushOptions, deps: CliDeps): Promise<void> {
 
   for (let i = 0; i < documents.length; i += BATCH_SIZE) {
     const batch = documents.slice(i, i + BATCH_SIZE);
-    const body = options.sourceId
-      ? { sourceId: options.sourceId, documents: batch }
-      : { documents: batch };
+    const body =
+      options.sourceId !== undefined
+        ? { sourceId: options.sourceId, documents: batch }
+        : { documents: batch };
     const res = await requestJson<IngestCounts>(
       deps.fetchImpl,
       url,
@@ -182,9 +185,10 @@ export async function push(options: PushOptions, deps: CliDeps): Promise<void> {
     const keep = documents
       .map((doc) => doc.externalId)
       .filter((id): id is string => typeof id === "string" && id.length > 0);
-    const pruneBody = options.sourceId
-      ? { sourceId: options.sourceId, prune: true, keep }
-      : { prune: true, keep };
+    const pruneBody =
+      options.sourceId !== undefined
+        ? { sourceId: options.sourceId, prune: true, keep }
+        : { prune: true, keep };
     const res = await requestJson<IngestCounts>(
       deps.fetchImpl,
       url,

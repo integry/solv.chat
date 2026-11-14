@@ -328,4 +328,28 @@ describe("solv push", () => {
 
     expect(requests).toHaveLength(0);
   });
+
+  it("preserves an explicit empty sourceId in PUT and DELETE bodies", async () => {
+    await writeFile(join(root, "doc.md"), "# Doc\n\nBody\n", "utf8");
+
+    const { fetchImpl, requests } = createMockFetch();
+    await push(
+      {
+        dir: root,
+        endpoint: "https://chat.example.com",
+        assistant: "ast_123",
+        baseUrl: "https://docs.example.com",
+        sourceId: "",
+        ingestKey: "ing_secret",
+        prune: true,
+      },
+      { fetchImpl, log: () => {} },
+    );
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.method).toBe("PUT");
+    expect(requests[0]?.body).toHaveProperty("sourceId", "");
+    expect(requests[1]?.method).toBe("DELETE");
+    expect(requests[1]?.body).toHaveProperty("sourceId", "");
+  });
 });

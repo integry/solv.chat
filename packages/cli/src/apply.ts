@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { parseVersionConfig, type VersionConfig } from "@solvchat/core";
-import { CliError, normalizeEndpoint, requestJson } from "./http.js";
+import { assertValidHeaderValue, CliError, normalizeEndpoint, requestJson } from "./http.js";
 import type { CliDeps } from "./push.js";
 
 export interface ApplyOptions {
@@ -59,12 +59,16 @@ export function diffConfig(before: VersionConfig | undefined, after: VersionConf
 function buildAuthHeaders(options: ApplyOptions): Record<string, string> {
   const headers: Record<string, string> = {};
   if (options.adminToken) {
-    headers.Authorization = `Bearer ${options.adminToken}`;
+    const authHeader = `Bearer ${options.adminToken}`;
+    assertValidHeaderValue("Authorization", authHeader, "SOLV_ADMIN_TOKEN");
+    headers.Authorization = authHeader;
   }
   if (options.session) {
-    headers.Cookie = options.session.includes("=")
+    const cookieHeader = options.session.includes("=")
       ? options.session
       : `solv_session=${options.session}`;
+    assertValidHeaderValue("Cookie", cookieHeader, "SOLV_SESSION");
+    headers.Cookie = cookieHeader;
   }
   return headers;
 }
