@@ -335,6 +335,7 @@ export class SolvChat extends HTMLElement {
     }));
 
     this.#messagesEl.replaceChildren(this.#greetingEl);
+    let restoredUnfinished = false;
     for (const turn of this.#turns) {
       const { bubble, textEl } = this.#appendBubble(turn.role);
       textEl.textContent = turn.text;
@@ -343,6 +344,10 @@ export class SolvChat extends HTMLElement {
           for (const citation of turn.citations) {
             this.#appendCitationLink(bubble, citation.url, citation.title);
           }
+        }
+        if (!turn.error && !turn.messageId) {
+          turn.error = "Response interrupted. Please try again.";
+          restoredUnfinished = true;
         }
         if (turn.error) {
           this.#renderBubbleError(bubble, turn.error);
@@ -356,6 +361,8 @@ export class SolvChat extends HTMLElement {
 
     if (saved.open) {
       this.#openPanel(false);
+    } else if (restoredUnfinished) {
+      this.#persist();
     }
   }
 
@@ -519,6 +526,13 @@ export class SolvChat extends HTMLElement {
     this.#scrollToBottom();
   }
 
+  #markTurnInterrupted(bubble: HTMLDivElement, turn: SavedTurn): void {
+    const msg = turn.text
+      ? "Response interrupted. Please try again."
+      : "Unable to reach the assistant. Please try again.";
+    this.#setTurnError(bubble, turn, msg);
+  }
+
   #renderBubbleError(bubble: HTMLDivElement, message: string): void {
     bubble.classList.add("solv-bubble--error");
     let errorEl = bubble.querySelector<HTMLDivElement>(".solv-bubble-error");
@@ -563,6 +577,8 @@ export class SolvChat extends HTMLElement {
     const { bubble, textEl } = this.#appendBubble("assistant");
     this.#persist();
 
+    let terminated = false;
+
     try {
       const requestBody: Record<string, unknown> = {
         // Sent on every request so the engine can refuse a version it does not
@@ -586,6 +602,7 @@ export class SolvChat extends HTMLElement {
       });
 
       if (!response.ok || !response.body) {
+        terminated = true;
         this.#setTurnError(bubble, assistantTurn, "Something went wrong. Please try again.");
         return;
       }
@@ -604,23 +621,31 @@ export class SolvChat extends HTMLElement {
           assistantTurn.text += event.text;
           textEl.textContent = assistantTurn.text;
           this.#scrollToBottom();
+          this.#persist();
         } else if (event.type === "citation") {
           this.#appendCitation(bubble, assistantTurn, event.url, event.title);
+          this.#persist();
         } else if (event.type === "done") {
+          terminated = true;
           this.#conversationId = event.conversationId;
           assistantTurn.messageId = event.messageId;
           this.#appendFeedbackControls(bubble, assistantTurn);
           this.#persist();
         } else if (event.type === "error") {
+          terminated = true;
           const msg = event.message.trim() || "Something went wrong. Please try again.";
           this.#setTurnError(bubble, assistantTurn, msg);
+          this.#persist();
         }
       }
+
+      if (!terminated) {
+        this.#markTurnInterrupted(bubble, assistantTurn);
+      }
     } catch {
-      const msg = assistantTurn.text
-        ? "Response interrupted. Please try again."
-        : "Unable to reach the assistant. Please try again.";
-      this.#setTurnError(bubble, assistantTurn, msg);
+      if (!terminated) {
+        this.#markTurnInterrupted(bubble, assistantTurn);
+      }
     } finally {
       this.#sending = false;
       this.#sendBtn.disabled = false;

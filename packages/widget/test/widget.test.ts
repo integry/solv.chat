@@ -775,4 +775,135 @@ describe("<solv-chat>", () => {
       "Response interrupted. Please try again.",
     );
   });
+
+  it("marks response as interrupted when stream reaches EOF without done or error", async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        return new Response(sseStream(['event: token\ndata: {"text":"Truncated answer"}\n\n']), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const el = mountWidget("pk_eof");
+    await flushAsync();
+    const root = shadow(el);
+
+    mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Question";
+    mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    const sendBtn = mustQuery<HTMLButtonElement>(root, ".solv-send");
+    expect(sendBtn.disabled).toBe(false);
+
+    const assistantBubbles = root.querySelectorAll(".solv-bubble--assistant");
+    const bubble = assistantBubbles[assistantBubbles.length - 1];
+    expect(bubble?.classList.contains("solv-bubble--error")).toBe(true);
+    expect(bubble?.querySelector(".solv-bubble-text")?.textContent).toBe("Truncated answer");
+    expect(bubble?.querySelector(".solv-bubble-error")?.textContent).toBe(
+      "Response interrupted. Please try again.",
+    );
+    expect(bubble?.querySelector(".solv-feedback")).toBeNull();
+
+    // Reloading preserves the partial text and interruption state.
+    el.remove();
+    const reloaded = mountWidget("pk_eof");
+    await flushAsync();
+    const reloadedRoot = shadow(reloaded);
+    const reloadedBubbles = reloadedRoot.querySelectorAll(".solv-bubble--assistant");
+    const reloadedBubble = reloadedBubbles[reloadedBubbles.length - 1];
+    expect(reloadedBubble?.classList.contains("solv-bubble--error")).toBe(true);
+    expect(reloadedBubble?.querySelector(".solv-bubble-text")?.textContent).toBe(
+      "Truncated answer",
+    );
+    expect(reloadedBubble?.querySelector(".solv-bubble-error")?.textContent).toBe(
+      "Response interrupted. Please try again.",
+    );
+  });
+
+  it("persists streaming tokens and citations immediately and restores an unfinished turn as interrupted on replacement", async () => {
+    const encoder = new TextEncoder();
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const first = mountWidget("pk_nav_midstream");
+    await flushAsync();
+    const firstRoot = shadow(first);
+
+    mustQuery<HTMLButtonElement>(firstRoot, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(firstRoot, "#solv-input").value = "Where do I start?";
+    mustQuery<HTMLFormElement>(firstRoot, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    expect(streamController).toBeDefined();
+    streamController?.enqueue(encoder.encode('event: token\ndata: {"text":"Read the "}\n\n'));
+    streamController?.enqueue(encoder.encode('event: token\ndata: {"text":"guide."}\n\n'));
+    streamController?.enqueue(
+      encoder.encode(
+        'event: citation\ndata: {"url":"https://docs.example.com/start","title":"Getting Started"}\n\n',
+      ),
+    );
+    await flushAsync();
+
+    // Progress must already be in sessionStorage before any terminal event or finally.
+    const rawSaved = sessionStorage.getItem("solv-chat-open:pk_nav_midstream");
+    expect(rawSaved).not.toBeNull();
+    const saved = JSON.parse(String(rawSaved)) as {
+      open: boolean;
+      turns: Array<{
+        role: string;
+        text: string;
+        citations?: Array<{ url: string; title: string }>;
+      }>;
+    };
+    expect(saved.open).toBe(true);
+    expect(saved.turns).toEqual([
+      { role: "user", text: "Where do I start?" },
+      {
+        role: "assistant",
+        text: "Read the guide.",
+        citations: [{ url: "https://docs.example.com/start", title: "Getting Started" }],
+      },
+    ]);
+
+    // Simulate navigation/reload before stream completion by replacing the element.
+    first.remove();
+    const replacement = mountWidget("pk_nav_midstream");
+    await flushAsync();
+    const replacementRoot = shadow(replacement);
+
+    expect(mustQuery<HTMLDivElement>(replacementRoot, ".solv-panel").hidden).toBe(false);
+    expect(replacementRoot.textContent).toContain("Where do I start?");
+
+    const assistantBubbles = replacementRoot.querySelectorAll(".solv-bubble--assistant");
+    const bubble = assistantBubbles[assistantBubbles.length - 1];
+    expect(bubble?.querySelector(".solv-bubble-text")?.textContent).toBe("Read the guide.");
+    const citation = bubble?.querySelector<HTMLAnchorElement>(".solv-citation");
+    expect(citation?.href).toBe("https://docs.example.com/start");
+    expect(citation?.textContent).toBe("Getting Started");
+    expect(bubble?.classList.contains("solv-bubble--error")).toBe(true);
+    expect(bubble?.querySelector(".solv-bubble-error")?.textContent).toBe(
+      "Response interrupted. Please try again.",
+    );
+    expect(bubble?.querySelector(".solv-feedback")).toBeNull();
+  });
 });
