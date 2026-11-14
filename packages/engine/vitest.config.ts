@@ -6,6 +6,11 @@ export default defineWorkersConfig(async () => {
   const migrations = await readD1Migrations(migrationsPath);
 
   return {
+    resolve: {
+      alias: {
+        "@solvchat/core": path.join(__dirname, "../core/src/index.ts"),
+      },
+    },
     test: {
       setupFiles: ["./test/setup.ts"],
       poolOptions: {
