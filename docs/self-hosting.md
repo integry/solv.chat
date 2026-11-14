@@ -63,6 +63,9 @@ SOLV_INGEST_KEY=<the key> npx solv push ./content \
 ## Rotating a secret
 
 - `SOLV_SECRET_KEY` — every session is signed out; sign in again.
+
+Signing out clears the session cookie in that browser only. The engine keeps no list of sessions, so a copy of the cookie stays valid until it expires after 30 days. If you think a session cookie was copied, rotate `SOLV_SECRET_KEY`.
+
 - An ingest key — rotate it on the **Install** screen in `/admin` and replace it in CI; the old one stops working at once.
 - A provider key — takes effect on the next request; nothing else changes.
 

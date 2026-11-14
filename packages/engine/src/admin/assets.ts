@@ -1,5 +1,21 @@
 import { ADMIN_ASSETS, ADMIN_HTML } from "../adminBundle.js";
 
+export interface AdminAssetEntry {
+  body: string;
+  type: string;
+  /** Binary files are stored base64 by `scripts/sync-admin.mjs`. */
+  encoding: "utf8" | "base64";
+}
+
+/** The bytes to serve for a bundled asset, decoding base64 for binary files. */
+export function assetBody(asset: AdminAssetEntry): string | ArrayBuffer {
+  if (asset.encoding !== "base64") return asset.body;
+  const binary = atob(asset.body);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
 /**
  * Serves the admin bundle. Any unmatched /admin path returns index.html so
  * client-side routing works on a deep link or a refresh, except unknown asset
@@ -10,9 +26,9 @@ import { ADMIN_ASSETS, ADMIN_HTML } from "../adminBundle.js";
  * indefinitely, while hashed files can never be stale by definition.
  */
 export function adminAsset(url: URL): Response {
-  const asset = ADMIN_ASSETS[url.pathname];
+  const asset: AdminAssetEntry | undefined = ADMIN_ASSETS[url.pathname];
   if (asset !== undefined) {
-    return new Response(asset.body, {
+    return new Response(assetBody(asset), {
       headers: {
         "content-type": asset.type,
         "cache-control": "public, max-age=31536000, immutable",

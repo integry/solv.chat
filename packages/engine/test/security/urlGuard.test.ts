@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assertPublicHttpsUrl,
+  assertPublicIpAddress,
   fetchCapped,
   followCheckingEachHop,
   UnsafeUrlError,
@@ -22,6 +23,27 @@ describe("urlGuard", () => {
     expect(assertPublicHttpsUrl("https://docs.example.com/sitemap.xml").href).toBe(
       "https://docs.example.com/sitemap.xml",
     );
+  });
+
+  it("refuses NAT64 and 6to4 addresses that embed a private IPv4 address", () => {
+    const refused = [
+      "64:ff9b::7f00:1", // NAT64 → 127.0.0.1
+      "64:ff9b::a9fe:a9fe", // NAT64 → 169.254.169.254
+      "64:ff9b::c0a8:101", // NAT64 → 192.168.1.1
+      "64:ff9b:1::808:808", // local-use NAT64: embedding unknown, whole prefix
+      "2002:7f00:1::", // 6to4 → 127.0.0.1
+      "2002:a00:1::1", // 6to4 → 10.0.0.1
+      "2002:a9fe:a9fe::", // 6to4 → 169.254.169.254
+    ];
+    for (const ip of refused) {
+      expect(() => assertPublicIpAddress(ip), ip).toThrow(UnsafeUrlError);
+      expect(() => assertPublicHttpsUrl(`https://[${ip}]/`), ip).toThrow(UnsafeUrlError);
+    }
+    // The same prefixes embedding a public address are ordinary addresses.
+    for (const ip of ["64:ff9b::808:808", "2002:808:808::1"]) {
+      expect(assertPublicIpAddress(ip)).toBeTruthy();
+      expect(assertPublicHttpsUrl(`https://[${ip}]/`).hostname).toBe(`[${ip}]`);
+    }
   });
 
   it("refuses hostnames resolving to private, loopback, or link-local addresses", async () => {

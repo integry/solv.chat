@@ -1,6 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
+import { normalizeQuestionText } from "../../src/db/messages.js";
 import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
 const ORG_A = TEST_ORG_ID;
@@ -60,6 +61,9 @@ async function seedAssistant(orgId: string): Promise<string> {
   return id;
 }
 
+const MESSAGE_COLUMNS =
+  "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at, reply_to, question_key";
+
 async function seedTurn(args: {
   orgId: string;
   assistantId: string;
@@ -81,18 +85,26 @@ async function seedTurn(args: {
   const assistantMessageId = newId("msg");
   await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
-       VALUES (?1, ?2, ?3, 'user', ?4, '[]', NULL, 0, 0, 1, ?5)`,
-    ).bind(questionId, args.orgId, conversationId, args.question, args.createdAt),
+      `INSERT INTO messages (${MESSAGE_COLUMNS})
+       VALUES (?1, ?2, ?3, 'user', ?4, '[]', NULL, 0, 0, 1, ?5, NULL, ?6)`,
+    ).bind(
+      questionId,
+      args.orgId,
+      conversationId,
+      args.question,
+      args.createdAt,
+      normalizeQuestionText(args.question),
+    ),
     env.DB.prepare(
-      `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
-       VALUES (?1, ?2, ?3, 'assistant', 'Fallback.', '[]', NULL, 0, 0, ?4, ?5)`,
+      `INSERT INTO messages (${MESSAGE_COLUMNS})
+       VALUES (?1, ?2, ?3, 'assistant', 'Fallback.', '[]', NULL, 0, 0, ?4, ?5, ?6, NULL)`,
     ).bind(
       assistantMessageId,
       args.orgId,
       conversationId,
       args.answered ? 1 : 0,
       args.createdAt + 1,
+      questionId,
     ),
   ]);
   return { conversationId, questionId, assistantMessageId };
@@ -327,13 +339,13 @@ describe("admin gaps API", () => {
         const ts = 2000 + i * 10 + j * 2;
         statements.push(
           env.DB.prepare(
-            `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
-             VALUES (?1, ?2, ?3, 'user', ?4, '[]', NULL, 0, 0, 1, ?5)`,
-          ).bind(qId, ORG_A, convId, question, ts),
+            `INSERT INTO messages (${MESSAGE_COLUMNS})
+             VALUES (?1, ?2, ?3, 'user', ?4, '[]', NULL, 0, 0, 1, ?5, NULL, ?6)`,
+          ).bind(qId, ORG_A, convId, question, ts, normalizeQuestionText(question)),
           env.DB.prepare(
-            `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
-             VALUES (?1, ?2, ?3, 'assistant', 'Fallback.', '[]', NULL, 0, 0, 0, ?4)`,
-          ).bind(aId, ORG_A, convId, ts + 1),
+            `INSERT INTO messages (${MESSAGE_COLUMNS})
+             VALUES (?1, ?2, ?3, 'assistant', 'Fallback.', '[]', NULL, 0, 0, 0, ?4, ?5, NULL)`,
+          ).bind(aId, ORG_A, convId, ts + 1, qId),
         );
         if (j === 1) {
           statements.push(
@@ -351,13 +363,13 @@ describe("admin gaps API", () => {
     const unresolvedAId = newId("msg");
     statements.push(
       env.DB.prepare(
-        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
-         VALUES (?1, ?2, ?3, 'user', 'Unresolved 101st question?', '[]', NULL, 0, 0, 1, 5000)`,
+        `INSERT INTO messages (${MESSAGE_COLUMNS})
+         VALUES (?1, ?2, ?3, 'user', 'Unresolved 101st question?', '[]', NULL, 0, 0, 1, 5000, NULL, 'unresolved 101st question?')`,
       ).bind(unresolvedQId, ORG_A, convId),
       env.DB.prepare(
-        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
-         VALUES (?1, ?2, ?3, 'assistant', 'Fallback.', '[]', NULL, 0, 0, 0, 5001)`,
-      ).bind(unresolvedAId, ORG_A, convId),
+        `INSERT INTO messages (${MESSAGE_COLUMNS})
+         VALUES (?1, ?2, ?3, 'assistant', 'Fallback.', '[]', NULL, 0, 0, 0, 5001, ?4, NULL)`,
+      ).bind(unresolvedAId, ORG_A, convId, unresolvedQId),
     );
 
     // D1 batch limit is 100 statements per batch.

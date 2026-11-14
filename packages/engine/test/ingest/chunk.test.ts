@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { chunkMarkdown, MAX_CHARS, OVERLAP_CHARS } from "../../src/ingest/chunk.js";
+import {
+  chunkMarkdown,
+  MAX_CHARS,
+  MAX_CHUNKS,
+  MAX_HEADING_CHARS,
+  OVERLAP_CHARS,
+} from "../../src/ingest/chunk.js";
 
 describe("chunkMarkdown", () => {
   it("tracks heading paths and truncates when a shallower heading follows a deeper one", () => {
@@ -173,5 +179,54 @@ describe("chunkMarkdown", () => {
       recovered += lines.slice(1, -1).join("\n");
     }
     expect(recovered).toBe(codeLine);
+  });
+
+  it("cuts a very long heading so the path stays bounded", () => {
+    const chunks = chunkMarkdown(`# ${"long ".repeat(5000)}\n\nBody`);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.headingPath[0]?.length).toBeLessThanOrEqual(MAX_HEADING_CHARS);
+    expect(chunks[0]?.text).toBe("Body");
+  });
+
+  it("packs a 1 MiB document of tiny sections under the chunk cap without losing words", () => {
+    const sections: string[] = [];
+    let i = 0;
+    let markdown = "# Guide\n\n";
+    while (markdown.length < 1024 * 1024 - 100) {
+      const section = `## Topic ${i}\n\nword${i}\n\n`;
+      markdown += section;
+      sections.push(`word${i}`);
+      i++;
+    }
+    expect(sections.length).toBeGreaterThan(MAX_CHUNKS);
+
+    const chunks = chunkMarkdown(markdown);
+    expect(chunks.length).toBeLessThanOrEqual(MAX_CHUNKS);
+    expect(chunks.map((c) => c.ordinal)).toEqual(chunks.map((_, n) => n));
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(MAX_CHARS);
+      // The shared heading stays the path; each section's own heading is kept
+      // in the text so the subject is still embedded with its words.
+      expect(chunk.headingPath).toEqual(["Guide"]);
+    }
+    const all = chunks.map((c) => c.text).join("\n\n");
+    expect(all).toContain("## Topic 0\n\nword0");
+    expect(all.match(/\bword\d+\b/g)).toEqual(sections);
+    // Deterministic: the same document packs the same way.
+    expect(chunkMarkdown(markdown)).toEqual(chunks);
+  });
+
+  it("keeps the first MAX_CHUNKS chunks when packing cannot get under the cap", () => {
+    const deep = [1, 2, 3, 4, 5].map((level) => `${"#".repeat(level)} ${"h".repeat(190)}${level}`);
+    let markdown = `${deep.join("\n\n")}\n\n`;
+    let i = 0;
+    while (markdown.length < 1024 * 1024 - 100) {
+      markdown += `###### Leaf ${i}\n\nw${i}\n\n`;
+      i++;
+    }
+    const chunks = chunkMarkdown(markdown);
+    expect(chunks).toHaveLength(MAX_CHUNKS);
+    expect(chunks[0]?.text).toContain("w0");
+    expect(chunks[MAX_CHUNKS - 1]?.ordinal).toBe(MAX_CHUNKS - 1);
   });
 });

@@ -37,16 +37,10 @@ export async function writeTheRightAnswer(
     throw new NotFound("message");
   }
 
-  let canonicalMessageId = args.fromMessageId;
-  if (message.role === "assistant") {
-    const turns = await deps.tenant.messages.list(message.conversationId);
-    const precedingUser = turns
-      .filter((t) => t.role === "user" && t.createdAt <= message.createdAt)
-      .sort((a, b) => b.createdAt - a.createdAt || (b.id > a.id ? 1 : b.id < a.id ? -1 : 0))[0];
-    if (precedingUser) {
-      canonicalMessageId = precedingUser.id;
-    }
-  }
+  // A reply links through the question it records; guessing "the latest
+  // question before it" picks the wrong one when two requests interleave.
+  const canonicalMessageId =
+    message.role === "assistant" && message.replyTo !== null ? message.replyTo : args.fromMessageId;
 
   const result = await saveEntry(deps, principal, {
     assistantId: args.assistantId,

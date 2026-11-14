@@ -2,7 +2,7 @@ import { BadRequest, Conflict, NotFound, readJsonBody } from "../admin/errors.js
 import { getDraft, updateDraft } from "../admin/versions.js";
 import { forIngestScope } from "../db/tenant.js";
 import type { Retriever } from "../providers/retrieval.js";
-import type { Limits } from "../seams/types.js";
+import type { AuthProvider, Limits } from "../seams/types.js";
 import { ingestScopeFor } from "./auth.js";
 import { deleteDocuments, type IngestQueueMessage, pushDocuments, TooLarge } from "./documents.js";
 
@@ -14,6 +14,7 @@ export interface IngestRouteDeps {
   queue: Queue<IngestQueueMessage>;
   retriever: Pick<Retriever, "remove">;
   limits: Limits;
+  auth: Pick<AuthProvider, "resolveOrg">;
 }
 
 /** Handles `/v1/ingest/:assistantId/documents` and `/v1/ingest/:assistantId/config`. */
@@ -31,7 +32,7 @@ export async function ingestRoutes(
     return Response.json({ error: "Not found." }, { status: 404 });
   }
 
-  const scope = await ingestScopeFor(deps.db, request, assistantId);
+  const scope = await ingestScopeFor(deps.db, deps.auth, request, assistantId);
   if (scope === null) {
     return Response.json({ error: "Unauthorized." }, { status: 401 });
   }

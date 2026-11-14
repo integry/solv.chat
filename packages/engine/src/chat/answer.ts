@@ -151,9 +151,13 @@ export async function* answerMessage(
   // Persist the visitor's message before calling anything: if the provider
   // fails, the owner still sees the question in Conversations, which is the
   // only way they can find out what went wrong.
+  // Every reply below records this id, so Gaps and "Write the right answer"
+  // follow the question this request asked, even if another request appended
+  // a question to the same conversation while this one was retrieving.
+  const questionId = newId("msg");
   if (!input.preview) {
     await deps.tenant.messages.create({
-      id: newId("msg"),
+      id: questionId,
       conversationId,
       role: "user",
       content: input.message,
@@ -166,13 +170,15 @@ export async function* answerMessage(
     });
   }
 
-  const embedded = await deps.embedder.embed([input.message]);
-  // The question's embedding is billed whatever happens next, so its cost
-  // rides on this message's usage event rather than vanishing.
-  const queryCost = embeddingCostMicros(embedded.tokens);
+  // The question's embedding is billed whatever happens next — a failing
+  // retriever, D1 read or model call must not make it vanish — so it is
+  // recorded the moment the provider reports it, as spend that is not a
+  // message. The answer's own usage event below carries model tokens only.
+  const embedded = await deps.embedder.embed([input.message], (tokens) =>
+    recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
+  );
   const [vector] = embedded.vectors;
   if (!vector) {
-    await recordEmbeddingOnly(deps, input, clock(), queryCost);
     yield { type: "error", message: "The assistant could not complete this response." };
     return;
   }
@@ -204,9 +210,10 @@ export async function* answerMessage(
         tokensOut: 0,
         answered: false,
         createdAt: clock(),
+        replyTo: questionId,
       });
     }
-    await recordMessageUsage(deps, input, clock(), 0, 0, queryCost);
+    await recordMessageUsage(deps, input, clock(), 0, 0, 0);
     yield { type: "done", messageId, conversationId };
     return;
   }
@@ -245,10 +252,8 @@ export async function* answerMessage(
           clock(),
           tokensIn,
           tokensOut,
-          costMicros(deps.model, tokensIn, tokensOut) + queryCost,
+          costMicros(deps.model, tokensIn, tokensOut),
         );
-      } else {
-        await recordEmbeddingOnly(deps, input, clock(), queryCost);
       }
       yield { type: "error", message: "The assistant could not complete this response." };
       return;
@@ -277,6 +282,7 @@ export async function* answerMessage(
       tokensOut,
       answered: true,
       createdAt: clock(),
+      replyTo: questionId,
     });
   }
 
@@ -286,7 +292,7 @@ export async function* answerMessage(
     clock(),
     tokensIn,
     tokensOut,
-    costMicros(deps.model, tokensIn, tokensOut) + queryCost,
+    costMicros(deps.model, tokensIn, tokensOut),
   );
 
   yield { type: "done", messageId, conversationId };

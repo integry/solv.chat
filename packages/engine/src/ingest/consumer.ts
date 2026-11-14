@@ -12,6 +12,11 @@ export interface IngestConsumerDeps {
   retriever: Retriever;
   /** Receives the embedding spend; the open build writes it to `usage_daily`. */
   usage?: UsageSink | undefined;
+  /**
+   * Asks the auth seam which org a message's claimed `orgId` belongs to
+   * (`AuthProvider.resolveOrg` with `queued_ingest`); null drops the message.
+   */
+  resolveOrg: (claimedOrgId: string) => Promise<string | null>;
 }
 
 /**
@@ -63,8 +68,13 @@ async function processIngestMessage(
     return;
   }
 
-  const { orgId, documentId, contentHash } = message.body;
-  const tenant = forQueuedIngest(deps.db, { orgId });
+  const { documentId, contentHash } = message.body;
+  const orgId = await deps.resolveOrg(message.body.orgId);
+  if (orgId === null) {
+    message.ack();
+    return;
+  }
+  const tenant = forQueuedIngest(deps.db, orgId);
 
   const document = await tenant.documents.get(documentId);
   if (document === null || document.contentHash !== contentHash) {
@@ -98,19 +108,22 @@ async function processIngestMessage(
 
   let vectors: number[][] = [];
   if (chunks.length > 0) {
-    const embedded = await deps.embedder.embed(chunks.map(embeddingInput));
-    vectors = embedded.vectors;
-    // Metered as soon as the provider has billed it: a later failure retries
-    // the message and pays again, and the owner's figure should say so.
-    await deps.usage?.record({
-      orgId,
-      assistantId: source.assistantId,
-      at: Date.now(),
-      messages: 0,
-      tokensIn: 0,
-      tokensOut: 0,
-      costMicros: embeddingCostMicros(embedded.tokens),
+    // Metered per provider request, as soon as each one is billed: when a
+    // later request or the upsert fails, the message retries and pays again
+    // for the requests that succeeded, and the owner's figure should say so.
+    const assistantId = source.assistantId;
+    const embedded = await deps.embedder.embed(chunks.map(embeddingInput), async (tokens) => {
+      await deps.usage?.record({
+        orgId,
+        assistantId,
+        at: Date.now(),
+        messages: 0,
+        tokensIn: 0,
+        tokensOut: 0,
+        costMicros: embeddingCostMicros(tokens),
+      });
     });
+    vectors = embedded.vectors;
   }
 
   if (chunks.length > 0) {

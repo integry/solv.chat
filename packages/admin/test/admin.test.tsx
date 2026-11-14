@@ -174,10 +174,7 @@ function installFakeServer(options: FakeServerOptions = {}) {
       });
       drafts.set(created.id, draft);
       versions.set(created.id, [draft]);
-      return Response.json(
-        { assistant: created, ingestKey: "sk_secret_never_shown" },
-        { status: 201 },
-      );
+      return Response.json({ assistant: created, ingestKey: "ik_shown_once" }, { status: 201 });
     }
 
     const singleAssistant = /^\/api\/admin\/assistants\/([^/]+)$/.exec(path);
@@ -449,7 +446,9 @@ describe("admin app", () => {
     await waitFor(() => {
       expect((screen.getByLabelText("Assistant") as HTMLSelectElement).value).toBe("ast_3");
     });
-    expect(screen.queryByText(/sk_secret_never_shown/)).toBeNull();
+    // The new assistant's ingest key is shown once, in a read-only field to
+    // copy (screens.test.tsx covers dismissing it).
+    expect((screen.getByLabelText("Ingest key") as HTMLInputElement).value).toBe("ik_shown_once");
   });
 
   it("edits Behaviour, marks unsaved, saves, publishes, and restores from History", async () => {

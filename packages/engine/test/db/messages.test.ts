@@ -47,6 +47,7 @@ describe("db/messages", () => {
       tokensOut: 45,
       answered: true,
       createdAt: 2000,
+      replyTo: "msg_0",
     });
 
     expect(created.answered).toBe(true);
@@ -64,6 +65,7 @@ describe("db/messages", () => {
       tokensOut: 45,
       answered: true,
       createdAt: 2000,
+      replyTo: "msg_0",
     });
   });
 

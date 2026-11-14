@@ -115,6 +115,23 @@ const mapChunk = (row: ChunkDbRow): ChunkRow => ({
   headingPath: row.heading_path,
 });
 
+// Source: https://developers.cloudflare.com/d1/platform/limits/ — checked 2026-11-14
+// "Maximum bound parameters per query: 100"; a `db.batch()` "counts as a
+// single query" against the per-invocation query limit. Two parameters are
+// taken by org and source, so IN lists hold at most 98 values.
+const IN_LIST_LIMIT = 98;
+
+function inGroups<T>(values: readonly T[]): T[][] {
+  const groups: T[][] = [];
+  for (let i = 0; i < values.length; i += IN_LIST_LIMIT) {
+    groups.push(values.slice(i, i + IN_LIST_LIMIT));
+  }
+  return groups;
+}
+
+const placeholdersFrom = (count: number, first: number): string =>
+  Array.from({ length: count }, (_, i) => `?${i + first}`).join(", ");
+
 /** Tenant-scoped data access for `documents` and `chunks`. */
 export function documentsFor(db: D1Database, orgId: string) {
   return {
@@ -175,6 +192,21 @@ export function documentsFor(db: D1Database, orgId: string) {
         .bind(orgId, id)
         .first<DocumentDbRow>();
       return row ? mapDocument(row) : null;
+    },
+
+    /** The source's documents with these external ids, in one D1 batch however many. */
+    async getByExternalIds(sourceId: string, externalIds: string[]): Promise<DocumentRow[]> {
+      if (externalIds.length === 0) return [];
+      const results = await db.batch(
+        inGroups(externalIds).map((group) =>
+          prepare(
+            db,
+            `SELECT ${DOC_COLUMNS} FROM documents
+              WHERE org_id = ?1 AND source_id = ?2 AND external_id IN (${placeholdersFrom(group.length, 3)})`,
+          ).bind(orgId, sourceId, ...group),
+        ),
+      );
+      return results.flatMap((r) => (r.results as DocumentDbRow[]).map(mapDocument));
     },
 
     async getByExternalId(sourceId: string, externalId: string): Promise<DocumentRow | null> {
@@ -286,6 +318,40 @@ export function documentsFor(db: D1Database, orgId: string) {
         .bind(orgId, id)
         .run();
       return (res.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Deletes these documents (cascading their chunks) in one atomic D1
+     * batch, and returns the chunk ids of each document actually removed so
+     * the caller can clean up vectors. Each group's chunk ids are read in the
+     * same batch, just before its delete.
+     */
+    async removeMany(ids: string[]): Promise<Map<string, string[]>> {
+      const removed = new Map<string, string[]>();
+      if (ids.length === 0) return removed;
+      const statements = inGroups(ids).flatMap((group) => [
+        prepare(
+          db,
+          `SELECT id, document_id FROM chunks
+            WHERE org_id = ?1 AND document_id IN (${placeholdersFrom(group.length, 2)})`,
+        ).bind(orgId, ...group),
+        prepare(
+          db,
+          `DELETE FROM documents WHERE org_id = ?1 AND id IN (${placeholdersFrom(group.length, 2)})
+           RETURNING id`,
+        ).bind(orgId, ...group),
+      ]);
+      const results = await db.batch(statements);
+      for (let i = 0; i < results.length; i += 2) {
+        const chunks = (results[i]?.results ?? []) as Array<{ id: string; document_id: string }>;
+        for (const row of (results[i + 1]?.results ?? []) as Array<{ id: string }>) {
+          removed.set(row.id, []);
+        }
+        for (const chunk of chunks) {
+          removed.get(chunk.document_id)?.push(chunk.id);
+        }
+      }
+      return removed;
     },
 
     async removeByExternalId(sourceId: string, externalId: string): Promise<boolean> {

@@ -7,7 +7,7 @@ import { ANTHROPIC_MODELS } from "../../src/models.js";
 import type { LlmProvider } from "../../src/providers/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
-import { fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
+import { directoryResolveOrg, fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
 
 function parseSseBody(text: string) {
   return text
@@ -252,6 +252,9 @@ describe("chat/guards", () => {
         authenticate: authSpy,
         login: async () => Response.json({ ok: true }),
         logout: async () => Response.json({ ok: true }),
+        // Only finds the key's org, so the error event can carry CORS
+        // headers for an allowed site; nothing billable or limited runs.
+        resolveOrg: directoryResolveOrg,
       },
       limits: { check: limitsSpy },
       keys: { modelKey: keysSpy, embeddingKey: keysSpy },
@@ -392,6 +395,23 @@ describe("chat/guards", () => {
       const other = await ask("https://evil.example");
       expect(other.status).toBe(204);
       expect(other.headers.get("access-control-allow-origin")).toBeNull();
+
+      // The preflight reads the origins index, which follows every change to
+      // an allow-list at once, and forgets a deleted assistant.
+      await tenant.assistants.update("ast_1", {
+        name: "Docs",
+        allowedOrigins: ["https://new.example"],
+      });
+      expect((await ask("https://new.example")).headers.get("access-control-allow-origin")).toBe(
+        "https://new.example",
+      );
+      expect(
+        (await ask("https://site.example")).headers.get("access-control-allow-origin"),
+      ).toBeNull();
+      await tenant.assistants.remove("ast_1");
+      expect(
+        (await ask("https://new.example")).headers.get("access-control-allow-origin"),
+      ).toBeNull();
     },
   );
 

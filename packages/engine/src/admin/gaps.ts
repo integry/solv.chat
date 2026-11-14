@@ -1,4 +1,3 @@
-import { normalizeQuestionText } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
 import { NotFound } from "./errors.js";
 
@@ -25,7 +24,8 @@ export interface GapsPage {
  * decision rather than a second heuristic that could disagree with it.
  *
  * Grouping is by the normalised question text: lowercased and with runs of
- * whitespace collapsed. Fuzzy grouping would need embeddings per gap and a
+ * whitespace collapsed, stored with the question when it is written. Each
+ * unanswered reply counts against the question it records in `reply_to`. Fuzzy grouping would need embeddings per gap and a
  * threshold to argue about; the specification asks only that gaps be listed.
  */
 export async function listGaps(
@@ -39,44 +39,10 @@ export async function listGaps(
   const limit = Math.min(Math.max(1, Math.trunc(options.limit ?? 50)), 100);
   const offset = Math.max(0, Math.trunc(options.offset ?? 0));
 
-  const rows = await tenant.messages.listGapRows(assistantId);
-  const groups = new Map<string, GapSummary>();
-
-  for (const row of rows) {
-    const key = normalizeQuestionText(row.questionContent);
-    if (!key) continue;
-
-    const existing = groups.get(key);
-    if (existing) {
-      existing.times += 1;
-      if (row.askedAt > existing.lastAsked) {
-        existing.lastAsked = row.askedAt;
-        existing.exampleMessageId = row.questionId;
-        existing.displayQuestion = row.questionContent.trim();
-      }
-      if (row.answerDocumentId !== null && existing.documentId === null) {
-        existing.handled = true;
-        existing.documentId = row.answerDocumentId;
-      }
-    } else {
-      groups.set(key, {
-        question: key,
-        displayQuestion: row.questionContent.trim(),
-        times: 1,
-        lastAsked: row.askedAt,
-        exampleMessageId: row.questionId,
-        handled: row.answerDocumentId !== null,
-        documentId: row.answerDocumentId,
-      });
-    }
-  }
-
-  const sorted = Array.from(groups.values()).sort(
-    (a, b) => b.times - a.times || b.lastAsked - a.lastAsked,
-  );
+  const { groups, total } = await tenant.messages.gapGroups(assistantId, { limit, offset });
   return {
-    gaps: sorted.slice(offset, offset + limit),
-    total: sorted.length,
+    gaps: groups.map((group) => ({ ...group, handled: group.documentId !== null })),
+    total,
     limit,
     offset,
   };

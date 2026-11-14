@@ -84,19 +84,19 @@ describe("admin overview API", () => {
 
       // 3 user messages + 3 assistant messages in Org A (2 answered, 1 unanswered -> 2/3)
       env.DB.prepare(
-        "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at) VALUES (?1, ?2, ?3, 'user', 'Pricing?', '[]', NULL, 0, 0, 1, 1001)",
+        "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, question_key, created_at) VALUES (?1, ?2, ?3, 'user', 'Pricing?', '[]', NULL, 0, 0, 1, 'pricing?', 1001)",
       ).bind(newId("msg"), ORG_A, convA),
       env.DB.prepare(
         "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at) VALUES (?1, ?2, ?3, 'assistant', 'Free tier.', '[]', NULL, 10, 5, 1, 1002)",
       ).bind(newId("msg"), ORG_A, convA),
       env.DB.prepare(
-        "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at) VALUES (?1, ?2, ?3, 'user', '  pricing? ', '[]', NULL, 0, 0, 1, 1003)",
+        "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, question_key, created_at) VALUES (?1, ?2, ?3, 'user', '  pricing? ', '[]', NULL, 0, 0, 1, 'pricing?', 1003)",
       ).bind(newId("msg"), ORG_A, convA),
       env.DB.prepare(
         "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at) VALUES (?1, ?2, ?3, 'assistant', 'Free tier.', '[]', NULL, 10, 5, 1, 1004)",
       ).bind(newId("msg"), ORG_A, convA),
       env.DB.prepare(
-        "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at) VALUES (?1, ?2, ?3, 'user', 'Refunds?', '[]', NULL, 0, 0, 1, 1005)",
+        "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, question_key, created_at) VALUES (?1, ?2, ?3, 'user', 'Refunds?', '[]', NULL, 0, 0, 1, 'refunds?', 1005)",
       ).bind(newId("msg"), ORG_A, convA),
       env.DB.prepare(
         "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at) VALUES (?1, ?2, ?3, 'assistant', 'No info.', '[]', NULL, 0, 0, 0, 1006)",
@@ -104,7 +104,7 @@ describe("admin overview API", () => {
 
       // Org B messages must not be counted.
       env.DB.prepare(
-        "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at) VALUES (?1, ?2, ?3, 'user', 'Other org', '[]', NULL, 0, 0, 1, 1007)",
+        "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, question_key, created_at) VALUES (?1, ?2, ?3, 'user', 'Other org', '[]', NULL, 0, 0, 1, 'other org', 1007)",
       ).bind(newId("msg"), ORG_B, convB),
 
       // Today's cost for Org A vs Org B

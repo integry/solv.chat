@@ -83,14 +83,12 @@ export async function getConversation(
     }
   }
 
-  let lastUserMessageId: string | null = null;
   const turns: ConversationTurn[] = messages.map((msg) => {
-    if (msg.role === "user") {
-      lastUserMessageId = msg.id;
-    }
+    // A reply shows the answer written for the question it records, not for
+    // whichever question happens to precede it: two requests can interleave.
     const answerDocumentId =
       msg.role === "assistant"
-        ? ((lastUserMessageId ? gapAnswers.get(lastUserMessageId) : undefined) ??
+        ? ((msg.replyTo !== null ? gapAnswers.get(msg.replyTo) : undefined) ??
           gapAnswers.get(msg.id) ??
           null)
         : (gapAnswers.get(msg.id) ?? null);

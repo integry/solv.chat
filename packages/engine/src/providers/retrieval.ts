@@ -17,16 +17,29 @@ export const OPENAI_EMBEDDING_MAX_CHARS_PER_REQUEST = 250_000;
 // Source: https://developers.cloudflare.com/vectorize/platform/limits/ — checked 2026-11-14
 // "Upsert batch size: 1000 (Workers) / 5000 (HTTP API)".
 export const VECTORIZE_UPSERT_BATCH_LIMIT = 1000;
+// The same page states no limit for `deleteByIds`; deletes use the upsert
+// batch size so one call never carries more ids than one upsert would.
+export const VECTORIZE_DELETE_BATCH_LIMIT = VECTORIZE_UPSERT_BATCH_LIMIT;
 
 export interface EmbedResult {
   vectors: number[][];
-  /** Tokens the provider billed for these inputs, so the cost can be metered. */
-  tokens: number;
 }
+
+/**
+ * Receives the tokens one provider request billed. It is awaited before the
+ * next request is sent, so spend already incurred is reported even when a
+ * later request, or whatever the caller does with the vectors, fails.
+ */
+export type EmbeddingBilled = (tokens: number) => Promise<void>;
 
 export interface Embedder {
   readonly dimensions: number;
-  embed(texts: string[]): Promise<EmbedResult>;
+  /**
+   * `onBilled` is the only channel for embedding usage: it runs once per
+   * provider request that billed tokens, and the result carries no total, so
+   * a caller cannot count the same tokens twice.
+   */
+  embed(texts: string[], onBilled: EmbeddingBilled): Promise<EmbedResult>;
 }
 
 export interface VectorRecord {
@@ -106,11 +119,10 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
 
   return {
     dimensions,
-    async embed(texts) {
-      if (texts.length === 0) return { vectors: [], tokens: 0 };
+    async embed(texts, onBilled) {
+      if (texts.length === 0) return { vectors: [] };
 
       const out: number[][] = [];
-      let tokens = 0;
       for (const batch of requestBatches(texts)) {
         let response: Response;
         try {
@@ -144,9 +156,11 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
           throw toProviderError(err, "openai embeddings response was not valid JSON");
         }
 
+        // Reported before the payload is validated: a malformed body was
+        // still billed, and so was this request if a later one fails.
         const billed = payload.usage?.total_tokens ?? payload.usage?.prompt_tokens;
         if (typeof billed === "number" && Number.isFinite(billed) && billed > 0) {
-          tokens += billed;
+          await onBilled(billed);
         }
 
         if (!Array.isArray(payload.data) || payload.data.length !== batch.length) {
@@ -174,7 +188,7 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
         }
       }
 
-      return { vectors: out, tokens };
+      return { vectors: out };
     },
   };
 }
@@ -219,8 +233,9 @@ export function vectorizeRetriever(index: VectorizeIndex): Retriever {
     },
 
     async remove(chunkIds) {
-      if (chunkIds.length === 0) return;
-      await index.deleteByIds(chunkIds);
+      for (let offset = 0; offset < chunkIds.length; offset += VECTORIZE_DELETE_BATCH_LIMIT) {
+        await index.deleteByIds(chunkIds.slice(offset, offset + VECTORIZE_DELETE_BATCH_LIMIT));
+      }
     },
   };
 }

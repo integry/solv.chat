@@ -7,11 +7,7 @@ import {
   parseFeedbackRequest,
   serializeChatEvent,
 } from "@solvchat/core";
-import {
-  assistantByPublicKey,
-  assistantForMessage,
-  originAllowedByAnyAssistant,
-} from "../db/public.js";
+import { assistantByPublicKey, assistantForMessage, originAllowedInOrg } from "../db/public.js";
 import { forPublicScope } from "../db/tenant.js";
 import { ANTHROPIC_MODELS, type ModelInfo, OPENAI_MODELS, type Tier } from "../models.js";
 import { ProviderError } from "../providers/error.js";
@@ -23,7 +19,7 @@ import {
   vectorizeRetriever,
 } from "../providers/retrieval.js";
 import type { LlmProvider } from "../providers/types.js";
-import type { Principal, Seams } from "../seams/types.js";
+import type { AuthProvider, Principal, Seams } from "../seams/types.js";
 import { answerMessage } from "./answer.js";
 import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
 
@@ -112,17 +108,31 @@ function preflightResponse(
 
 /**
  * Preflight for a route whose assistant is named only in the body. The Origin
- * is echoed only when some assistant allows it, so a site on no allow-list
- * is told no as early as the browser asks.
+ * is echoed only when one of the org's assistants allows it, so a site on no
+ * allow-list is told no as early as the browser asks. The org comes from the
+ * auth seam, as for every session-less request.
  */
 async function bodyKeyedPreflight(
   request: Request,
   db: D1Database,
+  auth: Pick<AuthProvider, "resolveOrg">,
   methods: string,
 ): Promise<Response> {
   const origin = request.headers.get("origin");
-  const allowed = origin !== null && (await originAllowedByAnyAssistant(db, origin));
+  if (origin === null) return preflightResponse(request, methods, null);
+  const orgId = await auth.resolveOrg({ kind: "preflight", origin });
+  const allowed = orgId !== null && (await originAllowedInOrg(db, orgId, origin));
   return preflightResponse(request, methods, allowed ? origin : null);
+}
+
+/** The org's assistant for a public key, with the org taken from the auth seam. */
+async function publicAssistant(
+  db: D1Database,
+  auth: Pick<AuthProvider, "resolveOrg">,
+  publicKey: string,
+) {
+  const orgId = await auth.resolveOrg({ kind: "public_key", publicKey });
+  return orgId === null ? null : assistantByPublicKey(db, orgId, publicKey);
 }
 
 function readAssistantKey(body: unknown): string | null {
@@ -254,8 +264,10 @@ export async function adminChatRoute(
     });
   }
 
-  const assistant = await assistantByPublicKey(env.DB, parsed.value.assistant);
-  if (assistant === null || assistant.orgId !== principal.orgId) {
+  // The signed-in owner's org, from `authenticate`: a key from another org
+  // matches no row.
+  const assistant = await assistantByPublicKey(env.DB, principal.orgId, parsed.value.assistant);
+  if (assistant === null) {
     return eventStreamOf({ type: "error", message: "This assistant is not available." });
   }
 
@@ -301,7 +313,7 @@ export async function chatRoute(
   overrides?: ChatRouteOverrides,
 ): Promise<Response> {
   if (request.method === "OPTIONS") {
-    return bodyKeyedPreflight(request, env.DB, "POST, OPTIONS");
+    return bodyKeyedPreflight(request, env.DB, seams.auth, "POST, OPTIONS");
   }
   if (request.method !== "POST") {
     return Response.json({ error: "Not found." }, { status: 404 });
@@ -314,7 +326,7 @@ export async function chatRoute(
     // unsupported protocol version) so a widget on an allowed site can read
     // the error event across origins.
     const assistantKey = readAssistantKey(body);
-    const assistant = assistantKey ? await assistantByPublicKey(env.DB, assistantKey) : null;
+    const assistant = assistantKey ? await publicAssistant(env.DB, seams.auth, assistantKey) : null;
     const origin = assistant ? matchedOrigin(assistant, request) : null;
     // A protocol or body we cannot parse is answered as a stream too, so the
     // widget has one code path for every failure instead of two.
@@ -327,7 +339,7 @@ export async function chatRoute(
     );
   }
 
-  const assistant = await assistantByPublicKey(env.DB, parsed.value.assistant);
+  const assistant = await publicAssistant(env.DB, seams.auth, parsed.value.assistant);
   if (assistant === null) {
     return eventStreamOf({ type: "error", message: "This assistant is not available." });
   }
@@ -374,10 +386,10 @@ export async function chatRoute(
 export async function feedbackRoute(
   request: Request,
   env: Pick<ChatEnv, "DB">,
-  seams: Pick<Seams, "limits">,
+  seams: Pick<Seams, "limits" | "auth">,
 ): Promise<Response> {
   if (request.method === "OPTIONS") {
-    return bodyKeyedPreflight(request, env.DB, "POST, OPTIONS");
+    return bodyKeyedPreflight(request, env.DB, seams.auth, "POST, OPTIONS");
   }
   if (request.method !== "POST") {
     return Response.json({ error: "Not found." }, { status: 404 });
@@ -392,7 +404,12 @@ export async function feedbackRoute(
     );
   }
 
-  const assistant = await assistantForMessage(env.DB, parsed.value.messageId);
+  const orgId = await seams.auth.resolveOrg({
+    kind: "message",
+    messageId: parsed.value.messageId,
+  });
+  const assistant =
+    orgId === null ? null : await assistantForMessage(env.DB, orgId, parsed.value.messageId);
   if (assistant === null) {
     return Response.json({ error: "Not found." }, { status: 404 });
   }
@@ -427,10 +444,10 @@ export async function feedbackRoute(
 export async function publicConfigRoute(
   request: Request,
   env: Pick<ChatEnv, "DB">,
-  seams: Pick<Seams, "limits">,
+  seams: Pick<Seams, "limits" | "auth">,
   publicKey: string,
 ): Promise<Response> {
-  const assistant = await assistantByPublicKey(env.DB, publicKey);
+  const assistant = await publicAssistant(env.DB, seams.auth, publicKey);
 
   if (request.method === "OPTIONS") {
     const origin = assistant ? matchedOrigin(assistant, request) : null;

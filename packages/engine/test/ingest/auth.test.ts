@@ -3,7 +3,7 @@ import { newId } from "@solvchat/core";
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../../src/admin/ingestKeys.js";
 import { ingestScopeFor } from "../../src/ingest/auth.js";
-import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
+import { createTestApp, directoryResolveOrg, TEST_ORG_ID } from "../helpers/app.js";
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 
@@ -110,7 +110,7 @@ describe("ingest auth", () => {
     expect(newRes.status).toBe(200);
   });
 
-  it("compares against the SHA-256 hash, never plaintext, and derives orgId from the row", async () => {
+  it("compares against the SHA-256 hash, never plaintext, and takes orgId from the auth seam", async () => {
     const orgId = newId("org");
     const a = await createAssistant(orgId, "Hashed Only");
     const storedHash = await sha256Hex(a.key);
@@ -118,6 +118,7 @@ describe("ingest auth", () => {
     // Presenting the stored hash itself as a bearer token must fail.
     const hashAsToken = await ingestScopeFor(
       env.DB,
+      { resolveOrg: directoryResolveOrg },
       new Request(`https://example.com/v1/ingest/${a.id}/documents`, {
         headers: { authorization: `Bearer ${storedHash}` },
       }),
@@ -125,14 +126,49 @@ describe("ingest auth", () => {
     );
     expect(hashAsToken).toBeNull();
 
-    // Presenting the real key returns orgId from the matched row.
+    // Presenting the real key returns the seam's org.
     const scope = await ingestScopeFor(
       env.DB,
+      { resolveOrg: directoryResolveOrg },
       new Request(`https://example.com/v1/ingest/${a.id}/documents`, {
         headers: { authorization: `Bearer ${a.key}` },
       }),
       a.id,
     );
     expect(scope).toEqual({ orgId, assistantId: a.id });
+  });
+
+  it("looks the key up only inside the org the auth seam returns", async () => {
+    const otherOrg = newId("org");
+    const a = await createAssistant(otherOrg, "Other org");
+    const request = () =>
+      new Request(`https://example.com/v1/ingest/${a.id}/documents`, {
+        headers: { authorization: `Bearer ${a.key}` },
+      });
+
+    // A valid key, but the seam says this request belongs to another org:
+    // the row is not found there, so the key is refused.
+    const claims: unknown[] = [];
+    const elsewhere = await ingestScopeFor(
+      env.DB,
+      {
+        async resolveOrg(claim) {
+          claims.push(claim);
+          return TEST_ORG_ID;
+        },
+      },
+      request(),
+      a.id,
+    );
+    expect(elsewhere).toBeNull();
+    expect(claims).toEqual([{ kind: "ingest_key", assistantId: a.id }]);
+
+    // The seam refusing the request is a 401 before any lookup.
+    expect(await ingestScopeFor(env.DB, { resolveOrg: async () => null }, request(), a.id)).toBe(
+      null,
+    );
+    expect(
+      await ingestScopeFor(env.DB, { resolveOrg: async () => otherOrg }, request(), a.id),
+    ).toEqual({ orgId: otherOrg, assistantId: a.id });
   });
 });

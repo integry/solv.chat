@@ -154,7 +154,7 @@ describe("chat/tenancy", () => {
 
     const {
       vectors: [vec],
-    } = await embedder.embed(["shared question"]);
+    } = await embedder.embed(["shared question"], async () => {});
     await retriever.upsert([
       { chunkId: "chk_a", vector: vec ?? [], orgId: TEST_ORG_ID, assistantId: "ast_a" },
       { chunkId: "chk_b", vector: vec ?? [], orgId: ORG_B, assistantId: "ast_b" },
@@ -294,5 +294,83 @@ describe("chat/tenancy", () => {
     expect(visitorBMsgConv?.visitorId).toBe("vis_b");
     const visitorBMsgs = await tenantA.messages.list(done.conversationId);
     expect(visitorBMsgs).toHaveLength(2);
+  });
+
+  it("serves only the org the auth seam names: another org's key, message and origin find nothing", async () => {
+    // Like the open build: one org for every session-less request.
+    const claims: string[] = [];
+    const app = createApp(
+      fakeSeams({
+        auth: {
+          async resolveOrg(claim) {
+            claims.push(claim.kind);
+            return TEST_ORG_ID;
+          },
+        },
+      }),
+      {
+        chat: {
+          embedder,
+          retriever,
+          provider: {
+            name: "anthropic",
+            model: ANTHROPIC_MODELS.balanced.id,
+            async *stream() {
+              yield { kind: "text", text: "should not run" };
+            },
+          },
+        },
+      },
+    );
+    const send = async (path: string, init: RequestInit) => {
+      const ctx = createExecutionContext();
+      const res = await app.fetch(new Request(`https://engine.example${path}`, init), env, ctx);
+      await waitOnExecutionContext(ctx);
+      return res;
+    };
+
+    const chat = await send("/v1/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://b.example" },
+      body: JSON.stringify({
+        protocol: 1,
+        assistant: "pk_org_b",
+        visitorId: "vis_b",
+        message: "shared question",
+      }),
+    });
+    const events = parseSseBody(await chat.text());
+    expect(events).toEqual([{ type: "error", message: "This assistant is not available." }]);
+
+    const config = await send("/v1/assistants/pk_org_b", {
+      method: "GET",
+      headers: { origin: "https://b.example" },
+    });
+    expect(config.status).toBe(404);
+
+    const feedback = await send("/v1/feedback", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://b.example" },
+      body: JSON.stringify({ messageId: "msg_b_secret", visitorId: "vis_b", value: "up" }),
+    });
+    expect(feedback.status).toBe(404);
+
+    const preflight = await send("/v1/chat", {
+      method: "OPTIONS",
+      headers: { origin: "https://b.example" },
+    });
+    expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+    const ownPreflight = await send("/v1/chat", {
+      method: "OPTIONS",
+      headers: { origin: "https://a.example" },
+    });
+    expect(ownPreflight.headers.get("access-control-allow-origin")).toBe("https://a.example");
+
+    expect(claims).toEqual(["public_key", "public_key", "message", "preflight", "preflight"]);
+    // Nothing of org B's was written to on the way.
+    const rows = await env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE org_id = ?1")
+      .bind(ORG_B)
+      .first<{ n: number }>();
+    expect(rows?.n).toBe(1);
   });
 });

@@ -2,8 +2,11 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import { defaultVersionConfig, newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { writeTheRightAnswer } from "../../src/admin/answers.js";
+import { getConversation } from "../../src/admin/conversations.js";
 import { NotFound } from "../../src/admin/errors.js";
+import { listGaps } from "../../src/admin/gaps.js";
 import { answerMessage } from "../../src/chat/answer.js";
+import { normalizeQuestionText } from "../../src/db/messages.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { runIngestBatch } from "../../src/ingest/consumer.js";
 import type { IngestQueueMessage } from "../../src/ingest/documents.js";
@@ -11,7 +14,7 @@ import { ANTHROPIC_MODELS } from "../../src/models.js";
 import type { LlmProvider } from "../../src/providers/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
-import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
+import { acceptQueuedOrg, createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
 const ORG_A = TEST_ORG_ID;
 const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -73,11 +76,11 @@ async function seedGap(orgId: string, question: string) {
       "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES (?1, ?2, ?3, 'vis_1', ?4, '')",
     ).bind(conversationId, orgId, assistantId, now),
     env.DB.prepare(
-      "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at) VALUES (?1, ?2, ?3, 'user', ?4, '[]', NULL, 0, 0, 1, ?5)",
-    ).bind(questionId, orgId, conversationId, question, now),
+      "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at, question_key) VALUES (?1, ?2, ?3, 'user', ?4, '[]', NULL, 0, 0, 1, ?5, ?6)",
+    ).bind(questionId, orgId, conversationId, question, now, normalizeQuestionText(question)),
     env.DB.prepare(
-      "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at) VALUES (?1, ?2, ?3, 'assistant', 'No answer.', '[]', NULL, 0, 0, 0, ?4)",
-    ).bind(assistantMsgId, orgId, conversationId, now + 1),
+      "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at, reply_to) VALUES (?1, ?2, ?3, 'assistant', 'No answer.', '[]', NULL, 0, 0, 0, ?4, ?5)",
+    ).bind(assistantMsgId, orgId, conversationId, now + 1, questionId),
   ]);
   return { assistantId, conversationId, questionId, assistantMsgId };
 }
@@ -148,7 +151,13 @@ describe("admin answers API", () => {
           retry() {},
         })),
       },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever: memoryRetriever() },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever: memoryRetriever(),
+      },
     );
 
     // Repeating with identical question & answer is idempotent (no new queue message).
@@ -250,14 +259,15 @@ describe("admin answers API", () => {
     const vocab = ["student", "discounts", "pricing", "shipping"];
     const embedder = {
       dimensions: vocab.length,
-      async embed(texts: readonly string[]) {
+      async embed(texts: readonly string[], onBilled: (tokens: number) => Promise<void>) {
+        await onBilled(texts.length);
         const vectors = texts.map((t) => {
           const lower = t.toLowerCase();
           const vec = vocab.map((w) => (lower.includes(w) ? 1 : 0));
           const norm = Math.hypot(...vec) || 1;
           return vec.map((v) => v / norm);
         });
-        return { vectors, tokens: texts.length };
+        return { vectors };
       },
     };
     const retriever = memoryRetriever();
@@ -272,7 +282,7 @@ describe("admin answers API", () => {
           retry() {},
         })),
       },
-      { db: env.DB, docs: env.DOCS, embedder, retriever },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever },
     );
 
     let capturedContext = "";
@@ -314,5 +324,138 @@ describe("admin answers API", () => {
     expect(events.some((e) => e.type === "citation")).toBe(false);
     expect(capturedContext).not.toContain(saved.url);
     expect(events.some((e) => e.type === "token" && e.text.includes("50% off"))).toBe(true);
+  });
+
+  it("links each unanswered reply to its own question when two requests interleave in one conversation", async () => {
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const assistantId = newId("ast");
+    await tenant.assistants.create({
+      id: assistantId,
+      name: "Docs Bot",
+      publicKey: `pk_${newId("ast").slice(4)}`,
+      allowedOrigins: [],
+      createdAt: 1000,
+    });
+    const conversationId = newId("cnv");
+    await tenant.conversations.create({
+      id: conversationId,
+      assistantId,
+      visitorId: "vis_1",
+      startedAt: 1000,
+      pageUrl: "",
+    });
+
+    // Request A stops inside retrieval until request B has finished, so B's
+    // question and reply are written between A's question and A's reply.
+    let releaseA: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let enteredA: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      enteredA = resolve;
+    });
+    let queries = 0;
+    const retriever = {
+      ...memoryRetriever(),
+      async query() {
+        queries += 1;
+        if (queries === 1) {
+          enteredA();
+          await gate;
+        }
+        return [];
+      },
+    };
+    const deps = {
+      tenant,
+      embedder: fakeEmbedder(),
+      retriever,
+      provider: {
+        name: "anthropic" as const,
+        model: ANTHROPIC_MODELS.fast.id,
+        async *stream() {
+          yield { kind: "text" as const, text: "unused" };
+        },
+      },
+      model: ANTHROPIC_MODELS.fast,
+      usage: { async record() {} },
+    };
+    const ask = async (message: string) => {
+      let replyId = "";
+      for await (const ev of answerMessage(deps, {
+        orgId: ORG_A,
+        assistantId,
+        visitorId: "vis_1",
+        conversationId,
+        message,
+        behaviour: defaultVersionConfig().behaviour,
+      })) {
+        if (ev.type === "done") replyId = ev.messageId;
+      }
+      return replyId;
+    };
+
+    const runA = ask("Question A about refunds?");
+    await entered;
+    const replyB = await ask("Question B about shipping?");
+    releaseA();
+    const replyA = await runA;
+
+    const turns = await tenant.messages.list(conversationId);
+    // The order a timestamp heuristic would get wrong: A's reply comes last.
+    expect(turns.map((t) => t.content)).toEqual([
+      "Question A about refunds?",
+      "Question B about shipping?",
+      defaultVersionConfig().behaviour.fallbackText,
+      defaultVersionConfig().behaviour.fallbackText,
+    ]);
+    const questionA = turns[0]?.id ?? "";
+    const questionB = turns[1]?.id ?? "";
+    expect(turns.find((t) => t.id === replyA)?.replyTo).toBe(questionA);
+    expect(turns.find((t) => t.id === replyB)?.replyTo).toBe(questionB);
+
+    const gaps = await listGaps(tenant, assistantId);
+    expect(gaps.total).toBe(2);
+    expect(gaps.gaps.map((g) => [g.question, g.times, g.exampleMessageId]).sort()).toEqual([
+      ["question a about refunds?", 1, questionA],
+      ["question b about shipping?", 1, questionB],
+    ]);
+
+    // Answering from A's reply links A's question, and the conversation shows
+    // the answer under A's reply only.
+    const saved = await writeTheRightAnswer(
+      {
+        tenant,
+        docs: env.DOCS,
+        queue: { async send() {} },
+        publicBaseUrl: "https://admin.example.com",
+      },
+      { orgId: ORG_A },
+      {
+        assistantId,
+        question: "Question A about refunds?",
+        answer: "Refunds take 5 days.",
+        fromMessageId: replyA,
+      },
+    );
+    const link = await env.DB.prepare(
+      "SELECT message_id FROM gap_answers WHERE org_id = ?1 AND document_id = ?2",
+    )
+      .bind(ORG_A, saved.documentId)
+      .first<{ message_id: string }>();
+    expect(link?.message_id).toBe(questionA);
+
+    const afterGaps = await listGaps(tenant, assistantId);
+    const handled = Object.fromEntries(afterGaps.gaps.map((g) => [g.question, g.handled]));
+    expect(handled).toEqual({
+      "question a about refunds?": true,
+      "question b about shipping?": false,
+    });
+
+    const detail = await getConversation(tenant, conversationId);
+    const docByTurn = Object.fromEntries(detail.turns.map((t) => [t.id, t.answerDocumentId]));
+    expect(docByTurn[replyA]).toBe(saved.documentId);
+    expect(docByTurn[replyB]).toBeNull();
   });
 });

@@ -2,6 +2,7 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import { newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  htmlToTitleAndMarkdown,
   importSitemapUrls,
   MAX_IMPORT_URLS,
   MAX_REDIRECTS,
@@ -14,7 +15,7 @@ import { runIngestBatch } from "../../src/ingest/consumer.js";
 import type { IngestQueueMessage } from "../../src/ingest/documents.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
-import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
+import { acceptQueuedOrg, createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
 const ORG_A = TEST_ORG_ID;
 const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -230,7 +231,13 @@ describe("admin sitemap preview and import", () => {
           retry() {},
         })),
       },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever,
+      },
     );
 
     for (const doc of docs) {
@@ -479,7 +486,13 @@ describe("admin sitemap preview and import", () => {
           retry() {},
         })),
       },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever,
+      },
     );
 
     for (const doc of docs) {
@@ -552,5 +565,35 @@ describe("admin sitemap preview and import", () => {
       ),
     ).rejects.toThrow(UnsafeUrlError);
     expect(fetchCalled).toBe(false);
+  });
+});
+
+describe("htmlToTitleAndMarkdown", () => {
+  it("turns an ordinary page into a title and Markdown", () => {
+    const html = `<html><head><title>Billing &amp; plans</title><style>p{color:red}</style></head>
+<body><h1 class="top">Billing <b>help</b></h1><p>Pay by <a href="/card">card</a>.</p>
+<ul><li>Monthly</li><li class="x">Yearly <i>saves</i></li></ul>
+<script>var s = "<p>hidden</p>";</script><noscript>Enable JS</noscript>
+<div>Line one<br>Line two</div><h2>Refunds</h2>Within 30 days &lt;always&gt;</body></html>`;
+    expect(htmlToTitleAndMarkdown(html, "https://example.com/billing")).toEqual({
+      title: "Billing & plans",
+      markdown:
+        "Billing & plans\n\n# Billing help\n\nPay by card.\n\n- Monthly\n- Yearly saves\n\nLine one\nLine two\n\n## Refunds\n\nWithin 30 days <always>",
+    });
+  });
+
+  it("falls back to the URL path when there is no title", () => {
+    expect(htmlToTitleAndMarkdown("<p>Body</p>", "https://example.com/a/b").title).toBe("/a/b");
+  });
+
+  it("handles a 1 MiB page of unclosed tags in linear time", () => {
+    for (const unit of ["<script ", "<style ", "<title ", "<h1>", "<li>", "<p ", "<"]) {
+      const html = unit.repeat(Math.floor((1024 * 1024) / unit.length));
+      const started = Date.now();
+      htmlToTitleAndMarkdown(html, "https://example.com/");
+      // The regex version took minutes on the same input; a linear scan takes
+      // milliseconds. The bound is loose so a slow CI host cannot flake it.
+      expect(Date.now() - started).toBeLessThan(2000);
+    }
   });
 });

@@ -121,7 +121,34 @@ function isPrivateOrReservedIpv6(groups: number[]): boolean {
     return isPrivateOrReservedIpv4([g6 >> 8, g6 & 0xff, g7 >> 8, g7 & 0xff]);
   }
 
+  const embedded = (high: number, low: number): [number, number, number, number] => [
+    high >> 8,
+    high & 0xff,
+    low >> 8,
+    low & 0xff,
+  ];
+
+  // 64:ff9b::/96 (NAT64 well-known prefix, RFC 6052): the last 32 bits are the
+  // IPv4 address a translator would reach.
+  if (
+    groups[0] === 0x64 &&
+    groups[1] === 0xff9b &&
+    groups[2] === 0 &&
+    groups[3] === 0 &&
+    groups[4] === 0 &&
+    groups[5] === 0
+  ) {
+    return isPrivateOrReservedIpv4(embedded(groups[6] ?? 0, groups[7] ?? 0));
+  }
+  // 64:ff9b:1::/48 (local-use NAT64, RFC 8215): the embedding is site-defined,
+  // so the IPv4 target cannot be read back. Refuse the whole prefix.
+  if (groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 1) return true;
+
   const first = groups[0] ?? 0;
+  // 2002::/16 (6to4, RFC 3056): bits 16–47 are the IPv4 relay address.
+  if (first === 0x2002) {
+    return isPrivateOrReservedIpv4(embedded(groups[1] ?? 0, groups[2] ?? 0));
+  }
   if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 (unique local)
   if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 (link-local)
   if ((first & 0xff00) === 0xff00) return true; // ff00::/8 (multicast)

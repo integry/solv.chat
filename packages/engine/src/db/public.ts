@@ -1,27 +1,24 @@
 /**
- * Scope resolution for the entry points that have no session.
+ * Credential lookups for the entry points that have no session.
  *
  * `docs/architecture.md` says route handlers receive `org_id` from the auth
- * seam. That holds for `/api/admin/*`, where `AuthProvider` resolves the
- * principal. Three public entry points cannot have a principal, so their org
- * is derived from a credential instead — never from a URL or body field:
+ * seam. On `/api/admin/*` that is `AuthProvider.authenticate`. The public,
+ * ingest and queue entry points have no principal, so they ask
+ * `AuthProvider.resolveOrg` which org the request belongs to (see
+ * `ScopeClaim` in `seams/types.ts`), and only then look their credential up
+ * here — inside that org, like every other statement:
  *
  * - `POST /v1/chat`, `GET /v1/assistants/:key`: the widget's public key.
  * - `POST /v1/feedback`: the message id the engine itself issued.
  * - `/v1/ingest/:assistantId/*`: the hashed bearer ingest key.
  * - `OPTIONS /v1/chat`, `OPTIONS /v1/feedback`: a browser preflight carries
- *   no body, so no key; it learns only whether its Origin is on some
- *   assistant's allow-list, and no row or org leaves the lookup.
+ *   no body, so no key; it learns only whether its Origin is on one of the
+ *   org's allow-lists, and no row leaves the lookup.
  *
- * (The Queue consumer is the fourth: its message is written only by the
- * engine, from one of the scopes above, and is re-checked against D1 by
- * `org_id`; see `forQueuedIngest` in `tenant.ts`.)
- *
- * These are the only statements in the engine that run before `org_id` is
- * known. Each returns the matched row's `org_id`; callers immediately build a
- * `Tenant` from it, so every statement after the lookup is tenant-scoped.
+ * A credential that belongs to another org matches no row, exactly as an
+ * unknown one does.
  */
-import { safeJsonArray } from "./sql.js";
+import { prepare, safeJsonArray } from "./sql.js";
 
 export interface PublicAssistant {
   id: string;
@@ -47,46 +44,42 @@ const mapAssistant = (row: AssistantLookupRow): PublicAssistant => ({
   allowedOrigins: safeJsonArray<string>(row.allowed_origins),
 });
 
-/**
- * Resolves an assistant by its public key before `org_id` is known.
- *
- * This is a public-entry lookup (the widget sends `pk_...` in the clear,
- * never `org_id`). Callers must immediately build a `Tenant` from the returned
- * `orgId` via `forPublicScope` so every subsequent query is tenant-scoped.
- */
+/** The org's assistant with this public key, or null. */
 export async function assistantByPublicKey(
   db: D1Database,
+  orgId: string,
   publicKey: string,
 ): Promise<PublicAssistant | null> {
-  const row = await db
-    .prepare(
-      "SELECT id, org_id, name, public_key, allowed_origins FROM assistants WHERE public_key = ?1",
-    )
-    .bind(publicKey)
+  const row = await prepare(
+    db,
+    "SELECT id, org_id, name, public_key, allowed_origins FROM assistants WHERE org_id = ?1 AND public_key = ?2",
+  )
+    .bind(orgId, publicKey)
     .first<AssistantLookupRow>();
   return row ? mapAssistant(row) : null;
 }
 
 /**
- * Resolves the owning assistant for a message id before `org_id` is known.
+ * The org's assistant that owns this message, or null.
  *
  * Used by `POST /v1/feedback` so origin checks, rate limits, and feedback
- * writes all bind to the message's actual assistant and org rather than
- * trusting caller-supplied tenant identifiers.
+ * writes all bind to the message's actual assistant rather than trusting
+ * caller-supplied identifiers.
  */
 export async function assistantForMessage(
   db: D1Database,
+  orgId: string,
   messageId: string,
 ): Promise<PublicAssistant | null> {
-  const row = await db
-    .prepare(
-      `SELECT a.id, a.org_id, a.name, a.public_key, a.allowed_origins
+  const row = await prepare(
+    db,
+    `SELECT a.id, a.org_id, a.name, a.public_key, a.allowed_origins
        FROM messages m
        JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
        JOIN assistants a ON a.id = c.assistant_id AND a.org_id = c.org_id
-       WHERE m.id = ?1`,
-    )
-    .bind(messageId)
+      WHERE m.org_id = ?1 AND m.id = ?2`,
+  )
+    .bind(orgId, messageId)
     .first<AssistantLookupRow>();
   return row ? mapAssistant(row) : null;
 }
@@ -98,42 +91,41 @@ export interface IngestKeyRow {
 }
 
 /**
- * Reads the stored ingest-key hash for an assistant before `org_id` is known.
- *
- * The bearer key *is* the authentication: the caller compares hashes in
- * constant time and only then builds a `Tenant` from the returned `orgId`
- * via `forIngestScope`.
+ * The stored ingest-key hash for one of the org's assistants. The caller
+ * compares hashes in constant time before building a `Tenant`.
  */
 export async function assistantIngestKeyHash(
   db: D1Database,
+  orgId: string,
   assistantId: string,
 ): Promise<IngestKeyRow | null> {
-  const row = await db
-    .prepare(
-      "SELECT id, org_id, ingest_key_hash FROM assistants WHERE id = ?1 AND ingest_key_hash IS NOT NULL",
-    )
-    .bind(assistantId)
+  const row = await prepare(
+    db,
+    "SELECT id, org_id, ingest_key_hash FROM assistants WHERE org_id = ?1 AND id = ?2 AND ingest_key_hash IS NOT NULL",
+  )
+    .bind(orgId, assistantId)
     .first<{ id: string; org_id: string; ingest_key_hash: string }>();
   return row ? { id: row.id, orgId: row.org_id, ingestKeyHash: row.ingest_key_hash } : null;
 }
 
 /**
- * Whether any assistant lists `origin` in its allowed origins.
+ * Whether any of the org's assistants lists `origin` as allowed.
  *
  * Used only to answer a CORS preflight, which carries no assistant key. The
- * answer is a yes/no about the caller's own Origin; the real request is still
- * checked against its own assistant's list.
+ * answer is a yes/no about the caller's own Origin, read from the
+ * `assistant_origins` index; the real request is still checked against its
+ * own assistant's list.
  */
-export async function originAllowedByAnyAssistant(
+export async function originAllowedInOrg(
   db: D1Database,
+  orgId: string,
   origin: string,
 ): Promise<boolean> {
-  const row = await db
-    .prepare(
-      `SELECT 1 AS hit FROM assistants, json_each(assistants.allowed_origins) AS allowed
-       WHERE json_valid(assistants.allowed_origins) AND allowed.value = ?1 LIMIT 1`,
-    )
-    .bind(origin)
+  const row = await prepare(
+    db,
+    "SELECT 1 AS hit FROM assistant_origins WHERE org_id = ?1 AND origin = ?2 LIMIT 1",
+  )
+    .bind(orgId, origin)
     .first<{ hit: number }>();
   return row !== null;
 }

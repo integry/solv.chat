@@ -18,6 +18,8 @@ const EXPECTED_TABLES = [
   "mcp_tools",
   "tests",
   "test_runs",
+  "gap_answers",
+  "assistant_origins",
 ];
 
 describe("migrations", () => {
@@ -140,5 +142,46 @@ describe("migrations", () => {
         .bind("doc_2", orgId, "src_1", "getting-started", "https://a.test/gs", "GS", "h2", 1001)
         .run(),
     ).rejects.toThrow();
+  });
+
+  it("backfills reply links and question keys for rows written before 0007", async () => {
+    const orgId = "org_00000000000000000000";
+    const legacy = (id: string, role: string, content: string, at: number) =>
+      env.DB.prepare(
+        "INSERT INTO messages (id, org_id, conversation_id, role, content, created_at) VALUES (?1, ?2, 'cnv_1', ?3, ?4, ?5)",
+      ).bind(id, orgId, role, content, at);
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'Site', 'pk_1', 1)",
+      ).bind(orgId),
+      env.DB.prepare(
+        "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES ('cnv_1', ?1, 'ast_1', 'vis', 1, '')",
+      ).bind(orgId),
+      // Ids sort opposite to insertion, and the first reply shares its
+      // question's millisecond: only insertion order tells them apart.
+      legacy("msg_z", "user", "First?", 100),
+      legacy("msg_y", "assistant", "Reply one", 100),
+      legacy("msg_x", "user", "  Hello\t\n  World    again?  ", 200),
+      legacy("msg_w", "assistant", "Reply two", 300),
+    ]);
+
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0007_"));
+    const updates = (migration?.queries ?? []).filter((q) => /^\s*UPDATE\b/i.test(q));
+    expect(updates.length).toBeGreaterThan(0);
+    for (const sql of updates) {
+      await env.DB.prepare(sql).run();
+    }
+
+    const rows = await env.DB.prepare(
+      "SELECT id, reply_to, question_key FROM messages WHERE org_id = ?1 ORDER BY rowid",
+    )
+      .bind(orgId)
+      .all<{ id: string; reply_to: string | null; question_key: string | null }>();
+    expect(rows.results).toEqual([
+      { id: "msg_z", reply_to: null, question_key: "first?" },
+      { id: "msg_y", reply_to: "msg_z", question_key: null },
+      { id: "msg_x", reply_to: null, question_key: "hello world again?" },
+      { id: "msg_w", reply_to: "msg_x", question_key: null },
+    ]);
   });
 });

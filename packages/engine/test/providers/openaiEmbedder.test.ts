@@ -30,8 +30,11 @@ describe("openAIEmbedder", () => {
       },
     });
 
-    const { vectors, tokens } = await embedder.embed(["first", "second"]);
-    expect(tokens).toBe(4);
+    const billed: number[] = [];
+    const { vectors } = await embedder.embed(["first", "second"], async (t) => {
+      billed.push(t);
+    });
+    expect(billed).toEqual([4]);
     expect(vectors).toEqual([
       [0.1, 0.2],
       [0.4, 0.5],
@@ -61,14 +64,14 @@ describe("openAIEmbedder", () => {
       },
     });
 
-    const { vectors } = await embedder.embed(texts);
+    const { vectors } = await embedder.embed(texts, async () => {});
     expect(batchSizes).toEqual([OPENAI_EMBEDDING_BATCH_LIMIT, 3]);
     expect(vectors).toHaveLength(total);
     expect(vectors[0]).toEqual([0]);
     expect(vectors[total - 1]).toEqual([total - 1]);
   });
 
-  it("splits requests before their total size could pass the per-request token cap, and sums billed tokens", async () => {
+  it("splits requests before their total size could pass the per-request token cap, and reports each request's billed tokens", async () => {
     const text = "z".repeat(1200);
     const total = Math.ceil((OPENAI_EMBEDDING_MAX_CHARS_PER_REQUEST * 2.5) / text.length);
     const texts = Array.from({ length: total }, () => text);
@@ -86,12 +89,60 @@ describe("openAIEmbedder", () => {
       },
     });
 
-    const { vectors, tokens } = await embedder.embed(texts);
+    const billed: number[] = [];
+    const { vectors } = await embedder.embed(texts, async (t) => {
+      billed.push(t);
+    });
     expect(vectors).toHaveLength(total);
     expect(requestChars).toHaveLength(3);
     expect(requestChars.every((c) => c <= OPENAI_EMBEDDING_MAX_CHARS_PER_REQUEST)).toBe(true);
-    expect(tokens).toBe(total * 300);
-    expect(embeddingCostMicros(tokens)).toBeGreaterThan(0);
+    expect(billed).toHaveLength(3);
+    expect(billed.reduce((a, b) => a + b, 0)).toBe(total * 300);
+    expect(embeddingCostMicros(total * 300)).toBeGreaterThan(0);
+  });
+
+  it("reports a billed request before a later request fails, and before validating a malformed body", async () => {
+    const text = "z".repeat(1200);
+    const total = Math.ceil((OPENAI_EMBEDDING_MAX_CHARS_PER_REQUEST * 1.5) / text.length);
+    let call = 0;
+    const embedder = openAIEmbedder({
+      apiKey: "test-key",
+      fetchImpl: async (_input, init) => {
+        call += 1;
+        const body = JSON.parse(String(init?.body)) as { input: string[] };
+        if (call === 1) {
+          return Response.json({
+            data: body.input.map((_t, index) => ({ index, embedding: [index] })),
+            usage: { total_tokens: 700 },
+          });
+        }
+        return new Response("upstream down", { status: 503 });
+      },
+    });
+    const billed: number[] = [];
+    await expect(
+      embedder.embed(
+        Array.from({ length: total }, () => text),
+        async (t) => {
+          billed.push(t);
+        },
+      ),
+    ).rejects.toBeInstanceOf(ProviderError);
+    expect(call).toBe(2);
+    expect(billed).toEqual([700]);
+
+    // A body that bills tokens but has the wrong shape is still spend.
+    const malformed = openAIEmbedder({
+      apiKey: "test-key",
+      fetchImpl: async () => Response.json({ data: [], usage: { total_tokens: 9 } }),
+    });
+    const malformedBilled: number[] = [];
+    await expect(
+      malformed.embed(["a"], async (t) => {
+        malformedBilled.push(t);
+      }),
+    ).rejects.toBeInstanceOf(ProviderError);
+    expect(malformedBilled).toEqual([9]);
   });
 
   it("upserts to Vectorize in batches no larger than the Workers binding limit", async () => {
@@ -114,6 +165,21 @@ describe("openAIEmbedder", () => {
     expect(sizes).toEqual([VECTORIZE_UPSERT_BATCH_LIMIT, VECTORIZE_UPSERT_BATCH_LIMIT, 1]);
   });
 
+  it("deletes from Vectorize in batches no larger than the upsert batch size", async () => {
+    const sizes: number[] = [];
+    const index = {
+      async deleteByIds(ids: string[]) {
+        sizes.push(ids.length);
+        return { mutationId: "m" };
+      },
+    } as unknown as VectorizeIndex;
+    const total = VECTORIZE_UPSERT_BATCH_LIMIT * 2 + 5;
+    await vectorizeRetriever(index).remove(Array.from({ length: total }, (_, i) => `chk_${i}`));
+    expect(sizes).toEqual([VECTORIZE_UPSERT_BATCH_LIMIT, VECTORIZE_UPSERT_BATCH_LIMIT, 5]);
+    await vectorizeRetriever(index).remove([]);
+    expect(sizes).toHaveLength(3);
+  });
+
   it("maps 429 to retryable ProviderError and 400 to non-retryable without leaking the key", async () => {
     const secret = "sk-openai-secret-key-999";
 
@@ -122,7 +188,7 @@ describe("openAIEmbedder", () => {
       fetchImpl: async () => new Response("rate limited", { status: 429 }),
     });
 
-    await expect(retryable.embed(["hello"])).rejects.toSatisfy((err: unknown) => {
+    await expect(retryable.embed(["hello"], async () => {})).rejects.toSatisfy((err: unknown) => {
       return (
         err instanceof ProviderError &&
         err.retryable === true &&
@@ -136,13 +202,15 @@ describe("openAIEmbedder", () => {
       fetchImpl: async () => new Response("bad request", { status: 400 }),
     });
 
-    await expect(nonRetryable.embed(["hello"])).rejects.toSatisfy((err: unknown) => {
-      return (
-        err instanceof ProviderError &&
-        err.retryable === false &&
-        err.status === 400 &&
-        !err.message.includes(secret)
-      );
-    });
+    await expect(nonRetryable.embed(["hello"], async () => {})).rejects.toSatisfy(
+      (err: unknown) => {
+        return (
+          err instanceof ProviderError &&
+          err.retryable === false &&
+          err.status === 400 &&
+          !err.message.includes(secret)
+        );
+      },
+    );
   });
 });

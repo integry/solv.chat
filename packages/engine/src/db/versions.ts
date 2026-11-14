@@ -40,9 +40,18 @@ export interface CreatePublishedInput {
 
 const COLUMNS = "id, org_id, assistant_id, state, config, created_at, published_at";
 
+/**
+ * The config text each row was read with, kept off the row itself so it never
+ * reaches an API response. `updateDraft` compares against these exact bytes:
+ * re-serialising the parsed config would never match a row that does not
+ * round-trip (a hand edit, or a schema that fell back to defaults), and every
+ * save of that draft would then fail as a conflict.
+ */
+const storedConfig = new WeakMap<VersionRow, string>();
+
 const map = (row: Row): VersionRow => {
   const parsed = parseVersionConfig(safeJson(row.config));
-  return {
+  const mapped: VersionRow = {
     id: row.id,
     orgId: row.org_id,
     assistantId: row.assistant_id,
@@ -53,6 +62,8 @@ const map = (row: Row): VersionRow => {
     createdAt: row.created_at,
     publishedAt: row.published_at,
   };
+  storedConfig.set(mapped, row.config);
+  return mapped;
 };
 
 /** Tenant-scoped data access for `assistant_versions`. */
@@ -123,13 +134,20 @@ export function versionsFor(db: D1Database, orgId: string) {
     async updateDraft(
       assistantId: string,
       config: VersionConfig,
-      expected?: { id: string; config: VersionConfig },
+      /** The draft row as read; the write applies only if its stored config is unchanged. */
+      expected?: VersionRow,
     ): Promise<boolean> {
       const sql = expected
         ? "UPDATE assistant_versions SET config = ?3 WHERE org_id = ?1 AND assistant_id = ?2 AND state = 'draft' AND id = ?4 AND config = ?5"
         : "UPDATE assistant_versions SET config = ?3 WHERE org_id = ?1 AND assistant_id = ?2 AND state = 'draft'";
       const args: unknown[] = expected
-        ? [orgId, assistantId, JSON.stringify(config), expected.id, JSON.stringify(expected.config)]
+        ? [
+            orgId,
+            assistantId,
+            JSON.stringify(config),
+            expected.id,
+            storedConfig.get(expected) ?? JSON.stringify(expected.config),
+          ]
         : [orgId, assistantId, JSON.stringify(config)];
       const res = await prepare(db, sql)
         .bind(...args)

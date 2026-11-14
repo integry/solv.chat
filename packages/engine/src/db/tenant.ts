@@ -36,33 +36,30 @@ export interface Tenant {
 /**
  * A database handle bound to one org. Handlers get this instead of a
  * `D1Database`: the filter is captured when the handle is built, so forgetting
- * it is not an available mistake. Constructible only from a `Principal` (auth
- * seam), an `IngestScope` (a row matched by a hashed bearer key), a
- * `PublicScope` (a row matched by public key or message id; see `public.ts`)
- * or an engine-written Queue message — none can come from a body or URL.
+ * it is not an available mistake. Every constructor takes an org the auth
+ * seam produced: a `Principal` (`authenticate`), or an `IngestScope`,
+ * `PublicScope` or queued org (`resolveOrg`, then a credential matched inside
+ * that org; see `public.ts`). None can come from a body or URL.
  */
 export const forPrincipal = (db: D1Database, principal: Principal): Tenant =>
   build(db, principal.orgId);
 
-/** Builds a `Tenant` from an authenticated ingest bearer-key scope. */
+/** Builds a `Tenant` from an ingest bearer key matched inside the seam's org. */
 export const forIngestScope = (db: D1Database, scope: IngestScope): Tenant =>
   build(db, scope.orgId);
 
-/** Builds a `Tenant` from a public assistant or message lookup. */
+/** Builds a `Tenant` from a public key or message id matched inside the seam's org. */
 export const forPublicScope = (db: D1Database, scope: PublicScope): Tenant =>
   build(db, scope.orgId);
 
 /**
- * Builds a `Tenant` for one ingest Queue message.
- *
- * The message's `orgId` is the one exception to "org from a credential": it
- * is written only by `pushDocuments`, from an `IngestScope` or a `Principal`,
- * and the Queue binding is not reachable from a request. The consumer still
- * treats it as a claim, not a fact: every read goes through this tenant, so a
- * message whose org does not own the document finds nothing and is dropped.
+ * Builds a `Tenant` for one ingest Queue message, from the org the auth seam
+ * returned for the message's claimed `orgId` (`resolveOrg`, `queued_ingest`).
+ * Every read still goes through this tenant, so a message whose org does not
+ * own the document finds nothing and is dropped.
  */
-export const forQueuedIngest = (db: D1Database, message: { orgId: string }): Tenant =>
-  build(db, message.orgId);
+export const forQueuedIngest = (db: D1Database, resolvedOrgId: string): Tenant =>
+  build(db, resolvedOrgId);
 
 function build(db: D1Database, orgId: string): Tenant {
   // Nothing exported takes an orgId argument, which could be the wrong one.

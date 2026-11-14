@@ -214,6 +214,16 @@ export function passwordAuth(env: PasswordAuthEnv, db: D1Database): AuthProvider
       );
     },
 
+    // A self-hosted install has exactly one org, so every session-less
+    // request belongs to it; the engine then finds the key inside that org.
+    // A queued message naming any other org was not written by this install.
+    async resolveOrg(claim) {
+      if (claim.kind === "queued_ingest") {
+        return claim.orgId === SINGLE_ORG_ID ? SINGLE_ORG_ID : null;
+      }
+      return SINGLE_ORG_ID;
+    },
+
     async logout() {
       return Response.json(
         { ok: true },

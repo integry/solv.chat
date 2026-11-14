@@ -6,7 +6,7 @@ import { runIngestBatch } from "../../src/ingest/consumer.js";
 import { pushDocuments } from "../../src/ingest/documents.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
-import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
+import { acceptQueuedOrg, createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
 const ORG_A = TEST_ORG_ID;
 const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -326,7 +326,13 @@ describe("admin sources API", () => {
           },
         ],
       },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever,
+      },
     );
 
     const chunksBefore = await tenant.documents.listChunks(documentId);

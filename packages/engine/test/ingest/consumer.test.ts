@@ -11,11 +11,15 @@ import {
   pushDocuments,
 } from "../../src/ingest/documents.js";
 import { resolveChunks } from "../../src/ingest/resolve.js";
-import type { Embedder, Retriever } from "../../src/providers/retrieval.js";
+import {
+  type Embedder,
+  embeddingCostMicros,
+  type Retriever,
+} from "../../src/providers/retrieval.js";
 import type { UsageEvent } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
-import { TEST_ORG_ID } from "../helpers/app.js";
+import { acceptQueuedOrg, TEST_ORG_ID } from "../helpers/app.js";
 
 async function seedOrgAndAssistant(orgId = TEST_ORG_ID) {
   const assistantId = newId("ast");
@@ -100,7 +104,10 @@ describe("ingest consumer", () => {
     const retriever = memoryRetriever();
     const msg = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash });
 
-    await runIngestBatch({ messages: [msg] }, { db: env.DB, docs: env.DOCS, embedder, retriever });
+    await runIngestBatch(
+      { messages: [msg] },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever },
+    );
 
     expect(msg.acked).toBe(true);
     const chunks = await tenant.documents.listChunks(documentId);
@@ -126,15 +133,21 @@ describe("ingest consumer", () => {
     const seen: string[] = [];
     const embedder: Embedder = {
       dimensions: inner.dimensions,
-      async embed(texts) {
+      async embed(texts, onBilled) {
         seen.push(...texts);
-        return inner.embed(texts);
+        return inner.embed(texts, onBilled);
       },
     };
 
     await runIngestBatch(
       { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash })] },
-      { db: env.DB, docs: env.DOCS, embedder, retriever: memoryRetriever() },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder,
+        retriever: memoryRetriever(),
+      },
     );
 
     expect(seen).toHaveLength(1);
@@ -153,7 +166,13 @@ describe("ingest consumer", () => {
 
     await runIngestBatch(
       { messages: [msg] },
-      { db: env.DB, docs: env.DOCS, embedder: { ...embedder, embed: embedSpy }, retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: { ...embedder, embed: embedSpy },
+        retriever,
+      },
     );
 
     expect(msg.acked).toBe(true);
@@ -171,6 +190,7 @@ describe("ingest consumer", () => {
       { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash })] },
       {
         db: env.DB,
+        resolveOrg: acceptQueuedOrg,
         docs: env.DOCS,
         embedder: fakeEmbedder(),
         retriever: memoryRetriever(),
@@ -181,6 +201,43 @@ describe("ingest consumer", () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ orgId: TEST_ORG_ID, assistantId, messages: 0 });
     expect(events[0]?.costMicros).toBeGreaterThan(0);
+  });
+
+  it("meters a billed embedding request even when a later request fails and the message retries", async () => {
+    const { assistantId, sourceId } = await seedOrgAndAssistant();
+    const { documentId, hash } = await seedDocument(sourceId, "Doc", "# A\n\nBody text.");
+    const events: UsageEvent[] = [];
+    // One request bills 40 tokens, then the next request fails.
+    const embedder: Embedder = {
+      dimensions: fakeEmbedder().dimensions,
+      async embed(_texts, onBilled) {
+        await onBilled(40);
+        throw new Error("second embedding request failed");
+      },
+    };
+    const msg = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash });
+
+    await runIngestBatch(
+      { messages: [msg] },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder,
+        retriever: memoryRetriever(),
+        usage: { record: async (event) => void events.push(event) },
+      },
+    );
+
+    expect(msg.retried).toBe(true);
+    expect(events).toEqual([
+      expect.objectContaining({
+        orgId: TEST_ORG_ID,
+        assistantId,
+        messages: 0,
+        costMicros: embeddingCostMicros(40),
+      }),
+    ]);
   });
 
   it("replaces chunk rows with fresh chunk ids and removes stale vectors on re-index", async () => {
@@ -196,7 +253,7 @@ describe("ingest consumer", () => {
 
     await runIngestBatch(
       { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash1 })] },
-      { db: env.DB, docs: env.DOCS, embedder, retriever },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever },
     );
     const oldChunks = await tenant.documents.listChunks(documentId);
     expect(oldChunks).toHaveLength(2);
@@ -218,7 +275,7 @@ describe("ingest consumer", () => {
 
     await runIngestBatch(
       { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 })] },
-      { db: env.DB, docs: env.DOCS, embedder, retriever },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever },
     );
 
     const newChunks = await tenant.documents.listChunks(documentId);
@@ -236,9 +293,9 @@ describe("ingest consumer", () => {
     const baseEmbedder = fakeEmbedder();
     const countingEmbedder: Embedder = {
       dimensions: baseEmbedder.dimensions,
-      async embed(texts) {
+      async embed(texts, onBilled) {
         embedCalls++;
-        return baseEmbedder.embed(texts);
+        return baseEmbedder.embed(texts, onBilled);
       },
     };
     const retriever = memoryRetriever();
@@ -248,13 +305,25 @@ describe("ingest consumer", () => {
 
     await runIngestBatch(
       { messages: [msg1] },
-      { db: env.DB, docs: env.DOCS, embedder: countingEmbedder, retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: countingEmbedder,
+        retriever,
+      },
     );
     const chunksAfterFirst = await tenant.documents.listChunks(documentId);
 
     await runIngestBatch(
       { messages: [msg2] },
-      { db: env.DB, docs: env.DOCS, embedder: countingEmbedder, retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: countingEmbedder,
+        retriever,
+      },
     );
 
     expect(msg1.acked).toBe(true);
@@ -322,7 +391,7 @@ describe("ingest consumer", () => {
     // Process newer message first.
     await runIngestBatch(
       { messages: [newMsg] },
-      { db: env.DB, docs: env.DOCS, embedder, retriever },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever },
     );
     const chunksAfterNew = await tenant.documents.listChunks(newMsg.body.documentId);
     expect(chunksAfterNew.map((c) => c.text)).toEqual(["New content."]);
@@ -333,12 +402,13 @@ describe("ingest consumer", () => {
       { messages: [oldMsg] },
       {
         db: env.DB,
+        resolveOrg: acceptQueuedOrg,
         docs: env.DOCS,
         embedder: {
           dimensions: embedder.dimensions,
-          async embed(texts) {
+          async embed(texts, onBilled) {
             embedCallsOnOld++;
-            return embedder.embed(texts);
+            return embedder.embed(texts, onBilled);
           },
         },
         retriever,
@@ -396,16 +466,22 @@ describe("ingest consumer", () => {
 
     const pausingEmbedder: Embedder = {
       dimensions: baseEmbedder.dimensions,
-      async embed(texts) {
+      async embed(texts, onBilled) {
         embedEntered();
         await embedGate;
-        return baseEmbedder.embed(texts);
+        return baseEmbedder.embed(texts, onBilled);
       },
     };
 
     const oldRun = runIngestBatch(
       { messages: [oldMsg] },
-      { db: env.DB, docs: env.DOCS, embedder: pausingEmbedder, retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: pausingEmbedder,
+        retriever,
+      },
     );
 
     await embedStarted;
@@ -446,7 +522,13 @@ describe("ingest consumer", () => {
     // Process the new message; D1 holds only the new content's chunks.
     await runIngestBatch(
       { messages: [newMsg] },
-      { db: env.DB, docs: env.DOCS, embedder: baseEmbedder, retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: baseEmbedder,
+        retriever,
+      },
     );
     expect(newMsg.acked).toBe(true);
     const finalChunks = await tenant.documents.listChunks(newMsg.body.documentId);
@@ -469,7 +551,13 @@ describe("ingest consumer", () => {
 
     await runIngestBatch(
       { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash1 })] },
-      { db: env.DB, docs: env.DOCS, embedder: baseEmbedder, retriever: baseRetriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: baseEmbedder,
+        retriever: baseRetriever,
+      },
     );
     const v1Chunks = await tenant.documents.listChunks(documentId);
     expect(v1Chunks.map((c) => c.text)).toEqual(["Initial."]);
@@ -496,6 +584,7 @@ describe("ingest consumer", () => {
       { messages: [embedFailMsg] },
       {
         db: env.DB,
+        resolveOrg: acceptQueuedOrg,
         docs: env.DOCS,
         embedder: {
           dimensions: baseEmbedder.dimensions,
@@ -517,6 +606,7 @@ describe("ingest consumer", () => {
       { messages: [upsertFailMsg] },
       {
         db: env.DB,
+        resolveOrg: acceptQueuedOrg,
         docs: env.DOCS,
         embedder: baseEmbedder,
         retriever: {
@@ -546,7 +636,13 @@ describe("ingest consumer", () => {
     const commitFailMsg = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 });
     await runIngestBatch(
       { messages: [commitFailMsg] },
-      { db: failingDb, docs: env.DOCS, embedder: baseEmbedder, retriever: baseRetriever },
+      {
+        db: failingDb,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: baseEmbedder,
+        retriever: baseRetriever,
+      },
     );
     expect(commitFailMsg.retried).toBe(true);
     expect(commitFailMsg.acked).toBe(false);
@@ -557,7 +653,13 @@ describe("ingest consumer", () => {
     const retryMsg = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 });
     await runIngestBatch(
       { messages: [retryMsg] },
-      { db: env.DB, docs: env.DOCS, embedder: baseEmbedder, retriever: baseRetriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: baseEmbedder,
+        retriever: baseRetriever,
+      },
     );
     expect(retryMsg.acked).toBe(true);
     const v2Chunks = await tenant.documents.listChunks(documentId);
@@ -602,7 +704,13 @@ describe("ingest consumer", () => {
 
     await runIngestBatch(
       { messages: [msg] },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever,
+      },
     );
 
     expect(msg.acked).toBe(true);
@@ -663,7 +771,7 @@ describe("ingest consumer", () => {
           makeMessage({ orgId: orgB.orgId, documentId: docB.documentId, contentHash: docB.hash }),
         ],
       },
-      { db: env.DB, docs: env.DOCS, embedder, retriever },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever },
     );
 
     const a1Chunks = await docA1.tenant.documents.listChunks(docA1.documentId);
@@ -716,7 +824,13 @@ describe("ingest consumer", () => {
 
     await runIngestBatch(
       { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash1 })] },
-      { db: env.DB, docs: env.DOCS, embedder, retriever: baseRetriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder,
+        retriever: baseRetriever,
+      },
     );
 
     const v2Markdown = "# V2\n\nSecond.";
@@ -745,7 +859,13 @@ describe("ingest consumer", () => {
     const msg = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 });
     await runIngestBatch(
       { messages: [msg] },
-      { db: env.DB, docs: env.DOCS, embedder, retriever: failingCleanupRetriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder,
+        retriever: failingCleanupRetriever,
+      },
     );
 
     expect(msg.acked).toBe(true);
@@ -791,20 +911,23 @@ describe("ingest consumer", () => {
     await pushDocuments(pushDeps, scope, { documents: [docB] });
     const msgB = makeMessage(queue[1] as IngestQueueMessage);
 
-    await runIngestBatch({ messages: [msgB] }, { db: env.DB, docs: env.DOCS, embedder, retriever });
+    await runIngestBatch(
+      { messages: [msgB] },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever },
+    );
 
     await pushDocuments(pushDeps, scope, { documents: [docA] });
     const msgA2 = makeMessage(queue[2] as IngestQueueMessage);
 
     await runIngestBatch(
       { messages: [msgA2] },
-      { db: env.DB, docs: env.DOCS, embedder, retriever },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever },
     );
 
     // Deliver old message for A last: must ack without deleting the second A's body.
     await runIngestBatch(
       { messages: [msgA1] },
-      { db: env.DB, docs: env.DOCS, embedder, retriever },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever },
     );
 
     expect(msgB.acked).toBe(true);
@@ -830,11 +953,11 @@ describe("ingest consumer", () => {
     const baseEmbedder = fakeEmbedder();
     const flakyEmbedder: Embedder = {
       dimensions: baseEmbedder.dimensions,
-      async embed(texts) {
+      async embed(texts, onBilled) {
         if (texts.some((t) => t.includes("Second doc."))) {
           throw new Error("embedder failed for doc2");
         }
-        return baseEmbedder.embed(texts);
+        return baseEmbedder.embed(texts, onBilled);
       },
     };
     const retriever = memoryRetriever();
@@ -857,7 +980,13 @@ describe("ingest consumer", () => {
 
     await runIngestBatch(
       { messages: [msg1, msg2, msg3] },
-      { db: env.DB, docs: env.DOCS, embedder: flakyEmbedder, retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: flakyEmbedder,
+        retriever,
+      },
     );
 
     expect(msg1.acked).toBe(true);

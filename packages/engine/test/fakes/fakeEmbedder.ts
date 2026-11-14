@@ -33,11 +33,12 @@ function hashVector(text: string, dimensions: number): number[] {
 export function fakeEmbedder(dimensions: number = EMBEDDING_MODEL.dimensions): Embedder {
   return {
     dimensions,
-    async embed(texts) {
+    async embed(texts, onBilled) {
       // A rough, deterministic token count so metering paths have something
-      // to record.
+      // to record. One call stands for one provider request.
       const tokens = texts.reduce((sum, text) => sum + Math.ceil(text.length / 4), 0);
-      return { vectors: texts.map((text) => hashVector(text, dimensions)), tokens };
+      if (tokens > 0) await onBilled(tokens);
+      return { vectors: texts.map((text) => hashVector(text, dimensions)) };
     },
   };
 }

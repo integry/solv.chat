@@ -1,5 +1,6 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { assetBody } from "../../src/admin/assets.js";
 import { createTestApp, fakeSeams } from "../helpers/app.js";
 
 const unauthenticatedApp = () =>
@@ -64,5 +65,19 @@ describe("admin static assets", () => {
     await waitOnExecutionContext(missingCtx);
 
     expect(missingRes.status).toBe(404);
+  });
+
+  it("serves a binary asset byte for byte", async () => {
+    // PNG signature plus bytes that are not valid UTF-8 on their own.
+    const bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00, 0x80];
+    const body = assetBody({
+      body: btoa(String.fromCharCode(...bytes)),
+      type: "image/png",
+      encoding: "base64",
+    });
+    const served = new Uint8Array(await new Response(body).arrayBuffer());
+    expect([...served]).toEqual(bytes);
+
+    expect(assetBody({ body: "a{}", type: "text/css", encoding: "utf8" })).toBe("a{}");
   });
 });

@@ -1,6 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
+import { normalizeQuestionText } from "../../src/db/messages.js";
 import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
 const ORG_A = TEST_ORG_ID;
@@ -56,6 +57,8 @@ async function seedConversation(
   return id;
 }
 
+const lastQuestion = new Map<string, string>();
+
 async function seedMessage(args: {
   orgId: string;
   conversationId: string;
@@ -64,11 +67,18 @@ async function seedMessage(args: {
   createdAt: number;
   answered?: boolean;
   citations?: Array<{ url: string; title: string }>;
+  /** For a reply; defaults to the last question seeded in the conversation. */
+  replyTo?: string;
 }): Promise<string> {
   const id = newId("msg");
+  const replyTo =
+    args.role === "assistant"
+      ? (args.replyTo ?? lastQuestion.get(args.conversationId) ?? null)
+      : null;
+  if (args.role === "user") lastQuestion.set(args.conversationId, id);
   await env.DB.prepare(
-    `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 10, 5, ?7, ?8)`,
+    `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at, reply_to, question_key)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 10, 5, ?7, ?8, ?9, ?10)`,
   )
     .bind(
       id,
@@ -79,6 +89,8 @@ async function seedMessage(args: {
       JSON.stringify(args.citations ?? []),
       args.answered === false ? 0 : 1,
       args.createdAt,
+      replyTo,
+      args.role === "user" ? normalizeQuestionText(args.content) : null,
     )
     .run();
   return id;

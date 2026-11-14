@@ -230,4 +230,20 @@ describe("passwordAuth", () => {
       }
     }
   });
+
+  it("resolves every session-less request to the single org, and refuses a queued message naming another", async () => {
+    const auth = passwordAuth(ENV, env.DB);
+    expect(await auth.resolveOrg({ kind: "public_key", publicKey: "pk_any" })).toBe(SINGLE_ORG_ID);
+    expect(await auth.resolveOrg({ kind: "message", messageId: "msg_any" })).toBe(SINGLE_ORG_ID);
+    expect(await auth.resolveOrg({ kind: "ingest_key", assistantId: "ast_any" })).toBe(
+      SINGLE_ORG_ID,
+    );
+    expect(await auth.resolveOrg({ kind: "preflight", origin: "https://a.example" })).toBe(
+      SINGLE_ORG_ID,
+    );
+    expect(await auth.resolveOrg({ kind: "queued_ingest", orgId: SINGLE_ORG_ID })).toBe(
+      SINGLE_ORG_ID,
+    );
+    expect(await auth.resolveOrg({ kind: "queued_ingest", orgId: "org_elsewhere" })).toBeNull();
+  });
 });

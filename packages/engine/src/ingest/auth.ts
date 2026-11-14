@@ -1,5 +1,6 @@
 import { assistantIngestKeyHash } from "../db/public.js";
 import type { IngestScope } from "../db/tenant.js";
+import type { AuthProvider } from "../seams/types.js";
 import { constantTimeEqual, sha256Hex } from "../util/crypto.js";
 
 function extractBearerToken(request: Request): string | null {
@@ -12,23 +13,28 @@ function extractBearerToken(request: Request): string | null {
 /**
  * Resolves a bearer ingest key to an `IngestScope`.
  *
- * The URL's `:assistantId` is used only inside the lookup, and `orgId` comes
- * from the row that matched — never from the URL or body. A key for another
- * assistant matches no row and gets the same 401 as a wrong key.
+ * `orgId` comes from the auth seam, never from the URL or body; the URL's
+ * `:assistantId` is looked up only inside that org. A key for another
+ * assistant, or an assistant in another org, matches no row and gets the
+ * same 401 as a wrong key.
  */
 export async function ingestScopeFor(
   db: D1Database,
+  auth: Pick<AuthProvider, "resolveOrg">,
   request: Request,
   assistantIdFromUrl: string,
 ): Promise<IngestScope | null> {
   const presented = extractBearerToken(request);
   if (presented === null || assistantIdFromUrl === "") return null;
 
+  const orgId = await auth.resolveOrg({ kind: "ingest_key", assistantId: assistantIdFromUrl });
+  if (orgId === null) return null;
+
   const presentedHash = await sha256Hex(presented);
-  const row = await assistantIngestKeyHash(db, assistantIdFromUrl);
+  const row = await assistantIngestKeyHash(db, orgId, assistantIdFromUrl);
   if (row === null || !constantTimeEqual(presentedHash, row.ingestKeyHash)) {
     return null;
   }
 
-  return { orgId: row.orgId, assistantId: row.id };
+  return { orgId, assistantId: row.id };
 }

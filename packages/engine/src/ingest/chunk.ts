@@ -4,6 +4,15 @@
 // overlap keeps a sentence that straddles a split retrievable from either side.
 export const MAX_CHARS = 1200;
 export const OVERLAP_CHARS = 150;
+// A heading longer than this is cut. Six levels of it keep the path (which is
+// embedded with the chunk and shown in the prompt) far inside the embedding
+// model's input limit, whatever a document's heading lines look like.
+export const MAX_HEADING_CHARS = 200;
+// Every chunk is one statement in the single D1 batch that commits a
+// document, and that batch must stay under 2,000 statements (see
+// `replaceChunks`). A normal 1 MiB document yields about 900 chunks; only one
+// made of thousands of tiny sections reaches this, and it is packed first.
+export const MAX_CHUNKS = 1500;
 
 export interface Chunk {
   ordinal: number;
@@ -283,7 +292,7 @@ export function chunkMarkdown(markdown: string): Chunk[] {
     if (heading !== null) {
       flush();
       const depth = heading[1]?.length ?? 1;
-      const text = (heading[2] ?? "").trim();
+      const text = (heading[2] ?? "").trim().slice(0, MAX_HEADING_CHARS).trimEnd();
       while (stack.length > 0 && (stack[stack.length - 1]?.depth ?? 0) >= depth) {
         stack.pop();
       }
@@ -295,5 +304,71 @@ export function chunkMarkdown(markdown: string): Chunk[] {
   }
 
   flush();
-  return chunks;
+  return chunks.length > MAX_CHUNKS ? limitChunkCount(chunks) : chunks;
+}
+
+function commonPrefix(a: string[], b: string[]): string[] {
+  let n = 0;
+  while (n < a.length && n < b.length && a[n] === b[n]) n++;
+  return a.slice(0, n);
+}
+
+/** A member's text under `base`: its own deeper headings become heading lines. */
+function renderUnder(base: string[], chunk: Chunk): string {
+  const lines = chunk.headingPath
+    .slice(base.length)
+    .map((heading, i) => `${"#".repeat(Math.min(6, base.length + i + 1))} ${heading}`);
+  return [...lines, chunk.text].join("\n\n");
+}
+
+/**
+ * Brings a document made of many tiny sections under `MAX_CHUNKS` without
+ * losing words: neighbouring chunks are packed into one up to `MAX_CHARS`,
+ * keeping the headings they share as the path and writing the rest into the
+ * text. Deterministic, so the same document always packs the same way. A
+ * document still over the cap after packing (only possible with very deep,
+ * repeated heading paths) keeps its first `MAX_CHUNKS` chunks; failing the
+ * whole document would retry it into the dead-letter queue with nothing
+ * indexed at all.
+ */
+function limitChunkCount(chunks: Chunk[]): Chunk[] {
+  const groups: Chunk[][] = [];
+  let current: Chunk[] = [];
+  let size = 0;
+  for (const chunk of chunks) {
+    // Measured against an empty base: an upper bound on the rendered size,
+    // since a shared path only removes heading lines.
+    const own = renderUnder([], chunk).length;
+    if (current.length > 0 && size + 2 + own > MAX_CHARS) {
+      groups.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(chunk);
+    size += (size === 0 ? 0 : 2) + own;
+  }
+  if (current.length > 0) groups.push(current);
+
+  const packed = groups.map((group, ordinal): Chunk => {
+    const [first] = group;
+    if (group.length === 1 && first !== undefined) return { ...first, ordinal };
+    const base = group.reduce(
+      (prefix, chunk) => commonPrefix(prefix, chunk.headingPath),
+      first?.headingPath ?? [],
+    );
+    return {
+      ordinal,
+      headingPath: base,
+      text: group.map((chunk) => renderUnder(base, chunk)).join("\n\n"),
+    };
+  });
+
+  if (packed.length > MAX_CHUNKS) {
+    console.warn("chunkMarkdown: document truncated to the chunk cap", {
+      chunks: packed.length,
+      kept: MAX_CHUNKS,
+    });
+    return packed.slice(0, MAX_CHUNKS);
+  }
+  return packed;
 }

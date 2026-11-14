@@ -100,7 +100,7 @@ describe("chat/answer", () => {
 
     const {
       vectors: [vec],
-    } = await embedder.embed(["How do I reset my password?"]);
+    } = await embedder.embed(["How do I reset my password?"], async () => {});
     await retriever.upsert([
       {
         chunkId: "chk_1",
@@ -219,16 +219,27 @@ describe("chat/answer", () => {
     expect(events[0]).toEqual({ type: "token", text: "Published fallback" });
     expect(events[1]?.type).toBe("done");
 
-    expect(usageSpy).toHaveBeenCalledTimes(1);
-    expect(usageSpy).toHaveBeenCalledWith(
+    // The question's embedding is its own event, recorded when billed; the
+    // answer counts a message and no model spend.
+    expect(usageSpy).toHaveBeenCalledTimes(2);
+    expect(usageSpy).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        orgId: TEST_ORG_ID,
+        assistantId: "ast_1",
+        messages: 0,
+        costMicros: embeddingCostMicros(QUESTION_TOKENS),
+      }),
+    );
+    expect(usageSpy).toHaveBeenNthCalledWith(
+      2,
       expect.objectContaining({
         orgId: TEST_ORG_ID,
         assistantId: "ast_1",
         messages: 1,
         tokensIn: 0,
         tokensOut: 0,
-        // No model call, but the question was still embedded.
-        costMicros: embeddingCostMicros(QUESTION_TOKENS),
+        costMicros: 0,
       }),
     );
 
@@ -617,7 +628,8 @@ describe("chat/answer", () => {
     }
 
     expect(await tenant.conversations.list("ast_1")).toHaveLength(0);
-    expect(usageSpy).toHaveBeenCalledTimes(1);
+    // The question's embedding, then the answer.
+    expect(usageSpy).toHaveBeenCalledTimes(2);
     expect(seenRequests[0]?.messages).toHaveLength(3);
     expect(seenRequests[0]?.messages[0]).toEqual({ role: "user", content: "Prior question" });
     expect(seenRequests[0]?.messages[1]).toEqual({ role: "assistant", content: "Prior answer" });
@@ -693,13 +705,17 @@ describe("chat/answer", () => {
 
     const events1 = parseSseBody(await res1.text());
     expect(events1.map((e) => e.type)).toEqual(["token", "error"]);
-    expect(usageWithTokens).toHaveBeenCalledTimes(1);
-    expect(usageWithTokens).toHaveBeenCalledWith(
+    expect(usageWithTokens).toHaveBeenCalledTimes(2);
+    expect(usageWithTokens).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ messages: 0, costMicros: embeddingCostMicros(QUESTION_TOKENS) }),
+    );
+    expect(usageWithTokens).toHaveBeenNthCalledWith(
+      2,
       expect.objectContaining({
         tokensIn: 120,
         tokensOut: 30,
-        costMicros:
-          costMicros(ANTHROPIC_MODELS.fast, 120, 30) + embeddingCostMicros(QUESTION_TOKENS),
+        costMicros: costMicros(ANTHROPIC_MODELS.fast, 120, 30),
       }),
     );
 
@@ -748,6 +764,88 @@ describe("chat/answer", () => {
       }),
     );
   });
+
+  it.each([
+    ["the retriever query", "retriever"],
+    ["the chunk lookup in D1", "resolve"],
+  ] as const)(
+    "keeps the question's billed embedding when %s fails afterwards",
+    async (_label, failing) => {
+      const usageSpy = vi.fn(async () => {});
+      const brokenRetriever = {
+        ...retriever,
+        async query(args: Parameters<typeof retriever.query>[0]) {
+          if (failing === "retriever") throw new Error("vectorize unavailable");
+          // A hit whose id D1 cannot resolve: resolveChunks reads D1, which is
+          // made to fail below.
+          return (await retriever.query(args)).length > 0
+            ? [{ chunkId: "chk_missing", score: 0.99 }]
+            : [];
+        },
+      };
+      const providerSpy = vi.fn();
+      const app = createApp(fakeSeams({ usage: { record: usageSpy } }), {
+        chat: {
+          embedder,
+          retriever: brokenRetriever,
+          provider: {
+            name: "anthropic",
+            model: ANTHROPIC_MODELS.fast.id,
+            async *stream() {
+              providerSpy();
+              yield { kind: "text", text: "unused" };
+            },
+          },
+        },
+      });
+
+      const db = env.DB;
+      const failingDb =
+        failing === "resolve"
+          ? (new Proxy(db, {
+              get(target, prop, receiver) {
+                if (prop === "prepare") {
+                  return (sql: string) => {
+                    if (/FROM chunks/i.test(sql)) throw new Error("d1 unavailable");
+                    return target.prepare(sql);
+                  };
+                }
+                const value = Reflect.get(target, prop, receiver);
+                return typeof value === "function" ? value.bind(target) : value;
+              },
+            }) as D1Database)
+          : db;
+
+      const ctx = createExecutionContext();
+      const res = await app.fetch(
+        new Request("https://engine.example/v1/chat", {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: "https://site.example" },
+          body: JSON.stringify({
+            protocol: 1,
+            assistant: "pk_ans_1",
+            visitorId: "vis_1",
+            message: "How do I reset my password?",
+          }),
+        }),
+        { ...env, DB: failingDb },
+        ctx,
+      );
+      await res.text().catch(() => "");
+      await waitOnExecutionContext(ctx);
+
+      expect(providerSpy).not.toHaveBeenCalled();
+      expect(usageSpy).toHaveBeenCalledTimes(1);
+      expect(usageSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orgId: TEST_ORG_ID,
+          assistantId: "ast_1",
+          messages: 0,
+          costMicros: embeddingCostMicros(QUESTION_TOKENS),
+        }),
+      );
+    },
+  );
 
   it("F5: /api/admin/chat serves draft for authenticated owner and returns 401 on expired session even when Worker origin is allowed", async () => {
     await tenant.assistants.update("ast_1", {

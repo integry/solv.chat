@@ -12,7 +12,7 @@ import {
 } from "../../src/ingest/documents.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
-import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
+import { acceptQueuedOrg, createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 
@@ -107,7 +107,13 @@ describe("ingest documents", () => {
           retry() {},
         })),
       },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever: memoryRetriever() },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever: memoryRetriever(),
+      },
     );
 
     // Re-pushing identical content after indexing must perform zero R2 puts and zero queue sends.
@@ -179,7 +185,13 @@ describe("ingest documents", () => {
           retry() {},
         })),
       },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever: memoryRetriever() },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever: memoryRetriever(),
+      },
     );
 
     expect(await push("A", "B\nC")).toEqual({ written: 1, unchanged: 0, deleted: 0 });
@@ -246,7 +258,13 @@ describe("ingest documents", () => {
           retry() {},
         })),
       },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever,
+      },
     );
 
     expect(retriever.all()).toHaveLength(2);
@@ -438,7 +456,13 @@ describe("ingest documents", () => {
           retry() {},
         })),
       },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever: memoryRetriever() },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever: memoryRetriever(),
+      },
     );
 
     const urlUpdate = await pushDocuments({ tenant, docs, queue }, scope, {
@@ -475,6 +499,87 @@ describe("ingest documents", () => {
     expect(queue.sent).toHaveLength(1);
   });
 
+  it.each(["prune", "externalIds"] as const)(
+    "deletes a large source by %s with one vector call and one R2 call",
+    async (mode) => {
+      const { id: assistantId } = await createAssistantWithKey();
+      const scope = { orgId: TEST_ORG_ID, assistantId };
+      const tenant = forIngestScope(env.DB, scope);
+      const queue = countingQueue();
+      const retriever = memoryRetriever();
+      // Many documents, one call each for vectors and R2 (grouping past D1's
+      // parameter cap is covered in test/db/documentsBulk.test.ts).
+      const total = 30;
+      const ids = Array.from({ length: total }, (_, i) => `doc-${i}`);
+      for (let i = 0; i < total; i += 100) {
+        await pushDocuments({ tenant, docs: env.DOCS, queue }, scope, {
+          documents: ids.slice(i, i + 100).map((externalId) => ({
+            externalId,
+            url: `https://example.com/${externalId}`,
+            title: externalId,
+            markdown: `# ${externalId}\n\nBody of ${externalId}.`,
+          })),
+        });
+      }
+      await runIngestBatch(
+        {
+          messages: queue.sent.map((body) => ({
+            id: newId("msg"),
+            timestamp: new Date(),
+            attempts: 1,
+            body,
+            ack() {},
+            retry() {},
+          })),
+        },
+        {
+          db: env.DB,
+          resolveOrg: acceptQueuedOrg,
+          docs: env.DOCS,
+          embedder: fakeEmbedder(),
+          retriever,
+        },
+      );
+      expect(retriever.all()).toHaveLength(total);
+      const sourceId = (await tenant.sources.list(assistantId))[0]?.id ?? "";
+      const bodyKeys = (await tenant.documents.listBySource(sourceId)).map((d) => d.bodyKey);
+
+      const removeCalls: string[][] = [];
+      const deleteCalls: Array<string | string[]> = [];
+      const result = await deleteDocuments(
+        {
+          tenant,
+          docs: {
+            async delete(keys: string | string[]) {
+              deleteCalls.push(keys);
+              return env.DOCS.delete(keys);
+            },
+          },
+          retriever: {
+            async remove(chunkIds: string[]) {
+              removeCalls.push(chunkIds);
+              return retriever.remove(chunkIds);
+            },
+          },
+        },
+        scope,
+        mode === "prune" ? { prune: true, keep: [] } : { externalIds: [...ids, "not-there"] },
+      );
+
+      expect(result).toEqual({ written: 0, unchanged: 0, deleted: total });
+      expect(await tenant.documents.listBySource(sourceId)).toHaveLength(0);
+      expect(removeCalls).toHaveLength(1);
+      expect(removeCalls[0]).toHaveLength(total);
+      expect(retriever.all()).toHaveLength(0);
+      expect(deleteCalls).toHaveLength(1);
+      expect([...(deleteCalls[0] as string[])].sort()).toEqual([...bodyKeys].sort());
+      for (const key of bodyKeys) {
+        expect(await env.DOCS.head(key as string)).toBeNull();
+      }
+    },
+    60_000,
+  );
+
   it("deletes D1 row first and succeeds when best-effort vector or R2 cleanup fails", async () => {
     const { id: assistantId } = await createAssistantWithKey();
     const scope = { orgId: TEST_ORG_ID, assistantId };
@@ -504,7 +609,13 @@ describe("ingest documents", () => {
           retry() {},
         })),
       },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever,
+      },
     );
 
     const failingDocs = {
@@ -582,7 +693,13 @@ describe("ingest documents", () => {
           retry() {},
         })),
       },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever,
+      },
     );
 
     expect(retriever.all()).toHaveLength(1);

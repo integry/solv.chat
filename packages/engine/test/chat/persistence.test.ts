@@ -93,7 +93,7 @@ describe("chat/persistence", () => {
 
     const {
       vectors: [vec],
-    } = await embedder.embed(["How does billing work?"]);
+    } = await embedder.embed(["How does billing work?"], async () => {});
     await retriever.upsert([
       {
         chunkId: "chk_1",

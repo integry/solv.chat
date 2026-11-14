@@ -97,6 +97,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           queue: env.INGEST_QUEUE,
           retriever: vectorizeRetriever(env.VECTORS),
           limits: seams.limits,
+          auth: seams.auth,
         });
       }
       if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
@@ -158,7 +159,15 @@ export function createApp(seams: Seams, options?: AppOptions): App {
       }
 
       const retriever = vectorizeRetriever(env.VECTORS);
-      for (const [orgId, messages] of byOrg) {
+      const resolveOrg = (orgId: string) => seams.auth.resolveOrg({ kind: "queued_ingest", orgId });
+      for (const [claimedOrgId, messages] of byOrg) {
+        // The message's org is a claim until the auth seam vouches for it:
+        // no key is fetched and nothing is read for an org it refuses.
+        const orgId = await resolveOrg(claimedOrgId);
+        if (orgId === null) {
+          for (const message of messages) message.ack();
+          continue;
+        }
         const apiKey = await seams.keys.embeddingKey(orgId);
         await runIngestBatch(
           { messages },
@@ -168,6 +177,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
             embedder: openAIEmbedder({ apiKey }),
             retriever,
             usage: seams.usage,
+            resolveOrg,
           },
         );
       }

@@ -306,6 +306,38 @@ describe("admin versions API", () => {
     expect(JSON.parse(freshDraftRow?.config ?? "{}")).toEqual(published.config);
   });
 
+  it("saves a draft whose stored config does not round-trip byte for byte", async () => {
+    const [row] = await tableVersions(assistantId);
+    // A hand edit: reformatted JSON plus a key the schema drops on parse.
+    const handEdited = JSON.stringify(
+      { ...JSON.parse(row?.config ?? "{}"), legacy: true },
+      null,
+      2,
+    );
+    await env.DB.prepare("UPDATE assistant_versions SET config = ?1 WHERE id = ?2")
+      .bind(handEdited, row?.id)
+      .run();
+
+    const res = await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Saved anyway" },
+    });
+    expect(res.status).toBe(200);
+    const [saved] = await tableVersions(assistantId);
+    expect(JSON.parse(saved?.config ?? "{}").behaviour.greeting).toBe("Saved anyway");
+  });
+
+  it("still refuses a write when the stored config changed after it was read", async () => {
+    const tenant = forPrincipal(env.DB, { orgId: TEST_ORG_ID, userId: "owner", role: "owner" });
+    const read = await tenant.versions.draft(assistantId);
+    if (read === null) throw new Error("no draft");
+    await updateDraft(tenant, assistantId, { behaviour: { greeting: "Someone else" } });
+
+    const written = await tenant.versions.updateDraft(assistantId, read.config, read);
+    expect(written).toBe(false);
+    const [row] = await tableVersions(assistantId);
+    expect(JSON.parse(row?.config ?? "{}").behaviour.greeting).toBe("Someone else");
+  });
+
   it("overlapping partial saves to different sections preserve both changes", async () => {
     const tenant = forPrincipal(env.DB, {
       orgId: TEST_ORG_ID,

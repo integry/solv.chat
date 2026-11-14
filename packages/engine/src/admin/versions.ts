@@ -40,10 +40,7 @@ export async function updateDraft(
     const parsed = parseVersionConfig(body, existing.config);
     if (!parsed.ok) throw new BadRequest(parsed.errors);
 
-    const updated = await tenant.versions.updateDraft(assistantId, parsed.value, {
-      id: existing.id,
-      config: existing.config,
-    });
+    const updated = await tenant.versions.updateDraft(assistantId, parsed.value, existing);
     if (updated) {
       return { ...existing, config: parsed.value };
     }
