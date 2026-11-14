@@ -339,6 +339,7 @@ describe("chat/guards", () => {
       postCtx,
     );
     await waitOnExecutionContext(postCtx);
+    await post.text();
 
     expect(post.headers.get("access-control-allow-origin")).toBe("https://site.example");
     expect(post.headers.get("access-control-allow-origin")).not.toBe("*");

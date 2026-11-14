@@ -15,6 +15,7 @@ export default defineWorkersConfig(async () => {
       setupFiles: ["./test/setup.ts"],
       poolOptions: {
         workers: {
+          singleWorker: true,
           wrangler: { configPath: "./wrangler.jsonc" },
           miniflare: {
             bindings: {
