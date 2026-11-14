@@ -163,10 +163,11 @@ export function mcpFor(db: D1Database, orgId: string) {
     },
 
     async removeServer(id: string): Promise<boolean> {
-      const res = await prepare(db, "DELETE FROM mcp_servers WHERE org_id = ?1 AND id = ?2")
-        .bind(orgId, id)
-        .run();
-      return (res.meta.changes ?? 0) > 0;
+      const [, serverRes] = await db.batch([
+        prepare(db, "DELETE FROM mcp_tools WHERE org_id = ?1 AND server_id = ?2").bind(orgId, id),
+        prepare(db, "DELETE FROM mcp_servers WHERE org_id = ?1 AND id = ?2").bind(orgId, id),
+      ]);
+      return (serverRes?.meta.changes ?? 0) > 0;
     },
 
     async listTools(serverId: string): Promise<McpToolRow[]> {

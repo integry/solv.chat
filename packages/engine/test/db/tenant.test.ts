@@ -540,4 +540,262 @@ describe("db/tenant isolation", () => {
     expect((await ingestA.assistants.list()).map((a) => a.id)).toEqual(["ast_a"]);
     expect(await ingestA.assistants.get("ast_b")).toBeNull();
   });
+
+  it("removes a server along with its discovered tools without affecting other tenants", async () => {
+    await tenantA.assistants.create({
+      id: "ast_a",
+      name: "A",
+      publicKey: "pk_a",
+      allowedOrigins: [],
+      createdAt: 1000,
+    });
+    await tenantB.assistants.create({
+      id: "ast_b",
+      name: "B",
+      publicKey: "pk_b",
+      allowedOrigins: [],
+      createdAt: 1000,
+    });
+    await tenantA.mcp.createServer({
+      id: "mcp_a",
+      assistantId: "ast_a",
+      label: "A",
+      url: "https://a.test/mcp",
+      authKind: "none",
+      secretCiphertext: null,
+      enabled: true,
+      createdAt: 1000,
+    });
+    await tenantB.mcp.createServer({
+      id: "mcp_b",
+      assistantId: "ast_b",
+      label: "B",
+      url: "https://b.test/mcp",
+      authKind: "none",
+      secretCiphertext: null,
+      enabled: true,
+      createdAt: 1000,
+    });
+    await tenantA.mcp.upsertTool({
+      id: "tool_a",
+      serverId: "mcp_a",
+      name: "search",
+      description: "Search A",
+      inputSchema: {},
+    });
+    await tenantB.mcp.upsertTool({
+      id: "tool_b",
+      serverId: "mcp_b",
+      name: "search",
+      description: "Search B",
+      inputSchema: {},
+    });
+
+    expect(await tenantA.mcp.removeServer("mcp_b")).toBe(false);
+    expect(await tenantB.mcp.getServer("mcp_b")).not.toBeNull();
+    expect((await tenantB.mcp.listTools("mcp_b")).map((t) => t.id)).toEqual(["tool_b"]);
+
+    expect(await tenantA.mcp.removeServer("mcp_a")).toBe(true);
+    expect(await tenantA.mcp.getServer("mcp_a")).toBeNull();
+    expect(await tenantA.mcp.listTools("mcp_a")).toEqual([]);
+  });
+
+  it("rejects child inserts referencing another tenant's parent", async () => {
+    await tenantB.assistants.create({
+      id: "ast_b",
+      name: "B",
+      publicKey: "pk_b",
+      allowedOrigins: [],
+      createdAt: 1000,
+    });
+    const cfg = defaultVersionConfig();
+
+    // A cannot occupy B's draft slot or insert via batch statement.
+    await expect(
+      tenantA.versions.createDraft({
+        id: "ver_a_hijack",
+        assistantId: "ast_b",
+        config: cfg,
+        createdAt: 1000,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      tenantA.versions.batch([
+        tenantA.versions.statements.insertDraft({
+          id: "ver_a_batch",
+          assistantId: "ast_b",
+          config: cfg,
+          createdAt: 1000,
+        }),
+      ]),
+    ).rejects.toThrow();
+
+    // B can still create its own draft unblocked.
+    await tenantB.versions.createDraft({
+      id: "ver_b",
+      assistantId: "ast_b",
+      config: cfg,
+      createdAt: 1001,
+    });
+    expect((await tenantB.versions.draft("ast_b"))?.id).toBe("ver_b");
+
+    await tenantB.sources.create({
+      id: "src_b",
+      assistantId: "ast_b",
+      kind: "push",
+      label: "Docs B",
+      settings: {},
+      createdAt: 1000,
+    });
+    await tenantB.documents.upsert({
+      id: "doc_b",
+      sourceId: "src_b",
+      externalId: "intro",
+      url: "https://b.test/intro",
+      title: "Intro B",
+      contentHash: "hb",
+      updatedAt: 1000,
+    });
+    await tenantB.documents.replaceChunks("doc_b", [
+      { id: "chk_b", ordinal: 0, text: "B", headingPath: "Intro" },
+    ]);
+    await tenantB.conversations.create({
+      id: "cnv_b",
+      assistantId: "ast_b",
+      visitorId: "vis_1",
+      startedAt: 1000,
+      pageUrl: "https://b.test",
+    });
+    await tenantB.messages.create({
+      id: "msg_b",
+      conversationId: "cnv_b",
+      role: "assistant",
+      content: "B",
+      citations: [],
+      toolCalls: null,
+      tokensIn: 1,
+      tokensOut: 1,
+      answered: true,
+      createdAt: 1000,
+    });
+    await tenantB.mcp.createServer({
+      id: "mcp_b",
+      assistantId: "ast_b",
+      label: "B",
+      url: "https://b.test/mcp",
+      authKind: "none",
+      secretCiphertext: null,
+      enabled: true,
+      createdAt: 1000,
+    });
+
+    await expect(
+      tenantA.sources.create({
+        id: "src_a_hijack",
+        assistantId: "ast_b",
+        kind: "push",
+        label: "Hijack",
+        settings: {},
+        createdAt: 1000,
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      tenantA.documents.upsert({
+        id: "doc_a_hijack",
+        sourceId: "src_b",
+        externalId: "hijack",
+        url: "https://a.test/hijack",
+        title: "Hijack",
+        contentHash: "ha",
+        updatedAt: 1000,
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      tenantA.documents.replaceChunks("doc_b", [
+        { id: "chk_a_hijack", ordinal: 0, text: "Hijack", headingPath: "" },
+      ]),
+    ).rejects.toThrow();
+    expect((await tenantB.documents.listChunks("doc_b")).map((c) => c.id)).toEqual(["chk_b"]);
+
+    await expect(
+      tenantA.conversations.create({
+        id: "cnv_a_hijack",
+        assistantId: "ast_b",
+        visitorId: "vis_a",
+        startedAt: 1000,
+        pageUrl: "https://a.test",
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      tenantA.messages.create({
+        id: "msg_a_hijack",
+        conversationId: "cnv_b",
+        role: "user",
+        content: "Hijack",
+        citations: [],
+        toolCalls: null,
+        tokensIn: 1,
+        tokensOut: 0,
+        answered: true,
+        createdAt: 1000,
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      tenantA.feedback.upsert({
+        id: "fb_a_hijack",
+        messageId: "msg_b",
+        visitorId: "vis_a",
+        value: "down",
+        note: "hijack",
+        createdAt: 1000,
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      tenantA.mcp.createServer({
+        id: "mcp_a_hijack",
+        assistantId: "ast_b",
+        label: "Hijack",
+        url: "https://a.test/mcp",
+        authKind: "none",
+        secretCiphertext: null,
+        enabled: true,
+        createdAt: 1000,
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      tenantA.mcp.upsertTool({
+        id: "tool_a_hijack",
+        serverId: "mcp_b",
+        name: "hijack",
+        description: "Hijack",
+        inputSchema: {},
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      tenantA.tests.create({
+        id: "tst_a_hijack",
+        assistantId: "ast_b",
+        question: "Hijack?",
+        expectation: { kind: "must_decline" },
+        createdAt: 1000,
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      tenantA.tests.createRun({
+        id: "run_a_hijack",
+        versionId: "ver_b",
+        startedAt: 1000,
+        results: [],
+        passed: false,
+      }),
+    ).rejects.toThrow();
+  });
 });
