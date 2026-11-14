@@ -4,15 +4,24 @@
  * update one without re-reading its source (AGENTS.md, "External facts").
  */
 
+export interface LongPromptPricing {
+  /** Input token count above which long-prompt rates apply to the whole request (`tokensIn > thresholdTokens`). */
+  thresholdTokens: number;
+  inputCostMicrosPerMillion: number;
+  outputCostMicrosPerMillion: number;
+}
+
 export interface ModelInfo {
   id: string;
   contextTokens: number;
   inputCostMicrosPerMillion: number;
   outputCostMicrosPerMillion: number;
+  longPrompt?: LongPromptPricing;
 }
 
 export type Tier = "fast" | "balanced";
 
+// Haiku 5.5 bills prompts >100,000 input tokens at $0.50/$2.50 per MTok; Sonnet 5.5 (and Opus 5.5) have no threshold.
 // Source: https://platform.claude.com/docs/en/about-claude/models/overview and https://platform.claude.com/docs/en/about-claude/pricing — checked 2026-11-14
 export const ANTHROPIC_MODELS: Record<Tier, ModelInfo> = {
   fast: {
@@ -20,6 +29,11 @@ export const ANTHROPIC_MODELS: Record<Tier, ModelInfo> = {
     contextTokens: 1_000_000,
     inputCostMicrosPerMillion: 100_000,
     outputCostMicrosPerMillion: 500_000,
+    longPrompt: {
+      thresholdTokens: 100_000,
+      inputCostMicrosPerMillion: 500_000,
+      outputCostMicrosPerMillion: 2_500_000,
+    },
   },
   balanced: {
     id: "claude-sonnet-5-5",
@@ -29,19 +43,30 @@ export const ANTHROPIC_MODELS: Record<Tier, ModelInfo> = {
   },
 };
 
-// Source: https://platform.openai.com/docs/models and https://platform.openai.com/docs/pricing — checked 2026-11-14
+// Both models are served by /v1/chat/completions and bill prompts >272,000 input tokens at 2x input, 1.5x output.
+// Source: https://developers.openai.com/api/docs/models and https://developers.openai.com/api/docs/pricing — checked 2026-11-14
 export const OPENAI_MODELS: Record<Tier, ModelInfo> = {
   fast: {
-    id: "gpt-5-mini",
-    contextTokens: 400_000,
-    inputCostMicrosPerMillion: 250_000,
-    outputCostMicrosPerMillion: 2_000_000,
+    id: "gpt-6-luna",
+    contextTokens: 1_050_000,
+    inputCostMicrosPerMillion: 100_000,
+    outputCostMicrosPerMillion: 500_000,
+    longPrompt: {
+      thresholdTokens: 272_000,
+      inputCostMicrosPerMillion: 200_000,
+      outputCostMicrosPerMillion: 750_000,
+    },
   },
   balanced: {
-    id: "gpt-5",
-    contextTokens: 400_000,
-    inputCostMicrosPerMillion: 1_250_000,
+    id: "gpt-6.1-sol",
+    contextTokens: 1_050_000,
+    inputCostMicrosPerMillion: 2_000_000,
     outputCostMicrosPerMillion: 10_000_000,
+    longPrompt: {
+      thresholdTokens: 272_000,
+      inputCostMicrosPerMillion: 4_000_000,
+      outputCostMicrosPerMillion: 15_000_000,
+    },
   },
 };
 
@@ -59,8 +84,10 @@ export const EMBEDDING_MODEL = {
  * accumulated over thousands of messages drifts.
  */
 export function costMicros(model: ModelInfo, tokensIn: number, tokensOut: number): number {
+  const rates =
+    model.longPrompt && tokensIn > model.longPrompt.thresholdTokens ? model.longPrompt : model;
   return Math.round(
-    (tokensIn * model.inputCostMicrosPerMillion + tokensOut * model.outputCostMicrosPerMillion) /
+    (tokensIn * rates.inputCostMicrosPerMillion + tokensOut * rates.outputCostMicrosPerMillion) /
       1_000_000,
   );
 }

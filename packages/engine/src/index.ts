@@ -3,6 +3,7 @@ export {
   ANTHROPIC_MODELS,
   costMicros,
   EMBEDDING_MODEL,
+  type LongPromptPricing,
   type ModelInfo,
   OPENAI_MODELS,
   type Tier,

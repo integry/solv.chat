@@ -11,6 +11,11 @@ describe("models", () => {
         expect(entry.contextTokens).toBeGreaterThan(0);
         expect(entry.inputCostMicrosPerMillion).toBeGreaterThanOrEqual(0);
         expect(entry.outputCostMicrosPerMillion).toBeGreaterThanOrEqual(0);
+        if (entry.longPrompt) {
+          expect(entry.longPrompt.thresholdTokens).toBeGreaterThan(0);
+          expect(entry.longPrompt.inputCostMicrosPerMillion).toBeGreaterThanOrEqual(0);
+          expect(entry.longPrompt.outputCostMicrosPerMillion).toBeGreaterThanOrEqual(0);
+        }
       }
     }
 
@@ -36,6 +41,25 @@ describe("models", () => {
     expect(cIn2).toBeLessThanOrEqual(cOut1);
     expect(cOut1).toBeLessThanOrEqual(cOut2);
     expect(cOut2).toBeGreaterThan(c0);
+  });
+
+  it("applies Haiku 5.5 long-prompt pricing strictly above 100,000 input tokens", () => {
+    const haiku = ANTHROPIC_MODELS.fast;
+    expect(costMicros(haiku, 99_999, 1_000)).toBe(10_500);
+    expect(costMicros(haiku, 100_000, 1_000)).toBe(10_500);
+    expect(costMicros(haiku, 100_001, 1_000)).toBe(52_501);
+  });
+
+  it("applies OpenAI long-prompt pricing strictly above 272,000 input tokens", () => {
+    const luna = OPENAI_MODELS.fast;
+    expect(costMicros(luna, 271_999, 1_000)).toBe(27_700);
+    expect(costMicros(luna, 272_000, 1_000)).toBe(27_700);
+    expect(costMicros(luna, 272_001, 1_000)).toBe(55_150);
+
+    const sol = OPENAI_MODELS.balanced;
+    expect(costMicros(sol, 271_999, 1_000)).toBe(553_998);
+    expect(costMicros(sol, 272_000, 1_000)).toBe(554_000);
+    expect(costMicros(sol, 272_001, 1_000)).toBe(1_103_004);
   });
 
   it("carries a source URL and checked date beside each table", () => {
