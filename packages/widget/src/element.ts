@@ -84,6 +84,7 @@ export class SolvChat extends HTMLElement {
   #initialized = false;
   #open = false;
   #sending = false;
+  #abortController: AbortController | null = null;
   #conversationId: string | null = null;
   #turns: SavedTurn[] = [];
   #config: WidgetPublicConfig = { ...DEFAULT_CONFIG };
@@ -106,16 +107,29 @@ export class SolvChat extends HTMLElement {
     }
 
     const assistant = this.#assistant();
-    if (this.#claimedAssistant === null && assistant) {
-      this.#claimedAssistant = assistant;
+    if (assistant) {
       claimConversation(assistant, this.#owner);
-      const saved = loadConversation(assistant);
-      if (saved !== null) {
-        this.#restore(saved);
+      if (this.#claimedAssistant === null) {
+        this.#claimedAssistant = assistant;
+        const saved = loadConversation(assistant);
+        if (saved !== null) {
+          this.#restore(saved);
+        }
       }
     }
 
     void this.#loadConfig();
+  }
+
+  disconnectedCallback(): void {
+    if (this.#abortController) {
+      this.#abortController.abort();
+      this.#abortController = null;
+      this.#sending = false;
+      if (this.#sendBtn) {
+        this.#sendBtn.disabled = false;
+      }
+    }
   }
 
   #assistant(): string {
@@ -595,6 +609,9 @@ export class SolvChat extends HTMLElement {
     this.#persist();
 
     let terminated = false;
+    const controller = new AbortController();
+    this.#abortController = controller;
+    const { signal } = controller;
 
     try {
       const requestBody: Record<string, unknown> = {
@@ -616,7 +633,10 @@ export class SolvChat extends HTMLElement {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(requestBody),
+        signal,
       });
+
+      if (signal.aborted) return;
 
       if (!response.ok || !response.body) {
         terminated = true;
@@ -625,6 +645,7 @@ export class SolvChat extends HTMLElement {
       }
 
       for await (const raw of readEventLines(response)) {
+        if (signal.aborted) break;
         const event = parseChatEventLine(raw.name, raw.data);
         // Unknown types are skipped, not an error: a newer engine will send event
         // types this cached bundle has never heard of, and the only acceptable
@@ -656,17 +677,22 @@ export class SolvChat extends HTMLElement {
         }
       }
 
-      if (!terminated) {
+      if (!terminated && !signal.aborted) {
         this.#markTurnInterrupted(bubble, assistantTurn);
       }
     } catch {
-      if (!terminated) {
+      if (!terminated && !signal.aborted) {
         this.#markTurnInterrupted(bubble, assistantTurn);
       }
     } finally {
-      this.#sending = false;
-      this.#sendBtn.disabled = false;
-      this.#persist();
+      if (this.#abortController === controller) {
+        this.#abortController = null;
+        this.#sending = false;
+        this.#sendBtn.disabled = false;
+      }
+      if (!signal.aborted) {
+        this.#persist();
+      }
     }
   }
 }

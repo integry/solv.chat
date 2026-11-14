@@ -455,13 +455,14 @@ describe("<solv-chat>", () => {
     expect(customElements.get("solv-chat")).toBeDefined();
   });
 
-  it("preserves live streaming state and final answer when reconnected mid-stream", async () => {
-    const encoder = new TextEncoder();
+  it("aborts the in-flight fetch signal when removed from the DOM", async () => {
+    let capturedSignal: AbortSignal | undefined;
     let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
 
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.endsWith("/v1/chat")) {
+        capturedSignal = init?.signal ?? undefined;
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
             streamController = controller;
@@ -475,33 +476,91 @@ describe("<solv-chat>", () => {
       return Response.json({});
     }) as typeof fetch;
 
+    const el = mountWidget("pk_abort_on_remove");
+    await flushAsync();
+    const root = shadow(el);
+
+    mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "In-flight question";
+    mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal?.aborted).toBe(false);
+    expect(streamController).toBeDefined();
+
+    el.remove();
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it("allows an element removed mid-stream and re-attached to claim ownership and send again", async () => {
+    const encoder = new TextEncoder();
+    let streamController1: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const signals: Array<AbortSignal | undefined> = [];
+    let chatCall = 0;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        chatCall += 1;
+        signals.push(init?.signal ?? undefined);
+        if (chatCall === 1) {
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              streamController1 = controller;
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        return new Response(
+          sseStream([
+            'event: token\ndata: {"text":"Second answer"}\n\n',
+            'event: done\ndata: {"messageId":"msg_re2","conversationId":"conv_re2"}\n\n',
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
     const el = mountWidget("pk_reconnect");
     await flushAsync();
     const root = shadow(el);
 
     mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
-    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Stream question";
+    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "First question";
     mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
     await flushAsync();
 
-    expect(streamController).toBeDefined();
-    streamController?.enqueue(encoder.encode('event: token\ndata: {"text":"First "}\n\n'));
+    expect(streamController1).toBeDefined();
+    streamController1?.enqueue(encoder.encode('event: token\ndata: {"text":"Partial "}\n\n'));
     await flushAsync();
 
-    // Reconnect the same element while the SSE stream is still open.
+    // Remove and re-attach the same element mid-stream.
     el.remove();
+    expect(signals[0]?.aborted).toBe(true);
+
     document.body.append(el);
     await flushAsync();
 
-    streamController?.enqueue(encoder.encode('event: token\ndata: {"text":"second"}\n\n'));
-    streamController?.enqueue(
-      encoder.encode('event: done\ndata: {"messageId":"msg_re","conversationId":"conv_re"}\n\n'),
-    );
-    streamController?.close();
+    // Re-attached element can immediately send a new message.
+    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Second question";
+    mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
     await flushAsync();
 
-    const assistantBubbles = root.querySelectorAll(".solv-bubble--assistant .solv-bubble-text");
-    expect(assistantBubbles[assistantBubbles.length - 1]?.textContent).toBe("First second");
+    // Stale chunks arriving on the aborted first stream must not overwrite storage.
+    streamController1?.enqueue(encoder.encode('event: token\ndata: {"text":"stale"}\n\n'));
+    streamController1?.enqueue(
+      encoder.encode('event: done\ndata: {"messageId":"msg_old","conversationId":"conv_old"}\n\n'),
+    );
+    streamController1?.close();
+    await flushAsync();
+
+    expect(chatCall).toBe(2);
+    expect(signals[1]?.aborted).toBe(false);
 
     const rawSaved = sessionStorage.getItem("solv-chat-open:pk_reconnect");
     expect(rawSaved).not.toBeNull();
@@ -509,10 +568,12 @@ describe("<solv-chat>", () => {
       conversationId: string | null;
       turns: Array<{ role: string; text: string; messageId?: string }>;
     };
-    expect(saved.conversationId).toBe("conv_re");
+    expect(saved.conversationId).toBe("conv_re2");
     expect(saved.turns).toEqual([
-      { role: "user", text: "Stream question" },
-      { role: "assistant", text: "First second", messageId: "msg_re" },
+      { role: "user", text: "First question" },
+      { role: "assistant", text: "Partial " },
+      { role: "user", text: "Second question" },
+      { role: "assistant", text: "Second answer", messageId: "msg_re2" },
     ]);
   });
 
