@@ -72,6 +72,27 @@ async function ensureConversation(
   return { conversationId, history: [] };
 }
 
+async function recordMessageUsage(
+  deps: AnswerDeps,
+  input: AnswerInput,
+  at: number,
+  tokensIn: number,
+  tokensOut: number,
+  cost: number,
+): Promise<void> {
+  // Usage goes through the seam, never straight into usage_daily: the hosted
+  // service meters and bills from these events.
+  await deps.usage.record({
+    orgId: input.orgId,
+    assistantId: input.assistantId,
+    at,
+    messages: 1,
+    tokensIn,
+    tokensOut,
+    costMicros: cost,
+  });
+}
+
 /**
  * Runs the retrieval, prompt, streaming, citation, persistence, and usage
  * pipeline for one visitor message.
@@ -132,6 +153,7 @@ export async function* answerMessage(
       answered: false,
       createdAt: clock(),
     });
+    await recordMessageUsage(deps, input, clock(), 0, 0, 0);
     yield { type: "done", messageId, conversationId };
     return;
   }
@@ -189,17 +211,14 @@ export async function* answerMessage(
     createdAt: clock(),
   });
 
-  // Usage goes through the seam, never straight into usage_daily: the hosted
-  // service meters and bills from these events.
-  await deps.usage.record({
-    orgId: input.orgId,
-    assistantId: input.assistantId,
-    at: clock(),
-    messages: 1,
+  await recordMessageUsage(
+    deps,
+    input,
+    clock(),
     tokensIn,
     tokensOut,
-    costMicros: costMicros(deps.model, tokensIn, tokensOut),
-  });
+    costMicros(deps.model, tokensIn, tokensOut),
+  );
 
   yield { type: "done", messageId, conversationId };
 }

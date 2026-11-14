@@ -35,6 +35,31 @@ export function corsHeaders(origin: string | null): Record<string, string> {
 }
 
 /**
+ * Per-IP rate limit, then the daily spend cap. Returns on the first failure so
+ * a rejected request costs nothing — no embedding, no model.
+ */
+export async function checkLimits(
+  limits: Limits,
+  assistant: Pick<PublicAssistant, "id" | "orgId">,
+  request: Request,
+): Promise<CheckFailure | null> {
+  const ip = request.headers.get("cf-connecting-ip") ?? "";
+  // Rate limit and spend cap are one seam call: the hosted service replaces the
+  // whole policy at once, which is what "Extension seams" intends.
+  const decision = await limits.check(assistant.orgId, assistant.id, { kind: "chat", ip });
+  if (!decision.ok) {
+    return {
+      reason: decision.reason,
+      message:
+        decision.reason === "rate_limit"
+          ? "Too many questions just now. Please wait a moment."
+          : "This assistant has reached its limit for today.",
+    };
+  }
+  return null;
+}
+
+/**
  * Origin, then per-IP rate limit, then the daily spend cap. Returns on the
  * first failure so a rejected request costs nothing — no embedding, no model.
  */
@@ -51,18 +76,5 @@ export async function runPublicChecks(
     // which origins are configured.
     return { reason: "origin", message: "This assistant is not available on this page." };
   }
-  const ip = request.headers.get("cf-connecting-ip") ?? "";
-  // Rate limit and spend cap are one seam call: the hosted service replaces the
-  // whole policy at once, which is what "Extension seams" intends.
-  const decision = await limits.check(assistant.orgId, assistant.id, { kind: "chat", ip });
-  if (!decision.ok) {
-    return {
-      reason: decision.reason,
-      message:
-        decision.reason === "rate_limit"
-          ? "Too many questions just now. Please wait a moment."
-          : "This assistant has reached its limit for today.",
-    };
-  }
-  return null;
+  return checkLimits(limits, assistant, request);
 }

@@ -166,23 +166,29 @@ describe("chat/answer", () => {
     expect(events[3]?.type).toBe("done");
   });
 
-  it("streams fallbackText, stores answered = 0, and never calls provider when retriever returns nothing", async () => {
+  it("streams fallbackText, stores answered = 0, records usage, and never calls provider when retriever returns nothing", async () => {
     const streamSpy = vi.fn();
+    const usageSpy = vi.fn(async () => {});
     const emptyRetriever = memoryRetriever();
-    const app = createApp(fakeSeams(), {
-      chat: {
-        embedder,
-        retriever: emptyRetriever,
-        provider: {
-          name: "anthropic",
-          model: ANTHROPIC_MODELS.balanced.id,
-          async *stream() {
-            streamSpy();
-            yield { kind: "text", text: "should not run" };
+    const app = createApp(
+      fakeSeams({
+        usage: { record: usageSpy },
+      }),
+      {
+        chat: {
+          embedder,
+          retriever: emptyRetriever,
+          provider: {
+            name: "anthropic",
+            model: ANTHROPIC_MODELS.balanced.id,
+            async *stream() {
+              streamSpy();
+              yield { kind: "text", text: "should not run" };
+            },
           },
         },
       },
-    });
+    );
 
     const ctx = createExecutionContext();
     const res = await app.fetch(
@@ -206,6 +212,18 @@ describe("chat/answer", () => {
     expect(events).toHaveLength(2);
     expect(events[0]).toEqual({ type: "token", text: "Published fallback" });
     expect(events[1]?.type).toBe("done");
+
+    expect(usageSpy).toHaveBeenCalledTimes(1);
+    expect(usageSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orgId: TEST_ORG_ID,
+        assistantId: "ast_1",
+        messages: 1,
+        tokensIn: 0,
+        tokensOut: 0,
+        costMicros: 0,
+      }),
+    );
 
     const gaps = await tenant.messages.unanswered("ast_1");
     expect(gaps).toHaveLength(1);
@@ -332,5 +350,138 @@ describe("chat/answer", () => {
     expect(seenSystems[0]).toContain("Draft-only persona");
     expect(seenSystems[1]).toContain("Published persona");
     expect(seenSystems[1]).not.toContain("Draft-only persona");
+  });
+
+  it("allows authenticated same-org owner draft previews from the Worker's own origin while enforcing limits and rejecting public/unauthenticated Worker-origin requests", async () => {
+    const draftConfig = defaultVersionConfig();
+    draftConfig.behaviour.persona = "Admin Try-It draft persona";
+    await tenant.versions.updateDraft("ast_1", draftConfig);
+
+    const seenSystems: string[] = [];
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.balanced.id,
+      async *stream(req: LlmRequest) {
+        seenSystems.push(req.system);
+        yield { kind: "text", text: "ok" };
+        yield { kind: "usage", tokensIn: 10, tokensOut: 2 };
+      },
+    };
+
+    const limitsSpy = vi.fn(async () => ({ ok: true as const }));
+    const appWithAuth = createApp(fakeSeams({ limits: { check: limitsSpy } }), {
+      chat: { embedder, retriever, provider },
+    });
+
+    // 1. Authenticated same-org owner on Worker's own origin (distinct from allowedOrigins)
+    const previewCtx = createExecutionContext();
+    const previewRes = await appWithAuth.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://engine.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_ans_1",
+          visitorId: "vis_admin",
+          message: "How do I reset my password?",
+          target: "draft",
+        }),
+      }),
+      env,
+      previewCtx,
+    );
+    await waitOnExecutionContext(previewCtx);
+    const previewEvents = parseSseBody(await previewRes.text());
+    expect(previewEvents.some((e) => e.type === "done")).toBe(true);
+    expect(seenSystems).toHaveLength(1);
+    expect(seenSystems[0]).toContain("Admin Try-It draft persona");
+    expect(limitsSpy).toHaveBeenCalledTimes(1);
+
+    // 2. Public request (no target: "draft") from Worker's own origin is still rejected by origin check
+    const pubCtx = createExecutionContext();
+    const pubRes = await appWithAuth.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://engine.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_ans_1",
+          visitorId: "vis_1",
+          message: "How do I reset my password?",
+        }),
+      }),
+      env,
+      pubCtx,
+    );
+    await waitOnExecutionContext(pubCtx);
+    expect(parseSseBody(await pubRes.text())).toEqual([
+      { type: "error", message: "This assistant is not available on this page." },
+    ]);
+
+    // 3. Unauthenticated or cross-org request with target: "draft" from Worker's origin is rejected
+    const appOtherOrg = createApp(
+      fakeSeams({
+        auth: {
+          authenticate: async () => ({
+            orgId: "org_other00000000000000",
+            userId: "u2",
+            role: "owner",
+          }),
+          login: async () => Response.json({ ok: true }),
+          logout: async () => Response.json({ ok: true }),
+        },
+      }),
+      { chat: { embedder, retriever, provider } },
+    );
+    const crossOrgCtx = createExecutionContext();
+    const crossOrgRes = await appOtherOrg.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://engine.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_ans_1",
+          visitorId: "vis_1",
+          message: "How do I reset my password?",
+          target: "draft",
+        }),
+      }),
+      env,
+      crossOrgCtx,
+    );
+    await waitOnExecutionContext(crossOrgCtx);
+    expect(parseSseBody(await crossOrgRes.text())).toEqual([
+      { type: "error", message: "This assistant is not available on this page." },
+    ]);
+
+    // 4. Limits still apply to authenticated owner draft previews
+    const rateLimitedApp = createApp(
+      fakeSeams({
+        limits: {
+          check: async () => ({ ok: false, reason: "rate_limit" }),
+        },
+      }),
+      { chat: { embedder, retriever, provider } },
+    );
+    const limitedCtx = createExecutionContext();
+    const limitedRes = await rateLimitedApp.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://engine.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_ans_1",
+          visitorId: "vis_admin",
+          message: "How do I reset my password?",
+          target: "draft",
+        }),
+      }),
+      env,
+      limitedCtx,
+    );
+    await waitOnExecutionContext(limitedCtx);
+    expect(parseSseBody(await limitedRes.text())).toEqual([
+      { type: "error", message: "Too many questions just now. Please wait a moment." },
+    ]);
   });
 });

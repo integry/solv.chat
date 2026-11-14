@@ -19,7 +19,7 @@ import {
 import type { LlmProvider } from "../providers/types.js";
 import type { Seams } from "../seams/types.js";
 import { answerMessage } from "./answer.js";
-import { corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
+import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
 
 export interface ChatEnv {
   DB: D1Database;
@@ -74,6 +74,16 @@ function preflightResponse(
   return new Response(null, { status: 204, headers });
 }
 
+function readAssistantKey(body: unknown): string | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const raw = (body as Record<string, unknown>).assistant;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed.length < 4 || trimmed.length > 128) return null;
+  if (!trimmed.startsWith("pk_") || /\s/.test(trimmed)) return null;
+  return trimmed;
+}
+
 /** Handles `POST /v1/chat` and its `OPTIONS` preflight. */
 export async function chatRoute(
   request: Request,
@@ -91,12 +101,21 @@ export async function chatRoute(
   const body = await request.json().catch(() => null);
   const parsed = parseChatRequest(body);
   if (!parsed.ok) {
+    // Resolve the assistant's allowed origin even when validation fails (e.g.
+    // unsupported protocol version) so a widget on an allowed site can read
+    // the error event across origins.
+    const assistantKey = readAssistantKey(body);
+    const assistant = assistantKey ? await assistantByPublicKey(env.DB, assistantKey) : null;
+    const origin = assistant ? matchedOrigin(assistant, request) : null;
     // A protocol or body we cannot parse is answered as a stream too, so the
     // widget has one code path for every failure instead of two.
-    return eventStreamOf({
-      type: "error",
-      message: parsed.errors[0] ?? "Invalid chat request.",
-    });
+    return eventStreamOf(
+      {
+        type: "error",
+        message: parsed.errors[0] ?? "Invalid chat request.",
+      },
+      origin,
+    );
   }
 
   const assistant = await assistantByPublicKey(env.DB, parsed.value.assistant);
@@ -104,8 +123,21 @@ export async function chatRoute(
     return eventStreamOf({ type: "error", message: "This assistant is not available." });
   }
 
+  const workerOrigin = new URL(request.url).origin;
+  const requestOrigin = request.headers.get("origin");
+  const isWorkerDraftRequest = parsed.value.target === "draft" && requestOrigin === workerOrigin;
+
+  // Recognize authenticated same-organization owner previews from the Worker's
+  // own origin before applying the visitor origin policy, since the admin
+  // does not need to be in the assistant's website allowlist.
+  const workerPrincipal = isWorkerDraftRequest ? await seams.auth.authenticate(request) : null;
+  const isWorkerOwnerPreview =
+    workerPrincipal !== null && workerPrincipal.orgId === assistant.orgId;
+
   const origin = matchedOrigin(assistant, request);
-  const failure = await runPublicChecks(seams.limits, assistant, request);
+  const failure = isWorkerOwnerPreview
+    ? await checkLimits(seams.limits, assistant, request)
+    : await runPublicChecks(seams.limits, assistant, request);
   if (failure !== null) {
     return eventStreamOf({ type: "error", message: failure.message }, origin);
   }
@@ -117,7 +149,11 @@ export async function chatRoute(
 
   // The draft is served only to the owner. The field is ignored rather than
   // rejected for a visitor, so a stale widget cannot be made to fail.
-  const principal = parsed.value.target === "draft" ? await seams.auth.authenticate(request) : null;
+  const principal = isWorkerDraftRequest
+    ? workerPrincipal
+    : parsed.value.target === "draft"
+      ? await seams.auth.authenticate(request)
+      : null;
   const useDraft =
     parsed.value.target === "draft" && principal !== null && principal.orgId === assistant.orgId;
 

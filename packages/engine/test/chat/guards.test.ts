@@ -284,10 +284,35 @@ describe("chat/guards", () => {
     if (events[0]?.type === "error") {
       expect(events[0].message).toContain("1");
     }
+    expect(response.headers.get("access-control-allow-origin")).toBe("https://site.example");
+    expect(response.headers.get("vary")).toBe("Origin");
     expect(authSpy).not.toHaveBeenCalled();
     expect(limitsSpy).not.toHaveBeenCalled();
     expect(keysSpy).not.toHaveBeenCalled();
     expect(usageSpy).not.toHaveBeenCalled();
+
+    // Disallowed origin with unsupported protocol must not receive CORS headers.
+    const evilCtx = createExecutionContext();
+    const evilResponse = await app.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://evil.example",
+        },
+        body: JSON.stringify({
+          protocol: 99,
+          assistant: "pk_test_1",
+          visitorId: "vis_1",
+          message: "Hello?",
+        }),
+      }),
+      env,
+      evilCtx,
+    );
+    await waitOnExecutionContext(evilCtx);
+    expect(evilResponse.headers.get("access-control-allow-origin")).toBeNull();
+    expect(parseSseBody(await evilResponse.text())[0]).toMatchObject({ type: "error" });
   });
 
   it("echoes matched Access-Control-Allow-Origin (never *) and handles OPTIONS preflight", async () => {
