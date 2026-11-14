@@ -22,7 +22,9 @@
   "engines": {
     "node": ">=24"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@solvchat/core": "^0.0.0"
+  },
   "scripts": {
     "pretypecheck": "npm run build -w @solvchat/core --if-present",
     "typecheck": "tsc --noEmit",

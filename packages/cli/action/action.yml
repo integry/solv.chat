@@ -25,9 +25,20 @@ runs:
     # The ingest key comes from the environment, not an input: an input would
     # appear in the workflow run's inputs view, and this value is a credential.
     - shell: bash
+      env:
+        INPUT_CONTENT: ${{ inputs.content }}
+        INPUT_ENDPOINT: ${{ inputs.endpoint }}
+        INPUT_ASSISTANT: ${{ inputs.assistant }}
+        INPUT_BASE_URL: ${{ inputs.base-url }}
+        INPUT_PRUNE: ${{ inputs.prune }}
       run: |
-        npx --yes @solvchat/cli push "${{ inputs.content }}" \
-          --endpoint "${{ inputs.endpoint }}" \
-          --assistant "${{ inputs.assistant }}" \
-          --base-url "${{ inputs.base-url }}" \
-          ${{ inputs.prune == 'true' && '--prune' || '' }}
+        args=(
+          "$INPUT_CONTENT"
+          --endpoint "$INPUT_ENDPOINT"
+          --assistant "$INPUT_ASSISTANT"
+          --base-url "$INPUT_BASE_URL"
+        )
+        if [ "$INPUT_PRUNE" = "true" ]; then
+          args+=(--prune)
+        fi
+        npx --yes @solvchat/cli push "${args[@]}"

@@ -75,6 +75,56 @@ describe("solv apply", () => {
     expect(diffOutput).toContain('+ widget.accentColor: "#111111"');
   });
 
+  it("sends the original partial config and diffs against customized draft settings", async () => {
+    const configPath = join(root, "solv.config.json");
+    const partial = { behaviour: { greeting: "Welcome" } };
+    await writeFile(configPath, JSON.stringify(partial), "utf8");
+
+    const customizedDraft = {
+      ...defaultVersionConfig(),
+      behaviour: {
+        ...defaultVersionConfig().behaviour,
+        persona: "Be concise.",
+      },
+      widget: {
+        title: "Custom Support",
+        accentColor: "#00aa00",
+        position: "left" as const,
+      },
+      limits: { dailyCostCapMicros: 500_000 },
+      allowedTools: ["search_docs"],
+    };
+
+    const putBodies: unknown[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      if ((init?.method ?? "GET") === "GET") {
+        return Response.json({ draft: { config: customizedDraft } });
+      }
+      putBodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ draft: { config: customizedDraft } });
+    };
+
+    const logs: string[] = [];
+    await apply(
+      {
+        file: configPath,
+        endpoint: "https://chat.example.com",
+        assistant: "ast_123",
+        adminToken: "tok_secret",
+      },
+      { fetchImpl, log: (line) => logs.push(line) },
+    );
+
+    expect(putBodies).toEqual([partial]);
+    const diffOutput = logs.join("\n");
+    expect(diffOutput).toContain('- behaviour.greeting: "Hello. Ask me anything about this site."');
+    expect(diffOutput).toContain('+ behaviour.greeting: "Welcome"');
+    expect(diffOutput).not.toContain("limits.dailyCostCapMicros");
+    expect(diffOutput).not.toContain("widget.accentColor");
+    expect(diffOutput).not.toContain("allowedTools");
+    expect(diffOutput).not.toContain("behaviour.persona");
+  });
+
   it("fails with the field name from packages/core and posts nothing on invalid config", async () => {
     const configPath = join(root, "solv.config.json");
     await writeFile(

@@ -201,4 +201,74 @@ describe("solv push", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.body.documents).toHaveLength(1);
   });
+
+  it("encodes reserved characters and colons in document URLs while preserving path separators", async () => {
+    await mkdir(join(root, "guides"), { recursive: true });
+    await mkdir(join(root, "api"), { recursive: true });
+    await writeFile(join(root, "guides", "guide#setup.md"), "# Setup\n", "utf8");
+    await writeFile(join(root, "faq?advanced.md"), "# Advanced FAQ\n", "utf8");
+    await writeFile(join(root, "api", "v1:auth.md"), "# Auth\n", "utf8");
+
+    const { fetchImpl, requests } = createMockFetch();
+    await push(
+      {
+        dir: root,
+        endpoint: "https://chat.example.com",
+        assistant: "ast_123",
+        baseUrl: "https://docs.example.com/docs",
+        ingestKey: "ing_secret",
+      },
+      { fetchImpl, log: () => {} },
+    );
+
+    expect(requests).toHaveLength(1);
+    const docs = requests[0]?.body.documents as Array<{ externalId: string; url: string }>;
+    expect(docs.map((d) => ({ externalId: d.externalId, url: d.url }))).toEqual([
+      {
+        externalId: "api/v1:auth",
+        url: "https://docs.example.com/docs/api/v1%3Aauth",
+      },
+      {
+        externalId: "faq?advanced",
+        url: "https://docs.example.com/docs/faq%3Fadvanced",
+      },
+      {
+        externalId: "guides/guide#setup",
+        url: "https://docs.example.com/docs/guides/guide%23setup",
+      },
+    ]);
+
+    const jsonPath = join(root, "batch.json");
+    await writeFile(
+      jsonPath,
+      JSON.stringify([
+        {
+          externalId: "v2/webhooks:retry#fast?v=1",
+          title: "Webhooks",
+          markdown: "# Webhooks\n",
+        },
+      ]),
+      "utf8",
+    );
+
+    const jsonFetch = createMockFetch();
+    await push(
+      {
+        json: jsonPath,
+        endpoint: "https://chat.example.com",
+        assistant: "ast_123",
+        baseUrl: "https://docs.example.com/docs",
+        ingestKey: "ing_secret",
+      },
+      { fetchImpl: jsonFetch.fetchImpl, log: () => {} },
+    );
+
+    const jsonDocs = jsonFetch.requests[0]?.body.documents as Array<{
+      externalId: string;
+      url: string;
+    }>;
+    expect(jsonDocs[0]?.url).toBe(
+      "https://docs.example.com/docs/v2/webhooks%3Aretry%23fast%3Fv%3D1",
+    );
+  });
 });

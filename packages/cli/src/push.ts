@@ -41,7 +41,8 @@ interface IngestCounts {
 
 function resolveDocumentUrl(externalId: string, baseUrl: string): string {
   const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-  return new URL(externalId, normalizedBase).href;
+  const encodedPath = externalId.split("/").map(encodeURIComponent).join("/");
+  return new URL(encodedPath, normalizedBase).href;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

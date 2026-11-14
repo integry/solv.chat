@@ -108,7 +108,15 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
   );
 
   const currentConfig = current.draft?.config ?? current.config;
-  deps.log(diffConfig(currentConfig, parsed.value));
+  const merged = parseVersionConfig(rawJson, currentConfig);
+  if (!merged.ok) {
+    for (const error of merged.errors) {
+      deps.log(error);
+    }
+    throw new CliError(merged.errors.join("; "));
+  }
+
+  deps.log(diffConfig(currentConfig, merged.value));
 
   await requestJson<DraftResponse>(
     deps.fetchImpl,
@@ -120,7 +128,7 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
         "Content-Type": "application/json",
         Origin: new URL(endpoint).origin,
       },
-      body: JSON.stringify(parsed.value),
+      body: JSON.stringify(rawJson),
     },
     "SOLV_ADMIN_TOKEN or SOLV_SESSION",
   );
