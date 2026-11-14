@@ -32,6 +32,8 @@ export interface AnswerInput {
   behaviour: BehaviourConfig;
   conversationId?: string | undefined;
   pageUrl?: string | undefined;
+  preview?: boolean | undefined;
+  history?: readonly LlmMessage[] | undefined;
 }
 
 function dedupeByUrl(chunks: readonly ResolvedChunk[]): ResolvedChunk[] {
@@ -50,6 +52,15 @@ async function ensureConversation(
   input: AnswerInput,
   now: number,
 ): Promise<{ conversationId: string; history: LlmMessage[] }> {
+  if (input.preview) {
+    // Owner previews stay out of D1 so they never appear in Conversations or
+    // Gaps; the pane resends its own recent turns in the request body.
+    return {
+      conversationId: newId("cnv"),
+      history: input.history ? [...input.history] : [],
+    };
+  }
+
   if (input.conversationId !== undefined) {
     const existing = await deps.tenant.conversations.get(input.conversationId);
     if (
@@ -111,18 +122,20 @@ export async function* answerMessage(
   // Persist the visitor's message before calling anything: if the provider
   // fails, the owner still sees the question in Conversations, which is the
   // only way they can find out what went wrong.
-  await deps.tenant.messages.create({
-    id: newId("msg"),
-    conversationId,
-    role: "user",
-    content: input.message,
-    citations: [],
-    toolCalls: null,
-    tokensIn: 0,
-    tokensOut: 0,
-    answered: true,
-    createdAt: clock(),
-  });
+  if (!input.preview) {
+    await deps.tenant.messages.create({
+      id: newId("msg"),
+      conversationId,
+      role: "user",
+      content: input.message,
+      citations: [],
+      toolCalls: null,
+      tokensIn: 0,
+      tokensOut: 0,
+      answered: true,
+      createdAt: clock(),
+    });
+  }
 
   const [vector] = await deps.embedder.embed([input.message]);
   if (!vector) {
@@ -145,18 +158,20 @@ export async function* answerMessage(
     // from its own training.
     yield { type: "token", text: input.behaviour.fallbackText };
     const messageId = newId("msg");
-    await deps.tenant.messages.create({
-      id: messageId,
-      conversationId,
-      role: "assistant",
-      content: input.behaviour.fallbackText,
-      citations: [],
-      toolCalls: null,
-      tokensIn: 0,
-      tokensOut: 0,
-      answered: false,
-      createdAt: clock(),
-    });
+    if (!input.preview) {
+      await deps.tenant.messages.create({
+        id: messageId,
+        conversationId,
+        role: "assistant",
+        content: input.behaviour.fallbackText,
+        citations: [],
+        toolCalls: null,
+        tokensIn: 0,
+        tokensOut: 0,
+        answered: false,
+        createdAt: clock(),
+      });
+    }
     await recordMessageUsage(deps, input, clock(), 0, 0, 0);
     yield { type: "done", messageId, conversationId };
     return;
@@ -172,6 +187,7 @@ export async function* answerMessage(
   let text = "";
   let tokensIn = 0;
   let tokensOut = 0;
+  let usageReported = false;
 
   try {
     for await (const chunk of deps.provider.stream(request)) {
@@ -183,10 +199,21 @@ export async function* answerMessage(
       } else {
         tokensIn = chunk.tokensIn;
         tokensOut = chunk.tokensOut;
+        usageReported = true;
       }
     }
   } catch (err) {
     if (err instanceof ProviderError) {
+      if (usageReported) {
+        await recordMessageUsage(
+          deps,
+          input,
+          clock(),
+          tokensIn,
+          tokensOut,
+          costMicros(deps.model, tokensIn, tokensOut),
+        );
+      }
       yield { type: "error", message: "The assistant could not complete this response." };
       return;
     }
@@ -202,18 +229,20 @@ export async function* answerMessage(
 
   const messageId = newId("msg");
   const citations = cited.map((c) => ({ url: c.url, title: c.title }));
-  await deps.tenant.messages.create({
-    id: messageId,
-    conversationId,
-    role: "assistant",
-    content: text,
-    citations,
-    toolCalls: null,
-    tokensIn,
-    tokensOut,
-    answered: true,
-    createdAt: clock(),
-  });
+  if (!input.preview) {
+    await deps.tenant.messages.create({
+      id: messageId,
+      conversationId,
+      role: "assistant",
+      content: text,
+      citations,
+      toolCalls: null,
+      tokensIn,
+      tokensOut,
+      answered: true,
+      createdAt: clock(),
+    });
+  }
 
   await recordMessageUsage(
     deps,

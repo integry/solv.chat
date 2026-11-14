@@ -14,6 +14,12 @@ import { isPlainObject, parseUrl, readTrimmedString } from "./shared.js";
 export const CHAT_PROTOCOL_VERSION = 1;
 export const SUPPORTED_CHAT_PROTOCOLS: readonly number[] = [1];
 export const MAX_CHAT_MESSAGE_LENGTH = 4000;
+export const MAX_CHAT_HISTORY_TURNS = 6;
+
+export interface ChatHistoryTurn {
+  role: "user" | "assistant";
+  content: string;
+}
 
 export interface ChatRequest {
   protocol: number;
@@ -26,6 +32,9 @@ export interface ChatRequest {
    *  for a request authenticated as the owner, so a visitor cannot read an
    *  unpublished draft by sending this field. */
   target?: "published" | "draft";
+  /** Prior turns resent by the admin "Try it" pane. Ignored except on an
+   *  authenticated owner-preview request. */
+  history?: ChatHistoryTurn[];
 }
 
 export type ChatEvent =
@@ -95,6 +104,36 @@ export function parseChatRequest(value: unknown): Result<ChatRequest> {
     }
   }
 
+  let history: ChatHistoryTurn[] | undefined;
+  if (value.history !== undefined) {
+    if (!Array.isArray(value.history)) {
+      errors.add("history", "must be an array");
+    } else {
+      if (value.history.length > MAX_CHAT_HISTORY_TURNS) {
+        errors.add("history", `must have at most ${MAX_CHAT_HISTORY_TURNS} items`);
+      }
+      const turns: ChatHistoryTurn[] = [];
+      value.history.slice(0, MAX_CHAT_HISTORY_TURNS).forEach((item, i) => {
+        if (!isPlainObject(item)) {
+          errors.add(`history[${i}]`, "must be an object");
+          return;
+        }
+        const role = item.role;
+        if (role !== "user" && role !== "assistant") {
+          errors.add(`history[${i}].role`, 'must be "user" or "assistant"');
+        }
+        const content = readTrimmedString(item.content, 1, MAX_CHAT_MESSAGE_LENGTH);
+        if (content === null) {
+          errors.add(`history[${i}].content`, `must be 1 to ${MAX_CHAT_MESSAGE_LENGTH} characters`);
+        }
+        if ((role === "user" || role === "assistant") && content !== null) {
+          turns.push({ role, content });
+        }
+      });
+      history = turns;
+    }
+  }
+
   if (
     errors.failed ||
     protocol === null ||
@@ -109,6 +148,7 @@ export function parseChatRequest(value: unknown): Result<ChatRequest> {
   if (conversationId !== undefined) result.conversationId = conversationId;
   if (pageUrl !== undefined) result.pageUrl = pageUrl;
   if (target !== undefined) result.target = target;
+  if (history !== undefined) result.history = history;
   return ok(result);
 }
 

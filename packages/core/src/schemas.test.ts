@@ -5,6 +5,7 @@ import {
   defaultVersionConfig,
   Errors,
   fail,
+  MAX_CHAT_HISTORY_TURNS,
   MAX_DOCUMENT_MARKDOWN_BYTES,
   ok,
   parseAssistantInput,
@@ -358,6 +359,51 @@ describe("chat schema and protocol", () => {
     expect(overCap.ok).toBe(false);
     if (!overCap.ok) {
       expect(overCap.errors.some((e) => e.startsWith("message:"))).toBe(true);
+    }
+  });
+
+  it("parses optional history up to MAX_CHAT_HISTORY_TURNS and rejects invalid or over-cap history", () => {
+    const turns = Array.from({ length: MAX_CHAT_HISTORY_TURNS }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `  turn ${i + 1}  `,
+    }));
+    const valid = parseChatRequest({
+      protocol: 1,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "follow-up",
+      target: "draft",
+      history: turns,
+    });
+    expect(valid.ok).toBe(true);
+    if (valid.ok) {
+      expect(valid.value.history).toHaveLength(MAX_CHAT_HISTORY_TURNS);
+      expect(valid.value.history?.[0]).toEqual({ role: "user", content: "turn 1" });
+    }
+
+    const overCap = parseChatRequest({
+      protocol: 1,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "follow-up",
+      history: [...turns, { role: "user", content: "extra" }],
+    });
+    expect(overCap.ok).toBe(false);
+    if (!overCap.ok) {
+      expect(overCap.errors.some((e) => e.startsWith("history:"))).toBe(true);
+    }
+
+    const badTurn = parseChatRequest({
+      protocol: 1,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "follow-up",
+      history: [{ role: "system", content: "" }],
+    });
+    expect(badTurn.ok).toBe(false);
+    if (!badTurn.ok) {
+      expect(badTurn.errors.some((e) => e.startsWith("history[0].role:"))).toBe(true);
+      expect(badTurn.errors.some((e) => e.startsWith("history[0].content:"))).toBe(true);
     }
   });
 

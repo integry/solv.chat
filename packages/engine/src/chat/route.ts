@@ -24,6 +24,36 @@ import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./chec
 export interface ChatEnv {
   DB: D1Database;
   VECTORS: VectorizeIndex;
+  SOLV_LLM_PROVIDER?: string | undefined;
+  SOLV_LLM_TIER?: string | undefined;
+}
+
+const DEFAULT_PROVIDER = "anthropic" as const;
+const DEFAULT_TIER: Tier = "fast";
+const warnedConfigVars = new Set<string>();
+
+function warnInvalidConfigOnce(
+  name: "SOLV_LLM_PROVIDER" | "SOLV_LLM_TIER",
+  fallback: string,
+): void {
+  if (warnedConfigVars.has(name)) return;
+  warnedConfigVars.add(name);
+  // Do not log or otherwise trust the unrecognised value's content.
+  console.warn(`Unrecognised ${name} configuration; falling back to default (${fallback}).`);
+}
+
+function resolveProvider(raw: string | undefined): "anthropic" | "openai" {
+  if (raw === undefined) return DEFAULT_PROVIDER;
+  if (raw === "anthropic" || raw === "openai") return raw;
+  warnInvalidConfigOnce("SOLV_LLM_PROVIDER", DEFAULT_PROVIDER);
+  return DEFAULT_PROVIDER;
+}
+
+function resolveTier(raw: string | undefined): Tier {
+  if (raw === undefined) return DEFAULT_TIER;
+  if (raw === "fast" || raw === "balanced") return raw;
+  warnInvalidConfigOnce("SOLV_LLM_TIER", DEFAULT_TIER);
+  return DEFAULT_TIER;
 }
 
 export interface ChatRouteOverrides {
@@ -166,8 +196,8 @@ export async function chatRoute(
     return eventStreamOf({ type: "error", message: "This assistant is not available." }, origin);
   }
 
-  const providerKind = overrides?.providerKind ?? "anthropic";
-  const tier = overrides?.tier ?? "balanced";
+  const providerKind = overrides?.providerKind ?? resolveProvider(env.SOLV_LLM_PROVIDER);
+  const tier = overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER);
   const model =
     overrides?.model ??
     (providerKind === "anthropic" ? ANTHROPIC_MODELS[tier] : OPENAI_MODELS[tier]);
@@ -205,6 +235,8 @@ export async function chatRoute(
               behaviour: version.config.behaviour,
               conversationId: parsed.value.conversationId,
               pageUrl: parsed.value.pageUrl,
+              preview: useDraft,
+              history: useDraft ? parsed.value.history : undefined,
             },
           )) {
             if (!cancelled) {

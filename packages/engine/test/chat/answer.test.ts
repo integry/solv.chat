@@ -3,7 +3,7 @@ import { defaultVersionConfig, parseChatEventLine } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/app.js";
 import { forPrincipal } from "../../src/db/tenant.js";
-import { ANTHROPIC_MODELS } from "../../src/models.js";
+import { ANTHROPIC_MODELS, costMicros, OPENAI_MODELS } from "../../src/models.js";
 import { ProviderError } from "../../src/providers/error.js";
 import type { LlmProvider, LlmRequest } from "../../src/providers/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
@@ -565,5 +565,253 @@ describe("chat/answer", () => {
 
     const events = parseSseBody(await res.text());
     expect(events).toEqual([{ type: "error", message: "Something went wrong. Please try again." }]);
+  });
+
+  it("selects provider and tier from Worker env and falls back to defaults on unrecognised values", async () => {
+    const requestedModels: Array<{ url: string; model: string }> = [];
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+      requestedModels.push({ url, model: body.model ?? "" });
+
+      const sse = url.includes("anthropic.com")
+        ? [
+            'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10}}}\n\n',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n',
+            'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":5}}\n\n',
+            'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+          ].join("")
+        : [
+            'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n',
+          ].join("");
+
+      return new Response(sse, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+
+    vi.stubGlobal("fetch", fetchSpy);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const app = createApp(fakeSeams(), {
+        chat: { embedder, retriever },
+      });
+
+      const cases: Array<{
+        provider?: string;
+        tier?: string;
+        expectedModel: string;
+      }> = [
+        { provider: "anthropic", tier: "fast", expectedModel: ANTHROPIC_MODELS.fast.id },
+        { provider: "anthropic", tier: "balanced", expectedModel: ANTHROPIC_MODELS.balanced.id },
+        { provider: "openai", tier: "fast", expectedModel: OPENAI_MODELS.fast.id },
+        { provider: "openai", tier: "balanced", expectedModel: OPENAI_MODELS.balanced.id },
+        { provider: "bad-provider", tier: "bad-tier", expectedModel: ANTHROPIC_MODELS.fast.id },
+        { provider: "bad-provider", tier: "bad-tier", expectedModel: ANTHROPIC_MODELS.fast.id },
+      ];
+
+      for (const c of cases) {
+        const ctx = createExecutionContext();
+        const res = await app.fetch(
+          new Request("https://engine.example/v1/chat", {
+            method: "POST",
+            headers: { "content-type": "application/json", origin: "https://site.example" },
+            body: JSON.stringify({
+              protocol: 1,
+              assistant: "pk_ans_1",
+              visitorId: "vis_1",
+              message: "How do I reset my password?",
+            }),
+          }),
+          { ...env, SOLV_LLM_PROVIDER: c.provider, SOLV_LLM_TIER: c.tier },
+          ctx,
+        );
+        await res.text();
+        await waitOnExecutionContext(ctx);
+      }
+
+      expect(requestedModels.map((r) => r.model)).toEqual(cases.map((c) => c.expectedModel));
+      // Unrecognised values are logged once per variable without echoing the value.
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      for (const call of warnSpy.mock.calls) {
+        expect(String(call[0])).not.toContain("bad-provider");
+        expect(String(call[0])).not.toContain("bad-tier");
+      }
+    } finally {
+      warnSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("owner preview writes no conversation or message rows, records usage, returns generated ids, and accepts history only for owner previews", async () => {
+    const seenRequests: LlmRequest[] = [];
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream(req: LlmRequest) {
+        seenRequests.push(req);
+        yield { kind: "text", text: "Draft answer" };
+        yield { kind: "usage", tokensIn: 50, tokensOut: 10 };
+      },
+    };
+    const usageSpy = vi.fn(async () => {});
+
+    const previewApp = createApp(fakeSeams({ usage: { record: usageSpy } }), {
+      chat: { embedder, retriever, provider },
+    });
+
+    const previewCtx = createExecutionContext();
+    const previewRes = await previewApp.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://engine.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_ans_1",
+          visitorId: "vis_admin",
+          message: "How do I reset my password?",
+          target: "draft",
+          history: [
+            { role: "user", content: "Prior question" },
+            { role: "assistant", content: "Prior answer" },
+          ],
+        }),
+      }),
+      env,
+      previewCtx,
+    );
+    await waitOnExecutionContext(previewCtx);
+
+    const previewEvents = parseSseBody(await previewRes.text());
+    const done = previewEvents.find((e) => e.type === "done");
+    expect(done?.type).toBe("done");
+    if (done?.type === "done") {
+      expect(done.messageId).toMatch(/^msg_/);
+      expect(done.conversationId).toMatch(/^cnv_/);
+    }
+
+    expect(await tenant.conversations.list("ast_1")).toHaveLength(0);
+    expect(usageSpy).toHaveBeenCalledTimes(1);
+    expect(seenRequests[0]?.messages).toHaveLength(3);
+    expect(seenRequests[0]?.messages[0]).toEqual({ role: "user", content: "Prior question" });
+    expect(seenRequests[0]?.messages[1]).toEqual({ role: "assistant", content: "Prior answer" });
+
+    // Visitor sending history (even with target: "draft" when unauthenticated) must have history ignored.
+    const visitorApp = createApp(
+      fakeSeams({
+        auth: {
+          authenticate: async () => null,
+          login: async () => Response.json({ ok: true }),
+          logout: async () => Response.json({ ok: true }),
+        },
+      }),
+      { chat: { embedder, retriever, provider } },
+    );
+
+    const visitorCtx = createExecutionContext();
+    const visitorRes = await visitorApp.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://site.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_ans_1",
+          visitorId: "vis_1",
+          message: "How do I reset my password?",
+          target: "draft",
+          history: [{ role: "user", content: "Injected prior turn" }],
+        }),
+      }),
+      env,
+      visitorCtx,
+    );
+    await visitorRes.text();
+    await waitOnExecutionContext(visitorCtx);
+
+    expect(seenRequests[1]?.messages).toHaveLength(1);
+    expect(seenRequests[1]?.messages[0]?.content).not.toContain("Injected prior turn");
+  });
+
+  it("meters a failed model stream only when usage was reported before failing", async () => {
+    const usageWithTokens = vi.fn(async () => {});
+    const failingWithUsage: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        yield { kind: "text", text: "Partial " };
+        yield { kind: "usage", tokensIn: 120, tokensOut: 30 };
+        throw new ProviderError("upstream reset", true, 502);
+      },
+    };
+
+    const appWithUsage = createApp(fakeSeams({ usage: { record: usageWithTokens } }), {
+      chat: { embedder, retriever, provider: failingWithUsage, model: ANTHROPIC_MODELS.fast },
+    });
+
+    const ctx1 = createExecutionContext();
+    const res1 = await appWithUsage.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://site.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_ans_1",
+          visitorId: "vis_1",
+          message: "How do I reset my password?",
+        }),
+      }),
+      env,
+      ctx1,
+    );
+    await waitOnExecutionContext(ctx1);
+
+    const events1 = parseSseBody(await res1.text());
+    expect(events1.map((e) => e.type)).toEqual(["token", "error"]);
+    expect(usageWithTokens).toHaveBeenCalledTimes(1);
+    expect(usageWithTokens).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokensIn: 120,
+        tokensOut: 30,
+        costMicros: costMicros(ANTHROPIC_MODELS.fast, 120, 30),
+      }),
+    );
+
+    const usageWithoutTokens = vi.fn(async () => {});
+    const failingWithoutUsage: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        yield { kind: "text", text: "Partial " };
+        throw new ProviderError("upstream reset", true, 502);
+      },
+    };
+
+    const appWithoutUsage = createApp(fakeSeams({ usage: { record: usageWithoutTokens } }), {
+      chat: { embedder, retriever, provider: failingWithoutUsage },
+    });
+
+    const ctx2 = createExecutionContext();
+    const res2 = await appWithoutUsage.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://site.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_ans_1",
+          visitorId: "vis_1",
+          message: "How do I reset my password?",
+        }),
+      }),
+      env,
+      ctx2,
+    );
+    await waitOnExecutionContext(ctx2);
+
+    const events2 = parseSseBody(await res2.text());
+    expect(events2.map((e) => e.type)).toEqual(["token", "error"]);
+    expect(usageWithoutTokens).not.toHaveBeenCalled();
   });
 });

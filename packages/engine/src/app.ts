@@ -27,6 +27,8 @@ export interface Env {
   VECTORS: VectorizeIndex;
   DOCS: R2Bucket;
   INGEST_QUEUE: Queue;
+  SOLV_LLM_PROVIDER?: string | undefined;
+  SOLV_LLM_TIER?: string | undefined;
 }
 
 export interface App {

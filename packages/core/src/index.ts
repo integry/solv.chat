@@ -4,7 +4,9 @@ export { type AssistantInput, parseAssistantInput } from "./schemas/assistant.js
 export {
   CHAT_PROTOCOL_VERSION,
   type ChatEvent,
+  type ChatHistoryTurn,
   type ChatRequest,
+  MAX_CHAT_HISTORY_TURNS,
   MAX_CHAT_MESSAGE_LENGTH,
   parseChatEventLine,
   parseChatRequest,

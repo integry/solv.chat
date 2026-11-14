@@ -142,7 +142,13 @@ carries a comment with the source URL and the date checked. Never fill it from
 memory.
 
 The admin does not expose model or temperature pickers per assistant. The
-instance picks a provider and a model tier in configuration.
+instance picks a provider and a model tier in configuration via plain Worker
+environment variables (`vars` in `wrangler.jsonc`):
+
+- `SOLV_LLM_PROVIDER` — `anthropic` or `openai` (default `anthropic`).
+- `SOLV_LLM_TIER` — `fast` or `balanced` (default `fast`).
+
+An unrecognised value falls back to its default and is logged once.
 
 ## MCP tools
 
