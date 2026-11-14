@@ -375,6 +375,36 @@ export function documentsFor(db: D1Database, orgId: string) {
       await db.batch(stmts);
     },
 
+    async listStaleObjects(documentId: string): Promise<string[]> {
+      const res = await prepare(
+        db,
+        "SELECT object_key FROM stale_objects WHERE org_id = ?1 AND document_id = ?2",
+      )
+        .bind(orgId, documentId)
+        .all<{ object_key: string }>();
+      return res.results.map((row) => row.object_key);
+    },
+
+    async addStaleObject(documentId: string, objectKey: string): Promise<void> {
+      await prepareInsert(
+        db,
+        "INSERT OR IGNORE INTO stale_objects (object_key, org_id, document_id) VALUES (?2, ?1, ?3)",
+      )
+        .bind(orgId, objectKey, documentId)
+        .run();
+    },
+
+    async clearStaleObjects(documentId: string, objectKeys: string[]): Promise<void> {
+      if (objectKeys.length === 0) return;
+      const stmts = objectKeys.map((objectKey) =>
+        prepare(
+          db,
+          "DELETE FROM stale_objects WHERE org_id = ?1 AND document_id = ?2 AND object_key = ?3",
+        ).bind(orgId, documentId, objectKey),
+      );
+      await db.batch(stmts);
+    },
+
     async replaceChunks(
       documentId: string,
       chunks: ChunkInput[],

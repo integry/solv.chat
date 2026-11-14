@@ -672,4 +672,83 @@ describe("ingest consumer", () => {
     expect(await tenant.documents.listStaleVectors(documentId)).toEqual([]);
     expect(await tenant.documents.listAllPendingVectors(documentId)).toEqual([]);
   });
+
+  it("persists failed cleanup IDs for a superseded live revision and reconciles them on retry (F8)", async () => {
+    const { assistantId, documentId } = await seedDocument("# Rev 1\n\nOlder content.");
+    const retriever = memoryRetriever();
+    const tenant = forIngestScope(env.DB, { orgId: TEST_ORG_ID, assistantId });
+
+    let upsertAEntered!: () => void;
+    const upsertAStarted = new Promise<void>((resolve) => {
+      upsertAEntered = resolve;
+    });
+    let releaseUpsertA!: () => void;
+    const upsertAGate = new Promise<void>((resolve) => {
+      releaseUpsertA = resolve;
+    });
+
+    const upsertedByA: string[][] = [];
+    const blockingFailingRetrieverA = {
+      query: retriever.query.bind(retriever),
+      async upsert(records: Parameters<typeof retriever.upsert>[0]) {
+        upsertedByA.push(records.map((r) => r.chunkId));
+        upsertAEntered();
+        await upsertAGate;
+        // Completes AFTER Consumer B committed revision 2 and cleared rev 1's pending/stale records.
+        return retriever.upsert(records);
+      },
+      async remove(chunkIds: string[]) {
+        throw new Error(`remove failed for ${chunkIds.join(",")}`);
+      },
+    };
+
+    const msgA = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 1 });
+    const promiseA = runIngestBatch(
+      { messages: [msgA] },
+      {
+        db: env.DB,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever: blockingFailingRetrieverA,
+      },
+    );
+
+    await upsertAStarted;
+
+    // Revision 2 arrives and commits while Consumer A is paused inside retriever.upsert.
+    await env.DB.prepare("UPDATE documents SET revision = 2 WHERE org_id = ?1 AND id = ?2")
+      .bind(TEST_ORG_ID, documentId)
+      .run();
+    await env.DOCS.put(documentObjectKey(TEST_ORG_ID, documentId, 2), "# Rev 2\n\nNewer content.");
+    const msgB = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 2 });
+    await runIngestBatch(
+      { messages: [msgB] },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+    expect(msgB.ack).toHaveBeenCalledTimes(1);
+
+    const rev2Chunks = await tenant.documents.listChunks(documentId);
+    expect(rev2Chunks.map((c) => c.text)).toEqual(["Newer content."]);
+
+    // Consumer A's upsert now completes (recreating rev 1's vectors), replaceChunks rejects it,
+    // and its immediate remove fails.
+    releaseUpsertA();
+    await expect(promiseA).rejects.toThrow("remove failed");
+    expect(msgA.ack).not.toHaveBeenCalled();
+
+    // Obsolete rev 1 vectors must be durably tracked in stale_vectors on the live rev 2 document.
+    const rev1Ids = upsertedByA[0] ?? [];
+    expect(rev1Ids).toHaveLength(1);
+    expect(await tenant.documents.listStaleVectors(documentId)).toEqual(rev1Ids);
+
+    // Retry of rev 1 enters the superseded-message branch and reconciles stale_vectors before acking.
+    const retryMsg = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 1 });
+    await runIngestBatch(
+      { messages: [retryMsg] },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+    expect(retryMsg.ack).toHaveBeenCalledTimes(1);
+    expect(await tenant.documents.listStaleVectors(documentId)).toEqual([]);
+    expect(retriever.all().map((v) => v.chunkId)).toEqual(rev2Chunks.map((c) => c.id));
+  });
 });

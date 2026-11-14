@@ -91,10 +91,116 @@ function toBlocks(lines: string[]): Block[] {
   return blocks;
 }
 
-function splitLong(lines: string[]): string[] {
-  const blocks = toBlocks(lines);
-  if (blocks.length === 0) return [];
+function splitProseBlock(text: string, maxLen = MAX_CHARS - OVERLAP_CHARS - 2): string[] {
+  if (text.length <= MAX_CHARS) return [text];
 
+  const pieces: string[] = [];
+  let start = 0;
+
+  while (start < text.length) {
+    while (start < text.length && /\s/.test(text[start] ?? "")) {
+      start++;
+    }
+    if (start >= text.length) break;
+
+    if (text.length - start <= maxLen) {
+      pieces.push(text.slice(start).trim());
+      break;
+    }
+
+    const window = text.slice(start, start + maxLen + 1);
+    let splitAt = -1;
+    for (let i = window.length - 1; i > 0; i--) {
+      if (/\s/.test(window[i] ?? "")) {
+        splitAt = i;
+        break;
+      }
+    }
+
+    if (splitAt <= 0) {
+      // No whitespace in the window (e.g., a single long token): hard split.
+      pieces.push(text.slice(start, start + maxLen));
+      start += maxLen;
+    } else {
+      const piece = text.slice(start, start + splitAt).trim();
+      if (piece !== "") {
+        pieces.push(piece);
+      }
+      start += splitAt + 1;
+    }
+  }
+
+  return pieces;
+}
+
+function splitFenceBlock(text: string): string[] {
+  if (text.length <= MAX_CHARS) return [text];
+
+  const lines = text.split("\n");
+  const openLine = lines[0] ?? "```";
+  const fence = parseFenceOpen(openLine);
+  const lastLine = lines[lines.length - 1] ?? "";
+  const hasClose = lines.length > 1 && fence !== null && isFenceClose(lastLine, fence);
+  const closeLine = hasClose ? lastLine : fence !== null ? fence.char.repeat(fence.length) : "```";
+  const bodyLines = hasClose ? lines.slice(1, -1) : lines.slice(1);
+
+  if (bodyLines.length === 0) {
+    return [text];
+  }
+
+  const maxBodyChars = Math.max(1, MAX_CHARS - openLine.length - closeLine.length - 2);
+  const chunks: string[] = [];
+  let currentLines: string[] = [];
+  let currentLen = 0;
+
+  const flushFence = () => {
+    if (currentLines.length === 0) return;
+    chunks.push(`${openLine}\n${currentLines.join("\n")}\n${closeLine}`);
+    currentLines = [];
+    currentLen = 0;
+  };
+
+  for (const line of bodyLines) {
+    if (line.length > maxBodyChars) {
+      flushFence();
+      for (let i = 0; i < line.length; i += maxBodyChars) {
+        chunks.push(`${openLine}\n${line.slice(i, i + maxBodyChars)}\n${closeLine}`);
+      }
+      continue;
+    }
+
+    const addedLen = currentLines.length === 0 ? line.length : 1 + line.length;
+    if (currentLines.length > 0 && currentLen + addedLen > maxBodyChars) {
+      flushFence();
+    }
+    currentLines.push(line);
+    currentLen += currentLines.length === 1 ? line.length : 1 + line.length;
+  }
+
+  flushFence();
+  return chunks;
+}
+
+function expandOversizedBlocks(blocks: Block[]): Block[] {
+  const expanded: Block[] = [];
+  for (const block of blocks) {
+    if (block.text.length <= MAX_CHARS) {
+      expanded.push(block);
+      continue;
+    }
+    const parts = block.isFence ? splitFenceBlock(block.text) : splitProseBlock(block.text);
+    for (const part of parts) {
+      expanded.push({ text: part, isFence: block.isFence });
+    }
+  }
+  return expanded;
+}
+
+function splitLong(lines: string[]): string[] {
+  const rawBlocks = toBlocks(lines);
+  if (rawBlocks.length === 0) return [];
+
+  const blocks = expandOversizedBlocks(rawBlocks);
   const fullText = blocks.map((b) => b.text).join("\n\n");
   if (fullText.length <= MAX_CHARS) return [fullText];
 

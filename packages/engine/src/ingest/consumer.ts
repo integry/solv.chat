@@ -6,7 +6,7 @@ import { documentObjectKey, type IngestQueueMessage } from "./documents.js";
 
 export interface IngestConsumerDeps {
   db: D1Database;
-  docs: Pick<R2Bucket, "get">;
+  docs: Pick<R2Bucket, "get" | "delete">;
   embedder: Embedder;
   retriever: Retriever;
 }
@@ -43,17 +43,22 @@ export async function runIngestBatch(
     const tenant = forIngestScope(deps.db, { orgId, assistantId: "" });
 
     const reconcileDeletedDocument = async (): Promise<void> => {
-      const [pendingIds, staleIds] = await Promise.all([
+      const [pendingIds, staleIds, staleObjectKeys] = await Promise.all([
         tenant.documents.listAllPendingVectors(documentId),
         tenant.documents.listStaleVectors(documentId),
+        tenant.documents.listStaleObjects(documentId),
       ]);
       const cleanupIds = [...new Set([...pendingIds, ...staleIds])];
       if (cleanupIds.length > 0) {
         await deps.retriever.remove(cleanupIds);
       }
+      for (const objectKey of staleObjectKeys) {
+        await deps.docs.delete(objectKey);
+      }
       await Promise.all([
         tenant.documents.clearAllPendingVectors(documentId),
         tenant.documents.clearStaleVectors(documentId, staleIds),
+        tenant.documents.clearStaleObjects(documentId, staleObjectKeys),
       ]);
     };
 
@@ -72,16 +77,20 @@ export async function runIngestBatch(
     }
 
     if (messageRevision !== undefined && document.revision !== messageRevision) {
-      // Superseded by a newer revision: clean up any pending vectors from an
-      // earlier failed attempt of this revision and discard.
-      const supersededPending = await tenant.documents.listPendingVectors(
-        document.id,
-        messageRevision,
-      );
-      if (supersededPending.length > 0) {
-        await deps.retriever.remove(supersededPending);
-        await tenant.documents.clearPendingVectors(document.id, messageRevision);
+      // Superseded by a newer revision: reconcile any pending vectors for this
+      // revision as well as durable stale-vector obligations before discarding.
+      const [supersededPending, staleIds] = await Promise.all([
+        tenant.documents.listPendingVectors(document.id, messageRevision),
+        tenant.documents.listStaleVectors(document.id),
+      ]);
+      const cleanupIds = [...new Set([...supersededPending, ...staleIds])];
+      if (cleanupIds.length > 0) {
+        await deps.retriever.remove(cleanupIds);
       }
+      await Promise.all([
+        tenant.documents.clearPendingVectors(document.id, messageRevision),
+        tenant.documents.clearStaleVectors(document.id, staleIds),
+      ]);
       message.ack();
       continue;
     }
@@ -141,6 +150,19 @@ export async function runIngestBatch(
       const latest = await tenant.documents.get(document.id);
       if (latest === null || latest.deleting) {
         await reconcileDeletedDocument();
+      } else if (messageRevision !== undefined && latest.revision !== targetRevision) {
+        const [supersededPending, staleIds] = await Promise.all([
+          tenant.documents.listPendingVectors(document.id, targetRevision),
+          tenant.documents.listStaleVectors(document.id),
+        ]);
+        const cleanupIds = [...new Set([...supersededPending, ...staleIds])];
+        if (cleanupIds.length > 0) {
+          await deps.retriever.remove(cleanupIds);
+        }
+        await Promise.all([
+          tenant.documents.clearPendingVectors(document.id, targetRevision),
+          tenant.documents.clearStaleVectors(document.id, staleIds),
+        ]);
       } else if (messageRevision !== undefined && latest.indexedRevision >= targetRevision) {
         const staleIds = await tenant.documents.listStaleVectors(document.id);
         if (staleIds.length > 0) {
@@ -197,21 +219,25 @@ export async function runIngestBatch(
       }
 
       // Superseded or deleting: remove the vectors we just upserted, retaining
-      // durable stale records if removal fails during deletion.
+      // durable stale records if removal fails so retries can reconcile them.
       const chunkIds = chunks.map((chunk) => chunk.id);
       if (chunkIds.length > 0) {
         try {
           await deps.retriever.remove(chunkIds);
         } catch (err) {
-          if (latest === null || latest.deleting) {
-            await tenant.documents.addStaleVectors(document.id, chunkIds);
-          }
+          await tenant.documents.addStaleVectors(document.id, chunkIds);
           throw err;
         }
       }
       await tenant.documents.clearPendingVectors(document.id, targetRevision);
       if (latest === null || latest.deleting) {
         await reconcileDeletedDocument();
+      } else {
+        const staleIds = await tenant.documents.listStaleVectors(document.id);
+        if (staleIds.length > 0) {
+          await deps.retriever.remove(staleIds);
+          await tenant.documents.clearStaleVectors(document.id, staleIds);
+        }
       }
       message.ack();
       continue;

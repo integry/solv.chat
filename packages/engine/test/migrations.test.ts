@@ -13,6 +13,7 @@ const EXPECTED_TABLES = [
   "chunks",
   "pending_vectors",
   "stale_vectors",
+  "stale_objects",
   "conversations",
   "messages",
   "feedback",

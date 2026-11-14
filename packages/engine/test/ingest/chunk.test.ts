@@ -81,4 +81,60 @@ describe("chunkMarkdown", () => {
     expect(fenceChunks[0]?.text).toContain("# Still inside the same fence after a blank line");
     expect(fenceChunks[0]?.text).toContain("```");
   });
+
+  it("subdivides an oversized single prose paragraph into bounded chunks (F10)", () => {
+    const md = "word ".repeat(100_000).trim();
+    const chunks = chunkMarkdown(md);
+
+    expect(chunks.length).toBeGreaterThan(100);
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(MAX_CHARS);
+    }
+  });
+
+  it("subdivides an oversized unspaced token without exceeding MAX_CHARS (F10)", () => {
+    const md = "a".repeat(3000);
+    const chunks = chunkMarkdown(md);
+
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(MAX_CHARS);
+    }
+  });
+
+  it("subdivides an oversized fenced code block while preserving fence structure and content (F10)", () => {
+    const codeLines = Array.from(
+      { length: 100 },
+      (_, i) => `const line_${i} = "${"x".repeat(30)}";`,
+    );
+    const md = `\`\`\`typescript\n${codeLines.join("\n")}\n\`\`\``;
+    const chunks = chunkMarkdown(md);
+
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    const recoveredLines: string[] = [];
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(MAX_CHARS);
+      expect(chunk.text.startsWith("```typescript\n")).toBe(true);
+      expect(chunk.text.endsWith("\n```")).toBe(true);
+      const inner = chunk.text.slice("```typescript\n".length, -"\n```".length);
+      recoveredLines.push(...inner.split("\n"));
+    }
+    expect(recoveredLines).toEqual(codeLines);
+  });
+
+  it("subdivides a fenced code block with a single oversized line while preserving fences (F10)", () => {
+    const longLine = "z".repeat(2500);
+    const md = `~~~\n${longLine}\n~~~`;
+    const chunks = chunkMarkdown(md);
+
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    let recovered = "";
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(MAX_CHARS);
+      expect(chunk.text.startsWith("~~~\n")).toBe(true);
+      expect(chunk.text.endsWith("\n~~~")).toBe(true);
+      recovered += chunk.text.slice("~~~\n".length, -"\n~~~".length);
+    }
+    expect(recovered).toBe(longLine);
+  });
 });

@@ -506,4 +506,140 @@ describe("ingest documents", () => {
     });
     expect(repeatB).toEqual({ written: 0, unchanged: 1, deleted: 0 });
   });
+
+  it("removes uploaded R2 body when concurrent deleteDocuments completes during docs.put (F9)", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const queue = countingQueue();
+    const retriever = memoryRetriever();
+
+    let putEntered!: () => void;
+    const putStarted = new Promise<void>((resolve) => {
+      putEntered = resolve;
+    });
+    let releasePut!: () => void;
+    const putGate = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+
+    let uploadedKey = "";
+    const blockingDocs = {
+      async put(key: string, value: string) {
+        uploadedKey = key;
+        putEntered();
+        await putGate;
+        return env.DOCS.put(key, value);
+      },
+      async delete(key: string) {
+        return env.DOCS.delete(key);
+      },
+    };
+
+    const pushPromise = pushDocuments({ tenant, docs: blockingDocs, queue }, scope, {
+      documents: [
+        {
+          externalId: "doomed",
+          url: "https://example.com/doomed",
+          title: "Doomed",
+          markdown: "# Doomed\n\nWill be deleted mid-upload.",
+        },
+      ],
+    });
+
+    await putStarted;
+
+    // Concurrent DELETE marks deleting, deletes rev 1 key (no-op), and removes the D1 row.
+    const deleted = await deleteDocuments({ tenant, docs: env.DOCS, retriever }, scope, {
+      externalIds: ["doomed"],
+    });
+    expect(deleted).toEqual({ written: 0, unchanged: 0, deleted: 1 });
+
+    // Release the paused put; pushDocuments must detect deletion won and delete the R2 object.
+    releasePut();
+    const pushResult = await pushPromise;
+    expect(pushResult).toEqual({ written: 0, unchanged: 0, deleted: 0 });
+    expect(queue.sent).toHaveLength(0);
+    expect(await env.DOCS.head(uploadedKey)).toBeNull();
+  });
+
+  it("preserves retryable stale object obligation when post-delete R2 cleanup fails (F9)", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const queue = countingQueue();
+    const retriever = memoryRetriever();
+
+    let putEntered!: () => void;
+    const putStarted = new Promise<void>((resolve) => {
+      putEntered = resolve;
+    });
+    let releasePut!: () => void;
+    const putGate = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+
+    let uploadedKey = "";
+    const flakyDocs = {
+      async put(key: string, value: string) {
+        uploadedKey = key;
+        putEntered();
+        await putGate;
+        return env.DOCS.put(key, value);
+      },
+      async delete() {
+        throw new Error("R2 delete failed");
+      },
+    };
+
+    const pushPromise = pushDocuments({ tenant, docs: flakyDocs, queue }, scope, {
+      documents: [
+        {
+          externalId: "doomed-retry",
+          url: "https://example.com/doomed-retry",
+          title: "Doomed Retry",
+          markdown: "# Doomed\n\nCleanup will retry.",
+        },
+      ],
+    });
+
+    await putStarted;
+
+    const deleted = await deleteDocuments({ tenant, docs: env.DOCS, retriever }, scope, {
+      externalIds: ["doomed-retry"],
+    });
+    expect(deleted).toEqual({ written: 0, unchanged: 0, deleted: 1 });
+
+    releasePut();
+    await expect(pushPromise).rejects.toThrow("R2 delete failed");
+
+    // Object still exists in R2, but a durable stale_objects record and queue message were created.
+    expect(await env.DOCS.head(uploadedKey)).not.toBeNull();
+    expect(queue.sent).toHaveLength(1);
+    const cleanupMsg = queue.sent[0] as { documentId: string; orgId: string; revision?: number };
+    expect(await tenant.documents.listStaleObjects(cleanupMsg.documentId)).toEqual([uploadedKey]);
+
+    // Queue consumer reconciles the stale object and clears the obligation.
+    let acked = false;
+    await runIngestBatch(
+      {
+        messages: [
+          {
+            id: newId("msg"),
+            timestamp: new Date(),
+            attempts: 1,
+            body: cleanupMsg,
+            ack() {
+              acked = true;
+            },
+            retry() {},
+          },
+        ],
+      },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+    expect(acked).toBe(true);
+    expect(await env.DOCS.head(uploadedKey)).toBeNull();
+    expect(await tenant.documents.listStaleObjects(cleanupMsg.documentId)).toEqual([]);
+  });
 });

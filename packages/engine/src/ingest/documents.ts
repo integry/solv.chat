@@ -28,7 +28,10 @@ export interface IngestQueueMessage {
 
 export interface PushDeps {
   tenant: Tenant;
-  docs: { put(key: string, value: string): Promise<unknown> };
+  docs: {
+    put(key: string, value: string): Promise<unknown>;
+    delete(key: string): Promise<unknown>;
+  };
   queue: { send(message: IngestQueueMessage): Promise<unknown> };
 }
 
@@ -176,11 +179,26 @@ export async function pushDocuments(
     // and only mark each obligation complete after it succeeds so retries resume.
     let current = saved.storedRevision >= saved.revision;
     if (!current) {
-      await deps.docs.put(
-        documentObjectKey(scope.orgId, saved.id, saved.revision),
-        document.markdown,
-      );
+      const objectKey = documentObjectKey(scope.orgId, saved.id, saved.revision);
+      await deps.docs.put(objectKey, document.markdown);
       current = await deps.tenant.documents.markBodyStored(saved.id, saved.revision);
+      if (!current) {
+        const latest = await deps.tenant.documents.get(saved.id);
+        if (latest === null || latest.deleting) {
+          try {
+            await deps.docs.delete(objectKey);
+          } catch (err) {
+            await deps.tenant.documents.addStaleObject(saved.id, objectKey);
+            await deps.queue.send({
+              documentId: saved.id,
+              orgId: scope.orgId,
+              revision: saved.revision,
+            });
+            throw err;
+          }
+          continue;
+        }
+      }
     }
     if (current && saved.enqueuedRevision < saved.revision) {
       await deps.queue.send({
