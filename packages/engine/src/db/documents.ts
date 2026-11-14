@@ -113,6 +113,24 @@ export function documentsFor(db: D1Database, orgId: string) {
       return row ? mapDocument(row) : null;
     },
 
+    async hashesFor(sourceId: string, externalIds: string[]): Promise<Map<string, string>> {
+      const result = new Map<string, string>();
+      if (externalIds.length === 0) return result;
+      const wanted = new Set(externalIds);
+      const rows = await prepare(
+        db,
+        "SELECT external_id, content_hash FROM documents WHERE org_id = ?1 AND source_id = ?2",
+      )
+        .bind(orgId, sourceId)
+        .all<{ external_id: string; content_hash: string }>();
+      for (const row of rows.results) {
+        if (wanted.has(row.external_id)) {
+          result.set(row.external_id, row.content_hash);
+        }
+      }
+      return result;
+    },
+
     async upsert(input: UpsertDocumentInput): Promise<DocumentRow> {
       await prepareInsert(
         db,
