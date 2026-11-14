@@ -278,6 +278,7 @@ export async function feedbackRoute(
 export async function publicConfigRoute(
   request: Request,
   env: Pick<ChatEnv, "DB">,
+  seams: Pick<Seams, "limits">,
   publicKey: string,
 ): Promise<Response> {
   const assistant = await assistantByPublicKey(env.DB, publicKey);
@@ -293,6 +294,15 @@ export async function publicConfigRoute(
     return Response.json({ error: "Not found." }, { status: 404 });
   }
 
+  const origin = matchedOrigin(assistant, request);
+  const failure = await runPublicChecks(seams.limits, assistant, request);
+  if (failure !== null) {
+    return Response.json(
+      { error: failure.message },
+      { status: failure.reason === "origin" ? 403 : 429, headers: corsHeaders(origin) },
+    );
+  }
+
   const tenant = forPublicScope(env.DB, {
     orgId: assistant.orgId,
     assistantId: assistant.id,
@@ -302,7 +312,6 @@ export async function publicConfigRoute(
     return Response.json({ error: "Not found." }, { status: 404 });
   }
 
-  const origin = matchedOrigin(assistant, request);
   return Response.json(
     {
       title: published.config.widget.title,

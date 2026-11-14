@@ -57,7 +57,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
       }
       const publicConfigMatch = /^\/v1\/assistants\/([^/]+)$/.exec(url.pathname);
       if (publicConfigMatch?.[1]) {
-        return publicConfigRoute(request, env, decodeURIComponent(publicConfigMatch[1]));
+        return publicConfigRoute(request, env, seams, decodeURIComponent(publicConfigMatch[1]));
       }
       if (request.method === "GET" && url.pathname === "/widget.js") {
         // Long cache: the owner embeds a stable URL, so a long max-age keeps

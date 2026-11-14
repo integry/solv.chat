@@ -1,8 +1,9 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { defaultVersionConfig } from "@solvchat/core";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createApp } from "../../src/app.js";
 import { forPrincipal } from "../../src/db/tenant.js";
-import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
+import { createTestApp, fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
 
 describe("chat/publicConfig", () => {
   const tenant = forPrincipal(env.DB, {
@@ -47,7 +48,9 @@ describe("chat/publicConfig", () => {
 
     const ctx2 = createExecutionContext();
     const neverPubRes = await app.fetch(
-      new Request("https://engine.example/v1/assistants/pk_pub_1"),
+      new Request("https://engine.example/v1/assistants/pk_pub_1", {
+        headers: { origin: "https://site.example" },
+      }),
       env,
       ctx2,
     );
@@ -116,7 +119,9 @@ describe("chat/publicConfig", () => {
     await tenant.versions.publishDraft("ast_1", "ver_2", "ver_3", 3000);
     const ctx2 = createExecutionContext();
     const res2 = await app.fetch(
-      new Request("https://engine.example/v1/assistants/pk_pub_1"),
+      new Request("https://engine.example/v1/assistants/pk_pub_1", {
+        headers: { origin: "https://site.example" },
+      }),
       env,
       ctx2,
     );
@@ -124,5 +129,70 @@ describe("chat/publicConfig", () => {
 
     const body2 = (await res2.json()) as Record<string, unknown>;
     expect(body2.title).toBe("Draft Only Title");
+  });
+
+  it("rejects missing or unlisted Origin with 403 before checking limits", async () => {
+    const draft = await tenant.versions.createDraft({
+      id: "ver_1",
+      assistantId: "ast_1",
+      config: defaultVersionConfig(),
+      createdAt: 1000,
+    });
+    await tenant.versions.publishDraft("ast_1", draft.id, "ver_2", 2000);
+
+    const limitsCheck = vi.fn(async () => ({ ok: true as const }));
+    const app = createApp(fakeSeams({ limits: { check: limitsCheck } }));
+
+    for (const headers of [undefined, { origin: "https://evil.example" }]) {
+      const ctx = createExecutionContext();
+      const res = await app.fetch(
+        new Request("https://engine.example/v1/assistants/pk_pub_1", headers ? { headers } : {}),
+        env,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(403);
+      expect(res.headers.get("access-control-allow-origin")).toBeNull();
+      expect(await res.json()).toEqual({ error: "This assistant is not available on this page." });
+    }
+
+    expect(limitsCheck).not.toHaveBeenCalled();
+  });
+
+  it("enforces rate limit and daily spend cap on GET requests", async () => {
+    const draft = await tenant.versions.createDraft({
+      id: "ver_1",
+      assistantId: "ast_1",
+      config: defaultVersionConfig(),
+      createdAt: 1000,
+    });
+    await tenant.versions.publishDraft("ast_1", draft.id, "ver_2", 2000);
+
+    for (const [reason, expectedMessage] of [
+      ["rate_limit", "Too many questions just now. Please wait a moment."],
+      ["spend_cap", "This assistant has reached its limit for today."],
+    ] as const) {
+      const limitsCheck = vi.fn(async () => ({ ok: false as const, reason }));
+      const app = createApp(fakeSeams({ limits: { check: limitsCheck } }));
+
+      const ctx = createExecutionContext();
+      const res = await app.fetch(
+        new Request("https://engine.example/v1/assistants/pk_pub_1", {
+          headers: { origin: "https://site.example", "cf-connecting-ip": "1.2.3.4" },
+        }),
+        env,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("access-control-allow-origin")).toBe("https://site.example");
+      expect(await res.json()).toEqual({ error: expectedMessage });
+      expect(limitsCheck).toHaveBeenCalledWith(TEST_ORG_ID, "ast_1", {
+        kind: "chat",
+        ip: "1.2.3.4",
+      });
+    }
   });
 });

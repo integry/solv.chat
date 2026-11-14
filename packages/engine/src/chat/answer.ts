@@ -52,7 +52,11 @@ async function ensureConversation(
 ): Promise<{ conversationId: string; history: LlmMessage[] }> {
   if (input.conversationId !== undefined) {
     const existing = await deps.tenant.conversations.get(input.conversationId);
-    if (existing !== null && existing.assistantId === input.assistantId) {
+    if (
+      existing !== null &&
+      existing.assistantId === input.assistantId &&
+      existing.visitorId === input.visitorId
+    ) {
       const prior = await deps.tenant.messages.list(existing.id);
       return {
         conversationId: existing.id,

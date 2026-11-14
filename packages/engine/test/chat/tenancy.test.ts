@@ -221,4 +221,76 @@ describe("chat/tenancy", () => {
     expect(JSON.stringify(prompts[1])).toContain("ORG_B_CONFIDENTIAL");
     expect(JSON.stringify(prompts[1])).not.toContain("ORG_A_CONFIDENTIAL");
   });
+
+  it("prevents visitor B from reading or appending to visitor A's conversation on the same assistant", async () => {
+    await tenantA.conversations.create({
+      id: "cnv_a_existing",
+      assistantId: "ast_a",
+      visitorId: "vis_a",
+      startedAt: 1000,
+      pageUrl: "https://a.example",
+    });
+    await tenantA.messages.create({
+      id: "msg_a_secret",
+      conversationId: "cnv_a_existing",
+      role: "user",
+      content: "VISITOR_A_PRIVATE_QUESTION",
+      citations: [],
+      toolCalls: null,
+      tokensIn: 0,
+      tokensOut: 0,
+      answered: true,
+      createdAt: 1000,
+    });
+
+    const prompts: LlmRequest[] = [];
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.balanced.id,
+      async *stream(req) {
+        prompts.push(req);
+        yield { kind: "text", text: "visitor b reply" };
+        yield { kind: "usage", tokensIn: 10, tokensOut: 3 };
+      },
+    };
+
+    const app = createApp(fakeSeams(), {
+      chat: { embedder, retriever, provider },
+    });
+
+    const ctx = createExecutionContext();
+    const res = await app.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://a.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_org_a",
+          visitorId: "vis_b",
+          conversationId: "cnv_a_existing",
+          message: "shared question",
+        }),
+      }),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    const events = parseSseBody(await res.text());
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type).toBe("done");
+    if (done?.type !== "done") return;
+
+    expect(done.conversationId).not.toBe("cnv_a_existing");
+    expect(JSON.stringify(prompts[0])).not.toContain("VISITOR_A_PRIVATE_QUESTION");
+
+    const visitorAMsgs = await tenantA.messages.list("cnv_a_existing");
+    expect(visitorAMsgs).toHaveLength(1);
+    expect(visitorAMsgs[0]?.content).toBe("VISITOR_A_PRIVATE_QUESTION");
+
+    const visitorBMsgConv = await tenantA.conversations.get(done.conversationId);
+    expect(visitorBMsgConv?.visitorId).toBe("vis_b");
+    const visitorBMsgs = await tenantA.messages.list(done.conversationId);
+    expect(visitorBMsgs).toHaveLength(2);
+  });
 });
