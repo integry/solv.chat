@@ -8,6 +8,9 @@ const css = `
   --solv-muted: #475569;
   --solv-user-bg: var(--solv-accent);
   --solv-user-text: #ffffff;
+  --solv-error: #dc2626;
+  --solv-error-bg: #fef2f2;
+  --solv-error-border: #fecaca;
   --solv-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
 
   position: fixed;
@@ -32,6 +35,9 @@ const css = `
     --solv-border: #334155;
     --solv-text: #f8fafc;
     --solv-muted: #94a3b8;
+    --solv-error: #f87171;
+    --solv-error-bg: #450a0a;
+    --solv-error-border: #7f1d1d;
     --solv-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
   }
 }
@@ -187,6 +193,27 @@ textarea:focus-visible {
   border-bottom-left-radius: 4px;
 }
 
+.solv-bubble-text:empty {
+  display: none;
+}
+
+.solv-bubble--error {
+  border-color: var(--solv-error-border);
+}
+
+.solv-bubble-error {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--solv-error-bg);
+  color: var(--solv-error);
+  font-size: 12px;
+}
+
+.solv-bubble-text:empty + .solv-bubble-error {
+  margin-top: 0;
+}
+
 .solv-citations {
   display: flex;
   flex-wrap: wrap;
@@ -275,6 +302,22 @@ textarea:focus-visible {
 
 .solv-chip:hover {
   border-color: var(--solv-accent);
+}
+
+.solv-input-error {
+  padding: 6px 12px 0;
+  border-top: 1px solid var(--solv-border);
+  background: var(--solv-bg);
+  color: var(--solv-error);
+  font-size: 12px;
+}
+
+.solv-input-error[hidden] {
+  display: none;
+}
+
+.solv-input[aria-invalid="true"] {
+  border-color: var(--solv-error);
 }
 
 .solv-form {

@@ -9,6 +9,7 @@ export interface SavedTurn {
   messageId?: string;
   citations?: SavedCitation[];
   feedback?: "up" | "down";
+  error?: string;
 }
 
 export interface SavedConversation {

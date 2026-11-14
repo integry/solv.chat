@@ -1,4 +1,4 @@
-import { CHAT_PROTOCOL_VERSION, parseChatEventLine } from "@solvchat/core";
+import { CHAT_PROTOCOL_VERSION, MAX_CHAT_MESSAGE_LENGTH, parseChatEventLine } from "@solvchat/core";
 import { readEventLines } from "./sse.js";
 import { loadConversation, type SavedTurn, saveConversation, visitorId } from "./storage.js";
 import { styles } from "./styles.js";
@@ -86,6 +86,7 @@ export class SolvChat extends HTMLElement {
   #messagesEl!: HTMLDivElement;
   #greetingEl!: HTMLDivElement;
   #suggestionsEl!: HTMLDivElement;
+  #inputErrorEl!: HTMLDivElement;
   #inputEl!: HTMLTextAreaElement;
   #sendBtn!: HTMLButtonElement;
 
@@ -169,6 +170,12 @@ export class SolvChat extends HTMLElement {
     suggestions.className = "solv-suggestions";
     suggestions.hidden = true;
 
+    const inputError = document.createElement("div");
+    inputError.className = "solv-input-error";
+    inputError.id = "solv-input-error";
+    inputError.setAttribute("role", "alert");
+    inputError.hidden = true;
+
     const form = document.createElement("form");
     form.className = "solv-form";
 
@@ -182,6 +189,12 @@ export class SolvChat extends HTMLElement {
     input.id = "solv-input";
     input.rows = 1;
     input.placeholder = "Ask a question...";
+    input.setAttribute("aria-describedby", "solv-input-error");
+    input.addEventListener("input", () => {
+      if (this.#inputEl.value.trim().length <= MAX_CHAT_MESSAGE_LENGTH) {
+        this.#clearInputError();
+      }
+    });
     let composing = false;
     input.addEventListener("compositionstart", () => {
       composing = true;
@@ -206,14 +219,13 @@ export class SolvChat extends HTMLElement {
 
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      const text = this.#inputEl.value.trim();
-      if (!text || this.#sending) return;
-      this.#inputEl.value = "";
-      void this.#send(text);
+      void this.#send(this.#inputEl.value, () => {
+        this.#inputEl.value = "";
+      });
     });
 
     form.append(label, input, sendBtn);
-    panel.append(header, messages, suggestions, form);
+    panel.append(header, messages, suggestions, inputError, form);
 
     const launcher = document.createElement("button");
     launcher.type = "button";
@@ -238,6 +250,7 @@ export class SolvChat extends HTMLElement {
     this.#messagesEl = messages;
     this.#greetingEl = greeting;
     this.#suggestionsEl = suggestions;
+    this.#inputErrorEl = inputError;
     this.#inputEl = input;
     this.#sendBtn = sendBtn;
     this.#launcher = launcher;
@@ -330,6 +343,9 @@ export class SolvChat extends HTMLElement {
           for (const citation of turn.citations) {
             this.#appendCitationLink(bubble, citation.url, citation.title);
           }
+        }
+        if (turn.error) {
+          this.#renderBubbleError(bubble, turn.error);
         }
         if (turn.messageId) {
           this.#appendFeedbackControls(bubble, turn);
@@ -484,21 +500,62 @@ export class SolvChat extends HTMLElement {
     bubble.append(row);
   }
 
+  #showInputError(message: string): void {
+    this.#inputErrorEl.textContent = message;
+    this.#inputErrorEl.hidden = false;
+    this.#inputEl.setAttribute("aria-invalid", "true");
+  }
+
+  #clearInputError(): void {
+    if (this.#inputErrorEl.hidden) return;
+    this.#inputErrorEl.textContent = "";
+    this.#inputErrorEl.hidden = true;
+    this.#inputEl.removeAttribute("aria-invalid");
+  }
+
+  #setTurnError(bubble: HTMLDivElement, turn: SavedTurn, message: string): void {
+    turn.error = message;
+    this.#renderBubbleError(bubble, message);
+    this.#scrollToBottom();
+  }
+
+  #renderBubbleError(bubble: HTMLDivElement, message: string): void {
+    bubble.classList.add("solv-bubble--error");
+    let errorEl = bubble.querySelector<HTMLDivElement>(".solv-bubble-error");
+    if (!errorEl) {
+      errorEl = document.createElement("div");
+      errorEl.className = "solv-bubble-error";
+      errorEl.setAttribute("role", "alert");
+      bubble.append(errorEl);
+    }
+    errorEl.textContent = message;
+  }
+
   #scrollToBottom(): void {
     this.#messagesEl.scrollTop = this.#messagesEl.scrollHeight;
   }
 
-  async #send(message: string): Promise<void> {
+  async #send(message: string, onAccepted?: () => void): Promise<void> {
     const assistant = this.#assistant();
-    if (!assistant) return;
+    const trimmed = message.trim();
+    if (!assistant || this.#sending || !trimmed) return;
 
+    if (trimmed.length > MAX_CHAT_MESSAGE_LENGTH) {
+      this.#showInputError(
+        `Message must be ${MAX_CHAT_MESSAGE_LENGTH.toLocaleString("en-US")} characters or fewer.`,
+      );
+      return;
+    }
+
+    this.#clearInputError();
+    onAccepted?.();
     this.#sending = true;
     this.#sendBtn.disabled = true;
 
-    const userTurn: SavedTurn = { role: "user", text: message };
+    const userTurn: SavedTurn = { role: "user", text: trimmed };
     this.#turns.push(userTurn);
     const userBubble = this.#appendBubble("user");
-    userBubble.textEl.textContent = message;
+    userBubble.textEl.textContent = trimmed;
     this.#renderSuggestions();
 
     const assistantTurn: SavedTurn = { role: "assistant", text: "" };
@@ -513,7 +570,7 @@ export class SolvChat extends HTMLElement {
         protocol: CHAT_PROTOCOL_VERSION,
         assistant,
         visitorId: visitorId(),
-        message,
+        message: trimmed,
       };
       if (this.#conversationId !== null) {
         requestBody.conversationId = this.#conversationId;
@@ -529,9 +586,7 @@ export class SolvChat extends HTMLElement {
       });
 
       if (!response.ok || !response.body) {
-        const msg = "Something went wrong. Please try again.";
-        assistantTurn.text = msg;
-        textEl.textContent = msg;
+        this.#setTurnError(bubble, assistantTurn, "Something went wrong. Please try again.");
         return;
       }
 
@@ -557,18 +612,15 @@ export class SolvChat extends HTMLElement {
           this.#appendFeedbackControls(bubble, assistantTurn);
           this.#persist();
         } else if (event.type === "error") {
-          if (!assistantTurn.text) {
-            assistantTurn.text = event.message;
-            textEl.textContent = event.message;
-          }
+          const msg = event.message.trim() || "Something went wrong. Please try again.";
+          this.#setTurnError(bubble, assistantTurn, msg);
         }
       }
     } catch {
-      if (!assistantTurn.text) {
-        const msg = "Unable to reach the assistant. Please try again.";
-        assistantTurn.text = msg;
-        textEl.textContent = msg;
-      }
+      const msg = assistantTurn.text
+        ? "Response interrupted. Please try again."
+        : "Unable to reach the assistant. Please try again.";
+      this.#setTurnError(bubble, assistantTurn, msg);
     } finally {
       this.#sending = false;
       this.#sendBtn.disabled = false;

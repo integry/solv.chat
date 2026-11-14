@@ -1,4 +1,4 @@
-import { CHAT_PROTOCOL_VERSION } from "@solvchat/core";
+import { CHAT_PROTOCOL_VERSION, MAX_CHAT_MESSAGE_LENGTH } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../src/widget.js";
 
@@ -590,5 +590,189 @@ describe("<solv-chat>", () => {
       message: "nihao",
     });
     expect(root.textContent).toContain("Submitted");
+  });
+
+  it("enforces the 4,000-character message limit without clearing oversized drafts and allows 4,000 trimmed chars", async () => {
+    const chatRequests: Array<{ message: string }> = [];
+    const oversizedSuggestion = "q".repeat(MAX_CHAT_MESSAGE_LENGTH + 1);
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/assistants/pk_len")) {
+        return Response.json({
+          title: "Docs Helper",
+          greeting: "Hi!",
+          suggestedQuestions: [oversizedSuggestion],
+        });
+      }
+      if (url.endsWith("/v1/chat")) {
+        chatRequests.push(JSON.parse(String(init?.body)) as { message: string });
+        return new Response(
+          sseStream([
+            'event: token\ndata: {"text":"Accepted"}\n\n',
+            'event: done\ndata: {"messageId":"msg_len","conversationId":"conv_len"}\n\n',
+          ]),
+          { status: 200 },
+        );
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const el = mountWidget("pk_len");
+    await flushAsync();
+    const root = shadow(el);
+
+    mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+    const input = mustQuery<HTMLTextAreaElement>(root, "#solv-input");
+    const form = mustQuery<HTMLFormElement>(root, ".solv-form");
+    const errorEl = mustQuery<HTMLDivElement>(root, ".solv-input-error");
+
+    // Oversized suggested question is also rejected before sending or modifying transcript.
+    const chip = mustQuery<HTMLButtonElement>(root, ".solv-chip");
+    chip.click();
+    await flushAsync();
+    expect(chatRequests).toHaveLength(0);
+    expect(errorEl.hidden).toBe(false);
+    expect(errorEl.textContent).toContain("4,000");
+    expect(root.querySelectorAll(".solv-bubble--user")).toHaveLength(0);
+
+    // Clear error by typing short text, then submit 4,001 non-whitespace characters.
+    const oversizedDraft = "a".repeat(MAX_CHAT_MESSAGE_LENGTH + 1);
+    input.value = oversizedDraft;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    form.requestSubmit();
+    await flushAsync();
+
+    expect(chatRequests).toHaveLength(0);
+    expect(input.value).toBe(oversizedDraft);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(errorEl.hidden).toBe(false);
+    expect(errorEl.textContent).toContain("4,000");
+    expect(root.querySelectorAll(".solv-bubble--user")).toHaveLength(0);
+    expect(sessionStorage.getItem("solv-chat-open:pk_len")).not.toContain(oversizedDraft);
+
+    // Exactly 4,000 trimmed characters (with surrounding whitespace) succeeds and clears the error.
+    const boundaryText = "b".repeat(MAX_CHAT_MESSAGE_LENGTH);
+    input.value = `  ${boundaryText}  `;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(errorEl.hidden).toBe(true);
+    expect(input.hasAttribute("aria-invalid")).toBe(false);
+
+    form.requestSubmit();
+    await flushAsync();
+
+    expect(chatRequests).toHaveLength(1);
+    expect(chatRequests[0]?.message).toBe(boundaryText);
+    expect(input.value).toBe("");
+    expect(errorEl.hidden).toBe(true);
+    expect(root.textContent).toContain("Accepted");
+  });
+
+  it("preserves partial text, marks failure on mid-stream error event, and retains failure across reload", async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        return new Response(
+          sseStream([
+            'event: token\ndata: {"text":"Partial answer"}\n\n',
+            'event: error\ndata: {"message":"Model quota exceeded"}\n\n',
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const el = mountWidget("pk_err_event");
+    await flushAsync();
+    const root = shadow(el);
+
+    mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Question";
+    mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    const sendBtn = mustQuery<HTMLButtonElement>(root, ".solv-send");
+    expect(sendBtn.disabled).toBe(false);
+
+    const assistantBubbles = root.querySelectorAll(".solv-bubble--assistant");
+    const bubble = assistantBubbles[assistantBubbles.length - 1];
+    expect(bubble?.classList.contains("solv-bubble--error")).toBe(true);
+    expect(bubble?.querySelector(".solv-bubble-text")?.textContent).toBe("Partial answer");
+    expect(bubble?.querySelector(".solv-bubble-error")?.textContent).toBe("Model quota exceeded");
+
+    // Reloading the widget restores both the partial text and the error indicator.
+    el.remove();
+    const reloaded = mountWidget("pk_err_event");
+    await flushAsync();
+    const reloadedRoot = shadow(reloaded);
+    const reloadedBubbles = reloadedRoot.querySelectorAll(".solv-bubble--assistant");
+    const reloadedBubble = reloadedBubbles[reloadedBubbles.length - 1];
+    expect(reloadedBubble?.classList.contains("solv-bubble--error")).toBe(true);
+    expect(reloadedBubble?.querySelector(".solv-bubble-text")?.textContent).toBe("Partial answer");
+    expect(reloadedBubble?.querySelector(".solv-bubble-error")?.textContent).toBe(
+      "Model quota exceeded",
+    );
+  });
+
+  it("preserves partial text, marks failure on mid-stream reader rejection, and retains failure across reload", async () => {
+    const encoder = new TextEncoder();
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        let sentFirst = false;
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!sentFirst) {
+              sentFirst = true;
+              controller.enqueue(
+                encoder.encode('event: token\ndata: {"text":"Streamed prefix"}\n\n'),
+              );
+              return;
+            }
+            controller.error(new Error("Connection reset"));
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const el = mountWidget("pk_err_reject");
+    await flushAsync();
+    const root = shadow(el);
+
+    mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Question";
+    mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    const sendBtn = mustQuery<HTMLButtonElement>(root, ".solv-send");
+    expect(sendBtn.disabled).toBe(false);
+
+    const assistantBubbles = root.querySelectorAll(".solv-bubble--assistant");
+    const bubble = assistantBubbles[assistantBubbles.length - 1];
+    expect(bubble?.classList.contains("solv-bubble--error")).toBe(true);
+    expect(bubble?.querySelector(".solv-bubble-text")?.textContent).toBe("Streamed prefix");
+    expect(bubble?.querySelector(".solv-bubble-error")?.textContent).toBe(
+      "Response interrupted. Please try again.",
+    );
+
+    // Reloading the widget restores both the partial text and the error indicator.
+    el.remove();
+    const reloaded = mountWidget("pk_err_reject");
+    await flushAsync();
+    const reloadedRoot = shadow(reloaded);
+    const reloadedBubbles = reloadedRoot.querySelectorAll(".solv-bubble--assistant");
+    const reloadedBubble = reloadedBubbles[reloadedBubbles.length - 1];
+    expect(reloadedBubble?.classList.contains("solv-bubble--error")).toBe(true);
+    expect(reloadedBubble?.querySelector(".solv-bubble-text")?.textContent).toBe("Streamed prefix");
+    expect(reloadedBubble?.querySelector(".solv-bubble-error")?.textContent).toBe(
+      "Response interrupted. Please try again.",
+    );
   });
 });
