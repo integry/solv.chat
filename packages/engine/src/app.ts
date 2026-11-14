@@ -68,15 +68,20 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         // making owners bust a cache.
         return widgetAsset();
       }
-      const ingestMatch = /^\/v1\/ingest\/([^/]+)\/documents$/.exec(url.pathname);
-      if (ingestMatch?.[1]) {
-        return ingestRoutes(request, decodeURIComponent(ingestMatch[1]), {
-          db: env.DB,
-          docs: env.DOCS,
-          queue: env.INGEST_QUEUE,
-          retriever: vectorizeRetriever(env.VECTORS),
-          limits: seams.limits,
-        });
+      const ingestMatch = /^\/v1\/ingest\/([^/]+)\/(documents|config)$/.exec(url.pathname);
+      if (ingestMatch?.[1] && ingestMatch[2]) {
+        return ingestRoutes(
+          request,
+          decodeURIComponent(ingestMatch[1]),
+          ingestMatch[2] as "documents" | "config",
+          {
+            db: env.DB,
+            docs: env.DOCS,
+            queue: env.INGEST_QUEUE,
+            retriever: vectorizeRetriever(env.VECTORS),
+            limits: seams.limits,
+          },
+        );
       }
       if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
         if (request.method !== "GET" && request.method !== "HEAD") {

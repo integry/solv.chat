@@ -94,6 +94,10 @@ that fails one gets a plain error event and costs nothing.
   documents (external id, url, title, Markdown). Unchanged `content_hash` is a no-op.
 - `DELETE /v1/ingest/:assistantId/documents` — by external id, or everything not in
   the pushed set (`prune`).
+- `GET /v1/ingest/:assistantId/config` — bearer ingest key. Returns the current
+  draft config.
+- `PUT /v1/ingest/:assistantId/config` — bearer ingest key. Validates and updates
+  the draft config only (never publishes, rolls back, or reads history).
 
 Ingest writes the document row, enqueues it, and a Queue consumer chunks, embeds
 and upserts vectors. There is no crawler in v1: content is pushed (CLI, GitHub
@@ -264,8 +268,11 @@ Install
 ## Config as code
 
 `solv.config.json` in a site's repository describes an assistant's behaviour,
-widget and tests. `solv apply` pushes it to the draft; `solv push` sends content;
-`solv test` runs the tests. The admin and the file edit the same draft.
+widget and tests. `solv apply` writes the draft with the ingest key
+(`SOLV_INGEST_KEY`); publishing always happens in the admin. `solv push` sends
+content; `solv test` runs the tests. The admin and the file edit the same draft.
+Because an ingest key can change an assistant's draft behaviour as well as its
+content, it must be kept as a secret.
 
 ## Extension seams
 
