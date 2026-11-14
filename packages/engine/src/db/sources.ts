@@ -59,6 +59,44 @@ const map = (row: Row): SourceRow => ({
 
 /** Tenant-scoped data access for `sources`. */
 export function sourcesFor(db: D1Database, orgId: string) {
+  async function getDefaultByKind(
+    assistantId: string,
+    kind: "push" | "entry",
+  ): Promise<SourceRow | null> {
+    const row = await prepare(
+      db,
+      `SELECT ${COLUMNS} FROM sources WHERE org_id = ?1 AND assistant_id = ?2 AND kind = ?3 AND is_default = 1`,
+    )
+      .bind(orgId, assistantId, kind)
+      .first<Row>();
+    return row ? map(row) : null;
+  }
+
+  async function getOrCreateDefaultByKind(
+    kind: "push" | "entry",
+    label: string,
+    input: { id: string; assistantId: string; createdAt: number },
+  ): Promise<SourceRow> {
+    const conflictTarget =
+      kind === "push"
+        ? "ON CONFLICT(org_id, assistant_id) WHERE kind = 'push' AND is_default = 1 DO NOTHING"
+        : "ON CONFLICT(org_id, assistant_id) WHERE kind = 'entry' AND is_default = 1 DO NOTHING";
+    await prepareInsert(
+      db,
+      `INSERT INTO sources (id, org_id, assistant_id, kind, label, settings, is_default, created_at)
+       VALUES (?2, ?1, ?3, ?4, ?5, '{}', 1, ?6)
+       ${conflictTarget}`,
+    )
+      .bind(orgId, input.id, input.assistantId, kind, label, input.createdAt)
+      .run();
+
+    const resolved = await getDefaultByKind(input.assistantId, kind);
+    if (!resolved) {
+      throw new Error(`failed to resolve default ${kind} source for ${input.assistantId}`);
+    }
+    return resolved;
+  }
+
   return {
     async list(assistantId: string): Promise<SourceRow[]> {
       const res = await prepare(
@@ -109,13 +147,7 @@ export function sourcesFor(db: D1Database, orgId: string) {
     },
 
     async getDefaultPush(assistantId: string): Promise<SourceRow | null> {
-      const row = await prepare(
-        db,
-        `SELECT ${COLUMNS} FROM sources WHERE org_id = ?1 AND assistant_id = ?2 AND kind = 'push' AND is_default = 1`,
-      )
-        .bind(orgId, assistantId)
-        .first<Row>();
-      return row ? map(row) : null;
+      return getDefaultByKind(assistantId, "push");
     },
 
     async getOrCreateDefaultPush(input: {
@@ -123,20 +155,19 @@ export function sourcesFor(db: D1Database, orgId: string) {
       assistantId: string;
       createdAt: number;
     }): Promise<SourceRow> {
-      await prepareInsert(
-        db,
-        `INSERT INTO sources (id, org_id, assistant_id, kind, label, settings, is_default, created_at)
-         VALUES (?2, ?1, ?3, 'push', 'Push', '{}', 1, ?4)
-         ON CONFLICT(org_id, assistant_id) WHERE kind = 'push' AND is_default = 1 DO NOTHING`,
-      )
-        .bind(orgId, input.id, input.assistantId, input.createdAt)
-        .run();
+      return getOrCreateDefaultByKind("push", "Push", input);
+    },
 
-      const resolved = await this.getDefaultPush(input.assistantId);
-      if (!resolved) {
-        throw new Error(`failed to resolve default push source for ${input.assistantId}`);
-      }
-      return resolved;
+    async getDefaultEntry(assistantId: string): Promise<SourceRow | null> {
+      return getDefaultByKind(assistantId, "entry");
+    },
+
+    async getOrCreateDefaultEntry(input: {
+      id: string;
+      assistantId: string;
+      createdAt: number;
+    }): Promise<SourceRow> {
+      return getOrCreateDefaultByKind("entry", "Answers you wrote", input);
     },
 
     async create(input: CreateSourceInput): Promise<SourceRow> {

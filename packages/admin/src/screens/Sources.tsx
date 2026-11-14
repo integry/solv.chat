@@ -299,6 +299,8 @@ export function Sources({ assistantId }: SourcesProps) {
     question: string;
     answer: string;
   } | null>(null);
+  const editingEntryRef = useRef(editingEntry);
+  editingEntryRef.current = editingEntry;
 
   const [busySourceId, setBusySourceId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -616,9 +618,16 @@ export function Sources({ assistantId }: SourcesProps) {
               }
             : undefined
         }
-        onSaved={(result) => {
-          cancelEntryLoad();
-          setEditingEntry(null);
+        onSaved={(result, session) => {
+          if (session.assistantId !== assistantId) return;
+          const current = editingEntryRef.current;
+          const sameSession =
+            session.documentId !== undefined
+              ? current?.sourceId === session.sourceId && current?.documentId === session.documentId
+              : current === null;
+          if (sameSession) {
+            setEditingEntry(null);
+          }
           sourcesRes.reload();
           if (expandedSourceId === result.sourceId) {
             void loadDocuments(

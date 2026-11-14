@@ -347,4 +347,46 @@ describe("admin entries", () => {
     expect(body.fields?.some((f) => f.startsWith("answer: "))).toBe(true);
     expect(await tenant.sources.listWithStats(assistantId)).toEqual([]);
   });
+
+  it("converges concurrent first saves of the same question onto one entry source and one document", async () => {
+    const assistantId = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+    const deps = { tenant, docs, queue, publicBaseUrl: "https://admin.example.com" };
+
+    const [first, second] = await Promise.all([
+      saveEntry(
+        deps,
+        { orgId: ORG_A },
+        {
+          assistantId,
+          question: "How do I reset my password?",
+          answer: "Use the Forgot password link on the sign-in page.",
+        },
+      ),
+      saveEntry(
+        deps,
+        { orgId: ORG_A },
+        {
+          assistantId,
+          question: "How do I reset my password?",
+          answer: "Use the Forgot password link on the sign-in page.",
+        },
+      ),
+    ]);
+
+    expect(first.sourceId).toBe(second.sourceId);
+    expect(first.documentId).toBe(second.documentId);
+    expect(first.url).toBe(second.url);
+
+    const sources = await tenant.sources.list(assistantId);
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.kind).toBe("entry");
+
+    const allDocs = await tenant.documents.listBySource(first.sourceId);
+    expect(allDocs).toHaveLength(1);
+    expect(allDocs[0]?.id).toBe(first.documentId);
+    expect(allDocs[0]?.title).toBe("How do I reset my password?");
+  });
 });

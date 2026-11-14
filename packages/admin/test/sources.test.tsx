@@ -20,6 +20,11 @@ function installSourcesFakeServer(options?: {
   extraDocuments?: Array<[string, Array<DocumentSummary & { markdown: string }>]>;
   onDocsRequest?: (sourceId: string, url: URL) => Promise<Response> | null;
   onDocRequest?: (sourceId: string, docId: string) => Promise<Response> | null;
+  onEntrySave?: (
+    sourceId: string,
+    docId: string,
+    body: { question: string; answer: string },
+  ) => Promise<Response> | Response | null;
   onSitemapImport?: (body: {
     sitemapUrl?: string;
     urls: string[];
@@ -189,6 +194,24 @@ function installSourcesFakeServer(options?: {
         { source: sitemapSource, written: body.urls.length, unchanged: 0, total: body.urls.length },
         { status: 201 },
       );
+    }
+
+    const entryPutMatch = /^\/api\/admin\/sources\/([^/]+)\/entries\/([^/]+)$/.exec(path);
+    if (entryPutMatch?.[1] && entryPutMatch[2] && method === "PUT") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { question: string; answer: string };
+      const intercepted = await options?.onEntrySave?.(entryPutMatch[1], entryPutMatch[2], body);
+      if (intercepted) {
+        return intercepted;
+      }
+      const list = documentsBySource.get(entryPutMatch[1]) ?? [];
+      const found = list.find((d) => d.id === entryPutMatch[2]);
+      if (!found) {
+        return Response.json({ error: "Not found." }, { status: 404 });
+      }
+      found.title = body.question;
+      found.updatedAt = Date.now();
+      found.markdown = `# ${body.question}\n\n${body.answer}`;
+      return Response.json({ documentId: found.id, sourceId: entryPutMatch[1] });
     }
 
     const docsMatch = /^\/api\/admin\/sources\/([^/]+)\/documents$/.exec(path);
@@ -704,5 +727,103 @@ describe("admin Sources screen", () => {
       expect(screen.queryByRole("heading", { name: "Edit answer" })).toBeNull();
       expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("");
     });
+  });
+
+  it("keeps entry B loaded and editable when a delayed save for entry A completes", async () => {
+    let resolveSaveA!: (res: Response) => void;
+    const entryDocs = [
+      {
+        id: "doc_a",
+        sourceId: "src_entry_1",
+        externalId: "entry:a",
+        url: "https://example.com/admin/sources#entry:a",
+        title: "Question A",
+        updatedAt: 1_700_000_200_000,
+        markdown: "# Question A\n\nAnswer A",
+      },
+      {
+        id: "doc_b",
+        sourceId: "src_entry_1",
+        externalId: "entry:b",
+        url: "https://example.com/admin/sources#entry:b",
+        title: "Question B",
+        updatedAt: 1_700_000_200_000,
+        markdown: "# Question B\n\nAnswer B",
+      },
+    ];
+
+    installSourcesFakeServer({
+      extraSources: [
+        {
+          id: "src_entry_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          kind: "entry",
+          label: "Answers you wrote",
+          settings: {},
+          createdAt: 1_700_000_200_000,
+          documentCount: 2,
+          lastUpdatedAt: 1_700_000_200_000,
+        },
+      ],
+      extraDocuments: [["src_entry_1", entryDocs]],
+      onEntrySave: (_sourceId, docId, body) => {
+        if (docId === "doc_a") {
+          return new Promise<Response>((resolve) => {
+            resolveSaveA = (res) => {
+              const currentDoc = entryDocs[0];
+              if (currentDoc) {
+                entryDocs[0] = { ...currentDoc, title: body.question };
+              }
+              resolve(res);
+            };
+          });
+        }
+        return null;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+
+    render(<App />);
+    await screen.findAllByText("Answers you wrote");
+
+    // Expand the entry source.
+    const viewButtons = screen.getAllByRole("button", { name: "View documents" });
+    const entryViewBtn = viewButtons[1];
+    if (!entryViewBtn) throw new Error("Expected entry View documents button");
+    fireEvent.click(entryViewBtn);
+    expect(await screen.findByText("Question A")).toBeTruthy();
+
+    const [editA, editB] = screen.getAllByRole("button", { name: "Edit" });
+    if (!editA || !editB) throw new Error("Expected both Edit buttons");
+
+    // 1. Load entry A, modify it, and click Save (PUT remains pending).
+    fireEvent.click(editA);
+    const questionInput = (await screen.findByLabelText("Question")) as HTMLInputElement;
+    const answerInput = screen.getByLabelText("Answer") as HTMLTextAreaElement;
+    await waitFor(() => {
+      expect(questionInput.value).toBe("Question A");
+    });
+    fireEvent.change(questionInput, { target: { value: "Updated Question A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeTruthy();
+
+    // 2. Switch to entry B while A's save is still pending.
+    fireEvent.click(editB);
+    await waitFor(() => {
+      expect(questionInput.value).toBe("Question B");
+      expect(answerInput.value).toBe("Answer B");
+    });
+    expect(questionInput.disabled).toBe(false);
+    fireEvent.change(answerInput, { target: { value: "Draft Answer B" } });
+
+    // 3. Delayed save for A now completes; B's editor session must stay intact.
+    resolveSaveA(Response.json({ documentId: "doc_a", sourceId: "src_entry_1" }));
+
+    expect(await screen.findByText("Updated Question A")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Edit answer" })).toBeTruthy();
+    expect(questionInput.value).toBe("Question B");
+    expect(answerInput.value).toBe("Draft Answer B");
+    expect(screen.queryByText("Answer saved.")).toBeNull();
   });
 });

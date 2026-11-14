@@ -20,12 +20,9 @@ export async function ensureEntrySource(tenant: Tenant, assistantId: string): Pr
   const existing = await tenant.sources.getFirstByKind(assistantId, "entry");
   if (existing !== null) return existing.id;
 
-  const created = await tenant.sources.create({
+  const created = await tenant.sources.getOrCreateDefaultEntry({
     id: newId("src"),
     assistantId,
-    kind: "entry",
-    label: "Answers you wrote",
-    settings: {},
     createdAt: Date.now(),
   });
   return created.id;

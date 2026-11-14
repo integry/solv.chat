@@ -1,5 +1,11 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, postJson, putJson } from "../api/client.js";
+
+export interface EntrySaveSession {
+  assistantId: string;
+  sourceId?: string;
+  documentId?: string;
+}
 
 export interface EntryEditorProps {
   assistantId: string;
@@ -7,7 +13,9 @@ export interface EntryEditorProps {
   documentId?: string | undefined;
   initialQuestion?: string | undefined;
   initialAnswer?: string | undefined;
-  onSaved?: ((result: { documentId: string; sourceId: string }) => void) | undefined;
+  onSaved?:
+    | ((result: { documentId: string; sourceId: string }, session: EntrySaveSession) => void)
+    | undefined;
   onCancel?: (() => void) | undefined;
 }
 
@@ -26,22 +34,32 @@ export function EntryEditor({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const sessionRef = useRef(0);
 
   useEffect(() => {
+    void assistantId;
     void sourceId;
     void documentId;
+    sessionRef.current++;
     setQuestion(initialQuestion);
     setAnswer(initialAnswer);
+    setSaving(false);
     setFieldErrors({});
     setFormError(null);
     setStatusMessage(null);
-  }, [sourceId, documentId, initialQuestion, initialAnswer]);
+  }, [assistantId, sourceId, documentId, initialQuestion, initialAnswer]);
 
   const isEditing = Boolean(sourceId && documentId);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (saving) return;
+    const submitSession = sessionRef.current;
+    const session: EntrySaveSession = {
+      assistantId,
+      ...(sourceId !== undefined ? { sourceId } : {}),
+      ...(documentId !== undefined ? { documentId } : {}),
+    };
     setSaving(true);
     setFieldErrors({});
     setFormError(null);
@@ -64,21 +82,27 @@ export function EntryEditor({
               payload,
             );
 
-      setStatusMessage("Answer saved.");
-      if (!isEditing) {
-        setQuestion("");
-        setAnswer("");
+      if (sessionRef.current === submitSession) {
+        setStatusMessage("Answer saved.");
+        if (!isEditing) {
+          setQuestion("");
+          setAnswer("");
+        }
       }
-      onSaved?.(result);
+      onSaved?.(result, session);
     } catch (err) {
-      if (err instanceof ApiError) {
-        setFieldErrors(err.fields);
-        setFormError(Object.keys(err.fields).length === 0 ? err.message : null);
-      } else {
-        setFormError("Could not save answer. Try again.");
+      if (sessionRef.current === submitSession) {
+        if (err instanceof ApiError) {
+          setFieldErrors(err.fields);
+          setFormError(Object.keys(err.fields).length === 0 ? err.message : null);
+        } else {
+          setFormError("Could not save answer. Try again.");
+        }
       }
     } finally {
-      setSaving(false);
+      if (sessionRef.current === submitSession) {
+        setSaving(false);
+      }
     }
   }
 
