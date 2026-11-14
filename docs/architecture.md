@@ -183,7 +183,10 @@ solv.actions.register({
   description: "Open one of the visitor's invoices",
   input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
   confirm: false,
-  run: async ({ id }) => { router.push(`/invoices/${id}`); return { opened: id }; },
+  run: async ({ id }) => {
+    router.push(`/invoices/${id}`);
+    return { opened: id };
+  },
 });
 ```
 
