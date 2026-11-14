@@ -6,7 +6,6 @@ import { forIngestScope } from "../../src/db/tenant.js";
 import { runIngestBatch } from "../../src/ingest/consumer.js";
 import {
   deleteDocuments,
-  documentObjectKey,
   type IngestQueueMessage,
   MAX_BATCH_DOCUMENTS,
   pushDocuments,
@@ -196,10 +195,8 @@ describe("ingest documents", () => {
     const dropDoc = await tenant.documents.getByExternalId(pushSourceId, "drop-me");
     expect(keepDoc).not.toBeNull();
     expect(dropDoc).toBeNull();
-    if (!keepDoc) throw new Error("expected keepDoc to exist");
-    expect(
-      await env.DOCS.head(documentObjectKey(TEST_ORG_ID, keepDoc.id, keepDoc.contentHash)),
-    ).not.toBeNull();
+    if (!keepDoc?.bodyKey) throw new Error("expected keepDoc and bodyKey to exist");
+    expect(await env.DOCS.head(keepDoc.bodyKey)).not.toBeNull();
 
     const remainingVectors = retriever.all();
     expect(remainingVectors).toHaveLength(1);

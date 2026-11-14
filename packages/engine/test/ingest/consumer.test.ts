@@ -47,6 +47,7 @@ async function seedDocument(
 ) {
   const documentId = newId("doc");
   const hash = await contentHash(title, markdown);
+  const bodyKey = documentObjectKey(orgId, documentId);
   const tenant = forIngestScope(env.DB, { orgId, assistantId: "" });
   await tenant.documents.upsert({
     id: documentId,
@@ -55,10 +56,11 @@ async function seedDocument(
     url,
     title,
     contentHash: hash,
+    bodyKey,
     updatedAt: Date.now(),
   });
-  await env.DOCS.put(documentObjectKey(orgId, documentId, hash), markdown);
-  return { documentId, hash, tenant };
+  await env.DOCS.put(bodyKey, markdown);
+  return { documentId, hash, bodyKey, tenant };
 }
 
 function makeMessage(body: IngestQueueMessage) {
@@ -132,6 +134,7 @@ describe("ingest consumer", () => {
 
     const newMarkdown = "# Updated\n\nOnly one chunk.";
     const hash2 = await contentHash("Doc", newMarkdown);
+    const bodyKey2 = documentObjectKey(TEST_ORG_ID, documentId);
     await tenant.documents.upsert({
       id: documentId,
       sourceId,
@@ -139,9 +142,10 @@ describe("ingest consumer", () => {
       url: "https://example.com/doc",
       title: "Doc",
       contentHash: hash2,
+      bodyKey: bodyKey2,
       updatedAt: Date.now(),
     });
-    await env.DOCS.put(documentObjectKey(TEST_ORG_ID, documentId, hash2), newMarkdown);
+    await env.DOCS.put(bodyKey2, newMarkdown);
 
     await runIngestBatch(
       { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 })] },
@@ -404,6 +408,7 @@ describe("ingest consumer", () => {
     // Update document to V2.
     const v2Markdown = "# V2\n\nUpdated.";
     const hash2 = await contentHash("Doc", v2Markdown);
+    const bodyKey2 = documentObjectKey(TEST_ORG_ID, documentId);
     await tenant.documents.upsert({
       id: documentId,
       sourceId,
@@ -411,47 +416,50 @@ describe("ingest consumer", () => {
       url: "https://example.com/doc",
       title: "Doc",
       contentHash: hash2,
+      bodyKey: bodyKey2,
       updatedAt: Date.now(),
     });
-    await env.DOCS.put(documentObjectKey(TEST_ORG_ID, documentId, hash2), v2Markdown);
+    await env.DOCS.put(bodyKey2, v2Markdown);
 
     // 1. Failure in embedder.
-    await expect(
-      runIngestBatch(
-        { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 })] },
-        {
-          db: env.DB,
-          docs: env.DOCS,
-          embedder: {
-            dimensions: baseEmbedder.dimensions,
-            async embed() {
-              throw new Error("embedder down");
-            },
+    const embedFailMsg = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 });
+    await runIngestBatch(
+      { messages: [embedFailMsg] },
+      {
+        db: env.DB,
+        docs: env.DOCS,
+        embedder: {
+          dimensions: baseEmbedder.dimensions,
+          async embed() {
+            throw new Error("embedder down");
           },
-          retriever: baseRetriever,
         },
-      ),
-    ).rejects.toThrow("embedder down");
+        retriever: baseRetriever,
+      },
+    );
+    expect(embedFailMsg.retried).toBe(true);
+    expect(embedFailMsg.acked).toBe(false);
     expect(await tenant.documents.listChunks(documentId)).toEqual(v1Chunks);
     expect((await tenant.documents.get(documentId))?.indexedHash).toBe(hash1);
 
     // 2. Failure in vector upsert.
-    await expect(
-      runIngestBatch(
-        { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 })] },
-        {
-          db: env.DB,
-          docs: env.DOCS,
-          embedder: baseEmbedder,
-          retriever: {
-            ...baseRetriever,
-            async upsert() {
-              throw new Error("vectorize down");
-            },
+    const upsertFailMsg = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 });
+    await runIngestBatch(
+      { messages: [upsertFailMsg] },
+      {
+        db: env.DB,
+        docs: env.DOCS,
+        embedder: baseEmbedder,
+        retriever: {
+          ...baseRetriever,
+          async upsert() {
+            throw new Error("vectorize down");
           },
         },
-      ),
-    ).rejects.toThrow("vectorize down");
+      },
+    );
+    expect(upsertFailMsg.retried).toBe(true);
+    expect(upsertFailMsg.acked).toBe(false);
     expect(await tenant.documents.listChunks(documentId)).toEqual(v1Chunks);
     expect((await tenant.documents.get(documentId))?.indexedHash).toBe(hash1);
 
@@ -466,12 +474,13 @@ describe("ingest consumer", () => {
       },
     } as unknown as D1Database;
 
-    await expect(
-      runIngestBatch(
-        { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 })] },
-        { db: failingDb, docs: env.DOCS, embedder: baseEmbedder, retriever: baseRetriever },
-      ),
-    ).rejects.toThrow("D1 commit failed");
+    const commitFailMsg = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 });
+    await runIngestBatch(
+      { messages: [commitFailMsg] },
+      { db: failingDb, docs: env.DOCS, embedder: baseEmbedder, retriever: baseRetriever },
+    );
+    expect(commitFailMsg.retried).toBe(true);
+    expect(commitFailMsg.acked).toBe(false);
     expect(await tenant.documents.listChunks(documentId)).toEqual(v1Chunks);
     expect((await tenant.documents.get(documentId))?.indexedHash).toBe(hash1);
 
@@ -641,6 +650,7 @@ describe("ingest consumer", () => {
 
     const v2Markdown = "# V2\n\nSecond.";
     const hash2 = await contentHash("Doc", v2Markdown);
+    const bodyKey2 = documentObjectKey(TEST_ORG_ID, documentId);
     await tenant.documents.upsert({
       id: documentId,
       sourceId,
@@ -648,9 +658,10 @@ describe("ingest consumer", () => {
       url: "https://example.com/doc",
       title: "Doc",
       contentHash: hash2,
+      bodyKey: bodyKey2,
       updatedAt: Date.now(),
     });
-    await env.DOCS.put(documentObjectKey(TEST_ORG_ID, documentId, hash2), v2Markdown);
+    await env.DOCS.put(bodyKey2, v2Markdown);
 
     const failingCleanupRetriever: Retriever = {
       upsert: baseRetriever.upsert,
@@ -659,17 +670,11 @@ describe("ingest consumer", () => {
         throw new Error("Vectorize remove failed");
       },
     };
-    const failingCleanupDocs = {
-      get: env.DOCS.get.bind(env.DOCS),
-      async delete() {
-        throw new Error("R2 delete failed");
-      },
-    };
 
     const msg = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash2 });
     await runIngestBatch(
       { messages: [msg] },
-      { db: env.DB, docs: failingCleanupDocs, embedder, retriever: failingCleanupRetriever },
+      { db: env.DB, docs: env.DOCS, embedder, retriever: failingCleanupRetriever },
     );
 
     expect(msg.acked).toBe(true);
@@ -677,5 +682,126 @@ describe("ingest consumer", () => {
     const chunks = await tenant.documents.listChunks(documentId);
     expect(chunks.map((c) => c.text)).toEqual(["Second."]);
     expect((await tenant.documents.get(documentId))?.indexedHash).toBe(hash2);
+  });
+
+  it("A -> B -> A with old message for A delivered last ends indexed with A's chunks and body object", async () => {
+    const { assistantId } = await seedOrgAndAssistant();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const queue: IngestQueueMessage[] = [];
+    const retriever = memoryRetriever();
+    const embedder = fakeEmbedder();
+    const pushDeps = {
+      tenant,
+      docs: env.DOCS,
+      queue: {
+        async send(m: IngestQueueMessage) {
+          queue.push(m);
+        },
+      },
+    };
+
+    const docA = {
+      externalId: "page",
+      url: "https://example.com/page",
+      title: "Page",
+      markdown: "# A\n\nContent A.",
+    };
+    const docB = {
+      externalId: "page",
+      url: "https://example.com/page",
+      title: "Page",
+      markdown: "# B\n\nContent B.",
+    };
+
+    await pushDocuments(pushDeps, scope, { documents: [docA] });
+    const msgA1 = makeMessage(queue[0] as IngestQueueMessage);
+
+    await pushDocuments(pushDeps, scope, { documents: [docB] });
+    const msgB = makeMessage(queue[1] as IngestQueueMessage);
+
+    await runIngestBatch({ messages: [msgB] }, { db: env.DB, docs: env.DOCS, embedder, retriever });
+
+    await pushDocuments(pushDeps, scope, { documents: [docA] });
+    const msgA2 = makeMessage(queue[2] as IngestQueueMessage);
+
+    await runIngestBatch(
+      { messages: [msgA2] },
+      { db: env.DB, docs: env.DOCS, embedder, retriever },
+    );
+
+    // Deliver old message for A last: must ack without deleting the second A's body.
+    await runIngestBatch(
+      { messages: [msgA1] },
+      { db: env.DB, docs: env.DOCS, embedder, retriever },
+    );
+
+    expect(msgB.acked).toBe(true);
+    expect(msgA2.acked).toBe(true);
+    expect(msgA1.acked).toBe(true);
+
+    const saved = await tenant.documents.get(msgA2.body.documentId);
+    expect(saved?.indexedHash).toBe(msgA2.body.contentHash);
+    expect(saved?.bodyKey).not.toBeNull();
+    if (!saved?.bodyKey) throw new Error("expected bodyKey on saved document");
+    expect(await env.DOCS.head(saved.bodyKey)).not.toBeNull();
+
+    const chunks = await tenant.documents.listChunks(msgA2.body.documentId);
+    expect(chunks.map((c) => c.text)).toEqual(["Content A."]);
+  });
+
+  it("isolates failures in a batch: first and third acked and indexed, second retried", async () => {
+    const { sourceId } = await seedOrgAndAssistant();
+    const doc1 = await seedDocument(sourceId, "One", "# One\n\nFirst doc.", TEST_ORG_ID, "d1");
+    const doc2 = await seedDocument(sourceId, "Two", "# Two\n\nSecond doc.", TEST_ORG_ID, "d2");
+    const doc3 = await seedDocument(sourceId, "Three", "# Three\n\nThird doc.", TEST_ORG_ID, "d3");
+
+    const baseEmbedder = fakeEmbedder();
+    const flakyEmbedder: Embedder = {
+      dimensions: baseEmbedder.dimensions,
+      async embed(texts) {
+        if (texts.some((t) => t.includes("Second doc."))) {
+          throw new Error("embedder failed for doc2");
+        }
+        return baseEmbedder.embed(texts);
+      },
+    };
+    const retriever = memoryRetriever();
+
+    const msg1 = makeMessage({
+      orgId: TEST_ORG_ID,
+      documentId: doc1.documentId,
+      contentHash: doc1.hash,
+    });
+    const msg2 = makeMessage({
+      orgId: TEST_ORG_ID,
+      documentId: doc2.documentId,
+      contentHash: doc2.hash,
+    });
+    const msg3 = makeMessage({
+      orgId: TEST_ORG_ID,
+      documentId: doc3.documentId,
+      contentHash: doc3.hash,
+    });
+
+    await runIngestBatch(
+      { messages: [msg1, msg2, msg3] },
+      { db: env.DB, docs: env.DOCS, embedder: flakyEmbedder, retriever },
+    );
+
+    expect(msg1.acked).toBe(true);
+    expect(msg1.retried).toBe(false);
+    expect(msg2.acked).toBe(false);
+    expect(msg2.retried).toBe(true);
+    expect(msg3.acked).toBe(true);
+    expect(msg3.retried).toBe(false);
+
+    expect((await doc1.tenant.documents.listChunks(doc1.documentId)).map((c) => c.text)).toEqual([
+      "First doc.",
+    ]);
+    expect(await doc2.tenant.documents.listChunks(doc2.documentId)).toEqual([]);
+    expect((await doc3.tenant.documents.listChunks(doc3.documentId)).map((c) => c.text)).toEqual([
+      "Third doc.",
+    ]);
   });
 });

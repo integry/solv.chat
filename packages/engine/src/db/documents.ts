@@ -9,6 +9,7 @@ interface DocumentDbRow {
   title: string;
   content_hash: string;
   indexed_hash: string | null;
+  body_key: string | null;
   updated_at: number;
 }
 
@@ -30,6 +31,7 @@ export interface DocumentRow {
   title: string;
   contentHash: string;
   indexedHash: string | null;
+  bodyKey: string | null;
   updatedAt: number;
 }
 
@@ -37,6 +39,7 @@ export interface ExistingDocumentState {
   id: string;
   url: string;
   contentHash: string;
+  bodyKey: string | null;
 }
 
 export interface ChunkRow {
@@ -64,6 +67,7 @@ export interface UpsertDocumentInput {
   url: string;
   title: string;
   contentHash: string;
+  bodyKey?: string | null;
   updatedAt: number;
 }
 
@@ -75,7 +79,7 @@ export interface ChunkInput {
 }
 
 const DOC_COLUMNS =
-  "id, org_id, source_id, external_id, url, title, content_hash, indexed_hash, updated_at";
+  "id, org_id, source_id, external_id, url, title, content_hash, indexed_hash, body_key, updated_at";
 const CHUNK_COLUMNS = "id, org_id, document_id, ordinal, text, heading_path";
 
 const mapDocument = (row: DocumentDbRow): DocumentRow => ({
@@ -87,6 +91,7 @@ const mapDocument = (row: DocumentDbRow): DocumentRow => ({
   title: row.title,
   contentHash: row.content_hash,
   indexedHash: row.indexed_hash,
+  bodyKey: row.body_key,
   updatedAt: row.updated_at,
 });
 
@@ -141,7 +146,7 @@ export function documentsFor(db: D1Database, orgId: string) {
       const wanted = new Set(externalIds);
       const rows = await prepare(
         db,
-        "SELECT id, external_id, url, content_hash FROM documents WHERE org_id = ?1 AND source_id = ?2",
+        "SELECT id, external_id, url, content_hash, body_key FROM documents WHERE org_id = ?1 AND source_id = ?2",
       )
         .bind(orgId, sourceId)
         .all<{
@@ -149,6 +154,7 @@ export function documentsFor(db: D1Database, orgId: string) {
           external_id: string;
           url: string;
           content_hash: string;
+          body_key: string | null;
         }>();
       for (const row of rows.results) {
         if (wanted.has(row.external_id)) {
@@ -156,6 +162,7 @@ export function documentsFor(db: D1Database, orgId: string) {
             id: row.id,
             url: row.url,
             contentHash: row.content_hash,
+            bodyKey: row.body_key,
           });
         }
       }
@@ -166,13 +173,14 @@ export function documentsFor(db: D1Database, orgId: string) {
       const saved = await prepareInsert(
         db,
         `INSERT INTO documents (
-           id, org_id, source_id, external_id, url, title, content_hash, updated_at
+           id, org_id, source_id, external_id, url, title, content_hash, body_key, updated_at
          )
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(org_id, source_id, external_id) DO UPDATE SET
            url = excluded.url,
            title = excluded.title,
            content_hash = excluded.content_hash,
+           body_key = excluded.body_key,
            updated_at = excluded.updated_at
          RETURNING ${DOC_COLUMNS}`,
       )
@@ -184,6 +192,7 @@ export function documentsFor(db: D1Database, orgId: string) {
           input.url,
           input.title,
           input.contentHash,
+          input.bodyKey ?? null,
           input.updatedAt,
         )
         .first<DocumentDbRow>();

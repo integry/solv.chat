@@ -57,9 +57,13 @@ export async function contentHash(title: string, markdown: string): Promise<stri
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Returns the content-addressed R2 object key for a document's Markdown body. */
-export function documentObjectKey(orgId: string, documentId: string, hash: string): string {
-  return `org/${orgId}/doc/${documentId}/${hash}.md`;
+/** Returns a fresh, never-reused R2 object key for a document's Markdown body. */
+export function documentObjectKey(
+  orgId: string,
+  documentId: string,
+  bodyId = crypto.randomUUID(),
+): string {
+  return `org/${orgId}/doc/${documentId}/${bodyId}.md`;
 }
 
 async function tryDeleteObject(
@@ -196,7 +200,7 @@ export async function pushDocuments(
     }
 
     const candidateId = prev?.id ?? newId("doc");
-    const objectKey = documentObjectKey(scope.orgId, candidateId, hash);
+    const objectKey = documentObjectKey(scope.orgId, candidateId);
     await deps.docs.put(objectKey, document.markdown);
 
     const saved = await deps.tenant.documents.upsert({
@@ -206,13 +210,9 @@ export async function pushDocuments(
       url: document.url,
       title: document.title,
       contentHash: hash,
+      bodyKey: objectKey,
       updatedAt: Date.now(),
     });
-
-    if (saved.id !== candidateId) {
-      await deps.docs.put(documentObjectKey(scope.orgId, saved.id, hash), document.markdown);
-      await tryDeleteObject(deps.docs, objectKey, candidateId);
-    }
 
     await deps.queue.send({
       orgId: scope.orgId,
@@ -220,18 +220,15 @@ export async function pushDocuments(
       contentHash: hash,
     });
 
-    if (prev && prev.contentHash !== hash) {
-      await tryDeleteObject(
-        deps.docs,
-        documentObjectKey(scope.orgId, saved.id, prev.contentHash),
-        saved.id,
-      );
+    if (prev?.bodyKey && prev.bodyKey !== saved.bodyKey) {
+      await tryDeleteObject(deps.docs, prev.bodyKey, saved.id);
     }
 
     existing.set(document.externalId, {
       id: saved.id,
       url: saved.url,
       contentHash: hash,
+      bodyKey: saved.bodyKey,
     });
     written++;
   }
@@ -309,12 +306,8 @@ export async function deleteDocuments(
       }
     }
 
-    const hashes = new Set<string>([doc.contentHash]);
-    if (doc.indexedHash) {
-      hashes.add(doc.indexedHash);
-    }
-    for (const hash of hashes) {
-      await tryDeleteObject(deps.docs, documentObjectKey(scope.orgId, doc.id, hash), doc.id);
+    if (doc.bodyKey !== null) {
+      await tryDeleteObject(deps.docs, doc.bodyKey, doc.id);
     }
   }
 

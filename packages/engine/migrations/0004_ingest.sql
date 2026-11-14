@@ -7,3 +7,5 @@ CREATE UNIQUE INDEX sources_default_push
 
 -- Last content_hash successfully indexed into chunks; null until first indexed.
 ALTER TABLE documents ADD COLUMN indexed_hash TEXT;
+-- R2 object key for the current document body; fresh per push that changes the document.
+ALTER TABLE documents ADD COLUMN body_key TEXT;
