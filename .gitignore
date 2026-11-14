@@ -6,3 +6,4 @@ dist
 .env.*
 *.log
 coverage
+packages/engine/src/widgetBundle.ts

@@ -16,8 +16,11 @@
     "migrations"
   ],
   "scripts": {
+    "pretypecheck": "node scripts/sync-widget.mjs",
     "typecheck": "tsc --noEmit",
+    "pretest": "node scripts/sync-widget.mjs",
     "test": "vitest run",
+    "prebuild": "node scripts/sync-widget.mjs --rebuild",
     "build": "tsc -p tsconfig.build.json"
   },
   "devDependencies": {
