@@ -8,13 +8,8 @@ interface DocumentDbRow {
   url: string;
   title: string;
   content_hash: string;
+  indexed_hash: string | null;
   updated_at: number;
-  revision: number;
-  stored_revision: number;
-  enqueued_revision: number;
-  indexed_revision: number;
-  chunk_generation: number;
-  deleting: number;
 }
 
 interface ChunkDbRow {
@@ -34,20 +29,14 @@ export interface DocumentRow {
   url: string;
   title: string;
   contentHash: string;
+  indexedHash: string | null;
   updatedAt: number;
-  revision: number;
-  storedRevision: number;
-  enqueuedRevision: number;
-  indexedRevision: number;
-  chunkGeneration: number;
-  deleting: boolean;
 }
 
-export interface PushState {
+export interface ExistingDocumentState {
   id: string;
   url: string;
   contentHash: string;
-  complete: boolean;
 }
 
 export interface ChunkRow {
@@ -57,6 +46,15 @@ export interface ChunkRow {
   ordinal: number;
   text: string;
   headingPath: string;
+}
+
+export interface ResolvedChunkRow {
+  id: string;
+  documentId: string;
+  text: string;
+  headingPath: string;
+  url: string;
+  title: string;
 }
 
 export interface UpsertDocumentInput {
@@ -77,7 +75,7 @@ export interface ChunkInput {
 }
 
 const DOC_COLUMNS =
-  "id, org_id, source_id, external_id, url, title, content_hash, updated_at, revision, stored_revision, enqueued_revision, indexed_revision, chunk_generation, deleting";
+  "id, org_id, source_id, external_id, url, title, content_hash, indexed_hash, updated_at";
 const CHUNK_COLUMNS = "id, org_id, document_id, ordinal, text, heading_path";
 
 const mapDocument = (row: DocumentDbRow): DocumentRow => ({
@@ -88,13 +86,8 @@ const mapDocument = (row: DocumentDbRow): DocumentRow => ({
   url: row.url,
   title: row.title,
   contentHash: row.content_hash,
+  indexedHash: row.indexed_hash,
   updatedAt: row.updated_at,
-  revision: row.revision,
-  storedRevision: row.stored_revision,
-  enqueuedRevision: row.enqueued_revision,
-  indexedRevision: row.indexed_revision,
-  chunkGeneration: row.chunk_generation,
-  deleting: row.deleting === 1,
 });
 
 const mapChunk = (row: ChunkDbRow): ChunkRow => ({
@@ -139,13 +132,16 @@ export function documentsFor(db: D1Database, orgId: string) {
       return row ? mapDocument(row) : null;
     },
 
-    async pushStatesFor(sourceId: string, externalIds: string[]): Promise<Map<string, PushState>> {
-      const result = new Map<string, PushState>();
+    async existingFor(
+      sourceId: string,
+      externalIds: string[],
+    ): Promise<Map<string, ExistingDocumentState>> {
+      const result = new Map<string, ExistingDocumentState>();
       if (externalIds.length === 0) return result;
       const wanted = new Set(externalIds);
       const rows = await prepare(
         db,
-        "SELECT id, external_id, url, content_hash, revision, stored_revision, enqueued_revision FROM documents WHERE org_id = ?1 AND source_id = ?2 AND deleting = 0",
+        "SELECT id, external_id, url, content_hash FROM documents WHERE org_id = ?1 AND source_id = ?2",
       )
         .bind(orgId, sourceId)
         .all<{
@@ -153,9 +149,6 @@ export function documentsFor(db: D1Database, orgId: string) {
           external_id: string;
           url: string;
           content_hash: string;
-          revision: number;
-          stored_revision: number;
-          enqueued_revision: number;
         }>();
       for (const row of rows.results) {
         if (wanted.has(row.external_id)) {
@@ -163,7 +156,6 @@ export function documentsFor(db: D1Database, orgId: string) {
             id: row.id,
             url: row.url,
             contentHash: row.content_hash,
-            complete: row.stored_revision >= row.revision && row.enqueued_revision >= row.revision,
           });
         }
       }
@@ -174,20 +166,14 @@ export function documentsFor(db: D1Database, orgId: string) {
       const saved = await prepareInsert(
         db,
         `INSERT INTO documents (
-           id, org_id, source_id, external_id, url, title, content_hash, updated_at,
-           revision, stored_revision, enqueued_revision, indexed_revision, deleting
+           id, org_id, source_id, external_id, url, title, content_hash, updated_at
          )
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, 1, 0, 0, 0, 0)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(org_id, source_id, external_id) DO UPDATE SET
            url = excluded.url,
            title = excluded.title,
            content_hash = excluded.content_hash,
-           updated_at = excluded.updated_at,
-           revision = CASE
-             WHEN documents.content_hash != excluded.content_hash THEN documents.revision + 1
-             ELSE documents.revision
-           END
-         WHERE documents.deleting = 0
+           updated_at = excluded.updated_at
          RETURNING ${DOC_COLUMNS}`,
       )
         .bind(
@@ -203,39 +189,9 @@ export function documentsFor(db: D1Database, orgId: string) {
         .first<DocumentDbRow>();
 
       if (!saved) {
-        throw new Error(`document ${input.externalId} is currently being deleted`);
+        throw new Error(`failed to upsert document ${input.externalId}`);
       }
       return mapDocument(saved);
-    },
-
-    async markBodyStored(id: string, revision: number): Promise<boolean> {
-      const res = await prepare(
-        db,
-        "UPDATE documents SET stored_revision = MAX(stored_revision, ?3) WHERE org_id = ?1 AND id = ?2 AND revision = ?3 AND deleting = 0",
-      )
-        .bind(orgId, id, revision)
-        .run();
-      return (res.meta.changes ?? 0) > 0;
-    },
-
-    async markEnqueued(id: string, revision: number): Promise<boolean> {
-      const res = await prepare(
-        db,
-        "UPDATE documents SET enqueued_revision = MAX(enqueued_revision, ?3) WHERE org_id = ?1 AND id = ?2 AND revision = ?3 AND deleting = 0",
-      )
-        .bind(orgId, id, revision)
-        .run();
-      return (res.meta.changes ?? 0) > 0;
-    },
-
-    async markDeleting(id: string): Promise<DocumentRow | null> {
-      const row = await prepare(
-        db,
-        `UPDATE documents SET deleting = 1 WHERE org_id = ?1 AND id = ?2 RETURNING ${DOC_COLUMNS}`,
-      )
-        .bind(orgId, id)
-        .first<DocumentDbRow>();
-      return row ? mapDocument(row) : null;
     },
 
     async updateMetadata(
@@ -248,13 +204,13 @@ export function documentsFor(db: D1Database, orgId: string) {
         updatedAt === undefined
           ? await prepare(
               db,
-              "UPDATE documents SET title = ?3, url = ?4 WHERE org_id = ?1 AND id = ?2 AND deleting = 0",
+              "UPDATE documents SET title = ?3, url = ?4 WHERE org_id = ?1 AND id = ?2",
             )
               .bind(orgId, id, title, url)
               .run()
           : await prepare(
               db,
-              "UPDATE documents SET title = ?3, url = ?4, updated_at = ?5 WHERE org_id = ?1 AND id = ?2 AND deleting = 0",
+              "UPDATE documents SET title = ?3, url = ?4, updated_at = ?5 WHERE org_id = ?1 AND id = ?2",
             )
               .bind(orgId, id, title, url, updatedAt)
               .run();
@@ -288,185 +244,44 @@ export function documentsFor(db: D1Database, orgId: string) {
       return res.results.map(mapChunk);
     },
 
-    async listPendingVectors(documentId: string, revision: number): Promise<string[]> {
+    async chunksByIds(assistantId: string, chunkIds: string[]): Promise<ResolvedChunkRow[]> {
+      if (chunkIds.length === 0) return [];
+      const placeholders = chunkIds.map((_, index) => `?${index + 3}`).join(", ");
       const res = await prepare(
         db,
-        "SELECT chunk_id FROM pending_vectors WHERE org_id = ?1 AND document_id = ?2 AND revision = ?3 ORDER BY ordinal ASC",
+        `SELECT c.id, c.document_id, c.text, c.heading_path, d.url, d.title
+         FROM chunks c
+         JOIN documents d ON d.org_id = c.org_id AND d.id = c.document_id
+         JOIN sources s ON s.org_id = d.org_id AND s.id = d.source_id
+         WHERE c.org_id = ?1
+           AND s.assistant_id = ?2
+           AND c.id IN (${placeholders})`,
       )
-        .bind(orgId, documentId, revision)
-        .all<{ chunk_id: string }>();
-      return res.results.map((row) => row.chunk_id);
-    },
-
-    async listAllPendingVectors(documentId: string): Promise<string[]> {
-      const res = await prepare(
-        db,
-        "SELECT chunk_id FROM pending_vectors WHERE org_id = ?1 AND document_id = ?2",
-      )
-        .bind(orgId, documentId)
-        .all<{ chunk_id: string }>();
-      return res.results.map((row) => row.chunk_id);
-    },
-
-    async savePendingVectors(
-      documentId: string,
-      revision: number,
-      chunkIds: string[],
-      options?: { allowSameRevision?: boolean; expectedGeneration?: number },
-    ): Promise<{ ok: true; chunkIds: string[] } | { ok: false }> {
-      const allowSame = options?.allowSameRevision ?? false;
-      const expectedGeneration = options?.expectedGeneration;
-      const baseGuard3 = allowSame
-        ? "revision = ?3 AND deleting = 0"
-        : "revision = ?3 AND indexed_revision < ?3 AND deleting = 0";
-      const baseGuard4 = allowSame
-        ? "revision = ?4 AND deleting = 0"
-        : "revision = ?4 AND indexed_revision < ?4 AND deleting = 0";
-      const guard3 =
-        expectedGeneration !== undefined ? `${baseGuard3} AND chunk_generation = ?4` : baseGuard3;
-      const guard4 =
-        expectedGeneration !== undefined ? `${baseGuard4} AND chunk_generation = ?6` : baseGuard4;
-
-      const updateStmt = prepare(
-        db,
-        `UPDATE documents SET updated_at = updated_at WHERE org_id = ?1 AND id = ?2 AND ${guard3}`,
-      );
-      const boundUpdate =
-        expectedGeneration !== undefined
-          ? updateStmt.bind(orgId, documentId, revision, expectedGeneration)
-          : updateStmt.bind(orgId, documentId, revision);
-
-      const stmts: D1PreparedStatement[] = [
-        boundUpdate,
-        ...chunkIds.map((chunkId, ordinal) => {
-          const insertStmt = prepareInsert(
-            db,
-            `INSERT OR IGNORE INTO pending_vectors (chunk_id, org_id, document_id, revision, ordinal)
-             SELECT ?2, ?1, ?3, ?4, ?5
-             WHERE EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?3 AND ${guard4})`,
-          );
-          return expectedGeneration !== undefined
-            ? insertStmt.bind(orgId, chunkId, documentId, revision, ordinal, expectedGeneration)
-            : insertStmt.bind(orgId, chunkId, documentId, revision, ordinal);
-        }),
-      ];
-      const results = await db.batch(stmts);
-      if ((results[0]?.meta.changes ?? 0) === 0) {
-        return { ok: false };
-      }
-      if (chunkIds.length === 0) {
-        return { ok: true, chunkIds: [] };
-      }
-      const canonical = await this.listPendingVectors(documentId, revision);
-      if (canonical.length !== chunkIds.length) {
-        return { ok: false };
-      }
-      return { ok: true, chunkIds: canonical };
-    },
-
-    async clearPendingVectors(documentId: string, revision: number): Promise<void> {
-      await prepare(
-        db,
-        "DELETE FROM pending_vectors WHERE org_id = ?1 AND document_id = ?2 AND revision = ?3",
-      )
-        .bind(orgId, documentId, revision)
-        .run();
-    },
-
-    async clearAllPendingVectors(documentId: string): Promise<void> {
-      await prepare(db, "DELETE FROM pending_vectors WHERE org_id = ?1 AND document_id = ?2")
-        .bind(orgId, documentId)
-        .run();
-    },
-
-    async listStaleVectors(documentId: string): Promise<string[]> {
-      const res = await prepare(
-        db,
-        "SELECT chunk_id FROM stale_vectors WHERE org_id = ?1 AND document_id = ?2",
-      )
-        .bind(orgId, documentId)
-        .all<{ chunk_id: string }>();
-      return res.results.map((row) => row.chunk_id);
-    },
-
-    async addStaleVectors(documentId: string, chunkIds: string[]): Promise<void> {
-      if (chunkIds.length === 0) return;
-      const stmts = chunkIds.map((chunkId) =>
-        prepareInsert(
-          db,
-          `INSERT OR IGNORE INTO stale_vectors (chunk_id, org_id, document_id)
-           SELECT ?2, ?1, ?3
-           WHERE NOT EXISTS (
-             SELECT 1 FROM chunks WHERE org_id = ?1 AND document_id = ?3 AND id = ?2
-           )`,
-        ).bind(orgId, chunkId, documentId),
-      );
-      await db.batch(stmts);
-    },
-
-    async clearStaleVectors(documentId: string, chunkIds: string[]): Promise<void> {
-      if (chunkIds.length === 0) return;
-      const stmts = chunkIds.map((chunkId) =>
-        prepare(
-          db,
-          "DELETE FROM stale_vectors WHERE org_id = ?1 AND document_id = ?2 AND chunk_id = ?3",
-        ).bind(orgId, documentId, chunkId),
-      );
-      await db.batch(stmts);
-    },
-
-    async listStaleObjects(documentId: string): Promise<string[]> {
-      const res = await prepare(
-        db,
-        "SELECT object_key FROM stale_objects WHERE org_id = ?1 AND document_id = ?2",
-      )
-        .bind(orgId, documentId)
-        .all<{ object_key: string }>();
-      return res.results.map((row) => row.object_key);
-    },
-
-    async listAllStaleObjects(
-      limit = 100,
-    ): Promise<Array<{ documentId: string; objectKey: string }>> {
-      const res = await prepare(
-        db,
-        "SELECT document_id, object_key FROM stale_objects WHERE org_id = ?1 LIMIT ?2",
-      )
-        .bind(orgId, limit)
-        .all<{ document_id: string; object_key: string }>();
+        .bind(orgId, assistantId, ...chunkIds)
+        .all<{
+          id: string;
+          document_id: string;
+          text: string;
+          heading_path: string;
+          url: string;
+          title: string;
+        }>();
       return res.results.map((row) => ({
+        id: row.id,
         documentId: row.document_id,
-        objectKey: row.object_key,
+        text: row.text,
+        headingPath: row.heading_path,
+        url: row.url,
+        title: row.title,
       }));
-    },
-
-    async addStaleObject(documentId: string, objectKey: string): Promise<void> {
-      await prepareInsert(
-        db,
-        "INSERT OR IGNORE INTO stale_objects (object_key, org_id, document_id) VALUES (?2, ?1, ?3)",
-      )
-        .bind(orgId, objectKey, documentId)
-        .run();
-    },
-
-    async clearStaleObjects(documentId: string, objectKeys: string[]): Promise<void> {
-      if (objectKeys.length === 0) return;
-      const stmts = objectKeys.map((objectKey) =>
-        prepare(
-          db,
-          "DELETE FROM stale_objects WHERE org_id = ?1 AND document_id = ?2 AND object_key = ?3",
-        ).bind(orgId, documentId, objectKey),
-      );
-      await db.batch(stmts);
     },
 
     async replaceChunks(
       documentId: string,
       chunks: ChunkInput[],
-      expectedRevision?: number,
-      options?: { allowSameRevision?: boolean; expectedGeneration?: number },
+      expectedContentHash?: string,
     ): Promise<boolean> {
-      if (expectedRevision === undefined) {
+      if (expectedContentHash === undefined) {
         const stmts: D1PreparedStatement[] = [
           prepare(db, "DELETE FROM chunks WHERE org_id = ?1 AND document_id = ?2").bind(
             orgId,
@@ -484,105 +299,44 @@ export function documentsFor(db: D1Database, orgId: string) {
         return true;
       }
 
-      const allowSame = options?.allowSameRevision ?? false;
-      const expectedGeneration = options?.expectedGeneration;
-      const baseGuard3 = allowSame
-        ? "revision = ?3 AND deleting = 0"
-        : "revision = ?3 AND indexed_revision < ?3 AND deleting = 0";
-      const baseGuard7 = allowSame
-        ? "revision = ?7 AND deleting = 0"
-        : "revision = ?7 AND indexed_revision < ?7 AND deleting = 0";
-      const guard3 =
-        expectedGeneration !== undefined ? `${baseGuard3} AND chunk_generation = ?4` : baseGuard3;
-      const guard7 =
-        expectedGeneration !== undefined ? `${baseGuard7} AND chunk_generation = ?8` : baseGuard7;
-
-      const bindDocGuard = (stmt: D1PreparedStatement) =>
-        expectedGeneration !== undefined
-          ? stmt.bind(orgId, documentId, expectedRevision, expectedGeneration)
-          : stmt.bind(orgId, documentId, expectedRevision);
-
       const stmts: D1PreparedStatement[] = [
-        bindDocGuard(
+        prepare(
+          db,
+          `DELETE FROM chunks
+           WHERE org_id = ?1 AND document_id = ?2
+             AND EXISTS (
+               SELECT 1 FROM documents
+               WHERE org_id = ?1 AND id = ?2 AND content_hash = ?3
+                 AND (indexed_hash IS NULL OR indexed_hash != ?3)
+             )`,
+        ).bind(orgId, documentId, expectedContentHash),
+        ...chunks.map((chunk) =>
           prepareInsert(
-            db,
-            `INSERT OR IGNORE INTO stale_vectors (chunk_id, org_id, document_id)
-             SELECT id, org_id, document_id FROM chunks
-             WHERE org_id = ?1 AND document_id = ?2
-               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${guard3})`,
-          ),
-        ),
-        bindDocGuard(
-          prepareInsert(
-            db,
-            `INSERT OR IGNORE INTO stale_vectors (chunk_id, org_id, document_id)
-             SELECT chunk_id, org_id, document_id FROM pending_vectors
-             WHERE org_id = ?1 AND document_id = ?2 AND revision != ?3
-               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${guard3})`,
-          ),
-        ),
-        bindDocGuard(
-          prepare(
-            db,
-            `DELETE FROM pending_vectors
-             WHERE org_id = ?1 AND document_id = ?2 AND revision <= ?3
-               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${guard3})`,
-          ),
-        ),
-        bindDocGuard(
-          prepare(
-            db,
-            `DELETE FROM chunks
-             WHERE org_id = ?1 AND document_id = ?2
-               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${guard3})`,
-          ),
-        ),
-        ...chunks.map((chunk) => {
-          const insertStmt = prepareInsert(
             db,
             `INSERT INTO chunks (id, org_id, document_id, ordinal, text, heading_path)
              SELECT ?2, ?1, ?3, ?4, ?5, ?6
-             WHERE EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?3 AND ${guard7})`,
-          );
-          return expectedGeneration !== undefined
-            ? insertStmt.bind(
-                orgId,
-                chunk.id,
-                documentId,
-                chunk.ordinal,
-                chunk.text,
-                chunk.headingPath,
-                expectedRevision,
-                expectedGeneration,
-              )
-            : insertStmt.bind(
-                orgId,
-                chunk.id,
-                documentId,
-                chunk.ordinal,
-                chunk.text,
-                chunk.headingPath,
-                expectedRevision,
-              );
-        }),
-        bindDocGuard(
-          prepare(
-            db,
-            `DELETE FROM stale_vectors
-             WHERE org_id = ?1 AND document_id = ?2
-               AND chunk_id IN (SELECT id FROM chunks WHERE org_id = ?1 AND document_id = ?2)
-               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${guard3})`,
+             WHERE EXISTS (
+               SELECT 1 FROM documents
+               WHERE org_id = ?1 AND id = ?3 AND content_hash = ?7
+                 AND (indexed_hash IS NULL OR indexed_hash != ?7)
+             )`,
+          ).bind(
+            orgId,
+            chunk.id,
+            documentId,
+            chunk.ordinal,
+            chunk.text,
+            chunk.headingPath,
+            expectedContentHash,
           ),
         ),
-        bindDocGuard(
-          prepare(
-            db,
-            `UPDATE documents
-             SET indexed_revision = ?3,
-                 chunk_generation = chunk_generation + 1
-             WHERE org_id = ?1 AND id = ?2 AND ${guard3}`,
-          ),
-        ),
+        prepare(
+          db,
+          `UPDATE documents
+           SET indexed_hash = ?3
+           WHERE org_id = ?1 AND id = ?2 AND content_hash = ?3
+             AND (indexed_hash IS NULL OR indexed_hash != ?3)`,
+        ).bind(orgId, documentId, expectedContentHash),
       ];
       const results = await db.batch(stmts);
       return (results[results.length - 1]?.meta.changes ?? 0) > 0;

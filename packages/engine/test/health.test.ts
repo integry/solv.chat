@@ -123,13 +123,13 @@ describe("queue consumer", () => {
         id: "msg-1",
         timestamp: new Date(),
         attempts: 1,
-        body: { documentId: "doc_1", orgId: "org_00000000000000000000" },
+        body: { documentId: "doc_1", orgId: "org_00000000000000000000", contentHash: "h1" },
       },
       {
         id: "msg-2",
         timestamp: new Date(),
         attempts: 1,
-        body: { documentId: "doc_2", orgId: "org_00000000000000000000" },
+        body: { documentId: "doc_2", orgId: "org_00000000000000000000", contentHash: "h2" },
       },
     ]);
 

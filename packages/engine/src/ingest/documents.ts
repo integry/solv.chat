@@ -21,9 +21,9 @@ export interface IngestCounts {
 }
 
 export interface IngestQueueMessage {
-  documentId: string;
   orgId: string;
-  revision?: number;
+  documentId: string;
+  contentHash: string;
 }
 
 export interface PushDeps {
@@ -57,9 +57,24 @@ export async function contentHash(title: string, markdown: string): Promise<stri
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Returns the R2 object key for a specific revision of a document's Markdown body. */
-export function documentObjectKey(orgId: string, documentId: string, revision = 1): string {
-  return `org/${orgId}/doc/${documentId}/v${revision}.md`;
+/** Returns the content-addressed R2 object key for a document's Markdown body. */
+export function documentObjectKey(orgId: string, documentId: string, hash: string): string {
+  return `org/${orgId}/doc/${documentId}/${hash}.md`;
+}
+
+async function tryDeleteObject(
+  docs: { delete(key: string): Promise<unknown> },
+  key: string,
+  documentId: string,
+): Promise<void> {
+  try {
+    await docs.delete(key);
+  } catch (err) {
+    console.warn("ingest: best-effort R2 delete failed", {
+      documentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function findExistingSource(
@@ -114,35 +129,8 @@ function readStringArray(value: unknown, field: string): string[] {
 }
 
 /**
- * Best-effort drain of persisted `stale_objects` records within the authenticated
- * org so cleanup obligations survive even if both immediate R2 delete and queue
- * dispatch failed.
- */
-async function drainStaleObjects(
-  tenant: Tenant,
-  docs: { delete(key: string): Promise<unknown> },
-): Promise<void> {
-  const stale = await tenant.documents.listAllStaleObjects();
-  if (stale.length === 0) return;
-
-  const cleared = new Map<string, string[]>();
-  for (const entry of stale) {
-    try {
-      await docs.delete(entry.objectKey);
-      const keys = cleared.get(entry.documentId) ?? [];
-      keys.push(entry.objectKey);
-      cleared.set(entry.documentId, keys);
-    } catch {
-      // Leave remaining records in stale_objects for the next ingest request.
-    }
-  }
-  for (const [documentId, objectKeys] of cleared) {
-    await tenant.documents.clearStaleObjects(documentId, objectKeys);
-  }
-}
-
-/**
- * Validates the whole batch, then writes and enqueues only documents whose
+ * Validates the whole batch, then writes the R2 object, upserts the D1 row,
+ * and enqueues `{ orgId, documentId, contentHash }` for documents whose
  * content hash changed.
  */
 export async function pushDocuments(
@@ -178,8 +166,7 @@ export async function pushDocuments(
   });
 
   const source = await resolveOrCreatePushSource(deps.tenant, scope.assistantId, rawBody.sourceId);
-  await drainStaleObjects(deps.tenant, deps.docs);
-  const existing = await deps.tenant.documents.pushStatesFor(
+  const existing = await deps.tenant.documents.existingFor(
     source.id,
     documents.map((doc) => doc.externalId),
   );
@@ -190,7 +177,7 @@ export async function pushDocuments(
   for (const document of documents) {
     const hash = await contentHash(document.title, document.markdown);
     const prev = existing.get(document.externalId);
-    if (prev && prev.contentHash === hash && prev.complete) {
+    if (prev && prev.contentHash === hash) {
       if (prev.url === document.url) {
         unchanged++;
         continue;
@@ -202,17 +189,18 @@ export async function pushDocuments(
         Date.now(),
       );
       if (updated) {
-        existing.set(document.externalId, {
-          ...prev,
-          url: document.url,
-        });
+        existing.set(document.externalId, { ...prev, url: document.url });
         written++;
         continue;
       }
     }
 
+    const candidateId = prev?.id ?? newId("doc");
+    const objectKey = documentObjectKey(scope.orgId, candidateId, hash);
+    await deps.docs.put(objectKey, document.markdown);
+
     const saved = await deps.tenant.documents.upsert({
-      id: newId("doc"),
+      id: candidateId,
       sourceId: source.id,
       externalId: document.externalId,
       url: document.url,
@@ -220,51 +208,31 @@ export async function pushDocuments(
       contentHash: hash,
       updatedAt: Date.now(),
     });
-    // Store the body before enqueuing so an immediate consumer never misses it,
-    // and only mark each obligation complete after it succeeds so retries resume.
-    let current = saved.storedRevision >= saved.revision;
-    if (!current) {
-      const objectKey = documentObjectKey(scope.orgId, saved.id, saved.revision);
-      await deps.docs.put(objectKey, document.markdown);
-      current = await deps.tenant.documents.markBodyStored(saved.id, saved.revision);
-      if (!current) {
-        const latest = await deps.tenant.documents.get(saved.id);
-        if (latest === null || latest.deleting) {
-          try {
-            await deps.docs.delete(objectKey);
-          } catch (err) {
-            await deps.tenant.documents.addStaleObject(saved.id, objectKey);
-            try {
-              await deps.queue.send({
-                documentId: saved.id,
-                orgId: scope.orgId,
-                revision: saved.revision,
-              });
-            } catch {
-              // Persisted in stale_objects; subsequent ingest requests will drain it.
-            }
-            throw err;
-          }
-          continue;
-        }
-      }
+
+    if (saved.id !== candidateId) {
+      await deps.docs.put(documentObjectKey(scope.orgId, saved.id, hash), document.markdown);
+      await tryDeleteObject(deps.docs, objectKey, candidateId);
     }
-    if (current && saved.enqueuedRevision < saved.revision) {
-      await deps.queue.send({
-        documentId: saved.id,
-        orgId: scope.orgId,
-        revision: saved.revision,
-      });
-      current = await deps.tenant.documents.markEnqueued(saved.id, saved.revision);
+
+    await deps.queue.send({
+      orgId: scope.orgId,
+      documentId: saved.id,
+      contentHash: hash,
+    });
+
+    if (prev && prev.contentHash !== hash) {
+      await tryDeleteObject(
+        deps.docs,
+        documentObjectKey(scope.orgId, saved.id, prev.contentHash),
+        saved.id,
+      );
     }
-    if (current) {
-      existing.set(document.externalId, {
-        id: saved.id,
-        url: saved.url,
-        contentHash: hash,
-        complete: true,
-      });
-    }
+
+    existing.set(document.externalId, {
+      id: saved.id,
+      url: saved.url,
+      contentHash: hash,
+    });
     written++;
   }
 
@@ -272,8 +240,9 @@ export async function pushDocuments(
 }
 
 /**
- * Deletes documents (and their chunks, R2 bodies, and vectors) by
- * `externalIds`, or prunes everything not in `keep`.
+ * Deletes documents by `externalIds` or prunes everything not in `keep`.
+ * Deletes the D1 row first (cascading chunks), then performs best-effort
+ * cleanup of vectors and R2 objects.
  */
 export async function deleteDocuments(
   deps: DeleteDeps,
@@ -298,7 +267,6 @@ export async function deleteDocuments(
     : [];
 
   const source = await findExistingSource(deps.tenant, scope.assistantId, rawBody.sourceId);
-  await drainStaleObjects(deps.tenant, deps.docs);
   if (source === null) {
     return { written: 0, unchanged: 0, deleted: 0 };
   }
@@ -322,31 +290,31 @@ export async function deleteDocuments(
 
   let deleted = 0;
   for (const doc of toDelete) {
-    // Atomically mark deleting before snapshotting cleanup IDs so no new
-    // pending saves or chunk commits can be admitted for this document.
-    const marked = await deps.tenant.documents.markDeleting(doc.id);
-    if (marked === null) {
+    const chunks = await deps.tenant.documents.listChunks(doc.id);
+    const removed = await deps.tenant.documents.remove(doc.id);
+    if (!removed) {
       continue;
     }
+    deleted++;
 
-    const [chunks, staleIds, pendingIds] = await Promise.all([
-      deps.tenant.documents.listChunks(marked.id),
-      deps.tenant.documents.listStaleVectors(marked.id),
-      deps.tenant.documents.listAllPendingVectors(marked.id),
-    ]);
-    const vectorIds = [...new Set([...chunks.map((c) => c.id), ...staleIds, ...pendingIds])];
+    const vectorIds = chunks.map((chunk) => chunk.id);
     if (vectorIds.length > 0) {
-      await deps.retriever.remove(vectorIds);
+      try {
+        await deps.retriever.remove(vectorIds);
+      } catch (err) {
+        console.warn("ingest delete: best-effort vector cleanup failed", {
+          documentId: doc.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
-    await Promise.all([
-      deps.tenant.documents.clearStaleVectors(marked.id, staleIds),
-      deps.tenant.documents.clearAllPendingVectors(marked.id),
-    ]);
-    for (let rev = 1; rev <= marked.revision; rev++) {
-      await deps.docs.delete(documentObjectKey(scope.orgId, marked.id, rev));
+
+    const hashes = new Set<string>([doc.contentHash]);
+    if (doc.indexedHash) {
+      hashes.add(doc.indexedHash);
     }
-    if (await deps.tenant.documents.remove(marked.id)) {
-      deleted++;
+    for (const hash of hashes) {
+      await tryDeleteObject(deps.docs, documentObjectKey(scope.orgId, doc.id, hash), doc.id);
     }
   }
 

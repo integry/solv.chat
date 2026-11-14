@@ -1,6 +1,7 @@
 export { type App, createApp, type Env } from "./app.js";
 export { type Chunk, chunkMarkdown, MAX_CHARS, OVERLAP_CHARS } from "./ingest/chunk.js";
 export { type IngestConsumerDeps, runIngestBatch } from "./ingest/consumer.js";
+export { type ResolvedChunk, resolveChunks } from "./ingest/resolve.js";
 export {
   ANTHROPIC_MODELS,
   costMicros,

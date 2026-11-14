@@ -7,6 +7,7 @@ import { runIngestBatch } from "../../src/ingest/consumer.js";
 import {
   deleteDocuments,
   documentObjectKey,
+  type IngestQueueMessage,
   MAX_BATCH_DOCUMENTS,
   pushDocuments,
 } from "../../src/ingest/documents.js";
@@ -60,10 +61,10 @@ function countingDocs(bucket: R2Bucket) {
 }
 
 function countingQueue() {
-  const sent: Array<{ documentId: string; orgId: string }> = [];
+  const sent: IngestQueueMessage[] = [];
   return {
     sent,
-    async send(message: { documentId: string; orgId: string }) {
+    async send(message: IngestQueueMessage) {
       sent.push(message);
     },
   };
@@ -90,6 +91,11 @@ describe("ingest documents", () => {
     expect(first).toEqual({ written: 1, unchanged: 0, deleted: 0 });
     expect(docs.puts).toBe(1);
     expect(queue.sent).toHaveLength(1);
+    expect(queue.sent[0]).toMatchObject({
+      orgId: TEST_ORG_ID,
+      documentId: expect.any(String),
+      contentHash: expect.any(String),
+    });
 
     // Re-pushing identical content must perform zero R2 puts and zero queue sends.
     const repeat = await pushDocuments({ tenant, docs, queue }, scope, {
@@ -192,7 +198,7 @@ describe("ingest documents", () => {
     expect(dropDoc).toBeNull();
     if (!keepDoc) throw new Error("expected keepDoc to exist");
     expect(
-      await env.DOCS.head(documentObjectKey(TEST_ORG_ID, keepDoc.id, keepDoc.revision)),
+      await env.DOCS.head(documentObjectKey(TEST_ORG_ID, keepDoc.id, keepDoc.contentHash)),
     ).not.toBeNull();
 
     const remainingVectors = retriever.all();
@@ -261,85 +267,7 @@ describe("ingest documents", () => {
     expect(count?.count).toBe(0);
   });
 
-  it("resumes unfinished R2 put and queue send on identical retry after push failure (F1)", async () => {
-    const { id: assistantId } = await createAssistantWithKey();
-    const scope = { orgId: TEST_ORG_ID, assistantId };
-    const tenant = forIngestScope(env.DB, scope);
-    const docs = countingDocs(env.DOCS);
-    const queue = countingQueue();
-
-    const payload = {
-      documents: [
-        {
-          externalId: "resumable",
-          url: "https://example.com/resumable",
-          title: "Resumable",
-          markdown: "# Resumable\n\nBody.",
-        },
-      ],
-    };
-
-    // 1. Fail on R2 put after documents.upsert persisted the content hash.
-    let failPut = true;
-    const flakyDocs = {
-      async put(key: string, value: string) {
-        if (failPut) {
-          throw new Error("R2 unavailable");
-        }
-        return docs.put(key, value);
-      },
-      async delete(key: string) {
-        return docs.delete(key);
-      },
-    };
-
-    await expect(pushDocuments({ tenant, docs: flakyDocs, queue }, scope, payload)).rejects.toThrow(
-      "R2 unavailable",
-    );
-    expect(docs.puts).toBe(0);
-    expect(queue.sent).toHaveLength(0);
-
-    // 2. Allow R2 put to succeed, but fail on Queue send.
-    failPut = false;
-    let failQueue = true;
-    const flakyQueue = {
-      async send(message: { documentId: string; orgId: string; revision?: number }) {
-        if (failQueue) {
-          throw new Error("Queue unavailable");
-        }
-        return queue.send(message);
-      },
-    };
-
-    await expect(
-      pushDocuments({ tenant, docs: flakyDocs, queue: flakyQueue }, scope, payload),
-    ).rejects.toThrow("Queue unavailable");
-    expect(docs.puts).toBe(1);
-    expect(queue.sent).toHaveLength(0);
-
-    // 3. Retry identical payload: must resume queue send without re-putting R2.
-    failQueue = false;
-    const resumed = await pushDocuments(
-      { tenant, docs: flakyDocs, queue: flakyQueue },
-      scope,
-      payload,
-    );
-    expect(resumed).toEqual({ written: 1, unchanged: 0, deleted: 0 });
-    expect(docs.puts).toBe(1);
-    expect(queue.sent).toHaveLength(1);
-
-    // 4. Subsequent identical push is now a true no-op.
-    const noop = await pushDocuments(
-      { tenant, docs: flakyDocs, queue: flakyQueue },
-      scope,
-      payload,
-    );
-    expect(noop).toEqual({ written: 0, unchanged: 1, deleted: 0 });
-    expect(docs.puts).toBe(1);
-    expect(queue.sent).toHaveLength(1);
-  });
-
-  it("converges concurrent first default-source pushes onto one source while allowing explicit sources (F4)", async () => {
+  it("converges concurrent first default-source pushes onto one source while allowing explicit sources", async () => {
     const { id: assistantId } = await createAssistantWithKey();
     const scope = { orgId: TEST_ORG_ID, assistantId };
     const tenant = forIngestScope(env.DB, scope);
@@ -413,312 +341,7 @@ describe("ingest documents", () => {
     expect(await tenant.documents.getByExternalId(explicit.id, "doc-c")).not.toBeNull();
   });
 
-  it("prevents concurrent pushes for the same externalId from overwriting a newer revision's R2 body (F5)", async () => {
-    const { id: assistantId } = await createAssistantWithKey();
-    const scope = { orgId: TEST_ORG_ID, assistantId };
-    const tenant = forIngestScope(env.DB, scope);
-    const queue = countingQueue();
-    const retriever = memoryRetriever();
-
-    let putAEntered!: () => void;
-    const putAStarted = new Promise<void>((resolve) => {
-      putAEntered = resolve;
-    });
-    let releasePutA!: () => void;
-    const putAGate = new Promise<void>((resolve) => {
-      releasePutA = resolve;
-    });
-
-    const blockingDocsA = {
-      async put(key: string, value: string) {
-        putAEntered();
-        await putAGate;
-        return env.DOCS.put(key, value);
-      },
-      async delete(key: string) {
-        return env.DOCS.delete(key);
-      },
-    };
-
-    const pushA = pushDocuments({ tenant, docs: blockingDocsA, queue }, scope, {
-      documents: [
-        {
-          externalId: "race",
-          url: "https://example.com/race",
-          title: "Race",
-          markdown: "# Rev 1\n\nBody A.",
-        },
-      ],
-    });
-
-    await putAStarted;
-
-    // Push B updates the same externalId to revision 2 while Push A is paused at docs.put.
-    const pushBRes = await pushDocuments({ tenant, docs: env.DOCS, queue }, scope, {
-      documents: [
-        {
-          externalId: "race",
-          url: "https://example.com/race",
-          title: "Race",
-          markdown: "# Rev 2\n\nBody B.",
-        },
-      ],
-    });
-    expect(pushBRes).toEqual({ written: 1, unchanged: 0, deleted: 0 });
-
-    // Release Push A's delayed put; it must write to v1.md without clobbering v2.md.
-    releasePutA();
-    await pushA;
-
-    expect(queue.sent).toHaveLength(1);
-    const queuedMsg = queue.sent[0] as { documentId: string; orgId: string; revision?: number };
-    expect(queuedMsg.revision).toBe(2);
-
-    await runIngestBatch(
-      {
-        messages: [
-          {
-            id: newId("msg"),
-            timestamp: new Date(),
-            attempts: 1,
-            body: queuedMsg,
-            ack() {},
-            retry() {},
-          },
-        ],
-      },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
-    );
-
-    const chunks = await tenant.documents.listChunks(queuedMsg.documentId);
-    expect(chunks.map((c) => c.text)).toEqual(["Body B."]);
-
-    // Re-pushing Body B is a true no-op.
-    const repeatB = await pushDocuments({ tenant, docs: env.DOCS, queue }, scope, {
-      documents: [
-        {
-          externalId: "race",
-          url: "https://example.com/race",
-          title: "Race",
-          markdown: "# Rev 2\n\nBody B.",
-        },
-      ],
-    });
-    expect(repeatB).toEqual({ written: 0, unchanged: 1, deleted: 0 });
-  });
-
-  it("removes uploaded R2 body when concurrent deleteDocuments completes during docs.put (F9)", async () => {
-    const { id: assistantId } = await createAssistantWithKey();
-    const scope = { orgId: TEST_ORG_ID, assistantId };
-    const tenant = forIngestScope(env.DB, scope);
-    const queue = countingQueue();
-    const retriever = memoryRetriever();
-
-    let putEntered!: () => void;
-    const putStarted = new Promise<void>((resolve) => {
-      putEntered = resolve;
-    });
-    let releasePut!: () => void;
-    const putGate = new Promise<void>((resolve) => {
-      releasePut = resolve;
-    });
-
-    let uploadedKey = "";
-    const blockingDocs = {
-      async put(key: string, value: string) {
-        uploadedKey = key;
-        putEntered();
-        await putGate;
-        return env.DOCS.put(key, value);
-      },
-      async delete(key: string) {
-        return env.DOCS.delete(key);
-      },
-    };
-
-    const pushPromise = pushDocuments({ tenant, docs: blockingDocs, queue }, scope, {
-      documents: [
-        {
-          externalId: "doomed",
-          url: "https://example.com/doomed",
-          title: "Doomed",
-          markdown: "# Doomed\n\nWill be deleted mid-upload.",
-        },
-      ],
-    });
-
-    await putStarted;
-
-    // Concurrent DELETE marks deleting, deletes rev 1 key (no-op), and removes the D1 row.
-    const deleted = await deleteDocuments({ tenant, docs: env.DOCS, retriever }, scope, {
-      externalIds: ["doomed"],
-    });
-    expect(deleted).toEqual({ written: 0, unchanged: 0, deleted: 1 });
-
-    // Release the paused put; pushDocuments must detect deletion won and delete the R2 object.
-    releasePut();
-    const pushResult = await pushPromise;
-    expect(pushResult).toEqual({ written: 0, unchanged: 0, deleted: 0 });
-    expect(queue.sent).toHaveLength(0);
-    expect(await env.DOCS.head(uploadedKey)).toBeNull();
-  });
-
-  it("preserves retryable stale object obligation when post-delete R2 cleanup fails (F9)", async () => {
-    const { id: assistantId } = await createAssistantWithKey();
-    const scope = { orgId: TEST_ORG_ID, assistantId };
-    const tenant = forIngestScope(env.DB, scope);
-    const queue = countingQueue();
-    const retriever = memoryRetriever();
-
-    let putEntered!: () => void;
-    const putStarted = new Promise<void>((resolve) => {
-      putEntered = resolve;
-    });
-    let releasePut!: () => void;
-    const putGate = new Promise<void>((resolve) => {
-      releasePut = resolve;
-    });
-
-    let uploadedKey = "";
-    const flakyDocs = {
-      async put(key: string, value: string) {
-        uploadedKey = key;
-        putEntered();
-        await putGate;
-        return env.DOCS.put(key, value);
-      },
-      async delete() {
-        throw new Error("R2 delete failed");
-      },
-    };
-
-    const pushPromise = pushDocuments({ tenant, docs: flakyDocs, queue }, scope, {
-      documents: [
-        {
-          externalId: "doomed-retry",
-          url: "https://example.com/doomed-retry",
-          title: "Doomed Retry",
-          markdown: "# Doomed\n\nCleanup will retry.",
-        },
-      ],
-    });
-
-    await putStarted;
-
-    const deleted = await deleteDocuments({ tenant, docs: env.DOCS, retriever }, scope, {
-      externalIds: ["doomed-retry"],
-    });
-    expect(deleted).toEqual({ written: 0, unchanged: 0, deleted: 1 });
-
-    releasePut();
-    await expect(pushPromise).rejects.toThrow("R2 delete failed");
-
-    // Object still exists in R2, but a durable stale_objects record and queue message were created.
-    expect(await env.DOCS.head(uploadedKey)).not.toBeNull();
-    expect(queue.sent).toHaveLength(1);
-    const cleanupMsg = queue.sent[0] as { documentId: string; orgId: string; revision?: number };
-    expect(await tenant.documents.listStaleObjects(cleanupMsg.documentId)).toEqual([uploadedKey]);
-
-    // Queue consumer reconciles the stale object and clears the obligation.
-    let acked = false;
-    await runIngestBatch(
-      {
-        messages: [
-          {
-            id: newId("msg"),
-            timestamp: new Date(),
-            attempts: 1,
-            body: cleanupMsg,
-            ack() {
-              acked = true;
-            },
-            retry() {},
-          },
-        ],
-      },
-      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
-    );
-    expect(acked).toBe(true);
-    expect(await env.DOCS.head(uploadedKey)).toBeNull();
-    expect(await tenant.documents.listStaleObjects(cleanupMsg.documentId)).toEqual([]);
-  });
-
-  it("recovers persisted stale object on subsequent ingest request when both immediate delete and queue dispatch fail (F12)", async () => {
-    const { id: assistantId } = await createAssistantWithKey();
-    const scope = { orgId: TEST_ORG_ID, assistantId };
-    const tenant = forIngestScope(env.DB, scope);
-    const retriever = memoryRetriever();
-
-    let putEntered!: () => void;
-    const putStarted = new Promise<void>((resolve) => {
-      putEntered = resolve;
-    });
-    let releasePut!: () => void;
-    const putGate = new Promise<void>((resolve) => {
-      releasePut = resolve;
-    });
-
-    let uploadedKey = "";
-    const failingDocs = {
-      async put(key: string, value: string) {
-        uploadedKey = key;
-        putEntered();
-        await putGate;
-        return env.DOCS.put(key, value);
-      },
-      async delete() {
-        throw new Error("R2 delete failed");
-      },
-    };
-    const failingQueue = {
-      async send() {
-        throw new Error("Queue send failed");
-      },
-    };
-
-    const pushPromise = pushDocuments({ tenant, docs: failingDocs, queue: failingQueue }, scope, {
-      documents: [
-        {
-          externalId: "stranded",
-          url: "https://example.com/stranded",
-          title: "Stranded",
-          markdown: "# Stranded\n\nNeeds drain.",
-        },
-      ],
-    });
-
-    await putStarted;
-
-    const deleted = await deleteDocuments({ tenant, docs: env.DOCS, retriever }, scope, {
-      externalIds: ["stranded"],
-    });
-    expect(deleted).toEqual({ written: 0, unchanged: 0, deleted: 1 });
-
-    releasePut();
-    await expect(pushPromise).rejects.toThrow("R2 delete failed");
-
-    // Object remains in R2 and is persisted in stale_objects with no queue message sent.
-    expect(await env.DOCS.head(uploadedKey)).not.toBeNull();
-    expect(await tenant.documents.listAllStaleObjects()).toHaveLength(1);
-
-    // Subsequent ingest request in the same org drains the orphaned stale object.
-    const queue = countingQueue();
-    const retryRes = await pushDocuments({ tenant, docs: env.DOCS, queue }, scope, {
-      documents: [
-        {
-          externalId: "stranded",
-          url: "https://example.com/stranded",
-          title: "Stranded",
-          markdown: "# Stranded\n\nRecovered.",
-        },
-      ],
-    });
-    expect(retryRes).toEqual({ written: 1, unchanged: 0, deleted: 0 });
-    expect(await env.DOCS.head(uploadedKey)).toBeNull();
-    expect(await tenant.documents.listAllStaleObjects()).toEqual([]);
-  });
-
-  it("persists URL-only updates without R2 puts or queue sends (F16)", async () => {
+  it("persists URL-only updates without R2 puts or queue sends", async () => {
     const { id: assistantId } = await createAssistantWithKey();
     const scope = { orgId: TEST_ORG_ID, assistantId };
     const tenant = forIngestScope(env.DB, scope);
@@ -757,7 +380,6 @@ describe("ingest documents", () => {
     const pushSourceId = sources[0]?.id ?? "";
     const saved = await tenant.documents.getByExternalId(pushSourceId, "guide");
     expect(saved?.url).toBe("https://example.com/new");
-    expect(saved?.revision).toBe(1);
 
     const repeat = await pushDocuments({ tenant, docs, queue }, scope, {
       documents: [
@@ -772,5 +394,60 @@ describe("ingest documents", () => {
     expect(repeat).toEqual({ written: 0, unchanged: 1, deleted: 0 });
     expect(docs.puts).toBe(1);
     expect(queue.sent).toHaveLength(1);
+  });
+
+  it("deletes D1 row first and succeeds when best-effort vector or R2 cleanup fails", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+    const retriever = memoryRetriever();
+
+    await pushDocuments({ tenant, docs, queue }, scope, {
+      documents: [
+        {
+          externalId: "best-effort",
+          url: "https://example.com/be",
+          title: "Best Effort",
+          markdown: "# Best Effort\n\nContent.",
+        },
+      ],
+    });
+    await runIngestBatch(
+      {
+        messages: queue.sent.map((body) => ({
+          id: newId("msg"),
+          timestamp: new Date(),
+          attempts: 1,
+          body,
+          ack() {},
+          retry() {},
+        })),
+      },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+
+    const failingDocs = {
+      async delete() {
+        throw new Error("R2 delete failed");
+      },
+    };
+    const failingRetriever = {
+      async remove() {
+        throw new Error("Vectorize remove failed");
+      },
+    };
+
+    const res = await deleteDocuments(
+      { tenant, docs: failingDocs, retriever: failingRetriever },
+      scope,
+      { externalIds: ["best-effort"] },
+    );
+    expect(res).toEqual({ written: 0, unchanged: 0, deleted: 1 });
+
+    const sources = await tenant.sources.list(assistantId);
+    const pushSourceId = sources[0]?.id ?? "";
+    expect(await tenant.documents.getByExternalId(pushSourceId, "best-effort")).toBeNull();
   });
 });
