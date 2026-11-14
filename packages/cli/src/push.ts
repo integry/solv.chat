@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { CliError, normalizeEndpoint, requestJson } from "./http.js";
 import { externalIdFor, firstHeading, markdownFiles, splitFrontMatter } from "./markdown.js";
 
@@ -53,10 +53,19 @@ async function loadFromDir(dir: string, baseUrl: string): Promise<PushDocument[]
   const root = resolve(dir);
   const files = await markdownFiles(root);
   const documents: PushDocument[] = [];
+  const seen = new Map<string, string>();
 
   for (const file of files) {
-    const { frontMatter, body } = splitFrontMatter(await readFile(file, "utf8"));
     const externalId = externalIdFor(root, file);
+    const existing = seen.get(externalId);
+    if (existing !== undefined) {
+      throw new CliError(
+        `Duplicate document ID "${externalId}" generated from "${relative(root, existing)}" and "${relative(root, file)}"`,
+      );
+    }
+    seen.set(externalId, file);
+
+    const { frontMatter, body } = splitFrontMatter(await readFile(file, "utf8"));
     documents.push({
       externalId,
       // Front matter wins over the first heading: an author who wrote an

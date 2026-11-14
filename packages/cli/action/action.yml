@@ -26,12 +26,18 @@ runs:
     # appear in the workflow run's inputs view, and this value is a credential.
     - shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
         INPUT_CONTENT: ${{ inputs.content }}
         INPUT_ENDPOINT: ${{ inputs.endpoint }}
         INPUT_ASSISTANT: ${{ inputs.assistant }}
         INPUT_BASE_URL: ${{ inputs.base-url }}
         INPUT_PRUNE: ${{ inputs.prune }}
       run: |
+        action_repo="$(cd "$ACTION_PATH/../../.." && pwd)"
+        if [ ! -d "$action_repo/node_modules" ] || [ ! -f "$action_repo/packages/cli/dist/index.js" ]; then
+          npm ci --prefix "$action_repo" --no-audit --no-fund
+          npm run build --prefix "$action_repo" -w @solvchat/cli
+        fi
         args=(
           "$INPUT_CONTENT"
           --endpoint "$INPUT_ENDPOINT"
@@ -41,4 +47,4 @@ runs:
         if [ "$INPUT_PRUNE" = "true" ]; then
           args+=(--prune)
         fi
-        npx --yes @solvchat/cli push "${args[@]}"
+        node "$action_repo/packages/cli/bin/solv.js" push "${args[@]}"

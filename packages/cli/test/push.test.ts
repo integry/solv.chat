@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CliError } from "../src/http.js";
 import { BATCH_SIZE, push } from "../src/push.js";
 
 interface RecordedRequest {
@@ -270,5 +271,33 @@ describe("solv push", () => {
     expect(jsonDocs[0]?.url).toBe(
       "https://docs.example.com/docs/v2/webhooks%3Aretry%23fast%3Fv%3D1",
     );
+  });
+
+  it("rejects colliding generated document IDs before making any request", async () => {
+    await writeFile(join(root, "guide.md"), "# Guide MD\n\nFirst version.\n", "utf8");
+    await writeFile(join(root, "guide.markdown"), "# Guide Markdown\n\nSecond version.\n", "utf8");
+
+    const { fetchImpl, requests } = createMockFetch();
+
+    await expect(
+      push(
+        {
+          dir: root,
+          endpoint: "https://chat.example.com",
+          assistant: "ast_123",
+          baseUrl: "https://docs.example.com",
+          ingestKey: "ing_secret",
+        },
+        { fetchImpl, log: () => {} },
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof CliError &&
+        err.message.includes('"guide"') &&
+        err.message.includes("guide.md") &&
+        err.message.includes("guide.markdown"),
+    );
+
+    expect(requests).toHaveLength(0);
   });
 });
