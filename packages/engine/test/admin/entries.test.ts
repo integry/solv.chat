@@ -168,6 +168,52 @@ describe("admin entries", () => {
     expect(chunksAfterEdit.map((c) => c.text).join("\n")).toContain("Settings > Keys");
   });
 
+  it("allocates a fresh identity instead of overwriting a renamed entry when reusing its original question", async () => {
+    const assistantId = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+    const deps = { tenant, docs, queue, publicBaseUrl: "https://admin.example.com" };
+
+    // 1. Create "Original question".
+    const original = await saveEntry(
+      deps,
+      { orgId: ORG_A },
+      { assistantId, question: "Original question", answer: "Original answer." },
+    );
+
+    // 2. Rename that document to "Different question" (retaining its original externalId).
+    const renamed = await saveEntry(
+      deps,
+      { orgId: ORG_A },
+      {
+        assistantId,
+        sourceId: original.sourceId,
+        documentId: original.documentId,
+        question: "Different question",
+        answer: "Different answer.",
+      },
+    );
+    expect(renamed.documentId).toBe(original.documentId);
+    expect(renamed.url).toBe(original.url);
+
+    // 3. Create a brand new entry with "Original question" again.
+    const recreated = await saveEntry(
+      deps,
+      { orgId: ORG_A },
+      { assistantId, question: "Original question", answer: "New answer." },
+    );
+
+    expect(recreated.documentId).not.toBe(original.documentId);
+    expect(recreated.url).not.toBe(original.url);
+    expect(recreated.counts).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+
+    const allDocs = await tenant.documents.listBySource(original.sourceId);
+    expect(allDocs).toHaveLength(2);
+    expect(allDocs.find((d) => d.id === original.documentId)?.title).toBe("Different question");
+    expect(allDocs.find((d) => d.id === recreated.documentId)?.title).toBe("Original question");
+  });
+
   it("rejects cross-org assistant or source access with NotFound", async () => {
     const assistantA = await seedAssistant(ORG_A);
     const tenantB = forPrincipal(env.DB, { orgId: ORG_B, userId: "owner", role: "owner" });

@@ -370,4 +370,98 @@ describe("admin sitemap preview and import", () => {
       ).status,
     ).toBe(404);
   });
+
+  it("recovers within the same source without duplicating documents when retrying after a queue failure", async () => {
+    const assistantId = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+
+    const createdSource = await tenant.sources.create({
+      id: newId("src"),
+      assistantId,
+      kind: "sitemap",
+      label: "docs.example.com",
+      settings: { url: "https://docs.example.com/sitemap.xml" },
+      createdAt: Date.now(),
+    });
+
+    const sent: IngestQueueMessage[] = [];
+    let sendCalls = 0;
+    let shouldFailSecond = true;
+    const flakyQueue = {
+      async send(message: IngestQueueMessage) {
+        sendCalls++;
+        if (shouldFailSecond && sendCalls === 2) {
+          throw new Error("queue send failed");
+        }
+        sent.push(message);
+      },
+    };
+
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      return new Response(
+        `<html><head><title>Page</title></head><body><p>Body for ${url}</p></body></html>`,
+        { status: 200, headers: { "content-type": "text/html" } },
+      );
+    };
+
+    const chosen = ["https://docs.example.com/one", "https://docs.example.com/two"];
+
+    await expect(
+      importSitemapUrls(
+        { tenant, docs: env.DOCS, queue: flakyQueue },
+        { orgId: ORG_A, assistantId },
+        {
+          sourceId: createdSource.id,
+          sitemapUrl: "https://docs.example.com/sitemap.xml",
+          urls: chosen,
+        },
+        fetchImpl,
+      ),
+    ).rejects.toThrow("queue send failed");
+
+    // Retry with the same sourceId after the transient queue failure clears.
+    shouldFailSecond = false;
+    const retried = await importSitemapUrls(
+      { tenant, docs: env.DOCS, queue: flakyQueue },
+      { orgId: ORG_A, assistantId },
+      {
+        sourceId: createdSource.id,
+        sitemapUrl: "https://docs.example.com/sitemap.xml",
+        urls: chosen,
+      },
+      fetchImpl,
+    );
+
+    expect(retried.source.id).toBe(createdSource.id);
+    expect(retried.total).toBe(2);
+
+    const sources = await tenant.sources.listWithStats(assistantId);
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.id).toBe(createdSource.id);
+    expect(sources[0]?.documentCount).toBe(2);
+
+    const docs = await tenant.documents.listBySource(createdSource.id);
+    expect(docs).toHaveLength(2);
+
+    const retriever = memoryRetriever();
+    await runIngestBatch(
+      {
+        messages: sent.map((body) => ({
+          id: newId("msg"),
+          timestamp: new Date(),
+          attempts: 1,
+          body,
+          ack() {},
+          retry() {},
+        })),
+      },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+
+    for (const doc of docs) {
+      const chunks = await tenant.documents.listChunks(doc.id);
+      expect(chunks.length).toBeGreaterThan(0);
+    }
+  });
 });

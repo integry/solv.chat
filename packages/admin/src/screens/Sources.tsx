@@ -44,6 +44,7 @@ function SitemapImport({
   const [sitemapUrl, setSitemapUrl] = useState("");
   const [previewUrls, setPreviewUrls] = useState<string[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [importSourceId, setImportSourceId] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,6 +56,7 @@ function SitemapImport({
     setFetching(true);
     setError(null);
     setNotice(null);
+    setImportSourceId(null);
 
     try {
       const res = await postJson<{ urls: string[] }>(
@@ -99,18 +101,42 @@ function SitemapImport({
 
     try {
       const chosen = previewUrls.filter((u) => selected.has(u));
+      let sourceId = importSourceId;
+      if (sourceId === null) {
+        const targetUrl = sitemapUrl.trim() || chosen[0] || "";
+        let label = "Sitemap";
+        try {
+          label = new URL(targetUrl).hostname.slice(0, 80) || "Sitemap";
+        } catch {
+          // Let server validation report the invalid URL.
+        }
+        const created = await postJson<{ source: SourceSummary }>(
+          `/api/admin/assistants/${assistantId}/sources`,
+          { kind: "sitemap", label, settings: { url: targetUrl } },
+        );
+        sourceId = created.source.id;
+        setImportSourceId(sourceId);
+      }
+
       const res = await postJson<{ total: number }>(
         `/api/admin/assistants/${assistantId}/sitemap-import`,
-        { sitemapUrl, urls: chosen },
+        { sitemapUrl, urls: chosen, sourceId },
       );
       setPreviewUrls(null);
       setSelected(new Set());
+      setImportSourceId(null);
       setSitemapUrl("");
       setNotice(res.total === 1 ? "Imported 1 page." : `Imported ${res.total} pages.`);
       onImported();
     } catch (err) {
       if (err instanceof ApiError) {
-        setError(err.fields.urls ?? err.fields.url ?? err.message);
+        setError(
+          err.fields.urls ??
+            err.fields.url ??
+            err.fields["settings.url"] ??
+            err.fields.label ??
+            err.message,
+        );
       } else {
         setError("Could not import those pages. Try again.");
       }
@@ -139,7 +165,10 @@ function SitemapImport({
             type="url"
             value={sitemapUrl}
             disabled={fetching || importing}
-            onChange={(e) => setSitemapUrl(e.target.value)}
+            onChange={(e) => {
+              setSitemapUrl(e.target.value);
+              setImportSourceId(null);
+            }}
             placeholder="https://example.com/sitemap.xml"
           />
         </div>

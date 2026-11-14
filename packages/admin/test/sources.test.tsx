@@ -19,6 +19,11 @@ function installSourcesFakeServer(options?: {
   extraSources?: SourceSummary[];
   extraDocuments?: Array<[string, Array<DocumentSummary & { markdown: string }>]>;
   onDocsRequest?: (sourceId: string, url: URL) => Promise<Response> | null;
+  onSitemapImport?: (body: {
+    sitemapUrl?: string;
+    urls: string[];
+    sourceId?: string;
+  }) => Promise<Response> | Response | null;
 }) {
   const assistant = makeAssistant();
   const sources: SourceSummary[] = [
@@ -53,7 +58,8 @@ function installSourcesFakeServer(options?: {
     ...(options?.extraDocuments ?? []),
   ]);
 
-  const importedPayloads: Array<{ sitemapUrl?: string; urls: string[] }> = [];
+  const importedPayloads: Array<{ sitemapUrl?: string; urls: string[]; sourceId?: string }> = [];
+  let createdSitemapSources = 0;
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -67,6 +73,29 @@ function installSourcesFakeServer(options?: {
 
     if (path === `/api/admin/assistants/${assistant.id}/sources` && method === "GET") {
       return Response.json({ sources: [...sources] });
+    }
+
+    if (path === `/api/admin/assistants/${assistant.id}/sources` && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        kind: "sitemap" | "entry";
+        label: string;
+        settings: Record<string, unknown>;
+      };
+      createdSitemapSources++;
+      const created: SourceSummary = {
+        id: `src_sitemap_${createdSitemapSources}`,
+        orgId: assistant.orgId,
+        assistantId: assistant.id,
+        kind: body.kind,
+        label: body.label,
+        settings: body.settings,
+        createdAt: Date.now(),
+        documentCount: 0,
+        lastUpdatedAt: null,
+      };
+      sources.push(created);
+      documentsBySource.set(created.id, []);
+      return Response.json({ source: created }, { status: 201 });
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/entries` && method === "POST") {
@@ -117,21 +146,32 @@ function installSourcesFakeServer(options?: {
       const body = JSON.parse(String(init?.body ?? "{}")) as {
         sitemapUrl?: string;
         urls: string[];
+        sourceId?: string;
       };
       importedPayloads.push(body);
+      const intercepted = await options?.onSitemapImport?.(body);
+      if (intercepted) {
+        return intercepted;
+      }
       const now = Date.now();
-      const sitemapSource: SourceSummary = {
-        id: "src_sitemap_1",
-        orgId: assistant.orgId,
-        assistantId: assistant.id,
-        kind: "sitemap",
-        label: "docs.example.com",
-        settings: { url: body.sitemapUrl ?? body.urls[0] },
-        createdAt: now,
-        documentCount: body.urls.length,
-        lastUpdatedAt: now,
-      };
-      sources.push(sitemapSource);
+      let sitemapSource = body.sourceId ? sources.find((s) => s.id === body.sourceId) : undefined;
+      if (!sitemapSource) {
+        sitemapSource = {
+          id: "src_sitemap_1",
+          orgId: assistant.orgId,
+          assistantId: assistant.id,
+          kind: "sitemap",
+          label: "docs.example.com",
+          settings: { url: body.sitemapUrl ?? body.urls[0] },
+          createdAt: now,
+          documentCount: body.urls.length,
+          lastUpdatedAt: now,
+        };
+        sources.push(sitemapSource);
+      } else {
+        sitemapSource.documentCount = body.urls.length;
+        sitemapSource.lastUpdatedAt = now;
+      }
       documentsBySource.set(
         sitemapSource.id,
         body.urls.map((u, idx) => ({
@@ -173,7 +213,12 @@ function installSourcesFakeServer(options?: {
   });
 
   vi.stubGlobal("fetch", fetchMock);
-  return { importedPayloads };
+  return {
+    importedPayloads,
+    get createdSitemapSourceCount() {
+      return createdSitemapSources;
+    },
+  };
 }
 
 afterEach(() => {
@@ -262,9 +307,47 @@ describe("admin Sources screen", () => {
       {
         sitemapUrl: "https://docs.example.com/sitemap.xml",
         urls: ["https://docs.example.com/getting-started", "https://docs.example.com/changelog"],
+        sourceId: "src_sitemap_1",
       },
     ]);
     expect(await screen.findByText("docs.example.com")).toBeTruthy();
+  });
+
+  it("retains and reuses sourceId when retrying a failed sitemap import", async () => {
+    let attempts = 0;
+    const server = installSourcesFakeServer({
+      onSitemapImport() {
+        attempts++;
+        if (attempts === 1) {
+          return Response.json({ error: "Queue send failed." }, { status: 500 });
+        }
+        return null;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Sources" });
+
+    fireEvent.change(screen.getByLabelText("Sitemap URL"), {
+      target: { value: "https://docs.example.com/sitemap.xml" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch URLs" }));
+    await screen.findByLabelText("https://docs.example.com/pricing");
+
+    fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
+    expect(await screen.findByText("Queue send failed.")).toBeTruthy();
+    expect(server.createdSitemapSourceCount).toBe(1);
+
+    // Retry without re-fetching: must reuse the same sourceId and not create a second source.
+    fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
+    await waitFor(() => {
+      expect(screen.getByText("Imported 3 pages.")).toBeTruthy();
+    });
+    expect(server.createdSitemapSourceCount).toBe(1);
+    expect(server.importedPayloads).toHaveLength(2);
+    expect(server.importedPayloads[0]?.sourceId).toBe("src_sitemap_1");
+    expect(server.importedPayloads[1]?.sourceId).toBe("src_sitemap_1");
   });
 
   it("paginates documents beyond the first 20 so the 21st entry is reachable and editable", async () => {
