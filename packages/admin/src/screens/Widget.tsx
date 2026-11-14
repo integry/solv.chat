@@ -64,6 +64,12 @@ export function Widget({ assistantId }: WidgetProps) {
   const ignoreNextTickRef = useRef(false);
   const syncWidgetOnLoadRef = useRef(false);
   const syncOriginsOnLoadRef = useRef(false);
+  const syncWidgetSnapshotRef = useRef<{
+    title: string;
+    accentColor: string;
+    position: WidgetPosition;
+  } | null>(null);
+  const syncOriginsSnapshotRef = useRef<string | null>(null);
   const prevSavedWidgetRef = useRef<WidgetConfig | undefined>(undefined);
   const prevSavedAssistantRef = useRef<Assistant | undefined>(undefined);
 
@@ -77,8 +83,18 @@ export function Widget({ assistantId }: WidgetProps) {
     if (mutation.lastKind !== "saving") {
       return;
     }
-    syncWidgetOnLoadRef.current = true;
-    syncOriginsOnLoadRef.current = true;
+    if (!syncWidgetOnLoadRef.current) {
+      syncWidgetSnapshotRef.current = {
+        title: latestRef.current.title,
+        accentColor: latestRef.current.accentColor,
+        position: latestRef.current.position,
+      };
+      syncWidgetOnLoadRef.current = true;
+    }
+    if (!syncOriginsOnLoadRef.current) {
+      syncOriginsSnapshotRef.current = latestRef.current.originsText;
+      syncOriginsOnLoadRef.current = true;
+    }
     assistantRes.reload();
     draftRes.reload();
     setHistoryTick((n) => n + 1);
@@ -89,12 +105,28 @@ export function Widget({ assistantId }: WidgetProps) {
     const key = `${assistantId}:${draftRes.value?.draft.id ?? ""}`;
     const shouldSyncReload =
       syncWidgetOnLoadRef.current && savedWidget !== prevSavedWidgetRef.current;
-    if (initWidgetKey !== key || shouldSyncReload) {
+    if (initWidgetKey !== key) {
       syncWidgetOnLoadRef.current = false;
+      syncWidgetSnapshotRef.current = null;
       prevSavedWidgetRef.current = savedWidget;
       setTitle(savedWidget.title);
       setAccentColor(savedWidget.accentColor);
       setPosition(savedWidget.position);
+      setInitWidgetKey(key);
+    } else if (shouldSyncReload) {
+      const snapshot = syncWidgetSnapshotRef.current;
+      syncWidgetOnLoadRef.current = false;
+      syncWidgetSnapshotRef.current = null;
+      prevSavedWidgetRef.current = savedWidget;
+      if (!snapshot || latestRef.current.title === snapshot.title) {
+        setTitle(savedWidget.title);
+      }
+      if (!snapshot || latestRef.current.accentColor === snapshot.accentColor) {
+        setAccentColor(savedWidget.accentColor);
+      }
+      if (!snapshot || latestRef.current.position === snapshot.position) {
+        setPosition(savedWidget.position);
+      }
       setInitWidgetKey(key);
     }
   }, [assistantId, draftRes.value?.draft.id, initWidgetKey, savedWidget]);
@@ -104,10 +136,20 @@ export function Widget({ assistantId }: WidgetProps) {
     const key = `${assistantId}:${savedAssistant.id}`;
     const shouldSyncReload =
       syncOriginsOnLoadRef.current && savedAssistant !== prevSavedAssistantRef.current;
-    if (initOriginsKey !== key || shouldSyncReload) {
+    if (initOriginsKey !== key) {
       syncOriginsOnLoadRef.current = false;
+      syncOriginsSnapshotRef.current = null;
       prevSavedAssistantRef.current = savedAssistant;
       setOriginsText(savedAssistant.allowedOrigins.join("\n"));
+      setInitOriginsKey(key);
+    } else if (shouldSyncReload) {
+      const snapshot = syncOriginsSnapshotRef.current;
+      syncOriginsOnLoadRef.current = false;
+      syncOriginsSnapshotRef.current = null;
+      prevSavedAssistantRef.current = savedAssistant;
+      if (snapshot === null || latestRef.current.originsText === snapshot) {
+        setOriginsText(savedAssistant.allowedOrigins.join("\n"));
+      }
       setInitOriginsKey(key);
     }
   }, [assistantId, initOriginsKey, savedAssistant]);

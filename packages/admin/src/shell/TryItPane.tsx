@@ -1,4 +1,8 @@
-import { type ChatHistoryTurn, MAX_CHAT_HISTORY_TURNS } from "@solvchat/core";
+import {
+  type ChatHistoryTurn,
+  MAX_CHAT_HISTORY_TURNS,
+  MAX_CHAT_MESSAGE_LENGTH,
+} from "@solvchat/core";
 import { type FormEvent, useRef, useState } from "react";
 import { streamDraftChat } from "../api/chat.js";
 import type { Assistant } from "../api/types.js";
@@ -15,6 +19,7 @@ interface Turn {
   content: string;
   citations?: Citation[];
   error?: string;
+  failed?: boolean;
 }
 
 export interface TryItPaneProps {
@@ -29,6 +34,7 @@ export function TryItPane({ assistant }: TryItPaneProps) {
   const [turnsByAssistant, setTurnsByAssistant] = useState<Record<string, Turn[]>>({});
   const [conversationIds, setConversationIds] = useState<Record<string, string>>({});
   const [input, setInput] = useState("");
+  const [inputError, setInputError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -46,12 +52,20 @@ export function TryItPane({ assistant }: TryItPaneProps) {
     event.preventDefault();
     const message = input.trim();
     if (!message || sending) return;
+    if (message.length > MAX_CHAT_MESSAGE_LENGTH) {
+      setInputError(`Message must be at most ${MAX_CHAT_MESSAGE_LENGTH} characters.`);
+      return;
+    }
 
+    setInputError(null);
     const assistantId = assistant.id;
     const history: ChatHistoryTurn[] = turns
-      .filter((t) => !t.error && t.content.trim() !== "")
+      .filter((t) => !t.error && !t.failed && t.content.trim() !== "")
       .slice(-MAX_CHAT_HISTORY_TURNS)
-      .map((t) => ({ role: t.role, content: t.content }));
+      .map((t) => ({
+        role: t.role,
+        content: t.content.trim().slice(0, MAX_CHAT_MESSAGE_LENGTH).trim(),
+      }));
 
     const userTurnId = `u_${Date.now()}_${Math.random()}`;
     const assistantTurnId = `a_${Date.now()}_${Math.random()}`;
@@ -66,6 +80,8 @@ export function TryItPane({ assistant }: TryItPaneProps) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let succeeded = false;
+    let failed = false;
 
     try {
       for await (const ev of streamDraftChat({
@@ -101,18 +117,39 @@ export function TryItPane({ assistant }: TryItPaneProps) {
             ),
           );
         } else if (ev.type === "done") {
+          succeeded = true;
           setConversationIds((prev) => ({ ...prev, [assistantId]: ev.conversationId }));
         } else if (ev.type === "error") {
+          failed = true;
           updateTurns(assistantId, (prev) =>
-            prev.map((t) => (t.id === assistantTurnId ? { ...t, error: ev.message } : t)),
+            prev.map((t) =>
+              t.id === userTurnId
+                ? { ...t, failed: true }
+                : t.id === assistantTurnId
+                  ? { ...t, error: ev.message, failed: true }
+                  : t,
+            ),
           );
         }
+      }
+      if (!succeeded && !failed && !controller.signal.aborted) {
+        updateTurns(assistantId, (prev) =>
+          prev.map((t) =>
+            t.id === userTurnId || t.id === assistantTurnId ? { ...t, failed: true } : t,
+          ),
+        );
       }
     } catch (err) {
       if (!controller.signal.aborted) {
         const msg = err instanceof Error ? err.message : "Could not reach the assistant.";
         updateTurns(assistantId, (prev) =>
-          prev.map((t) => (t.id === assistantTurnId ? { ...t, error: msg } : t)),
+          prev.map((t) =>
+            t.id === userTurnId
+              ? { ...t, failed: true }
+              : t.id === assistantTurnId
+                ? { ...t, error: msg, failed: true }
+                : t,
+          ),
         );
       }
     } finally {
@@ -127,6 +164,7 @@ export function TryItPane({ assistant }: TryItPaneProps) {
     abortRef.current?.abort();
     abortRef.current = null;
     setSending(false);
+    setInputError(null);
     setTurnsByAssistant((prev) => ({ ...prev, [assistant.id]: [] }));
     setConversationIds((prev) => {
       const next = { ...prev };
@@ -186,7 +224,10 @@ export function TryItPane({ assistant }: TryItPaneProps) {
           id="try-it-input"
           type="text"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            if (inputError) setInputError(null);
+          }}
           placeholder="Ask a question…"
           disabled={sending}
         />
@@ -194,6 +235,11 @@ export function TryItPane({ assistant }: TryItPaneProps) {
           {sending ? "Sending…" : "Send"}
         </button>
       </form>
+      {inputError && (
+        <p className="field-error" role="alert">
+          {inputError}
+        </p>
+      )}
     </aside>
   );
 }

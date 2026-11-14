@@ -1,4 +1,9 @@
-import { CHAT_PROTOCOL_VERSION, defaultVersionConfig } from "@solvchat/core";
+import {
+  CHAT_PROTOCOL_VERSION,
+  defaultVersionConfig,
+  MAX_CHAT_MESSAGE_LENGTH,
+  parseChatRequest,
+} from "@solvchat/core";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
@@ -84,8 +89,11 @@ function installFakeServer(options: FakeServerOptions = {}) {
   let forceNext401 = false;
   let nextLogoutFailure: "http" | "network" | null = null;
   let pendingDraftSave: Promise<void> | null = null;
+  let pendingDraftGet: Promise<void> | null = null;
+  let pendingAssistantGet: Promise<void> | null = null;
   let pendingAssistantPatch: Promise<void> | null = null;
   let pendingPublish: Promise<void> | null = null;
+  let nextChatResponder: ((body: Record<string, unknown>) => Response) | null = null;
   const chatBodies: Array<Record<string, unknown>> = [];
   const calls: Array<{ method: string; path: string }> = [];
 
@@ -155,6 +163,11 @@ function installFakeServer(options: FakeServerOptions = {}) {
       if (!found) return Response.json({ error: "Not found." }, { status: 404 });
 
       if (method === "GET") {
+        if (pendingAssistantGet) {
+          const wait = pendingAssistantGet;
+          pendingAssistantGet = null;
+          await wait;
+        }
         return Response.json({ assistant: found });
       }
       if (method === "PATCH") {
@@ -194,6 +207,11 @@ function installFakeServer(options: FakeServerOptions = {}) {
       if (!draft) return Response.json({ error: "Not found." }, { status: 404 });
 
       if (method === "GET") {
+        if (pendingDraftGet) {
+          const wait = pendingDraftGet;
+          pendingDraftGet = null;
+          await wait;
+        }
         return Response.json({ draft });
       }
       if (method === "PUT") {
@@ -269,6 +287,11 @@ function installFakeServer(options: FakeServerOptions = {}) {
     if (path === "/api/admin/chat" && method === "POST") {
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       chatBodies.push(body);
+      if (nextChatResponder) {
+        const respond = nextChatResponder;
+        nextChatResponder = null;
+        return respond(body);
+      }
       return sseResponse([
         { event: "token", data: { text: `Draft reply to: ${String(body.message)}` } },
         { event: "done", data: { messageId: "msg_1", conversationId: "conv_preview_1" } },
@@ -295,6 +318,16 @@ function installFakeServer(options: FakeServerOptions = {}) {
       pendingDraftSave = d.promise;
       return d;
     },
+    holdNextDraftGet() {
+      const d = createDeferred();
+      pendingDraftGet = d.promise;
+      return d;
+    },
+    holdNextAssistantGet() {
+      const d = createDeferred();
+      pendingAssistantGet = d.promise;
+      return d;
+    },
     holdNextAssistantPatch() {
       const d = createDeferred();
       pendingAssistantPatch = d.promise;
@@ -304,6 +337,9 @@ function installFakeServer(options: FakeServerOptions = {}) {
       const d = createDeferred();
       pendingPublish = d.promise;
       return d;
+    },
+    setNextChatResponse(responder: (body: Record<string, unknown>) => Response) {
+      nextChatResponder = responder;
     },
   };
 }
@@ -775,5 +811,149 @@ describe("admin app", () => {
     expect(accent.value).toBe("#123456");
     expect(origins.value).toBe("https://unsaved.example.com");
     expect(screen.getByText("Unsaved changes")).toBeTruthy();
+  });
+
+  it("F7: preserves Widget edits made while background reload is in flight after a cross-screen save", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
+    fireEvent.change(greeting, { target: { value: "Updated before nav" } });
+
+    const saveDeferred = server.holdNextDraftSave();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // Navigate to Widget while Behaviour's save is still pending.
+    fireEvent.click(screen.getByRole("link", { name: "Widget" }));
+    const title = (await screen.findByLabelText("Title")) as HTMLInputElement;
+    const origins = screen.getByLabelText("Allowed origins") as HTMLTextAreaElement;
+    expect(title.disabled).toBe(true);
+    expect(origins.disabled).toBe(true);
+
+    // Hold the background reload GETs triggered when the Behaviour save finishes.
+    const assistantGetDeferred = server.holdNextAssistantGet();
+    const draftGetDeferred = server.holdNextDraftGet();
+    saveDeferred.resolve();
+
+    await waitFor(() => {
+      expect(title.disabled).toBe(false);
+      expect(origins.disabled).toBe(false);
+    });
+
+    // Edit Widget fields while the reload GETs are still pending.
+    fireEvent.change(title, { target: { value: "Edited during reload" } });
+    fireEvent.change(origins, { target: { value: "https://edited-during-reload.example.com" } });
+
+    assistantGetDeferred.resolve();
+    draftGetDeferred.resolve();
+
+    // Give effects a tick to process the resolved reload responses.
+    await waitFor(() => {
+      expect(screen.getByText("Unsaved changes")).toBeTruthy();
+    });
+    expect(title.value).toBe("Edited during reload");
+    expect(origins.value).toBe("https://edited-during-reload.example.com");
+  });
+
+  it("F7: preserves Behaviour edits made while background reload is in flight on return", async () => {
+    const first = makeAssistant("ast_1", "First Bot");
+    const second = makeAssistant("ast_2", "Second Bot");
+    const server = installFakeServer({ signedIn: true, assistants: [first, second] });
+
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
+    fireEvent.change(greeting, { target: { value: "Ast1 saved greeting" } });
+
+    const saveDeferred = server.holdNextDraftSave();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // Switch away and back while save is still in flight.
+    const select = screen.getByLabelText("Assistant") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "ast_2" } });
+    fireEvent.change(select, { target: { value: "ast_1" } });
+
+    const returnedGreeting = (await screen.findByLabelText(
+      "First thing it says",
+    )) as HTMLInputElement;
+    await waitFor(() => {
+      expect(returnedGreeting.disabled).toBe(true);
+    });
+
+    const draftGetDeferred = server.holdNextDraftGet();
+    saveDeferred.resolve();
+
+    await waitFor(() => {
+      expect(returnedGreeting.disabled).toBe(false);
+    });
+
+    fireEvent.change(returnedGreeting, { target: { value: "Newer edit during reload" } });
+    draftGetDeferred.resolve();
+
+    await waitFor(() => {
+      expect(screen.getByText("Unsaved changes")).toBeTruthy();
+    });
+    expect(returnedGreeting.value).toBe("Newer edit during reload");
+  });
+
+  it("F8: rejects oversized Try it messages, excludes failed exchanges from history, and caps resent history length", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const input = (await screen.findByLabelText("Ask a question")) as HTMLInputElement;
+    const sendBtn = screen.getByRole("button", { name: "Send" });
+
+    // 1. Oversized input is rejected before appending or sending.
+    const oversized = "x".repeat(MAX_CHAT_MESSAGE_LENGTH + 1);
+    fireEvent.change(input, { target: { value: oversized } });
+    fireEvent.click(sendBtn);
+
+    expect(
+      await screen.findByText(`Message must be at most ${MAX_CHAT_MESSAGE_LENGTH} characters.`),
+    ).toBeTruthy();
+    expect(server.chatBodies).toHaveLength(0);
+    expect(input.value).toBe(oversized);
+
+    // 2. Failed exchange (SSE error event) is excluded from subsequent history.
+    server.setNextChatResponse(() =>
+      sseResponse([{ event: "error", data: { message: "Model unavailable" } }]),
+    );
+    fireEvent.change(input, { target: { value: "First attempt that fails" } });
+    fireEvent.click(sendBtn);
+    expect(await screen.findByText("Model unavailable")).toBeTruthy();
+
+    // 3. Successful exchange with an oversized assistant reply (> MAX_CHAT_MESSAGE_LENGTH).
+    const longReply = "r".repeat(MAX_CHAT_MESSAGE_LENGTH + 500);
+    server.setNextChatResponse(() =>
+      sseResponse([
+        { event: "token", data: { text: longReply } },
+        { event: "done", data: { messageId: "msg_long", conversationId: "conv_preview_1" } },
+      ]),
+    );
+    fireEvent.change(input, { target: { value: "Second attempt succeeds" } });
+    fireEvent.click(sendBtn);
+    expect(await screen.findByText(longReply)).toBeTruthy();
+
+    // Failed exchange was not sent in the second request's history.
+    expect(server.chatBodies[1]?.history).toBeUndefined();
+
+    // 4. Follow-up message resends history truncated to MAX_CHAT_MESSAGE_LENGTH and valid under parseChatRequest.
+    fireEvent.change(input, { target: { value: "Follow-up question" } });
+    fireEvent.click(sendBtn);
+    expect(await screen.findByText("Draft reply to: Follow-up question")).toBeTruthy();
+
+    const followUpBody = server.chatBodies[2];
+    expect(followUpBody).toBeTruthy();
+    const parsed = parseChatRequest(followUpBody);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.value.history).toEqual([
+        { role: "user", content: "Second attempt succeeds" },
+        { role: "assistant", content: "r".repeat(MAX_CHAT_MESSAGE_LENGTH) },
+      ]);
+    }
   });
 });

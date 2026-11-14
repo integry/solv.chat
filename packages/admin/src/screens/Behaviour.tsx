@@ -59,6 +59,12 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const lastTickRef = useRef(mutation.tick);
   const ignoreNextTickRef = useRef(false);
   const syncOnLoadRef = useRef(false);
+  const syncSnapshotRef = useRef<{
+    greeting: string;
+    persona: string;
+    fallbackText: string;
+    questionsText: string;
+  } | null>(null);
   const prevSavedBehaviourRef = useRef<BehaviourConfig | undefined>(undefined);
 
   useEffect(() => {
@@ -71,7 +77,10 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     if (mutation.lastKind !== "saving") {
       return;
     }
-    syncOnLoadRef.current = true;
+    if (!syncOnLoadRef.current) {
+      syncSnapshotRef.current = { ...latestRef.current };
+      syncOnLoadRef.current = true;
+    }
     draft.reload();
     setHistoryTick((n) => n + 1);
   }, [mutation.tick, mutation.lastKind, draft.reload]);
@@ -81,13 +90,32 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     const key = `${assistantId}:${draft.value?.draft.id ?? ""}`;
     const shouldSyncReload =
       syncOnLoadRef.current && savedBehaviour !== prevSavedBehaviourRef.current;
-    if (initializedFor !== key || shouldSyncReload) {
+    if (initializedFor !== key) {
       syncOnLoadRef.current = false;
+      syncSnapshotRef.current = null;
       prevSavedBehaviourRef.current = savedBehaviour;
       setGreeting(savedBehaviour.greeting);
       setPersona(savedBehaviour.persona);
       setFallbackText(savedBehaviour.fallbackText);
       setQuestionsText(savedBehaviour.suggestedQuestions.join("\n"));
+      setInitializedFor(key);
+    } else if (shouldSyncReload) {
+      const snapshot = syncSnapshotRef.current;
+      syncOnLoadRef.current = false;
+      syncSnapshotRef.current = null;
+      prevSavedBehaviourRef.current = savedBehaviour;
+      if (!snapshot || latestRef.current.greeting === snapshot.greeting) {
+        setGreeting(savedBehaviour.greeting);
+      }
+      if (!snapshot || latestRef.current.persona === snapshot.persona) {
+        setPersona(savedBehaviour.persona);
+      }
+      if (!snapshot || latestRef.current.fallbackText === snapshot.fallbackText) {
+        setFallbackText(savedBehaviour.fallbackText);
+      }
+      if (!snapshot || latestRef.current.questionsText === snapshot.questionsText) {
+        setQuestionsText(savedBehaviour.suggestedQuestions.join("\n"));
+      }
       setInitializedFor(key);
     }
   }, [assistantId, draft.value?.draft.id, initializedFor, savedBehaviour]);
