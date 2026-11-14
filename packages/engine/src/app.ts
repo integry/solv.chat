@@ -1,3 +1,4 @@
+import { adminAsset } from "./admin/assets.js";
 import { adminRoutes } from "./admin/router.js";
 import {
   type ChatRouteOverrides,
@@ -98,6 +99,12 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         const principal = await seams.auth.authenticate(request);
         if (principal === null) return Response.json({ error: "Sign in first." }, { status: 401 });
         return adminRoutes(request, url, forPrincipal(env.DB, principal));
+      }
+      if (
+        (request.method === "GET" || request.method === "HEAD") &&
+        (url.pathname === "/admin" || url.pathname.startsWith("/admin/"))
+      ) {
+        return adminAsset(url);
       }
       void ctx; // Later tasks add their routes above this line.
       return Response.json({ error: "Not found." }, { status: 404 });

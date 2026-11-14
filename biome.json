@@ -1,6 +1,13 @@
 {
   "files": {
-    "includes": ["**", "!**/dist", "!**/node_modules", "!**/.wrangler", "!**/widgetBundle.ts"]
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/node_modules",
+      "!**/.wrangler",
+      "!**/widgetBundle.ts",
+      "!**/adminBundle.ts"
+    ]
   },
   "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
   "linter": { "rules": { "preset": "recommended" } }
