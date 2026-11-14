@@ -751,4 +751,57 @@ describe("ingest consumer", () => {
     expect(await tenant.documents.listStaleVectors(documentId)).toEqual([]);
     expect(retriever.all().map((v) => v.chunkId)).toEqual(rev2Chunks.map((c) => c.id));
   });
+
+  it("preserves live vectors when duplicate revisionless consumers overlap at upsert (F11)", async () => {
+    const { assistantId, documentId } = await seedDocument("# Revless\n\nSame content.");
+    const retriever = memoryRetriever();
+    const tenant = forIngestScope(env.DB, { orgId: TEST_ORG_ID, assistantId });
+
+    let upsertAEntered!: () => void;
+    const upsertAStarted = new Promise<void>((resolve) => {
+      upsertAEntered = resolve;
+    });
+    let releaseUpsertA!: () => void;
+    const upsertAGate = new Promise<void>((resolve) => {
+      releaseUpsertA = resolve;
+    });
+
+    const blockingRetrieverA = {
+      query: retriever.query.bind(retriever),
+      remove: retriever.remove.bind(retriever),
+      async upsert(records: Parameters<typeof retriever.upsert>[0]) {
+        await retriever.upsert(records);
+        upsertAEntered();
+        await upsertAGate;
+      },
+    };
+
+    const msgA = makeMessage({ documentId, orgId: TEST_ORG_ID });
+    const promiseA = runIngestBatch(
+      { messages: [msgA] },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever: blockingRetrieverA },
+    );
+
+    await upsertAStarted;
+
+    // Consumer B processes the same revisionless document to completion while A is paused.
+    const msgB = makeMessage({ documentId, orgId: TEST_ORG_ID });
+    await runIngestBatch(
+      { messages: [msgB] },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+    expect(msgB.ack).toHaveBeenCalledTimes(1);
+
+    // Consumer A resumes and runs replaceChunks with allowSameRevision: true; it must not
+    // mark the retained canonical chunk IDs as stale or delete their live vectors.
+    releaseUpsertA();
+    await promiseA;
+    expect(msgA.ack).toHaveBeenCalledTimes(1);
+
+    const finalChunks = await tenant.documents.listChunks(documentId);
+    expect(finalChunks).toHaveLength(1);
+    expect(finalChunks[0]?.text).toBe("Same content.");
+    expect(retriever.all().map((v) => v.chunkId)).toEqual(finalChunks.map((c) => c.id));
+    expect(await tenant.documents.listStaleVectors(documentId)).toEqual([]);
+  });
 });

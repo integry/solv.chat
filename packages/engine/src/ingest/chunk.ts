@@ -133,19 +133,29 @@ function splitProseBlock(text: string, maxLen = MAX_CHARS - OVERLAP_CHARS - 2): 
   return pieces;
 }
 
+const MAX_FENCE_MARKER_LEN = 32;
+const MAX_FENCE_INFO_LEN = 64;
+
 function splitFenceBlock(text: string): string[] {
   if (text.length <= MAX_CHARS) return [text];
 
   const lines = text.split("\n");
-  const openLine = lines[0] ?? "```";
-  const fence = parseFenceOpen(openLine);
+  const rawOpenLine = lines[0] ?? "```";
+  const fenceMatch = /^\s*(`{3,}|~{3,})(.*)$/.exec(rawOpenLine);
+  const fence = parseFenceOpen(rawOpenLine);
   const lastLine = lines[lines.length - 1] ?? "";
   const hasClose = lines.length > 1 && fence !== null && isFenceClose(lastLine, fence);
-  const closeLine = hasClose ? lastLine : fence !== null ? fence.char.repeat(fence.length) : "```";
-  const bodyLines = hasClose ? lines.slice(1, -1) : lines.slice(1);
 
+  const marker =
+    fence !== null ? fence.char.repeat(Math.min(fence.length, MAX_FENCE_MARKER_LEN)) : "```";
+  const rawInfo = fence !== null && fenceMatch !== null ? (fenceMatch[2] ?? "").trimEnd() : "";
+  const maxInfoLen = Math.max(0, Math.min(MAX_FENCE_INFO_LEN, MAX_CHARS - marker.length * 2 - 3));
+  const openLine = `${marker}${rawInfo.slice(0, maxInfoLen)}`;
+  const closeLine = marker;
+
+  const bodyLines = hasClose ? lines.slice(1, -1) : lines.slice(1);
   if (bodyLines.length === 0) {
-    return [text];
+    return [`${openLine}\n${closeLine}`];
   }
 
   const maxBodyChars = Math.max(1, MAX_CHARS - openLine.length - closeLine.length - 2);

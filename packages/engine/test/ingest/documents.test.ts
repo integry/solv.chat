@@ -642,4 +642,79 @@ describe("ingest documents", () => {
     expect(await env.DOCS.head(uploadedKey)).toBeNull();
     expect(await tenant.documents.listStaleObjects(cleanupMsg.documentId)).toEqual([]);
   });
+
+  it("recovers persisted stale object on subsequent ingest request when both immediate delete and queue dispatch fail (F12)", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const retriever = memoryRetriever();
+
+    let putEntered!: () => void;
+    const putStarted = new Promise<void>((resolve) => {
+      putEntered = resolve;
+    });
+    let releasePut!: () => void;
+    const putGate = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+
+    let uploadedKey = "";
+    const failingDocs = {
+      async put(key: string, value: string) {
+        uploadedKey = key;
+        putEntered();
+        await putGate;
+        return env.DOCS.put(key, value);
+      },
+      async delete() {
+        throw new Error("R2 delete failed");
+      },
+    };
+    const failingQueue = {
+      async send() {
+        throw new Error("Queue send failed");
+      },
+    };
+
+    const pushPromise = pushDocuments({ tenant, docs: failingDocs, queue: failingQueue }, scope, {
+      documents: [
+        {
+          externalId: "stranded",
+          url: "https://example.com/stranded",
+          title: "Stranded",
+          markdown: "# Stranded\n\nNeeds drain.",
+        },
+      ],
+    });
+
+    await putStarted;
+
+    const deleted = await deleteDocuments({ tenant, docs: env.DOCS, retriever }, scope, {
+      externalIds: ["stranded"],
+    });
+    expect(deleted).toEqual({ written: 0, unchanged: 0, deleted: 1 });
+
+    releasePut();
+    await expect(pushPromise).rejects.toThrow("R2 delete failed");
+
+    // Object remains in R2 and is persisted in stale_objects with no queue message sent.
+    expect(await env.DOCS.head(uploadedKey)).not.toBeNull();
+    expect(await tenant.documents.listAllStaleObjects()).toHaveLength(1);
+
+    // Subsequent ingest request in the same org drains the orphaned stale object.
+    const queue = countingQueue();
+    const retryRes = await pushDocuments({ tenant, docs: env.DOCS, queue }, scope, {
+      documents: [
+        {
+          externalId: "stranded",
+          url: "https://example.com/stranded",
+          title: "Stranded",
+          markdown: "# Stranded\n\nRecovered.",
+        },
+      ],
+    });
+    expect(retryRes).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    expect(await env.DOCS.head(uploadedKey)).toBeNull();
+    expect(await tenant.documents.listAllStaleObjects()).toEqual([]);
+  });
 });

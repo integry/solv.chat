@@ -137,4 +137,41 @@ describe("chunkMarkdown", () => {
     }
     expect(recovered).toBe(longLine);
   });
+
+  it("bounds long fence markers without amplifying chunk count or memory (F13)", () => {
+    const longFence = "`".repeat(1300);
+    const codeLine = "x".repeat(100_000);
+    const md = `${longFence}\n${codeLine}\n${longFence}`;
+    const chunks = chunkMarkdown(md);
+
+    expect(chunks.length).toBeLessThan(200);
+    let recovered = "";
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(MAX_CHARS);
+      const lines = chunk.text.split("\n");
+      expect(lines[0]).toMatch(/^`{3,}$/);
+      expect(lines[lines.length - 1]).toBe(lines[0]);
+      recovered += lines.slice(1, -1).join("\n");
+    }
+    expect(recovered).toBe(codeLine);
+  });
+
+  it("bounds oversized fence info strings while preserving valid fencing and content (F13)", () => {
+    const longInfo = `typescript-${"a".repeat(2000)}`;
+    const codeLine = "y".repeat(3000);
+    const md = `\`\`\`${longInfo}\n${codeLine}\n\`\`\``;
+    const chunks = chunkMarkdown(md);
+
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    expect(chunks.length).toBeLessThan(10);
+    let recovered = "";
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(MAX_CHARS);
+      const lines = chunk.text.split("\n");
+      expect(lines[0]?.startsWith("```typescript-")).toBe(true);
+      expect(lines[lines.length - 1]).toBe("```");
+      recovered += lines.slice(1, -1).join("\n");
+    }
+    expect(recovered).toBe(codeLine);
+  });
 });

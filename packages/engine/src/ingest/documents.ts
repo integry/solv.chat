@@ -114,6 +114,34 @@ function readStringArray(value: unknown, field: string): string[] {
 }
 
 /**
+ * Best-effort drain of persisted `stale_objects` records within the authenticated
+ * org so cleanup obligations survive even if both immediate R2 delete and queue
+ * dispatch failed.
+ */
+async function drainStaleObjects(
+  tenant: Tenant,
+  docs: { delete(key: string): Promise<unknown> },
+): Promise<void> {
+  const stale = await tenant.documents.listAllStaleObjects();
+  if (stale.length === 0) return;
+
+  const cleared = new Map<string, string[]>();
+  for (const entry of stale) {
+    try {
+      await docs.delete(entry.objectKey);
+      const keys = cleared.get(entry.documentId) ?? [];
+      keys.push(entry.objectKey);
+      cleared.set(entry.documentId, keys);
+    } catch {
+      // Leave remaining records in stale_objects for the next ingest request.
+    }
+  }
+  for (const [documentId, objectKeys] of cleared) {
+    await tenant.documents.clearStaleObjects(documentId, objectKeys);
+  }
+}
+
+/**
  * Validates the whole batch, then writes and enqueues only documents whose
  * content hash changed.
  */
@@ -150,6 +178,7 @@ export async function pushDocuments(
   });
 
   const source = await resolveOrCreatePushSource(deps.tenant, scope.assistantId, rawBody.sourceId);
+  await drainStaleObjects(deps.tenant, deps.docs);
   const existing = await deps.tenant.documents.pushStatesFor(
     source.id,
     documents.map((doc) => doc.externalId),
@@ -189,11 +218,15 @@ export async function pushDocuments(
             await deps.docs.delete(objectKey);
           } catch (err) {
             await deps.tenant.documents.addStaleObject(saved.id, objectKey);
-            await deps.queue.send({
-              documentId: saved.id,
-              orgId: scope.orgId,
-              revision: saved.revision,
-            });
+            try {
+              await deps.queue.send({
+                documentId: saved.id,
+                orgId: scope.orgId,
+                revision: saved.revision,
+              });
+            } catch {
+              // Persisted in stale_objects; subsequent ingest requests will drain it.
+            }
             throw err;
           }
           continue;
@@ -244,6 +277,7 @@ export async function deleteDocuments(
     : [];
 
   const source = await findExistingSource(deps.tenant, scope.assistantId, rawBody.sourceId);
+  await drainStaleObjects(deps.tenant, deps.docs);
   if (source === null) {
     return { written: 0, unchanged: 0, deleted: 0 };
   }

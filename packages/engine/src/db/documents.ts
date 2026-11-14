@@ -385,6 +385,21 @@ export function documentsFor(db: D1Database, orgId: string) {
       return res.results.map((row) => row.object_key);
     },
 
+    async listAllStaleObjects(
+      limit = 100,
+    ): Promise<Array<{ documentId: string; objectKey: string }>> {
+      const res = await prepare(
+        db,
+        "SELECT document_id, object_key FROM stale_objects WHERE org_id = ?1 LIMIT ?2",
+      )
+        .bind(orgId, limit)
+        .all<{ document_id: string; object_key: string }>();
+      return res.results.map((row) => ({
+        documentId: row.document_id,
+        objectKey: row.object_key,
+      }));
+    },
+
     async addStaleObject(documentId: string, objectKey: string): Promise<void> {
       await prepareInsert(
         db,
@@ -480,6 +495,13 @@ export function documentsFor(db: D1Database, orgId: string) {
             expectedRevision,
           ),
         ),
+        prepare(
+          db,
+          `DELETE FROM stale_vectors
+           WHERE org_id = ?1 AND document_id = ?2
+             AND chunk_id IN (SELECT id FROM chunks WHERE org_id = ?1 AND document_id = ?2)
+             AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${guard3})`,
+        ).bind(orgId, documentId, expectedRevision),
         prepare(
           db,
           `UPDATE documents SET indexed_revision = ?3 WHERE org_id = ?1 AND id = ?2 AND ${guard3}`,
