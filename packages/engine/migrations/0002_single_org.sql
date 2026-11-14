@@ -1,0 +1,2 @@
+INSERT OR IGNORE INTO orgs (id, name)
+VALUES ('org_00000000000000000000', 'Default');
