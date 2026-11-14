@@ -75,7 +75,9 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
 ## Public API (called by the widget)
 
 - `POST /v1/chat` — body: assistant public key, conversation id (optional), message.
-  Responds with server-sent events: `token`, `citation`, `tool`, `done`, `error`.
+  Responds with server-sent events: `token`, `citation`, `tool`, `done`, `error`
+  (and `action` from phase 2). The request carries a protocol version; unknown
+  event types are ignored by the widget.
 - `POST /v1/feedback` — thumbs up or down on a message.
 - `GET /v1/assistants/:publicKey` — published widget config (title, colours, greeting,
   suggested questions). No secrets, no prompts.
@@ -155,11 +157,69 @@ credential. The rules that follow from that:
 The MCP client loop is provider-independent. A provider-native MCP connector may
 be added later behind the same interface.
 
+## Page actions
+
+The assistant can act inside the page the visitor is on, not only answer. Asked
+"how do I change my plan?", it can take the visitor to the billing section and
+point at the control; asked to "book a demo for Tuesday", it can fill the form
+and leave the visitor to press Submit.
+
+Actions run in the visitor's browser, with the visitor's own session. No owner
+credential is involved, which makes them safer than MCP tools.
+
+Built in:
+
+- `navigate` — go to a URL on the same site (same origin, or an origin the owner
+  listed), optionally to a section. The conversation continues on the new page.
+- `highlight` — scroll to an element and point at it with a short note.
+- `fill` — put values into form fields the owner has marked as fillable. It never
+  submits.
+
+Custom: the site registers its own actions in code,
+
+```js
+solv.actions.register({
+  name: "open_invoice",
+  description: "Open one of the visitor's invoices",
+  input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  confirm: false,
+  run: async ({ id }) => { router.push(`/invoices/${id}`); return { opened: id }; },
+});
+```
+
+and the widget sends the list of available actions (name, description, input
+schema) with each chat request. The model sees them as tools. When it calls
+one, the server emits an `action` event; the widget validates the input against
+the schema, runs it, and posts the result back so the answer can continue.
+
+Rules:
+
+- Only actions the page registered, or the built-ins the owner enabled, can run.
+  The model cannot run arbitrary script, pick arbitrary selectors or reach
+  another origin.
+- The widget says what it is about to do. Anything marked `confirm`, and every
+  `fill`, waits for the visitor to accept. Nothing is submitted, bought, sent or
+  deleted without the visitor's own click.
+- Fields of type password, payment and one-time code are never filled or read.
+- Action results and page content are untrusted input to the model, like tool
+  results.
+- Every action call is stored on the message, so the owner sees in
+  Conversations what the assistant did.
+
+The owner enables built-ins and sets allowed origins on the Widget screen; a
+plain-language list of what the assistant may do on the page is shown there.
+
+Page actions are phase 2. Phase 1 builds what they stand on: a conversation that
+survives a page change, and a chat protocol whose event stream and request body
+are versioned so `action` events and action results can be added without
+breaking installed widgets.
+
 ## Widget
 
 A custom element, `<solv-chat assistant="pk_...">`, loaded with one script tag.
 No framework, no dependencies, Shadow DOM, one file, under 30 kB gzipped.
-Streams tokens, renders citations as links, thumbs up and down, keyboard and
+Streams tokens, renders citations as links, restores the open conversation after a
+page change or reload (conversation id and open state in localStorage), thumbs up and down, keyboard and
 screen-reader usable, respects `prefers-reduced-motion` and `prefers-color-scheme`.
 It sets no cookies and loads nothing from third parties.
 
@@ -207,5 +267,5 @@ with the open implementations.
 
 1. Engine, widget and admin without tools: sources, behaviour, widget, draft and
    publish, conversations, gaps. First install: propr.dev.
-2. MCP tools, tests, reports. Second install: mcptest.io.
+2. MCP tools, page actions, tests, reports. Second install: mcptest.io.
 3. Cloud layer in the closed repo.
