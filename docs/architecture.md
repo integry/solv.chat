@@ -75,9 +75,10 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
 ## Public API (called by the widget)
 
 - `POST /v1/chat` — body: assistant public key, conversation id (optional), message.
-  Responds with server-sent events: `token`, `citation`, `tool`, `done`, `error`
-  (and `action` from phase 2). The request carries a protocol version; unknown
-  event types are ignored by the widget.
+  The body also carries a protocol version; the engine refuses a version it does
+  not support with an `error` event, and clients ignore event types they do not
+  know. Responds with server-sent events: `token`, `citation`, `tool`, `done`,
+  `error` (and `action` from phase 2).
 - `POST /v1/feedback` — thumbs up or down on a message.
 - `GET /v1/assistants/:publicKey` — published widget config (title, colours, greeting,
   suggested questions). No secrets, no prompts.
@@ -118,9 +119,9 @@ numbers, install snippet.
 
 1. Load the published version (or the draft, for the admin "Try it" pane).
 2. Retrieve: embed the question, query the retriever for the assistant, keep the
-   top chunks above a score floor.
+   top chunks above a score floor (top 6, floor 0.3; chosen for v1, not tuned).
 3. Build the prompt: fixed safety frame, the owner's behaviour fields, retrieved
-   chunks with their URLs, recent turns.
+   chunks with their URLs (capped at 2000 characters each), the last 6 turns.
 4. Call the model through the provider interface, streaming. If tools are allowed,
    run the MCP loop: the model asks for a tool, the Worker calls the MCP server,
    the result goes back as untrusted data.
@@ -141,7 +142,13 @@ carries a comment with the source URL and the date checked. Never fill it from
 memory.
 
 The admin does not expose model or temperature pickers per assistant. The
-instance picks a provider and a model tier in configuration.
+instance picks a provider and a model tier in configuration via plain Worker
+environment variables (`vars` in `wrangler.jsonc`):
+
+- `SOLV_LLM_PROVIDER` — `anthropic` or `openai` (default `anthropic`).
+- `SOLV_LLM_TIER` — `fast` or `balanced` (default `fast`).
+
+An unrecognised value falls back to its default and is logged once.
 
 ## MCP tools
 

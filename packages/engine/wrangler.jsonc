@@ -9,6 +9,10 @@
   //   SOLV_SECRET_KEY
   //   SOLV_ANTHROPIC_KEY
   //   SOLV_OPENAI_KEY
+  "vars": {
+    "SOLV_LLM_PROVIDER": "anthropic",
+    "SOLV_LLM_TIER": "fast"
+  },
   "d1_databases": [
     {
       "binding": "DB",

@@ -1,4 +1,10 @@
 import { adminRoutes } from "./admin/router.js";
+import {
+  type ChatRouteOverrides,
+  chatRoute,
+  feedbackRoute,
+  publicConfigRoute,
+} from "./chat/route.js";
 import { forPrincipal } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
 import { ingestRoutes } from "./ingest/router.js";
@@ -21,6 +27,8 @@ export interface Env {
   VECTORS: VectorizeIndex;
   DOCS: R2Bucket;
   INGEST_QUEUE: Queue;
+  SOLV_LLM_PROVIDER?: string | undefined;
+  SOLV_LLM_TIER?: string | undefined;
 }
 
 export interface App {
@@ -28,8 +36,12 @@ export interface App {
   queue(batch: MessageBatch<unknown>, env: Env, ctx: ExecutionContext): Promise<void>;
 }
 
+export interface AppOptions {
+  chat?: ChatRouteOverrides | undefined;
+}
+
 /** Creates the Worker fetch and queue handlers wired to the given extension seams. */
-export function createApp(seams: Seams): App {
+export function createApp(seams: Seams, options?: AppOptions): App {
   return {
     async fetch(request, env, ctx) {
       const url = new URL(request.url);
@@ -38,6 +50,16 @@ export function createApp(seams: Seams): App {
         // than one that fails, because deploys look healthy.
         await env.DB.prepare("SELECT 1").first();
         return Response.json({ ok: true });
+      }
+      if (url.pathname === "/v1/chat") {
+        return chatRoute(request, env, seams, ctx, options?.chat);
+      }
+      if (url.pathname === "/v1/feedback") {
+        return feedbackRoute(request, env, seams);
+      }
+      const publicConfigMatch = /^\/v1\/assistants\/([^/]+)$/.exec(url.pathname);
+      if (publicConfigMatch?.[1]) {
+        return publicConfigRoute(request, env, seams, decodeURIComponent(publicConfigMatch[1]));
       }
       if (request.method === "GET" && url.pathname === "/widget.js") {
         // Long cache: the owner embeds a stable URL, so a long max-age keeps

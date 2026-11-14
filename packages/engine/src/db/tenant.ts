@@ -14,6 +14,11 @@ export interface IngestScope {
   assistantId: string;
 }
 
+export interface PublicScope {
+  orgId: string;
+  assistantId: string;
+}
+
 export interface Tenant {
   readonly assistants: ReturnType<typeof assistantsFor>;
   readonly versions: ReturnType<typeof versionsFor>;
@@ -38,6 +43,10 @@ export const forPrincipal = (db: D1Database, principal: Principal): Tenant =>
 
 /** Builds a `Tenant` from an authenticated ingest bearer-key scope. */
 export const forIngestScope = (db: D1Database, scope: IngestScope): Tenant =>
+  build(db, scope.orgId);
+
+/** Builds a `Tenant` from a public assistant or message lookup. */
+export const forPublicScope = (db: D1Database, scope: PublicScope): Tenant =>
   build(db, scope.orgId);
 
 function build(db: D1Database, orgId: string): Tenant {
