@@ -1,4 +1,10 @@
-import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import {
+  createExecutionContext,
+  createMessageBatch,
+  env,
+  getQueueResult,
+  waitOnExecutionContext,
+} from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { createTestApp } from "./helpers/app.js";
 
@@ -105,5 +111,24 @@ describe("admin same-origin check", () => {
     await waitOnExecutionContext(ctx);
 
     expect(response.status).toBe(404);
+  });
+});
+
+describe("queue stub", () => {
+  it("retries every message in the batch instead of acknowledging", async () => {
+    const app = createTestApp();
+    const ctx = createExecutionContext();
+    const batch = createMessageBatch("solvchat-ingest", [
+      { id: "msg-1", timestamp: new Date(), attempts: 1, body: { docId: "doc_1" } },
+      { id: "msg-2", timestamp: new Date(), attempts: 1, body: { docId: "doc_2" } },
+    ]);
+
+    await app.queue(batch, env, ctx);
+    const result = await getQueueResult(batch, ctx);
+
+    expect(result.outcome).toBe("ok");
+    expect(result.ackAll).toBe(false);
+    expect(result.explicitAcks).toEqual([]);
+    expect(result.retryBatch.retry).toBe(true);
   });
 });

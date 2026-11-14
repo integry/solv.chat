@@ -28,5 +28,6 @@ CREATE TABLE IF NOT EXISTS login_failures (
   ip TEXT NOT NULL,
   failures INTEGER NOT NULL,
   window_start INTEGER NOT NULL,
+  locked_until INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (org_id, ip)
 );

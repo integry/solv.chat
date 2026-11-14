@@ -41,11 +41,11 @@ export function createApp(seams: Seams): App {
       return Response.json({ error: "Not found." }, { status: 404 });
     },
     async queue(batch, env, ctx) {
-      // The ingest task fills this in. Acknowledging nothing means a message
-      // retries rather than vanishing while the consumer is unbuilt.
-      void batch;
+      // The ingest task fills this in. Explicitly retry every message so
+      // nothing is acknowledged and discarded while the consumer is unbuilt.
       void env;
       void ctx;
+      batch.retryAll();
     },
   };
 }

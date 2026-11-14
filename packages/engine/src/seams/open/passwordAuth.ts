@@ -135,47 +135,54 @@ export function passwordAuth(env: PasswordAuthEnv, db: D1Database): AuthProvider
     },
 
     async login(request) {
+      const body = (await request.json().catch(() => null)) as { password?: unknown } | null;
+      const password = typeof body?.password === "string" ? body.password : "";
       const ip = clientIp(request);
       const now = Date.now();
-      const row = await db
-        .prepare("SELECT failures, window_start FROM login_failures WHERE org_id = ?1 AND ip = ?2")
-        .bind(SINGLE_ORG_ID, ip)
-        .first<{ failures: number; window_start: number }>();
 
-      if (row && now - row.window_start < LOGIN_WINDOW_MS && row.failures >= MAX_LOGIN_FAILURES) {
-        const retryAfter = Math.max(
-          1,
-          Math.ceil((row.window_start + LOGIN_WINDOW_MS - now) / 1000),
-        );
+      // Reserve an attempt slot atomically before verifying the password so
+      // concurrent requests cannot all read a pre-threshold count and bypass
+      // the limit. Lockout expiration is tracked independently of window_start
+      // so the 15-minute wait always runs from the threshold-crossing failure.
+      const attempt = await db
+        .prepare(
+          `INSERT INTO login_failures (org_id, ip, failures, window_start, locked_until)
+           VALUES (?1, ?2, 1, ?3, 0)
+           ON CONFLICT(org_id, ip) DO UPDATE SET
+             failures = CASE
+               WHEN login_failures.locked_until > ?3 THEN ?5 + 1
+               WHEN ?3 - login_failures.window_start >= ?4 OR login_failures.failures >= ?5 THEN 1
+               ELSE login_failures.failures + 1
+             END,
+             window_start = CASE
+               WHEN login_failures.locked_until > ?3 THEN login_failures.window_start
+               WHEN ?3 - login_failures.window_start >= ?4 OR login_failures.failures >= ?5 THEN ?3
+               ELSE login_failures.window_start
+             END,
+             locked_until = CASE
+               WHEN login_failures.locked_until > ?3 THEN login_failures.locked_until
+               WHEN ?3 - login_failures.window_start >= ?4 OR login_failures.failures >= ?5 THEN 0
+               WHEN login_failures.failures + 1 >= ?5 THEN ?3 + ?4
+               ELSE 0
+             END
+           RETURNING failures, locked_until`,
+        )
+        .bind(SINGLE_ORG_ID, ip, now, LOGIN_WINDOW_MS, MAX_LOGIN_FAILURES)
+        .first<{ failures: number; locked_until: number }>();
+
+      if (attempt && attempt.failures > MAX_LOGIN_FAILURES) {
+        const retryAfter = Math.max(1, Math.ceil((attempt.locked_until - now) / 1000));
         return Response.json(
           { error: "Too many failed sign-in attempts." },
           { status: 429, headers: { "retry-after": String(retryAfter) } },
         );
       }
 
-      const body = (await request.json().catch(() => null)) as { password?: unknown } | null;
-      const password = typeof body?.password === "string" ? body.password : "";
       const valid = Boolean(
         env.SOLV_ADMIN_PASSWORD && env.SOLV_SECRET_KEY && equals(password, env.SOLV_ADMIN_PASSWORD),
       );
 
       if (!valid) {
-        await db
-          .prepare(
-            `INSERT INTO login_failures (org_id, ip, failures, window_start)
-             VALUES (?1, ?2, 1, ?3)
-             ON CONFLICT(org_id, ip) DO UPDATE SET
-               failures = CASE
-                 WHEN ?3 - login_failures.window_start >= ?4 THEN 1
-                 ELSE login_failures.failures + 1
-               END,
-               window_start = CASE
-                 WHEN ?3 - login_failures.window_start >= ?4 THEN ?3
-                 ELSE login_failures.window_start
-               END`,
-          )
-          .bind(SINGLE_ORG_ID, ip, now, LOGIN_WINDOW_MS)
-          .run();
         // One message for "unset" and "wrong" so the response does not say which.
         return Response.json({ error: "Sign-in failed." }, { status: 401 });
       }

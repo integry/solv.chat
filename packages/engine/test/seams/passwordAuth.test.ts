@@ -146,4 +146,64 @@ describe("passwordAuth", () => {
     const afterWait = await auth.login(loginRequest(ENV.SOLV_ADMIN_PASSWORD, "198.51.100.1"));
     expect(afterWait.status).toBe(200);
   });
+
+  it("keeps lockout for 15 minutes from the 5th failure when failures are spread across the window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T12:00:00Z"));
+
+    const auth = passwordAuth(ENV, env.DB);
+    expect((await auth.login(loginRequest("wrong", "198.51.100.3"))).status).toBe(401);
+
+    // Failures 2..5 happen 14m59s after the first failure.
+    vi.setSystemTime(new Date("2026-01-01T12:14:59Z"));
+    for (let i = 0; i < 4; i++) {
+      expect((await auth.login(loginRequest("wrong", "198.51.100.3"))).status).toBe(401);
+    }
+
+    // 15m00s after the first failure (1s after the 5th failure): must still be locked out.
+    vi.setSystemTime(new Date("2026-01-01T12:15:00Z"));
+    const stillLocked = await auth.login(loginRequest(ENV.SOLV_ADMIN_PASSWORD, "198.51.100.3"));
+    expect(stillLocked.status).toBe(429);
+    expect(Number(stillLocked.headers.get("retry-after"))).toBeGreaterThanOrEqual(899);
+
+    // 14m59s after the 5th failure: still locked out.
+    vi.setSystemTime(new Date("2026-01-01T12:29:58Z"));
+    expect((await auth.login(loginRequest(ENV.SOLV_ADMIN_PASSWORD, "198.51.100.3"))).status).toBe(
+      429,
+    );
+
+    // 15m00s after the 5th failure: lockout expires.
+    vi.setSystemTime(new Date("2026-01-01T12:29:59Z"));
+    const unlocked = await auth.login(loginRequest(ENV.SOLV_ADMIN_PASSWORD, "198.51.100.3"));
+    expect(unlocked.status).toBe(200);
+  });
+
+  it("prevents concurrent login attempts from bypassing the 5-failure threshold", async () => {
+    const auth = passwordAuth(ENV, env.DB);
+    const ip = "198.51.100.4";
+
+    for (let i = 0; i < 4; i++) {
+      expect((await auth.login(loginRequest("wrong", ip))).status).toBe(401);
+    }
+
+    // Fire 5 concurrent attempts at the 5th-attempt threshold: only 1 may be admitted.
+    const responses = await Promise.all([
+      auth.login(loginRequest("wrong", ip)),
+      auth.login(loginRequest("wrong", ip)),
+      auth.login(loginRequest("wrong", ip)),
+      auth.login(loginRequest("wrong", ip)),
+      auth.login(loginRequest(ENV.SOLV_ADMIN_PASSWORD, ip)),
+    ]);
+
+    const statuses = responses.map((r) => r.status);
+    const admitted = statuses.filter((s) => s !== 429);
+    const throttled = statuses.filter((s) => s === 429);
+    expect(admitted).toHaveLength(1);
+    expect(throttled).toHaveLength(4);
+    for (const res of responses) {
+      if (res.status === 429) {
+        expect(res.headers.get("set-cookie")).toBeNull();
+      }
+    }
+  });
 });
