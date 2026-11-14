@@ -15,7 +15,11 @@ function makeAssistant(): Assistant {
   };
 }
 
-function installSourcesFakeServer() {
+function installSourcesFakeServer(options?: {
+  extraSources?: SourceSummary[];
+  extraDocuments?: Array<[string, Array<DocumentSummary & { markdown: string }>]>;
+  onDocsRequest?: (sourceId: string, url: URL) => Promise<Response> | null;
+}) {
   const assistant = makeAssistant();
   const sources: SourceSummary[] = [
     {
@@ -29,6 +33,7 @@ function installSourcesFakeServer() {
       documentCount: 3,
       lastUpdatedAt: 1_700_000_100_000,
     },
+    ...(options?.extraSources ?? []),
   ];
   const documentsBySource = new Map<string, Array<DocumentSummary & { markdown: string }>>([
     [
@@ -45,6 +50,7 @@ function installSourcesFakeServer() {
         },
       ],
     ],
+    ...(options?.extraDocuments ?? []),
   ]);
 
   const importedPayloads: Array<{ sitemapUrl?: string; urls: string[] }> = [];
@@ -146,12 +152,20 @@ function installSourcesFakeServer() {
 
     const docsMatch = /^\/api\/admin\/sources\/([^/]+)\/documents$/.exec(path);
     if (docsMatch?.[1] && method === "GET") {
+      const parsedUrl = new URL(url, "https://example.com");
+      const intercepted = options?.onDocsRequest?.(docsMatch[1], parsedUrl);
+      if (intercepted) {
+        return intercepted;
+      }
       const list = documentsBySource.get(docsMatch[1]) ?? [];
+      const limit = Math.max(1, Number(parsedUrl.searchParams.get("limit") ?? "20"));
+      const offset = Math.max(0, Number(parsedUrl.searchParams.get("offset") ?? "0"));
+      const page = list.slice(offset, offset + limit);
       return Response.json({
-        documents: list.map(({ markdown: _m, ...rest }) => rest),
+        documents: page.map(({ markdown: _m, ...rest }) => rest),
         total: list.length,
-        limit: 20,
-        offset: 0,
+        limit,
+        offset,
       });
     }
 
@@ -251,5 +265,168 @@ describe("admin Sources screen", () => {
       },
     ]);
     expect(await screen.findByText("docs.example.com")).toBeTruthy();
+  });
+
+  it("paginates documents beyond the first 20 so the 21st entry is reachable and editable", async () => {
+    const entries = Array.from({ length: 21 }, (_, idx) => ({
+      id: `doc_e_${idx + 1}`,
+      sourceId: "src_entry_1",
+      externalId: `entry:h${idx + 1}`,
+      url: `https://example.com/admin/sources#entry:h${idx + 1}`,
+      title: `Question ${idx + 1}`,
+      updatedAt: 1_700_000_200_000 - idx * 1000,
+      markdown: `# Question ${idx + 1}\n\nAnswer ${idx + 1}`,
+    }));
+
+    installSourcesFakeServer({
+      extraSources: [
+        {
+          id: "src_entry_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          kind: "entry",
+          label: "Answers you wrote",
+          settings: {},
+          createdAt: 1_700_000_000_000,
+          documentCount: 21,
+          lastUpdatedAt: 1_700_000_200_000,
+        },
+      ],
+      extraDocuments: [["src_entry_1", entries]],
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+
+    render(<App />);
+    await screen.findAllByText("Answers you wrote");
+
+    const [, entryViewButton] = screen.getAllByRole("button", { name: "View documents" });
+    if (!entryViewButton) throw new Error("Expected entry View documents button");
+    fireEvent.click(entryViewButton);
+
+    expect(await screen.findByText("Question 1")).toBeTruthy();
+    expect(screen.getByText("Showing 1–20 of 21")).toBeTruthy();
+    expect(screen.queryByText("Question 21")).toBeNull();
+
+    const prevButton = screen.getByRole("button", { name: "Previous" }) as HTMLButtonElement;
+    const nextButton = screen.getByRole("button", { name: "Next" }) as HTMLButtonElement;
+    expect(prevButton.disabled).toBe(true);
+    expect(nextButton.disabled).toBe(false);
+
+    fireEvent.click(nextButton);
+
+    expect(await screen.findByText("Question 21")).toBeTruthy();
+    expect(screen.getByText("Showing 21–21 of 21")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Previous" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    expect(await screen.findByText("Question 1")).toBeTruthy();
+    expect(screen.queryByText("Question 21")).toBeNull();
+  });
+
+  it("ignores stale document responses and errors when switching to another source", async () => {
+    let resolveStaleA!: (value: Response) => void;
+    let rejectStaleA2!: (reason?: unknown) => void;
+    let aCallCount = 0;
+
+    installSourcesFakeServer({
+      extraSources: [
+        {
+          id: "src_entry_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          kind: "entry",
+          label: "Answers you wrote",
+          settings: {},
+          createdAt: 1_700_000_000_000,
+          documentCount: 1,
+          lastUpdatedAt: 1_700_000_200_000,
+        },
+      ],
+      extraDocuments: [
+        [
+          "src_entry_1",
+          [
+            {
+              id: "doc_e_1",
+              sourceId: "src_entry_1",
+              externalId: "entry:h1",
+              url: "https://example.com/admin/sources#entry:h1",
+              title: "Entry B Question",
+              updatedAt: 1_700_000_200_000,
+              markdown: "# Entry B Question\n\nAnswer B",
+            },
+          ],
+        ],
+      ],
+      onDocsRequest(sourceId) {
+        if (sourceId === "src_push_1") {
+          aCallCount++;
+          if (aCallCount === 1) {
+            return new Promise<Response>((resolve) => {
+              resolveStaleA = resolve;
+            });
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            rejectStaleA2 = reject;
+          });
+        }
+        return null;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+
+    render(<App />);
+    await screen.findAllByText("Answers you wrote");
+
+    const [pushViewButton, entryViewButton] = screen.getAllByRole("button", {
+      name: "View documents",
+    });
+    if (!pushViewButton || !entryViewButton)
+      throw new Error("Expected both View documents buttons");
+    // Expand source A (src_push_1) whose response stays pending.
+    fireEvent.click(pushViewButton);
+    // Switch to source B (src_entry_1) whose response resolves immediately.
+    fireEvent.click(entryViewButton);
+
+    expect(await screen.findByText("Entry B Question")).toBeTruthy();
+
+    // Now resolve the stale response for source A.
+    resolveStaleA(
+      Response.json({
+        documents: [
+          {
+            id: "doc_p1",
+            sourceId: "src_push_1",
+            externalId: "intro",
+            url: "https://docs.example.com/intro",
+            title: "Stale Source A Doc",
+            updatedAt: 1_700_000_100_000,
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Entry B Question")).toBeTruthy();
+      expect(screen.queryByText("Stale Source A Doc")).toBeNull();
+    });
+
+    // Also verify a late error from a superseded request does not overwrite source B.
+    fireEvent.click(screen.getByRole("button", { name: "View documents" })); // expand A again (2nd call)
+    fireEvent.click(screen.getByRole("button", { name: "View documents" })); // switch back to B
+    expect(await screen.findByText("Entry B Question")).toBeTruthy();
+
+    rejectStaleA2(new Error("Network error from A"));
+    await waitFor(() => {
+      expect(screen.getByText("Entry B Question")).toBeTruthy();
+      expect(screen.queryByText("Could not load documents.")).toBeNull();
+    });
   });
 });

@@ -187,6 +187,74 @@ export interface FollowOptions {
   maxRedirects: number;
   timeoutMs: number;
   accept?: string;
+  signal?: AbortSignal;
+}
+
+export interface FetchCappedOptions extends FollowOptions {
+  maxBytes: number;
+}
+
+function linkAbortSignal(signal?: AbortSignal): {
+  controller: AbortController;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  if (!signal) {
+    return { controller, cleanup: () => {} };
+  }
+  if (signal.aborted) {
+    controller.abort();
+    return { controller, cleanup: () => {} };
+  }
+  const onAbort = () => controller.abort();
+  signal.addEventListener("abort", onAbort, { once: true });
+  return {
+    controller,
+    cleanup: () => signal.removeEventListener("abort", onAbort),
+  };
+}
+
+function raceWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  onAbort: () => Promise<void> | void,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.resolve(onAbort()).then(() => {
+      throw new UnsafeUrlError("request timed out");
+    });
+  }
+  return new Promise<T>((resolve, reject) => {
+    let aborted = false;
+    const handleAbort = () => {
+      aborted = true;
+      Promise.resolve(onAbort()).finally(() => {
+        reject(new UnsafeUrlError("request timed out"));
+      });
+    };
+    signal.addEventListener("abort", handleAbort, { once: true });
+    promise.then(
+      (val) => {
+        signal.removeEventListener("abort", handleAbort);
+        if (!aborted && !signal.aborted) {
+          resolve(val);
+        }
+      },
+      (err) => {
+        signal.removeEventListener("abort", handleAbort);
+        if (aborted) return;
+        if (signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+          aborted = true;
+          Promise.resolve(onAbort()).finally(() => {
+            reject(new UnsafeUrlError("request timed out"));
+          });
+        } else {
+          reject(err);
+        }
+      },
+    );
+  });
 }
 
 /**
@@ -199,13 +267,18 @@ export async function followCheckingEachHop(
   fetchImpl: typeof fetch,
   options: FollowOptions,
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  const { controller, cleanup } = linkAbortSignal(options.signal);
+  const timer = options.signal
+    ? undefined
+    : setTimeout(() => controller.abort(), options.timeoutMs);
 
   try {
     let current = assertPublicHttpsUrl(target.href);
 
     for (let redirects = 0; ; redirects++) {
+      if (controller.signal.aborted) {
+        throw new UnsafeUrlError("request timed out");
+      }
       const response = await fetchImpl(current.href, {
         method: "GET",
         redirect: "manual",
@@ -245,17 +318,30 @@ export async function followCheckingEachHop(
     if (err instanceof DOMException && err.name === "AbortError") {
       throw new UnsafeUrlError("request timed out");
     }
+    if (controller.signal.aborted) {
+      throw new UnsafeUrlError("request timed out");
+    }
     throw new UnsafeUrlError("could not fetch URL");
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
+    cleanup();
   }
 }
 
 /**
- * Reads a response body up to `maxBytes`, aborting early if `Content-Length`
- * or the streamed byte count exceeds the cap.
+ * Reads a response body up to `maxBytes`, aborting early if `Content-Length`,
+ * the streamed byte count, or the optional `signal` deadline is exceeded.
  */
-export async function readCapped(response: Response, maxBytes: number): Promise<string> {
+export async function readCapped(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (signal?.aborted) {
+    await response.body?.cancel().catch(() => {});
+    throw new UnsafeUrlError("request timed out");
+  }
+
   const declaredLength = response.headers.get("content-length");
   if (declaredLength !== null) {
     const parsed = Number(declaredLength);
@@ -266,7 +352,7 @@ export async function readCapped(response: Response, maxBytes: number): Promise<
   }
 
   if (!response.body) {
-    const buffer = await response.arrayBuffer();
+    const buffer = await raceWithAbort(response.arrayBuffer(), signal, () => {});
     if (buffer.byteLength > maxBytes) {
       throw new UnsafeUrlError(`response exceeds ${maxBytes} bytes`);
     }
@@ -279,7 +365,9 @@ export async function readCapped(response: Response, maxBytes: number): Promise<
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await raceWithAbort(reader.read(), signal, () =>
+        reader.cancel().catch(() => {}),
+      );
       if (done) break;
       if (!value) continue;
       total += value.byteLength;
@@ -290,7 +378,11 @@ export async function readCapped(response: Response, maxBytes: number): Promise<
       chunks.push(value);
     }
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // Lock may already be released after cancellation.
+    }
   }
 
   const combined = new Uint8Array(total);
@@ -300,4 +392,30 @@ export async function readCapped(response: Response, maxBytes: number): Promise<
     offset += chunk.byteLength;
   }
   return new TextDecoder().decode(combined);
+}
+
+/**
+ * Follows redirects with `followCheckingEachHop` and reads the response body
+ * with `readCapped` under a single shared timeout budget, so stalled
+ * response bodies are aborted and cancelled on timeout.
+ */
+export async function fetchCapped(
+  target: URL,
+  fetchImpl: typeof fetch,
+  options: FetchCappedOptions,
+): Promise<{ response: Response; body: string }> {
+  const { controller, cleanup } = linkAbortSignal(options.signal);
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+
+  try {
+    const response = await followCheckingEachHop(target, fetchImpl, {
+      ...options,
+      signal: controller.signal,
+    });
+    const body = await readCapped(response, options.maxBytes, controller.signal);
+    return { response, body };
+  } finally {
+    clearTimeout(timer);
+    cleanup();
+  }
 }

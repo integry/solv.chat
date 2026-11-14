@@ -1,5 +1,5 @@
 import type { SourceKind } from "@solvchat/core";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, deleteJson, getJson, postJson } from "../api/client.js";
 import type { DocumentSummary, SourceSummary } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
@@ -8,6 +8,8 @@ import { EntryEditor } from "./EntryEditor.js";
 export interface SourcesProps {
   assistantId: string;
 }
+
+const DOCS_PAGE_SIZE = 20;
 
 const KIND_LABELS: Record<SourceKind, string> = {
   push: "Pushed from your site",
@@ -229,11 +231,16 @@ export function Sources({ assistantId }: SourcesProps) {
 
   const [expandedSourceId, setExpandedSourceId] = useState<string | null>(null);
   const [docsState, setDocsState] = useState<{
+    sourceId: string | null;
     documents: DocumentSummary[];
     total: number;
+    offset: number;
     loading: boolean;
     error: string | null;
-  }>({ documents: [], total: 0, loading: false, error: null });
+  }>({ sourceId: null, documents: [], total: 0, offset: 0, loading: false, error: null });
+
+  const docsRequestRef = useRef<{ id: number; controller: AbortController } | null>(null);
+  const docsRequestSeqRef = useRef(0);
 
   const [editingEntry, setEditingEntry] = useState<{
     sourceId: string;
@@ -245,35 +252,85 @@ export function Sources({ assistantId }: SourcesProps) {
   const [busySourceId, setBusySourceId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  async function loadDocuments(sourceId: string) {
-    setDocsState((prev) => ({ ...prev, loading: true, error: null }));
+  useEffect(() => {
+    void assistantId;
+    docsRequestRef.current?.controller.abort();
+    docsRequestRef.current = null;
+    docsRequestSeqRef.current++;
+    setExpandedSourceId(null);
+    setEditingEntry(null);
+    setDocsState({
+      sourceId: null,
+      documents: [],
+      total: 0,
+      offset: 0,
+      loading: false,
+      error: null,
+    });
+  }, [assistantId]);
+
+  useEffect(() => {
+    return () => {
+      docsRequestRef.current?.controller.abort();
+    };
+  }, []);
+
+  async function loadDocuments(sourceId: string, offset = 0) {
+    docsRequestRef.current?.controller.abort();
+    const requestId = ++docsRequestSeqRef.current;
+    const controller = new AbortController();
+    docsRequestRef.current = { id: requestId, controller };
+
+    setDocsState((prev) => ({
+      sourceId,
+      documents: prev.sourceId === sourceId ? prev.documents : [],
+      total: prev.sourceId === sourceId ? prev.total : 0,
+      offset,
+      loading: true,
+      error: null,
+    }));
+
     try {
-      const data = await getJson<{ documents: DocumentSummary[]; total: number }>(
-        `/api/admin/sources/${sourceId}/documents?limit=20&offset=0`,
+      const data = await getJson<{ documents: DocumentSummary[]; total: number; offset?: number }>(
+        `/api/admin/sources/${sourceId}/documents?limit=${DOCS_PAGE_SIZE}&offset=${offset}`,
+        controller.signal,
       );
+      if (docsRequestSeqRef.current !== requestId || controller.signal.aborted) {
+        return;
+      }
       setDocsState({
+        sourceId,
         documents: data.documents,
         total: data.total,
+        offset: data.offset ?? offset,
         loading: false,
         error: null,
       });
     } catch (err) {
-      setDocsState({
-        documents: [],
-        total: 0,
+      if (docsRequestSeqRef.current !== requestId || controller.signal.aborted) {
+        return;
+      }
+      setDocsState((prev) => ({
+        sourceId,
+        documents: prev.sourceId === sourceId ? prev.documents : [],
+        total: prev.sourceId === sourceId ? prev.total : 0,
+        offset,
         loading: false,
         error: err instanceof ApiError ? err.message : "Could not load documents.",
-      });
+      }));
     }
   }
 
   function handleToggleDocuments(sourceId: string) {
     if (expandedSourceId === sourceId) {
+      docsRequestRef.current?.controller.abort();
+      docsRequestRef.current = null;
+      docsRequestSeqRef.current++;
       setExpandedSourceId(null);
       return;
     }
     setExpandedSourceId(sourceId);
-    void loadDocuments(sourceId);
+    void loadDocuments(sourceId, 0);
   }
 
   async function handleEditEntry(sourceId: string, doc: DocumentSummary) {
@@ -299,7 +356,12 @@ export function Sources({ assistantId }: SourcesProps) {
     setActionError(null);
     try {
       await deleteJson(`/api/admin/sources/${sourceId}`);
-      if (expandedSourceId === sourceId) setExpandedSourceId(null);
+      if (expandedSourceId === sourceId) {
+        docsRequestRef.current?.controller.abort();
+        docsRequestRef.current = null;
+        docsRequestSeqRef.current++;
+        setExpandedSourceId(null);
+      }
       if (editingEntry?.sourceId === sourceId) setEditingEntry(null);
       sourcesRes.reload();
     } catch (err) {
@@ -383,41 +445,87 @@ export function Sources({ assistantId }: SourcesProps) {
                   </p>
                 )}
 
-                {expanded && (
-                  <div className="source-docs">
-                    {docsState.loading ? (
-                      <p className="muted">Loading documents…</p>
-                    ) : docsState.error ? (
-                      <p className="error-text" role="alert">
-                        {docsState.error}
-                      </p>
-                    ) : docsState.documents.length === 0 ? (
-                      <p className="muted">No documents in this source yet.</p>
-                    ) : (
-                      <ul className="source-doc-list">
-                        {docsState.documents.map((doc) => (
-                          <li key={doc.id} className="source-doc-item">
-                            <div>
-                              <div className="source-doc-title">{doc.title}</div>
-                              <div className="muted">
-                                {doc.url} · {formatDate(doc.updatedAt)}
+                {expanded &&
+                  (() => {
+                    const activeDocs = docsState.sourceId === source.id ? docsState : null;
+                    const start = activeDocs ? activeDocs.offset + 1 : 0;
+                    const end = activeDocs ? activeDocs.offset + activeDocs.documents.length : 0;
+                    const hasPrev = activeDocs ? activeDocs.offset > 0 : false;
+                    const hasNext = activeDocs ? end < activeDocs.total : false;
+                    return (
+                      <div className="source-docs stack">
+                        {!activeDocs ||
+                        (activeDocs.loading && activeDocs.documents.length === 0) ? (
+                          <p className="muted">Loading documents…</p>
+                        ) : activeDocs.error ? (
+                          <p className="error-text" role="alert">
+                            {activeDocs.error}
+                          </p>
+                        ) : activeDocs.documents.length === 0 ? (
+                          <p className="muted">No documents in this source yet.</p>
+                        ) : (
+                          <>
+                            <ul className="source-doc-list">
+                              {activeDocs.documents.map((doc) => (
+                                <li key={doc.id} className="source-doc-item">
+                                  <div>
+                                    <div className="source-doc-title">{doc.title}</div>
+                                    <div className="muted">
+                                      {doc.url} · {formatDate(doc.updatedAt)}
+                                    </div>
+                                  </div>
+                                  {source.kind === "entry" && (
+                                    <button
+                                      type="button"
+                                      className="btn btn-secondary btn-sm"
+                                      onClick={() => void handleEditEntry(source.id, doc)}
+                                    >
+                                      Edit
+                                    </button>
+                                  )}
+                                </li>
+                              ))}
+                            </ul>
+                            {(activeDocs.total > DOCS_PAGE_SIZE || hasPrev) && (
+                              <div className="sitemap-toolbar">
+                                <span className="muted">
+                                  Showing {start}–{end} of {activeDocs.total}
+                                </span>
+                                <div className="actions">
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary btn-sm"
+                                    disabled={activeDocs.loading || !hasPrev}
+                                    onClick={() =>
+                                      void loadDocuments(
+                                        source.id,
+                                        Math.max(0, activeDocs.offset - DOCS_PAGE_SIZE),
+                                      )
+                                    }
+                                  >
+                                    Previous
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary btn-sm"
+                                    disabled={activeDocs.loading || !hasNext}
+                                    onClick={() =>
+                                      void loadDocuments(
+                                        source.id,
+                                        activeDocs.offset + DOCS_PAGE_SIZE,
+                                      )
+                                    }
+                                  >
+                                    Next
+                                  </button>
+                                </div>
                               </div>
-                            </div>
-                            {source.kind === "entry" && (
-                              <button
-                                type="button"
-                                className="btn btn-secondary btn-sm"
-                                onClick={() => void handleEditEntry(source.id, doc)}
-                              >
-                                Edit
-                              </button>
                             )}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                )}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()}
               </li>
             );
           })}
@@ -435,7 +543,10 @@ export function Sources({ assistantId }: SourcesProps) {
           setEditingEntry(null);
           sourcesRes.reload();
           if (expandedSourceId === result.sourceId) {
-            void loadDocuments(result.sourceId);
+            void loadDocuments(
+              result.sourceId,
+              docsState.sourceId === result.sourceId ? docsState.offset : 0,
+            );
           }
         }}
       />

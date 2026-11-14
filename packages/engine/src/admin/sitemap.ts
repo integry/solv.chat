@@ -1,13 +1,16 @@
 import { MAX_DOCUMENT_MARKDOWN_BYTES, newId } from "@solvchat/core";
 import type { SourceRow } from "../db/sources.js";
 import { type PushDeps, pushDocuments } from "../ingest/documents.js";
-import {
-  assertPublicHttpsUrl,
-  followCheckingEachHop,
-  readCapped,
-  UnsafeUrlError,
-} from "../security/urlGuard.js";
+import { assertPublicHttpsUrl, fetchCapped, UnsafeUrlError } from "../security/urlGuard.js";
 import { BadRequest, NotFound } from "./errors.js";
+
+const textEncoder = new TextEncoder();
+
+async function hashUrlExternalId(normalizedUrl: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", textEncoder.encode(normalizedUrl));
+  const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  return `sitemap:${hex}`;
+}
 
 // Caps chosen because the spec gives none for this path: a sitemap larger than
 // this is not a small site's index, and the budgets stop one import from
@@ -111,16 +114,17 @@ function htmlToTitleAndMarkdown(
 export async function previewSitemap(
   url: string,
   fetchImpl: typeof fetch = fetch,
+  options?: { timeoutMs?: number },
 ): Promise<string[]> {
   const target = assertPublicHttpsUrl(url);
   // Redirects are followed manually so each hop is checked: `redirect: "follow"`
   // would let a public URL redirect to a link-local metadata address.
-  const response = await followCheckingEachHop(target, fetchImpl, {
+  const { body: xml } = await fetchCapped(target, fetchImpl, {
     maxRedirects: MAX_REDIRECTS,
-    timeoutMs: FETCH_TIMEOUT_MS,
+    timeoutMs: options?.timeoutMs ?? FETCH_TIMEOUT_MS,
+    maxBytes: MAX_SITEMAP_BYTES,
     accept: "application/xml, text/xml, */*",
   });
-  const xml = await readCapped(response, MAX_SITEMAP_BYTES);
   // A deliberately small extractor rather than an XML parser dependency: we
   // need <loc> values, and anything else in the document is not our business.
   return extractLocs(xml);
@@ -150,6 +154,7 @@ export async function importSitemapUrls(
   scope: { orgId: string; assistantId: string },
   input: SitemapImportInput,
   fetchImpl: typeof fetch = fetch,
+  options?: { timeoutMs?: number },
 ): Promise<SitemapImportResult> {
   const assistant = await deps.tenant.assistants.get(scope.assistantId);
   if (assistant === null) throw new NotFound("assistant");
@@ -216,13 +221,13 @@ export async function importSitemapUrls(
   }> = [];
 
   for (const pageUrl of dedupedUrls) {
-    const response = await followCheckingEachHop(pageUrl, fetchImpl, {
+    const { response, body } = await fetchCapped(pageUrl, fetchImpl, {
       maxRedirects: MAX_REDIRECTS,
-      timeoutMs: FETCH_TIMEOUT_MS,
+      timeoutMs: options?.timeoutMs ?? FETCH_TIMEOUT_MS,
+      maxBytes: MAX_PAGE_BYTES,
       accept: "text/html, text/markdown, text/plain, */*",
     });
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-    const body = await readCapped(response, MAX_PAGE_BYTES);
 
     let title: string;
     let markdown: string;
@@ -234,7 +239,7 @@ export async function importSitemapUrls(
     }
 
     documents.push({
-      externalId: pageUrl.href,
+      externalId: await hashUrlExternalId(pageUrl.href),
       url: pageUrl.href,
       title,
       markdown,

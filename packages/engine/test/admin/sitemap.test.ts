@@ -216,6 +216,114 @@ describe("admin sitemap preview and import", () => {
     }
   });
 
+  it("times out and cancels a stalled body in both previewSitemap and importSitemapUrls", async () => {
+    let previewCancelled = false;
+    const stalledPreviewFetch: typeof fetch = async () => {
+      const stream = new TransformStream<Uint8Array, Uint8Array>();
+      const writer = stream.writable.getWriter();
+      writer.closed.catch(() => {
+        previewCancelled = true;
+      });
+      void writer.write(new TextEncoder().encode("<urlset>")).catch(() => {});
+      return new Response(stream.readable, {
+        status: 200,
+        headers: { "content-type": "application/xml" },
+      });
+    };
+
+    await expect(
+      previewSitemap("https://docs.example.com/sitemap.xml", stalledPreviewFetch, {
+        timeoutMs: 25,
+      }),
+    ).rejects.toThrow(UnsafeUrlError);
+    expect(previewCancelled).toBe(true);
+
+    const assistantId = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const queue = makeQueue();
+
+    let importCancelled = false;
+    const stalledImportFetch: typeof fetch = async () => {
+      const stream = new TransformStream<Uint8Array, Uint8Array>();
+      const writer = stream.writable.getWriter();
+      writer.closed.catch(() => {
+        importCancelled = true;
+      });
+      void writer
+        .write(new TextEncoder().encode("<html><title>Slow</title><body>"))
+        .catch(() => {});
+      return new Response(stream.readable, {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+    };
+
+    await expect(
+      importSitemapUrls(
+        { tenant, docs: env.DOCS, queue },
+        { orgId: ORG_A, assistantId },
+        { urls: ["https://docs.example.com/stalled"] },
+        stalledImportFetch,
+        { timeoutMs: 25 },
+      ),
+    ).rejects.toThrow(UnsafeUrlError);
+    expect(importCancelled).toBe(true);
+  });
+
+  it("imports a mixed batch containing a URL longer than 200 characters with a bounded stable externalId", async () => {
+    const assistantId = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const queue = makeQueue();
+
+    const shortUrl = "https://docs.example.com/short";
+    const longUrl = `https://docs.example.com/guides/${"a".repeat(220)}?ref=sitemap`;
+    expect(longUrl.length).toBeGreaterThan(200);
+
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      return new Response(
+        `<html><head><title>Page</title></head><body><p>Body for ${url}</p></body></html>`,
+        { status: 200, headers: { "content-type": "text/html" } },
+      );
+    };
+
+    const first = await importSitemapUrls(
+      { tenant, docs: env.DOCS, queue },
+      { orgId: ORG_A, assistantId },
+      { sitemapUrl: "https://docs.example.com/sitemap.xml", urls: [shortUrl, longUrl] },
+      fetchImpl,
+    );
+    expect(first.written).toBe(2);
+    expect(first.total).toBe(2);
+
+    const docs = await tenant.documents.listBySource(first.source.id);
+    expect(docs).toHaveLength(2);
+    for (const doc of docs) {
+      expect(doc.externalId.length).toBeGreaterThan(0);
+      expect(doc.externalId.length).toBeLessThanOrEqual(200);
+    }
+    expect(docs.map((d) => d.url).sort()).toEqual([shortUrl, longUrl].sort());
+
+    // Re-importing the same URLs into the same source resolves the same stable externalIds.
+    const second = await importSitemapUrls(
+      { tenant, docs: env.DOCS, queue },
+      { orgId: ORG_A, assistantId },
+      { sourceId: first.source.id, urls: [shortUrl, longUrl] },
+      fetchImpl,
+    );
+    expect(second.total).toBe(2);
+    const docsAfter = await tenant.documents.listBySource(first.source.id);
+    expect(
+      docsAfter
+        .map((d) => ({ id: d.id, externalId: d.externalId }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+    ).toEqual(
+      docs
+        .map((d) => ({ id: d.id, externalId: d.externalId }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+    );
+  });
+
   it("returns 404 for another org's assistant on sitemap-preview and sitemap-import", async () => {
     const assistantA = await seedAssistant(ORG_A);
     const appB = createTestApp({
