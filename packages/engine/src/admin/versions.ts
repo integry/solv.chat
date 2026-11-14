@@ -17,13 +17,16 @@ export async function getDraft(tenant: Tenant, assistantId: string): Promise<Ver
   return draft;
 }
 
-/** Validates and replaces the assistant's draft configuration. */
+/** Validates and updates the assistant's draft configuration, preserving omitted sections. */
 export async function updateDraft(
   tenant: Tenant,
   assistantId: string,
   body: unknown,
 ): Promise<VersionRow> {
-  const parsed = parseVersionConfig(body);
+  const existing = await tenant.versions.draft(assistantId);
+  if (existing === null) throw new NotFound("assistant");
+
+  const parsed = parseVersionConfig(body, existing.config);
   if (!parsed.ok) throw new BadRequest(parsed.errors);
 
   const updated = await tenant.versions.updateDraft(assistantId, parsed.value);
@@ -48,23 +51,9 @@ export async function publishDraft(tenant: Tenant, assistantId: string): Promise
   if (draft === null) throw new NotFound("assistant");
 
   const now = Date.now();
-  await tenant.versions.batch([
-    // Archive first: the partial unique index allows one published row, so
-    // promoting the draft would fail with the old one still published.
-    tenant.versions.statements.archivePublished(assistantId),
-    // The draft becomes the published version and keeps its id, so a "Try it"
-    // conversation started against the draft still resolves afterwards.
-    tenant.versions.statements.markPublished(draft.id, now),
-    // A fresh draft with the same words: the owner keeps editing at once and
-    // the "exactly one draft" invariant holds.
-    tenant.versions.statements.insertDraft({
-      id: newId("ver"),
-      assistantId,
-      config: draft.config,
-      createdAt: now,
-    }),
-  ]);
-  return { ...draft, state: "published", publishedAt: now };
+  const published = await tenant.versions.publishDraft(assistantId, draft.id, newId("ver"), now);
+  if (published === null) throw new NotFound("assistant");
+  return published;
 }
 
 /**

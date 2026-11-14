@@ -117,6 +117,39 @@ describe("parseVersionConfig", () => {
     }
   });
 
+  it("merges partial sections over a provided base without mutating the base", () => {
+    const base = {
+      ...defaultVersionConfig(),
+      behaviour: {
+        greeting: "Custom greeting",
+        persona: "Helpful guide",
+        fallbackText: "Custom fallback",
+        suggestedQuestions: ["How do I start?"],
+      },
+      widget: {
+        title: "Docs Bot",
+        accentColor: "#112233",
+        position: "left" as const,
+      },
+      limits: { dailyCostCapMicros: 500 },
+      allowedTools: ["search_docs"],
+    };
+    const res = parseVersionConfig({ behaviour: { greeting: "Welcome" } }, base);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value.behaviour).toEqual({
+        greeting: "Welcome",
+        persona: "Helpful guide",
+        fallbackText: "Custom fallback",
+        suggestedQuestions: ["How do I start?"],
+      });
+      expect(res.value.widget).toEqual(base.widget);
+      expect(res.value.limits).toEqual({ dailyCostCapMicros: 500 });
+      expect(res.value.allowedTools).toEqual(["search_docs"]);
+    }
+    expect(base.behaviour.greeting).toBe("Custom greeting");
+  });
+
   it("rejects bad hex colour, bad position, negative cap, and over-cap suggestedQuestions", () => {
     const res = parseVersionConfig({
       behaviour: {

@@ -138,15 +138,28 @@ function parseLimitsSection(raw: unknown, target: LimitsConfig, errors: Errors):
   }
 }
 
+function cloneVersionConfig(config: VersionConfig): VersionConfig {
+  return {
+    behaviour: {
+      ...config.behaviour,
+      suggestedQuestions: [...config.behaviour.suggestedQuestions],
+    },
+    widget: { ...config.widget },
+    limits: { ...config.limits },
+    allowedTools: [...config.allowedTools],
+  };
+}
+
 /**
- * Parses a partial config over the defaults. Partial on purpose: the admin's
- * Behaviour screen saves one section at a time, and requiring the whole blob
- * would make every screen responsible for fields it does not show.
+ * Parses a partial config over a base configuration (defaults when omitted).
+ * Partial on purpose: the admin's Behaviour screen saves one section at a time,
+ * and requiring the whole blob would make every screen responsible for fields
+ * it does not show.
  */
-export function parseVersionConfig(value: unknown): Result<VersionConfig> {
+export function parseVersionConfig(value: unknown, base?: VersionConfig): Result<VersionConfig> {
   if (!isPlainObject(value)) return fail("body: must be a JSON object");
 
-  const config = defaultVersionConfig();
+  const config = base ? cloneVersionConfig(base) : defaultVersionConfig();
   const errors = new Errors();
 
   if (value.behaviour !== undefined)

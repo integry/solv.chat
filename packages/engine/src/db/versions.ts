@@ -130,6 +130,44 @@ export function versionsFor(db: D1Database, orgId: string) {
       return (res.meta.changes ?? 0) > 0;
     },
 
+    async publishDraft(
+      assistantId: string,
+      draftId: string,
+      nextDraftId: string,
+      publishedAt: number,
+    ): Promise<VersionRow | null> {
+      const results = await db.batch([
+        // Archive first: the partial unique index allows one published row, so
+        // promoting the draft would fail with the old one still published.
+        prepare(
+          db,
+          "UPDATE assistant_versions SET state = 'archived' WHERE org_id = ?1 AND assistant_id = ?2 AND state = 'published'",
+        ).bind(orgId, assistantId),
+        // The draft becomes the published version and keeps its id, so a "Try it"
+        // conversation started against the draft still resolves afterwards.
+        prepare(
+          db,
+          "UPDATE assistant_versions SET state = 'published', published_at = ?3 WHERE org_id = ?1 AND id = ?2 AND state = 'draft'",
+        ).bind(orgId, draftId, publishedAt),
+        // Derive the fresh draft from the promoted row inside the same batch
+        // so a completed draft update between the initial read and this batch
+        // is neither lost nor overwritten.
+        prepareInsert(
+          db,
+          `INSERT INTO assistant_versions (id, org_id, assistant_id, state, config, created_at, published_at)
+           SELECT ?2, org_id, assistant_id, 'draft', config, ?4, NULL
+           FROM assistant_versions
+           WHERE org_id = ?1 AND id = ?3`,
+        ).bind(orgId, nextDraftId, draftId, publishedAt),
+        prepare(db, `SELECT ${COLUMNS} FROM assistant_versions WHERE org_id = ?1 AND id = ?2`).bind(
+          orgId,
+          draftId,
+        ),
+      ]);
+      const promoted = results[3]?.results?.[0] as Row | undefined;
+      return promoted ? map(promoted) : null;
+    },
+
     async remove(id: string): Promise<boolean> {
       const res = await prepare(db, "DELETE FROM assistant_versions WHERE org_id = ?1 AND id = ?2")
         .bind(orgId, id)

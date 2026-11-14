@@ -1,6 +1,8 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { publishDraft, updateDraft } from "../../src/admin/versions.js";
 import type { AssistantRow } from "../../src/db/assistants.js";
+import { forPrincipal } from "../../src/db/tenant.js";
 import type { VersionRow } from "../../src/db/versions.js";
 import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
@@ -227,5 +229,78 @@ describe("admin versions API", () => {
     ).json()) as { draft: VersionRow };
     expect(after.draft.config).toEqual(before.draft.config);
     expect(after.draft.orgId).toBe(TEST_ORG_ID);
+  });
+
+  it("successive partial section saves preserve previously customized sections and fields", async () => {
+    const first = await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      widget: { title: "Support Bot" },
+      limits: { dailyCostCapMicros: 500 },
+    });
+    expect(first.status).toBe(200);
+
+    const second = await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Welcome" },
+    });
+    expect(second.status).toBe(200);
+    const secondBody = (await second.json()) as { draft: VersionRow };
+    expect(secondBody.draft.config.behaviour.greeting).toBe("Welcome");
+    expect(secondBody.draft.config.widget.title).toBe("Support Bot");
+    expect(secondBody.draft.config.limits.dailyCostCapMicros).toBe(500);
+
+    const third = await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      widget: { accentColor: "#112233" },
+    });
+    expect(third.status).toBe(200);
+
+    const fetched = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: VersionRow };
+    expect(fetched.draft.config.behaviour.greeting).toBe("Welcome");
+    expect(fetched.draft.config.widget).toEqual({
+      title: "Support Bot",
+      accentColor: "#112233",
+      position: "right",
+    });
+    expect(fetched.draft.config.limits.dailyCostCapMicros).toBe(500);
+  });
+
+  it("publish returns and copies the latest committed draft when an update completes between read and batch", async () => {
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Initial A" },
+      limits: { dailyCostCapMicros: 500 },
+    });
+
+    const tenant = forPrincipal(env.DB, {
+      orgId: TEST_ORG_ID,
+      userId: "owner",
+      role: "owner",
+    });
+    const racingTenant = {
+      ...tenant,
+      versions: {
+        ...tenant.versions,
+        async draft(id: string) {
+          const read = await tenant.versions.draft(id);
+          await updateDraft(tenant, id, {
+            behaviour: { greeting: "Updated B" },
+            limits: { dailyCostCapMicros: 1234 },
+          });
+          return read;
+        },
+      },
+    };
+
+    const published = await publishDraft(racingTenant, assistantId);
+    expect(published.state).toBe("published");
+    expect(published.config.behaviour.greeting).toBe("Updated B");
+    expect(published.config.limits.dailyCostCapMicros).toBe(1234);
+
+    const rows = await tableVersions(assistantId);
+    expect(rows).toHaveLength(2);
+    const publishedRow = rows.find((r) => r.state === "published");
+    const freshDraftRow = rows.find((r) => r.state === "draft");
+    expect(publishedRow?.id).toBe(published.id);
+    expect(JSON.parse(publishedRow?.config ?? "{}")).toEqual(published.config);
+    expect(JSON.parse(freshDraftRow?.config ?? "{}")).toEqual(published.config);
   });
 });
