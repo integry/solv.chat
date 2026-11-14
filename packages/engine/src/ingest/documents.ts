@@ -191,8 +191,24 @@ export async function pushDocuments(
     const hash = await contentHash(document.title, document.markdown);
     const prev = existing.get(document.externalId);
     if (prev && prev.contentHash === hash && prev.complete) {
-      unchanged++;
-      continue;
+      if (prev.url === document.url) {
+        unchanged++;
+        continue;
+      }
+      const updated = await deps.tenant.documents.updateMetadata(
+        prev.id,
+        document.title,
+        document.url,
+        Date.now(),
+      );
+      if (updated) {
+        existing.set(document.externalId, {
+          ...prev,
+          url: document.url,
+        });
+        written++;
+        continue;
+      }
     }
 
     const saved = await deps.tenant.documents.upsert({
@@ -242,7 +258,12 @@ export async function pushDocuments(
       current = await deps.tenant.documents.markEnqueued(saved.id, saved.revision);
     }
     if (current) {
-      existing.set(document.externalId, { contentHash: hash, complete: true });
+      existing.set(document.externalId, {
+        id: saved.id,
+        url: saved.url,
+        contentHash: hash,
+        complete: true,
+      });
     }
     written++;
   }

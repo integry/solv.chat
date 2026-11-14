@@ -717,4 +717,60 @@ describe("ingest documents", () => {
     expect(await env.DOCS.head(uploadedKey)).toBeNull();
     expect(await tenant.documents.listAllStaleObjects()).toEqual([]);
   });
+
+  it("persists URL-only updates without R2 puts or queue sends (F16)", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+
+    const first = await pushDocuments({ tenant, docs, queue }, scope, {
+      documents: [
+        {
+          externalId: "guide",
+          url: "https://example.com/old",
+          title: "Guide",
+          markdown: "# Guide\n\nUnchanged body.",
+        },
+      ],
+    });
+    expect(first).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    expect(docs.puts).toBe(1);
+    expect(queue.sent).toHaveLength(1);
+
+    const urlUpdate = await pushDocuments({ tenant, docs, queue }, scope, {
+      documents: [
+        {
+          externalId: "guide",
+          url: "https://example.com/new",
+          title: "Guide",
+          markdown: "# Guide\n\nUnchanged body.",
+        },
+      ],
+    });
+    expect(urlUpdate).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    expect(docs.puts).toBe(1);
+    expect(queue.sent).toHaveLength(1);
+
+    const sources = await tenant.sources.list(assistantId);
+    const pushSourceId = sources[0]?.id ?? "";
+    const saved = await tenant.documents.getByExternalId(pushSourceId, "guide");
+    expect(saved?.url).toBe("https://example.com/new");
+    expect(saved?.revision).toBe(1);
+
+    const repeat = await pushDocuments({ tenant, docs, queue }, scope, {
+      documents: [
+        {
+          externalId: "guide",
+          url: "https://example.com/new",
+          title: "Guide",
+          markdown: "# Guide\n\nUnchanged body.",
+        },
+      ],
+    });
+    expect(repeat).toEqual({ written: 0, unchanged: 1, deleted: 0 });
+    expect(docs.puts).toBe(1);
+    expect(queue.sent).toHaveLength(1);
+  });
 });

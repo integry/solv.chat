@@ -23,6 +23,45 @@ function isIngestMessage(body: unknown): body is IngestQueueMessage {
   );
 }
 
+async function cleanupStaleVectors(
+  tenant: ReturnType<typeof forIngestScope>,
+  retriever: Retriever,
+  documentId: string,
+): Promise<void> {
+  const staleIds = await tenant.documents.listStaleVectors(documentId);
+  if (staleIds.length === 0) return;
+  const liveIds = new Set((await tenant.documents.listChunks(documentId)).map((c) => c.id));
+  const toRemove = staleIds.filter((id) => !liveIds.has(id));
+  if (toRemove.length > 0) {
+    await retriever.remove(toRemove);
+  }
+  await tenant.documents.clearStaleVectors(documentId, staleIds);
+}
+
+async function persistObsoleteVectorsOnFailure(
+  tenant: ReturnType<typeof forIngestScope>,
+  documentId: string,
+  targetRevision: number,
+  expectedGeneration: number,
+  chunkIds: string[],
+): Promise<void> {
+  if (chunkIds.length === 0) return;
+  try {
+    const latest = await tenant.documents.get(documentId);
+    if (
+      latest === null ||
+      latest.deleting ||
+      latest.revision !== targetRevision ||
+      latest.chunkGeneration !== expectedGeneration
+    ) {
+      await tenant.documents.addStaleVectors(documentId, chunkIds);
+    }
+  } catch {
+    // Best-effort durable recording; the original error is rethrown so the
+    // message is retried.
+  }
+}
+
 /**
  * Processes an ingest Queue batch: loads each document and its R2 body,
  * chunks, embeds, durably tracks pending/stale vector IDs, upserts vectors,
@@ -97,15 +136,12 @@ export async function runIngestBatch(
 
     const targetRevision = messageRevision ?? document.revision;
     const allowSameRevision = messageRevision === undefined;
+    const expectedGeneration = document.chunkGeneration;
 
     if (messageRevision !== undefined && document.indexedRevision >= messageRevision) {
       // Already committed to D1 (retry after stale-vector removal failure or
       // duplicate delivery): finish removing stale vectors without re-embedding.
-      const staleIds = await tenant.documents.listStaleVectors(document.id);
-      if (staleIds.length > 0) {
-        await deps.retriever.remove(staleIds);
-        await tenant.documents.clearStaleVectors(document.id, staleIds);
-      }
+      await cleanupStaleVectors(tenant, deps.retriever, document.id);
       message.ack();
       continue;
     }
@@ -136,7 +172,11 @@ export async function runIngestBatch(
       chunks.length > 0 ? await deps.embedder.embed(chunks.map((chunk) => chunk.text)) : [];
 
     if (!reusePending && existingPendingIds.length > 0) {
-      await deps.retriever.remove(existingPendingIds);
+      const liveIds = new Set((await tenant.documents.listChunks(document.id)).map((c) => c.id));
+      const obsoletePendingIds = existingPendingIds.filter((id) => !liveIds.has(id));
+      if (obsoletePendingIds.length > 0) {
+        await deps.retriever.remove(obsoletePendingIds);
+      }
       await tenant.documents.clearPendingVectors(document.id, targetRevision);
     }
 
@@ -144,18 +184,22 @@ export async function runIngestBatch(
       document.id,
       targetRevision,
       chunks.map((chunk) => chunk.id),
-      { allowSameRevision },
+      { allowSameRevision, expectedGeneration },
     );
     if (!pendingResult.ok) {
       const latest = await tenant.documents.get(document.id);
       if (latest === null || latest.deleting) {
         await reconcileDeletedDocument();
       } else if (messageRevision !== undefined && latest.revision !== targetRevision) {
-        const [supersededPending, staleIds] = await Promise.all([
+        const [supersededPending, staleIds, liveChunks] = await Promise.all([
           tenant.documents.listPendingVectors(document.id, targetRevision),
           tenant.documents.listStaleVectors(document.id),
+          tenant.documents.listChunks(document.id),
         ]);
-        const cleanupIds = [...new Set([...supersededPending, ...staleIds])];
+        const liveIds = new Set(liveChunks.map((c) => c.id));
+        const cleanupIds = [...new Set([...supersededPending, ...staleIds])].filter(
+          (id) => !liveIds.has(id),
+        );
         if (cleanupIds.length > 0) {
           await deps.retriever.remove(cleanupIds);
         }
@@ -163,12 +207,8 @@ export async function runIngestBatch(
           tenant.documents.clearPendingVectors(document.id, targetRevision),
           tenant.documents.clearStaleVectors(document.id, staleIds),
         ]);
-      } else if (messageRevision !== undefined && latest.indexedRevision >= targetRevision) {
-        const staleIds = await tenant.documents.listStaleVectors(document.id);
-        if (staleIds.length > 0) {
-          await deps.retriever.remove(staleIds);
-          await tenant.documents.clearStaleVectors(document.id, staleIds);
-        }
+      } else {
+        await cleanupStaleVectors(tenant, deps.retriever, document.id);
       }
       message.ack();
       continue;
@@ -184,43 +224,75 @@ export async function runIngestBatch(
       }
     }
 
+    const chunkIds = chunks.map((chunk) => chunk.id);
     if (chunks.length > 0) {
-      await deps.retriever.upsert(
-        chunks.map((chunk, index) => {
-          const vector = vectors[index];
-          if (vector === undefined) {
-            throw new Error(`missing embedding vector at index ${index}`);
-          }
-          return {
-            chunkId: chunk.id,
-            vector,
-            orgId,
-            assistantId: source.assistantId,
-          };
-        }),
-      );
+      try {
+        await deps.retriever.upsert(
+          chunks.map((chunk, index) => {
+            const vector = vectors[index];
+            if (vector === undefined) {
+              throw new Error(`missing embedding vector at index ${index}`);
+            }
+            return {
+              chunkId: chunk.id,
+              vector,
+              orgId,
+              assistantId: source.assistantId,
+            };
+          }),
+        );
+      } catch (err) {
+        await persistObsoleteVectorsOnFailure(
+          tenant,
+          document.id,
+          targetRevision,
+          expectedGeneration,
+          chunkIds,
+        );
+        throw err;
+      }
     }
 
-    const committed = await tenant.documents.replaceChunks(document.id, chunks, targetRevision, {
-      allowSameRevision,
-    });
+    let committed: boolean;
+    try {
+      committed = await tenant.documents.replaceChunks(document.id, chunks, targetRevision, {
+        allowSameRevision,
+        expectedGeneration,
+      });
+    } catch (err) {
+      await persistObsoleteVectorsOnFailure(
+        tenant,
+        document.id,
+        targetRevision,
+        expectedGeneration,
+        chunkIds,
+      );
+      throw err;
+    }
+
     if (!committed) {
       const latest = await tenant.documents.get(document.id);
-      if (latest !== null && !latest.deleting && latest.indexedRevision === targetRevision) {
-        // Another consumer already committed this exact revision: keep its live
-        // vectors intact and only finish any remaining stale-vector cleanup.
-        const staleIds = await tenant.documents.listStaleVectors(document.id);
-        if (staleIds.length > 0) {
-          await deps.retriever.remove(staleIds);
-          await tenant.documents.clearStaleVectors(document.id, staleIds);
+      if (latest !== null && !latest.deleting && latest.revision === targetRevision) {
+        // Another consumer already committed this revision (or a newer
+        // generation of the same revision): keep any live vectors intact and
+        // remove only our obsolete vectors plus remaining stale-vector cleanup.
+        const liveIds = new Set((await tenant.documents.listChunks(document.id)).map((c) => c.id));
+        const obsoleteIds = chunkIds.filter((id) => !liveIds.has(id));
+        if (obsoleteIds.length > 0) {
+          try {
+            await deps.retriever.remove(obsoleteIds);
+          } catch (err) {
+            await tenant.documents.addStaleVectors(document.id, obsoleteIds);
+            throw err;
+          }
         }
+        await cleanupStaleVectors(tenant, deps.retriever, document.id);
         message.ack();
         continue;
       }
 
       // Superseded or deleting: remove the vectors we just upserted, retaining
       // durable stale records if removal fails so retries can reconcile them.
-      const chunkIds = chunks.map((chunk) => chunk.id);
       if (chunkIds.length > 0) {
         try {
           await deps.retriever.remove(chunkIds);
@@ -233,21 +305,13 @@ export async function runIngestBatch(
       if (latest === null || latest.deleting) {
         await reconcileDeletedDocument();
       } else {
-        const staleIds = await tenant.documents.listStaleVectors(document.id);
-        if (staleIds.length > 0) {
-          await deps.retriever.remove(staleIds);
-          await tenant.documents.clearStaleVectors(document.id, staleIds);
-        }
+        await cleanupStaleVectors(tenant, deps.retriever, document.id);
       }
       message.ack();
       continue;
     }
 
-    const staleIds = await tenant.documents.listStaleVectors(document.id);
-    if (staleIds.length > 0) {
-      await deps.retriever.remove(staleIds);
-      await tenant.documents.clearStaleVectors(document.id, staleIds);
-    }
+    await cleanupStaleVectors(tenant, deps.retriever, document.id);
     message.ack();
   }
 }
