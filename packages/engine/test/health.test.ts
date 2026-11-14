@@ -104,7 +104,7 @@ describe("admin same-origin check", () => {
     const app = createTestApp();
     const ctx = createExecutionContext();
     const response = await app.fetch(
-      new Request("https://example.com/api/admin/assistants", { method: "GET" }),
+      new Request("https://example.com/api/admin/unknown", { method: "GET" }),
       env,
       ctx,
     );

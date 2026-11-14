@@ -1,4 +1,5 @@
 import { createApp, type Env } from "./app.js";
+import { publishedCapMicros } from "./db/versions.js";
 import { basicLimits } from "./seams/open/basicLimits.js";
 import { type PasswordAuthEnv, passwordAuth } from "./seams/open/passwordAuth.js";
 import { type SecretKeyEnv, secretKeys } from "./seams/open/secretKeys.js";
@@ -11,7 +12,12 @@ function buildApp(env: WorkerEnv) {
     auth: passwordAuth(env, env.DB),
     keys: secretKeys(env),
     usage: usageDaily(env.DB),
-    limits: basicLimits(env.DB),
+    // The cap is the owner's own setting, stored on the published version.
+    // Reading it here keeps the Limits seam free of any knowledge of version
+    // config, so the hosted service can replace the whole policy.
+    limits: basicLimits(env.DB, (orgId, assistantId) =>
+      publishedCapMicros(env.DB, orgId, assistantId),
+    ),
   });
 }
 

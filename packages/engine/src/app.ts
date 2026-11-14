@@ -1,3 +1,5 @@
+import { adminRoutes } from "./admin/router.js";
+import { forPrincipal } from "./db/tenant.js";
 import type { Seams } from "./seams/types.js";
 
 export interface Env {
@@ -36,6 +38,13 @@ export function createApp(seams: Seams): App {
       }
       if (request.method === "POST" && url.pathname === "/api/admin/logout") {
         return seams.auth.logout(request);
+      }
+      // One gate for the whole admin surface: resolve the principal here and
+      // hand down a Tenant, so no handler can read a row without the filter.
+      if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
+        const principal = await seams.auth.authenticate(request);
+        if (principal === null) return Response.json({ error: "Sign in first." }, { status: 401 });
+        return adminRoutes(request, url, forPrincipal(env.DB, principal));
       }
       void ctx; // Later tasks add their routes above this line.
       return Response.json({ error: "Not found." }, { status: 404 });

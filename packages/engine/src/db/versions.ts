@@ -30,6 +30,14 @@ export interface CreateDraftInput {
   createdAt: number;
 }
 
+export interface CreatePublishedInput {
+  id: string;
+  assistantId: string;
+  config: VersionConfig;
+  createdAt: number;
+  publishedAt: number;
+}
+
 const COLUMNS = "id, org_id, assistant_id, state, config, created_at, published_at";
 
 const map = (row: Row): VersionRow => {
@@ -67,6 +75,13 @@ export function versionsFor(db: D1Database, orgId: string) {
     get: (id: string) =>
       one(`SELECT ${COLUMNS} FROM assistant_versions WHERE org_id = ?1 AND id = ?2`, id),
 
+    byId: (assistantId: string, id: string) =>
+      one(
+        `SELECT ${COLUMNS} FROM assistant_versions WHERE org_id = ?1 AND assistant_id = ?2 AND id = ?3`,
+        assistantId,
+        id,
+      ),
+
     draft: (assistantId: string) =>
       one(
         `SELECT ${COLUMNS} FROM assistant_versions WHERE org_id = ?1 AND assistant_id = ?2 AND state = 'draft'`,
@@ -81,7 +96,7 @@ export function versionsFor(db: D1Database, orgId: string) {
 
     history: (assistantId: string) =>
       many(
-        `SELECT ${COLUMNS} FROM assistant_versions WHERE org_id = ?1 AND assistant_id = ?2 ORDER BY created_at DESC LIMIT 100`,
+        `SELECT ${COLUMNS} FROM assistant_versions WHERE org_id = ?1 AND assistant_id = ?2 ORDER BY created_at DESC, rowid DESC LIMIT 100`,
         assistantId,
       ),
 
@@ -145,6 +160,20 @@ export function versionsFor(db: D1Database, orgId: string) {
           `INSERT INTO assistant_versions (id, org_id, assistant_id, state, config, created_at, published_at)
            VALUES (?2, ?1, ?3, 'draft', ?4, ?5, NULL)`,
         ).bind(orgId, input.id, input.assistantId, JSON.stringify(input.config), input.createdAt),
+
+      insertPublished: (input: CreatePublishedInput): D1PreparedStatement =>
+        prepareInsert(
+          db,
+          `INSERT INTO assistant_versions (id, org_id, assistant_id, state, config, created_at, published_at)
+           VALUES (?2, ?1, ?3, 'published', ?4, ?5, ?6)`,
+        ).bind(
+          orgId,
+          input.id,
+          input.assistantId,
+          JSON.stringify(input.config),
+          input.createdAt,
+          input.publishedAt,
+        ),
     },
 
     async batch(stmts: D1PreparedStatement[]): Promise<void> {
@@ -152,4 +181,20 @@ export function versionsFor(db: D1Database, orgId: string) {
       await db.batch(stmts);
     },
   };
+}
+
+/**
+ * Reads the daily spend cap from the assistant's published version, falling
+ * back to the default when nothing is published yet. A published cap of 0
+ * means "no cap" and passes through unchanged.
+ */
+export async function publishedCapMicros(
+  db: D1Database,
+  orgId: string,
+  assistantId: string,
+): Promise<number> {
+  const published = await versionsFor(db, orgId).published(assistantId);
+  return published
+    ? published.config.limits.dailyCostCapMicros
+    : defaultVersionConfig().limits.dailyCostCapMicros;
 }
