@@ -26,6 +26,7 @@ export interface CreateAssistantInput {
   publicKey: string;
   allowedOrigins: string[];
   createdAt: number;
+  ingestKeyHash?: string | null;
 }
 
 export interface UpdateAssistantInput {
@@ -79,10 +80,11 @@ export function assistantsFor(db: D1Database, orgId: string) {
     },
 
     async create(input: CreateAssistantInput): Promise<AssistantRow> {
+      const ingestKeyHash = input.ingestKeyHash ?? null;
       await prepareInsert(
         db,
-        `INSERT INTO assistants (id, org_id, name, public_key, allowed_origins, created_at)
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6)`,
+        `INSERT INTO assistants (id, org_id, name, public_key, allowed_origins, ingest_key_hash, created_at)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7)`,
       )
         .bind(
           orgId,
@@ -90,6 +92,7 @@ export function assistantsFor(db: D1Database, orgId: string) {
           input.name,
           input.publicKey,
           JSON.stringify(input.allowedOrigins),
+          ingestKeyHash,
           input.createdAt,
         )
         .run();
@@ -100,9 +103,26 @@ export function assistantsFor(db: D1Database, orgId: string) {
         name: input.name,
         publicKey: input.publicKey,
         allowedOrigins: [...input.allowedOrigins],
-        hasIngestKey: false,
+        hasIngestKey: ingestKeyHash !== null,
         createdAt: input.createdAt,
       };
+    },
+
+    statements: {
+      insert: (input: CreateAssistantInput): D1PreparedStatement =>
+        prepareInsert(
+          db,
+          `INSERT INTO assistants (id, org_id, name, public_key, allowed_origins, ingest_key_hash, created_at)
+           VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7)`,
+        ).bind(
+          orgId,
+          input.id,
+          input.name,
+          input.publicKey,
+          JSON.stringify(input.allowedOrigins),
+          input.ingestKeyHash ?? null,
+          input.createdAt,
+        ),
     },
 
     async update(id: string, input: UpdateAssistantInput): Promise<boolean> {
