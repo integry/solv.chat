@@ -176,7 +176,7 @@ async function assistantRoutes(
       return Response.json(await listConversations(tenant, assistantId, readPagingParams(url)));
     }
     if (action === "gaps" && method === "GET") {
-      return Response.json({ gaps: await listGaps(tenant, assistantId) });
+      return Response.json(await listGaps(tenant, assistantId, readPagingParams(url)));
     }
     if (action === "answers" && method === "POST") {
       const fields = readAnswerFields(await readJsonBody(request));

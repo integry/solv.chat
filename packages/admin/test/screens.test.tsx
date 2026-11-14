@@ -132,7 +132,19 @@ function installFakeServer(options?: {
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/gaps` && method === "GET") {
-      return Response.json({ gaps });
+      const parsed = new URL(url, "https://example.com");
+      const rawLimit = Number(parsed.searchParams.get("limit") ?? 50);
+      const rawOffset = Number(parsed.searchParams.get("offset") ?? 0);
+      const limit = Number.isFinite(rawLimit)
+        ? Math.min(Math.max(1, Math.trunc(rawLimit)), 100)
+        : 50;
+      const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.trunc(rawOffset)) : 0;
+      return Response.json({
+        gaps: gaps.slice(offset, offset + limit),
+        total: gaps.length,
+        limit,
+        offset,
+      });
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/answers` && method === "POST") {
@@ -596,5 +608,40 @@ describe("admin phase 1 screens", () => {
     for (const link of links) {
       expect(link.getAttribute("href")).toMatch(/^\/admin\//);
     }
+  });
+
+  it("paginates Gaps so unresolved questions beyond the first 100 are reachable", async () => {
+    const manyGaps: GapSummary[] = Array.from({ length: 101 }, (_, i) => ({
+      question: i < 100 ? `handled question ${i + 1}?` : "unresolved 101st question?",
+      displayQuestion: i < 100 ? `Handled question ${i + 1}?` : "Unresolved 101st question?",
+      times: i < 100 ? 2 : 1,
+      lastAsked: 1_700_000_000_000 + i,
+      exampleMessageId: `msg_gap_${i + 1}`,
+      handled: i < 100,
+      documentId: i < 100 ? `doc_${i + 1}` : null,
+    }));
+
+    installFakeServer({ gaps: manyGaps });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Gaps" }));
+    expect(await screen.findByText("Handled question 1?")).toBeTruthy();
+    expect(screen.queryByText("Unresolved 101st question?")).toBeNull();
+
+    // Advance 4 pages (25 per page): offset 0 -> 25 -> 50 -> 75 -> 100.
+    for (let page = 0; page < 4; page++) {
+      const nextButton = screen.getByRole("button", { name: "Next" }) as HTMLButtonElement;
+      expect(nextButton.disabled).toBe(false);
+      fireEvent.click(nextButton);
+      await waitFor(() =>
+        expect(screen.getByText(`Handled question ${(page + 1) * 25 + 1}?`)).toBeTruthy(),
+      ).catch(() => undefined);
+    }
+
+    expect(await screen.findByText("Unresolved 101st question?")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Previous" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
   });
 });

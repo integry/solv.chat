@@ -295,4 +295,114 @@ describe("admin gaps API", () => {
       documentId: updatedDocId,
     });
   });
+
+  it("paginates beyond 100 gap groups so unresolved questions remain reachable when leading groups are handled", async () => {
+    const astA = await seedAssistant(ORG_A);
+    const sourceId = newId("src");
+    const docId = newId("doc");
+    const convId = newId("cnv");
+
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO sources (id, org_id, assistant_id, kind, label, settings, created_at)
+         VALUES (?1, ?2, ?3, 'entry', 'Manual answers', '{}', 1000)`,
+      ).bind(sourceId, ORG_A, astA),
+      env.DB.prepare(
+        `INSERT INTO documents (id, org_id, source_id, external_id, url, title, content_hash, updated_at)
+         VALUES (?1, ?2, ?3, 'entry:1', 'https://example.com/#1', 'Answer', 'hash1', 1000)`,
+      ).bind(docId, ORG_A, sourceId),
+      env.DB.prepare(
+        `INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url)
+         VALUES (?1, ?2, ?3, 'vis_1', 1000, '')`,
+      ).bind(convId, ORG_A, astA),
+    ]);
+
+    const statements: D1PreparedStatement[] = [];
+    // Seed 100 handled questions asked 2 times each (200 turns).
+    for (let i = 0; i < 100; i++) {
+      const question = `Handled question ${i + 1}?`;
+      for (let j = 0; j < 2; j++) {
+        const qId = newId("msg");
+        const aId = newId("msg");
+        const ts = 2000 + i * 10 + j * 2;
+        statements.push(
+          env.DB.prepare(
+            `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
+             VALUES (?1, ?2, ?3, 'user', ?4, '[]', NULL, 0, 0, 1, ?5)`,
+          ).bind(qId, ORG_A, convId, question, ts),
+          env.DB.prepare(
+            `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
+             VALUES (?1, ?2, ?3, 'assistant', 'Fallback.', '[]', NULL, 0, 0, 0, ?4)`,
+          ).bind(aId, ORG_A, convId, ts + 1),
+        );
+        if (j === 1) {
+          statements.push(
+            env.DB.prepare(
+              `INSERT INTO gap_answers (org_id, message_id, document_id, created_at)
+               VALUES (?1, ?2, ?3, ?4)`,
+            ).bind(ORG_A, qId, docId, ts + 2),
+          );
+        }
+      }
+    }
+
+    // Seed the 101st unresolved question asked once.
+    const unresolvedQId = newId("msg");
+    const unresolvedAId = newId("msg");
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
+         VALUES (?1, ?2, ?3, 'user', 'Unresolved 101st question?', '[]', NULL, 0, 0, 1, 5000)`,
+      ).bind(unresolvedQId, ORG_A, convId),
+      env.DB.prepare(
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at)
+         VALUES (?1, ?2, ?3, 'assistant', 'Fallback.', '[]', NULL, 0, 0, 0, 5001)`,
+      ).bind(unresolvedAId, ORG_A, convId),
+    );
+
+    // D1 batch limit is 100 statements per batch.
+    for (let start = 0; start < statements.length; start += 100) {
+      await env.DB.batch(statements.slice(start, start + 100));
+    }
+
+    const app = appForOrg(ORG_A);
+
+    const firstPageRes = await call(
+      app,
+      "GET",
+      `/api/admin/assistants/${astA}/gaps?limit=100&offset=0`,
+    );
+    expect(firstPageRes.status).toBe(200);
+    const firstPage = (await firstPageRes.json()) as {
+      gaps: Array<{ question: string; handled: boolean }>;
+      total: number;
+      limit: number;
+      offset: number;
+    };
+    expect(firstPage.total).toBe(101);
+    expect(firstPage.limit).toBe(100);
+    expect(firstPage.offset).toBe(0);
+    expect(firstPage.gaps).toHaveLength(100);
+    expect(firstPage.gaps.every((g) => g.handled)).toBe(true);
+
+    const secondPageRes = await call(
+      app,
+      "GET",
+      `/api/admin/assistants/${astA}/gaps?limit=100&offset=100`,
+    );
+    expect(secondPageRes.status).toBe(200);
+    const secondPage = (await secondPageRes.json()) as {
+      gaps: Array<{ question: string; handled: boolean; times: number }>;
+      total: number;
+      limit: number;
+      offset: number;
+    };
+    expect(secondPage.total).toBe(101);
+    expect(secondPage.gaps).toHaveLength(1);
+    expect(secondPage.gaps[0]).toMatchObject({
+      question: "unresolved 101st question?",
+      handled: false,
+      times: 1,
+    });
+  });
 });

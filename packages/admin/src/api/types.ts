@@ -105,6 +105,13 @@ export interface GapSummary {
   documentId: string | null;
 }
 
+export interface GapsPage {
+  gaps: GapSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface TopQuestion {
   question: string;
   count: number;

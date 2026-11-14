@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { GapSummary } from "../api/types.js";
+import type { GapSummary, GapsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { EntryEditor } from "./EntryEditor.js";
 
@@ -7,15 +7,23 @@ export interface GapsProps {
   assistantId: string;
 }
 
+const PAGE_SIZE = 25;
+
 function formatDate(timestamp: number): string {
   return new Date(timestamp).toLocaleString();
 }
 
 export function Gaps({ assistantId }: GapsProps) {
-  const gapsRes = useResource<{ gaps: GapSummary[] }>(`/api/admin/assistants/${assistantId}/gaps`);
+  const [offset, setOffset] = useState(0);
+  const gapsRes = useResource<GapsPage>(
+    `/api/admin/assistants/${assistantId}/gaps?limit=${PAGE_SIZE}&offset=${offset}`,
+  );
   const [editingGap, setEditingGap] = useState<GapSummary | null>(null);
 
-  const gaps = gapsRes.value?.gaps ?? [];
+  const page = gapsRes.value;
+  const gaps = page?.gaps ?? [];
+  const hasPrevious = offset > 0;
+  const hasNext = page ? offset + page.limit < page.total : false;
 
   return (
     <div className="screen">
@@ -51,32 +59,59 @@ export function Gaps({ assistantId }: GapsProps) {
         <p className="error-text" role="alert">
           {gapsRes.error}
         </p>
-      ) : gaps.length === 0 ? (
+      ) : gaps.length === 0 && !hasPrevious ? (
         <p className="muted">No unanswered questions yet.</p>
       ) : (
-        <ul className="history-list">
-          {gaps.map((gap) => (
-            <li key={gap.exampleMessageId} className="source-card stack">
-              <div className="source-header">
-                <div>
-                  <div className="source-title">{gap.displayQuestion || gap.question}</div>
-                  <div className="source-meta">
-                    <span>{gap.times === 1 ? "Asked 1 time" : `Asked ${gap.times} times`}</span>
-                    <span>Last asked {formatDate(gap.lastAsked)}</span>
-                    {gap.handled && <span className="badge badge-published">Handled</span>}
+        <div className="stack">
+          {gaps.length === 0 ? (
+            <p className="muted">No unanswered questions on this page.</p>
+          ) : (
+            <ul className="history-list">
+              {gaps.map((gap) => (
+                <li key={gap.exampleMessageId} className="source-card stack">
+                  <div className="source-header">
+                    <div>
+                      <div className="source-title">{gap.displayQuestion || gap.question}</div>
+                      <div className="source-meta">
+                        <span>{gap.times === 1 ? "Asked 1 time" : `Asked ${gap.times} times`}</span>
+                        <span>Last asked {formatDate(gap.lastAsked)}</span>
+                        {gap.handled && <span className="badge badge-published">Handled</span>}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setEditingGap(gap)}
+                    >
+                      Write the right answer
+                    </button>
                   </div>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => setEditingGap(gap)}
-                >
-                  Write the right answer
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {(hasPrevious || hasNext) && (
+            <div className="actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={!hasPrevious}
+                onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={!hasNext}
+                onClick={() => setOffset(offset + PAGE_SIZE)}
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

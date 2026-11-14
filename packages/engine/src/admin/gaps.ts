@@ -12,6 +12,13 @@ export interface GapSummary {
   documentId: string | null;
 }
 
+export interface GapsPage {
+  gaps: GapSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 /**
  * The unanswered questions. `answered = 0` is written by the chat pipeline when
  * nothing cleared the score floor, so this screen is a direct read of that
@@ -21,9 +28,16 @@ export interface GapSummary {
  * whitespace collapsed. Fuzzy grouping would need embeddings per gap and a
  * threshold to argue about; the specification asks only that gaps be listed.
  */
-export async function listGaps(tenant: Tenant, assistantId: string): Promise<GapSummary[]> {
+export async function listGaps(
+  tenant: Tenant,
+  assistantId: string,
+  options: { limit?: number; offset?: number } = {},
+): Promise<GapsPage> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
+
+  const limit = Math.min(Math.max(1, Math.trunc(options.limit ?? 50)), 100);
+  const offset = Math.max(0, Math.trunc(options.offset ?? 0));
 
   const rows = await tenant.messages.listGapRows(assistantId);
   const groups = new Map<string, GapSummary>();
@@ -57,7 +71,13 @@ export async function listGaps(tenant: Tenant, assistantId: string): Promise<Gap
     }
   }
 
-  return Array.from(groups.values())
-    .sort((a, b) => b.times - a.times || b.lastAsked - a.lastAsked)
-    .slice(0, 100);
+  const sorted = Array.from(groups.values()).sort(
+    (a, b) => b.times - a.times || b.lastAsked - a.lastAsked,
+  );
+  return {
+    gaps: sorted.slice(offset, offset + limit),
+    total: sorted.length,
+    limit,
+    offset,
+  };
 }
