@@ -285,6 +285,16 @@ function installFakeServer(options: FakeServerOptions = {}) {
       return Response.json({ versions: versions.get(versionsMatch[1]) ?? [] });
     }
 
+    const overviewMatch = /^\/api\/admin\/assistants\/([^/]+)\/overview$/.exec(path);
+    if (overviewMatch?.[1] && method === "GET") {
+      return Response.json({
+        messages: 0,
+        answeredShare: 0,
+        topQuestions: [],
+        todayCostMicros: 0,
+      });
+    }
+
     const rollbackMatch = /^\/api\/admin\/assistants\/([^/]+)\/versions\/([^/]+)\/rollback$/.exec(
       path,
     );
@@ -399,7 +409,7 @@ describe("admin app", () => {
 
     expect(await screen.findByRole("navigation", { name: "Primary" })).toBeTruthy();
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
-    expect(screen.getByText("This screen is not built yet.")).toBeTruthy();
+    expect(screen.getByText("How your assistant is doing.")).toBeTruthy();
   });
 
   it("returns the owner to login when any API call answers 401", async () => {

@@ -42,3 +42,84 @@ export interface DocumentSummary {
   title: string;
   updatedAt: number;
 }
+
+export interface ConversationSummary {
+  id: string;
+  assistantId: string;
+  visitorId: string;
+  startedAt: number;
+  pageUrl: string;
+  firstQuestion: string | null;
+  turnCount: number;
+  hasUnanswered: boolean;
+}
+
+export interface ConversationsPage {
+  conversations: ConversationSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ConversationFeedback {
+  id: string;
+  value: "up" | "down";
+  note: string;
+  createdAt: number;
+}
+
+export interface Citation {
+  url: string;
+  title: string;
+}
+
+export interface ConversationTurn {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  citations: Citation[];
+  answered: boolean;
+  createdAt: number;
+  feedback: ConversationFeedback[];
+  answerDocumentId: string | null;
+}
+
+export interface ConversationDetail {
+  conversation: {
+    id: string;
+    assistantId: string;
+    visitorId: string;
+    startedAt: number;
+    pageUrl: string;
+  };
+  turns: ConversationTurn[];
+}
+
+export interface GapSummary {
+  question: string;
+  displayQuestion: string;
+  times: number;
+  lastAsked: number;
+  exampleMessageId: string;
+  handled: boolean;
+  documentId: string | null;
+}
+
+export interface TopQuestion {
+  question: string;
+  count: number;
+}
+
+export interface AssistantOverview {
+  messages: number;
+  answeredShare: number;
+  topQuestions: TopQuestion[];
+  todayCostMicros: number;
+}
+
+export interface InstallInfo {
+  assistantId: string;
+  publicKey: string;
+  allowedOrigins: string[];
+  snippet: string;
+}

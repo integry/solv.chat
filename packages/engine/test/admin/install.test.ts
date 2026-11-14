@@ -1,0 +1,109 @@
+import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import { beforeEach, describe, expect, it } from "vitest";
+import { sha256Hex } from "../../src/admin/ingestKeys.js";
+import type { AssistantRow } from "../../src/db/assistants.js";
+import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
+
+const ORG_A = TEST_ORG_ID;
+const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
+
+function appForOrg(orgId: string) {
+  return createTestApp({
+    auth: {
+      async authenticate() {
+        return { orgId, userId: "owner", role: "owner" };
+      },
+      async login() {
+        return Response.json({ ok: true });
+      },
+      async logout() {
+        return Response.json({ ok: true });
+      },
+    },
+  });
+}
+
+async function call(
+  app: ReturnType<typeof createTestApp>,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<Response> {
+  const ctx = createExecutionContext();
+  const headers: Record<string, string> = {};
+  if (method !== "GET" && method !== "HEAD") {
+    headers.Origin = "https://example.com";
+  }
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+  const response = await app.fetch(
+    new Request(`https://example.com${path}`, {
+      method,
+      headers,
+      body: body === undefined ? null : JSON.stringify(body),
+    }),
+    env,
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  return response;
+}
+
+describe("admin install API", () => {
+  beforeEach(async () => {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM assistant_versions"),
+      env.DB.prepare("DELETE FROM assistants"),
+      env.DB.prepare("DELETE FROM orgs WHERE id != ?1").bind(ORG_A),
+      env.DB.prepare("INSERT INTO orgs (id, name) VALUES (?1, ?2)").bind(ORG_B, "Org B"),
+    ]);
+  });
+
+  it("returns a snippet with the public key and deployed origin, and never exposes an ingest key", async () => {
+    const appA = appForOrg(ORG_A);
+    const createRes = await call(appA, "POST", "/api/admin/assistants", {
+      name: "Docs Bot",
+      allowedOrigins: ["https://docs.example.com"],
+    });
+    expect(createRes.status).toBe(201);
+    const { assistant, ingestKey } = (await createRes.json()) as {
+      assistant: AssistantRow;
+      ingestKey: string;
+    };
+    const keyHash = await sha256Hex(ingestKey);
+
+    const installRes = await call(appA, "GET", `/api/admin/assistants/${assistant.id}/install`);
+    expect(installRes.status).toBe(200);
+    const raw = await installRes.text();
+    expect(raw).not.toContain(ingestKey);
+    expect(raw).not.toContain(keyHash);
+    expect(raw).not.toContain("ik_");
+
+    const body = JSON.parse(raw) as {
+      assistantId: string;
+      publicKey: string;
+      allowedOrigins: string[];
+      snippet: string;
+    };
+    expect(body.assistantId).toBe(assistant.id);
+    expect(body.publicKey).toBe(assistant.publicKey);
+    expect(body.allowedOrigins).toEqual(["https://docs.example.com"]);
+    expect(body.snippet).toContain("https://example.com/widget.js");
+    expect(body.snippet).toContain(assistant.publicKey);
+    expect(body.snippet).toContain("<solv-chat");
+  });
+
+  it("returns 404 for another org's assistant", async () => {
+    const appB = appForOrg(ORG_B);
+    const createRes = await call(appB, "POST", "/api/admin/assistants", {
+      name: "Org B Bot",
+      allowedOrigins: [],
+    });
+    const { assistant } = (await createRes.json()) as { assistant: AssistantRow };
+
+    const appA = appForOrg(ORG_A);
+    const res = await call(appA, "GET", `/api/admin/assistants/${assistant.id}/install`);
+    expect(res.status).toBe(404);
+  });
+});

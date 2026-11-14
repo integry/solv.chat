@@ -48,6 +48,23 @@ export interface CreateMessageInput {
   createdAt: number;
 }
 
+export interface GapMessageRow {
+  questionId: string;
+  questionContent: string;
+  askedAt: number;
+  answerDocumentId: string | null;
+}
+
+export interface TopQuestionRow {
+  question: string;
+  count: number;
+}
+
+/** Normalises a visitor question for grouping (trimmed, lowercased, collapsed whitespace). */
+export function normalizeQuestionText(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 const COLUMNS =
   "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at";
 
@@ -154,6 +171,144 @@ export function messagesFor(db: D1Database, orgId: string) {
         .bind(orgId, id)
         .run();
       return (res.meta.changes ?? 0) > 0;
+    },
+
+    async listGapRows(assistantId: string): Promise<GapMessageRow[]> {
+      const res = await prepare(
+        db,
+        `SELECT q.id AS question_id,
+                q.content AS question_content,
+                q.created_at AS asked_at,
+                ga.document_id AS answer_document_id
+           FROM messages a
+           JOIN conversations c ON c.id = a.conversation_id AND c.org_id = a.org_id
+           JOIN messages q ON q.conversation_id = a.conversation_id
+                          AND q.org_id = a.org_id
+                          AND q.role = 'user'
+                          AND q.id = (
+                            SELECT q2.id
+                              FROM messages q2
+                             WHERE q2.org_id = a.org_id
+                               AND q2.conversation_id = a.conversation_id
+                               AND q2.role = 'user'
+                               AND q2.created_at <= a.created_at
+                             ORDER BY q2.created_at DESC, q2.id DESC
+                             LIMIT 1
+                          )
+           LEFT JOIN gap_answers ga ON ga.org_id = a.org_id
+                                   AND (ga.message_id = q.id OR ga.message_id = a.id)
+          WHERE a.org_id = ?1
+            AND c.assistant_id = ?2
+            AND a.role = 'assistant'
+            AND a.answered = 0
+          ORDER BY q.created_at DESC, q.id DESC`,
+      )
+        .bind(orgId, assistantId)
+        .all<{
+          question_id: string;
+          question_content: string;
+          asked_at: number;
+          answer_document_id: string | null;
+        }>();
+
+      return res.results.map((r) => ({
+        questionId: r.question_id,
+        questionContent: r.question_content,
+        askedAt: r.asked_at,
+        answerDocumentId: r.answer_document_id,
+      }));
+    },
+
+    async linkGapAnswer(messageId: string, documentId: string, createdAt: number): Promise<void> {
+      await prepareInsert(
+        db,
+        `INSERT INTO gap_answers (org_id, message_id, document_id, created_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(org_id, message_id) DO UPDATE SET
+           document_id = excluded.document_id`,
+      )
+        .bind(orgId, messageId, documentId, createdAt)
+        .run();
+    },
+
+    async listGapAnswersForConversation(conversationId: string): Promise<Map<string, string>> {
+      const res = await prepare(
+        db,
+        `SELECT ga.message_id, ga.document_id
+           FROM gap_answers ga
+           JOIN messages m ON m.id = ga.message_id AND m.org_id = ga.org_id
+          WHERE ga.org_id = ?1 AND m.conversation_id = ?2`,
+      )
+        .bind(orgId, conversationId)
+        .all<{ message_id: string; document_id: string }>();
+
+      const mapByMsg = new Map<string, string>();
+      for (const r of res.results) {
+        mapByMsg.set(r.message_id, r.document_id);
+      }
+      return mapByMsg;
+    },
+
+    async countFor(assistantId: string): Promise<number> {
+      const row = await prepare(
+        db,
+        `SELECT COUNT(*) AS total
+           FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+          WHERE m.org_id = ?1 AND c.assistant_id = ?2`,
+      )
+        .bind(orgId, assistantId)
+        .first<{ total: number }>();
+      return row?.total ?? 0;
+    },
+
+    async answeredShareFor(assistantId: string): Promise<number> {
+      const row = await prepare(
+        db,
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN m.answered = 1 THEN 1 ELSE 0 END), 0) AS answered_count
+           FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+          WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'assistant'`,
+      )
+        .bind(orgId, assistantId)
+        .first<{ total: number; answered_count: number }>();
+      if (!row || row.total === 0) return 0;
+      return row.answered_count / row.total;
+    },
+
+    async topQuestionsFor(assistantId: string, limit = 5): Promise<TopQuestionRow[]> {
+      const res = await prepare(
+        db,
+        `SELECT lower(trim(m.content)) AS question,
+                COUNT(*) AS count,
+                MAX(m.created_at) AS last_asked
+           FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+          WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'user'
+          GROUP BY question
+          ORDER BY count DESC, last_asked DESC`,
+      )
+        .bind(orgId, assistantId)
+        .all<{ question: string; count: number; last_asked: number }>();
+
+      const merged = new Map<string, { count: number; lastAsked: number }>();
+      for (const row of res.results) {
+        const key = normalizeQuestionText(row.question);
+        if (!key) continue;
+        const existing = merged.get(key);
+        if (existing) {
+          existing.count += row.count;
+          existing.lastAsked = Math.max(existing.lastAsked, row.last_asked);
+        } else {
+          merged.set(key, { count: row.count, lastAsked: row.last_asked });
+        }
+      }
+
+      return Array.from(merged.entries())
+        .sort((a, b) => b[1].count - a[1].count || b[1].lastAsked - a[1].lastAsked)
+        .slice(0, limit)
+        .map(([question, info]) => ({ question, count: info.count }));
     },
   };
 }

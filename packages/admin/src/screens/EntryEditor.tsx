@@ -11,6 +11,7 @@ export interface EntryEditorProps {
   assistantId: string;
   sourceId?: string | undefined;
   documentId?: string | undefined;
+  fromMessageId?: string | undefined;
   initialQuestion?: string | undefined;
   initialAnswer?: string | undefined;
   onSaved?:
@@ -23,6 +24,7 @@ export function EntryEditor({
   assistantId,
   sourceId,
   documentId,
+  fromMessageId,
   initialQuestion = "",
   initialAnswer = "",
   onSaved,
@@ -66,21 +68,25 @@ export function EntryEditor({
     setStatusMessage(null);
 
     try {
-      const payload = { question, answer };
       const result = isEditing
         ? await putJson<{ documentId: string; sourceId: string }>(
             `/api/admin/sources/${sourceId}/entries/${documentId}`,
-            payload,
+            { question, answer },
           )
-        : sourceId
+        : fromMessageId
           ? await postJson<{ documentId: string; sourceId: string }>(
-              `/api/admin/sources/${sourceId}/entries`,
-              payload,
+              `/api/admin/assistants/${assistantId}/answers`,
+              { question, answer, fromMessageId },
             )
-          : await postJson<{ documentId: string; sourceId: string }>(
-              `/api/admin/assistants/${assistantId}/entries`,
-              payload,
-            );
+          : sourceId
+            ? await postJson<{ documentId: string; sourceId: string }>(
+                `/api/admin/sources/${sourceId}/entries`,
+                { question, answer },
+              )
+            : await postJson<{ documentId: string; sourceId: string }>(
+                `/api/admin/assistants/${assistantId}/entries`,
+                { question, answer },
+              );
 
       if (sessionRef.current === submitSession) {
         setStatusMessage("Answer saved.");

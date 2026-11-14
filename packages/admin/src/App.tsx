@@ -2,10 +2,13 @@ import { useState } from "react";
 import { ApiError } from "./api/client.js";
 import type { Assistant } from "./api/types.js";
 import { useResource } from "./api/useResource.js";
-import { NAV_ITEMS, type ScreenId, useRoute } from "./routing.js";
+import { type ScreenId, useRoute } from "./routing.js";
 import { Behaviour } from "./screens/Behaviour.js";
+import { Conversations } from "./screens/Conversations.js";
+import { Gaps } from "./screens/Gaps.js";
+import { Install } from "./screens/Install.js";
 import { Login } from "./screens/Login.js";
-import { Placeholder } from "./screens/Placeholder.js";
+import { Overview } from "./screens/Overview.js";
 import { Sources } from "./screens/Sources.js";
 import { Widget } from "./screens/Widget.js";
 import { AssistantSwitcher } from "./shell/AssistantSwitcher.js";
@@ -16,16 +19,20 @@ import { useSession } from "./shell/useSession.js";
 
 function renderScreen(screen: ScreenId, assistantId: string) {
   switch (screen) {
+    case "overview":
+      return <Overview key={assistantId} assistantId={assistantId} />;
+    case "conversations":
+      return <Conversations key={assistantId} assistantId={assistantId} />;
+    case "gaps":
+      return <Gaps key={assistantId} assistantId={assistantId} />;
     case "sources":
       return <Sources key={assistantId} assistantId={assistantId} />;
     case "behaviour":
       return <Behaviour key={assistantId} assistantId={assistantId} />;
     case "widget":
       return <Widget key={assistantId} assistantId={assistantId} />;
-    default: {
-      const item = NAV_ITEMS.find((n) => n.id === screen);
-      return <Placeholder title={item?.label ?? "Overview"} />;
-    }
+    case "install":
+      return <Install key={assistantId} assistantId={assistantId} />;
   }
 }
 

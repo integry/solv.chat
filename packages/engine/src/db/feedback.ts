@@ -56,6 +56,20 @@ export function feedbackFor(db: D1Database, orgId: string) {
       return res.results.map(map);
     },
 
+    async listForConversation(conversationId: string): Promise<FeedbackRow[]> {
+      const res = await prepare(
+        db,
+        `SELECT f.id, f.org_id, f.message_id, f.visitor_id, f.value, f.note, f.created_at
+           FROM feedback f
+           JOIN messages m ON m.id = f.message_id AND m.org_id = f.org_id
+          WHERE f.org_id = ?1 AND m.conversation_id = ?2
+          ORDER BY f.created_at DESC`,
+      )
+        .bind(orgId, conversationId)
+        .all<Row>();
+      return res.results.map(map);
+    },
+
     async get(id: string): Promise<FeedbackRow | null> {
       const row = await prepare(db, `SELECT ${COLUMNS} FROM feedback WHERE org_id = ?1 AND id = ?2`)
         .bind(orgId, id)

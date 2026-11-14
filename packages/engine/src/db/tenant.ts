@@ -7,6 +7,7 @@ import { mcpFor } from "./mcp.js";
 import { messagesFor } from "./messages.js";
 import { sourcesFor } from "./sources.js";
 import { testsFor } from "./tests.js";
+import { usageFor } from "./usage.js";
 import { versionsFor } from "./versions.js";
 
 export interface IngestScope {
@@ -29,6 +30,7 @@ export interface Tenant {
   readonly feedback: ReturnType<typeof feedbackFor>;
   readonly mcp: ReturnType<typeof mcpFor>;
   readonly tests: ReturnType<typeof testsFor>;
+  readonly usage: ReturnType<typeof usageFor>;
 }
 
 /**
@@ -61,5 +63,6 @@ function build(db: D1Database, orgId: string): Tenant {
     feedback: feedbackFor(db, orgId),
     mcp: mcpFor(db, orgId),
     tests: testsFor(db, orgId),
+    usage: usageFor(db, orgId),
   };
 }

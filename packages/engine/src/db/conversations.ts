@@ -18,6 +18,28 @@ export interface ConversationRow {
   pageUrl: string;
 }
 
+export interface ConversationSummaryRow {
+  id: string;
+  assistantId: string;
+  visitorId: string;
+  startedAt: number;
+  pageUrl: string;
+  firstQuestion: string | null;
+  turnCount: number;
+  hasUnanswered: boolean;
+}
+
+interface SummaryRow {
+  id: string;
+  assistant_id: string;
+  visitor_id: string;
+  started_at: number;
+  page_url: string;
+  first_question: string | null;
+  turn_count: number;
+  has_unanswered: number;
+}
+
 export interface CreateConversationInput {
   id: string;
   assistantId: string;
@@ -48,6 +70,56 @@ export function conversationsFor(db: D1Database, orgId: string) {
         .bind(orgId, assistantId, limit)
         .all<Row>();
       return res.results.map(map);
+    },
+
+    async listPaged(
+      assistantId: string,
+      options: { limit: number; offset: number },
+    ): Promise<{ conversations: ConversationSummaryRow[]; total: number }> {
+      const [rowsRes, countRow] = await Promise.all([
+        prepare(
+          db,
+          `SELECT c.id, c.assistant_id, c.visitor_id, c.started_at, c.page_url,
+                  (SELECT q.content
+                     FROM messages q
+                    WHERE q.org_id = ?1 AND q.conversation_id = c.id AND q.role = 'user'
+                    ORDER BY q.created_at ASC, q.id ASC
+                    LIMIT 1) AS first_question,
+                  (SELECT COUNT(*)
+                     FROM messages m
+                    WHERE m.org_id = ?1 AND m.conversation_id = c.id) AS turn_count,
+                  EXISTS(SELECT 1
+                           FROM messages u
+                          WHERE u.org_id = ?1 AND u.conversation_id = c.id
+                            AND u.role = 'assistant' AND u.answered = 0) AS has_unanswered
+             FROM conversations c
+            WHERE c.org_id = ?1 AND c.assistant_id = ?2
+            ORDER BY c.started_at DESC, c.id DESC
+            LIMIT ?3 OFFSET ?4`,
+        )
+          .bind(orgId, assistantId, options.limit, options.offset)
+          .all<SummaryRow>(),
+        prepare(
+          db,
+          "SELECT COUNT(*) AS total FROM conversations WHERE org_id = ?1 AND assistant_id = ?2",
+        )
+          .bind(orgId, assistantId)
+          .first<{ total: number }>(),
+      ]);
+
+      return {
+        conversations: rowsRes.results.map((r) => ({
+          id: r.id,
+          assistantId: r.assistant_id,
+          visitorId: r.visitor_id,
+          startedAt: r.started_at,
+          pageUrl: r.page_url,
+          firstQuestion: r.first_question,
+          turnCount: r.turn_count,
+          hasUnanswered: r.has_unanswered === 1,
+        })),
+        total: countRow?.total ?? 0,
+      };
     },
 
     async get(id: string): Promise<ConversationRow | null> {

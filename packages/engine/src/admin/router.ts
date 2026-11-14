@@ -1,6 +1,7 @@
 import type { Tenant } from "../db/tenant.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
 import type { Retriever } from "../providers/retrieval.js";
+import { writeTheRightAnswer } from "./answers.js";
 import {
   createAssistant,
   getAssistant,
@@ -8,8 +9,12 @@ import {
   rotateIngestKey,
   updateAssistant,
 } from "./assistants.js";
+import { getConversation, listConversations } from "./conversations.js";
 import { saveEntry } from "./entries.js";
 import { BadRequest, Conflict, NotFound, readJsonBody } from "./errors.js";
+import { listGaps } from "./gaps.js";
+import { getInstallInfo } from "./install.js";
+import { overviewFor } from "./overview.js";
 import { importSitemapUrls, previewSitemap } from "./sitemap.js";
 import {
   createSource,
@@ -42,6 +47,32 @@ function readEntryFields(body: unknown): { question: string; answer: string } {
   return {
     question: typeof body.question === "string" ? body.question : "",
     answer: typeof body.answer === "string" ? body.answer : "",
+  };
+}
+
+function readAnswerFields(body: unknown): {
+  question: string;
+  answer: string;
+  fromMessageId: string;
+} {
+  if (!isPlainObject(body)) {
+    throw new BadRequest(["body: must be a JSON object"]);
+  }
+  return {
+    question: typeof body.question === "string" ? body.question : "",
+    answer: typeof body.answer === "string" ? body.answer : "",
+    fromMessageId: typeof body.fromMessageId === "string" ? body.fromMessageId : "",
+  };
+}
+
+function readPagingParams(url: URL): { limit?: number; offset?: number } {
+  const rawLimit = url.searchParams.get("limit");
+  const rawOffset = url.searchParams.get("offset");
+  const limit = rawLimit !== null ? Number(rawLimit) : undefined;
+  const offset = rawOffset !== null ? Number(rawOffset) : undefined;
+  return {
+    ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+    ...(offset !== undefined && Number.isFinite(offset) ? { offset } : {}),
   };
 }
 
@@ -141,7 +172,27 @@ async function assistantRoutes(
       );
       return Response.json(result, { status: 201 });
     }
-    void url;
+    if (action === "conversations" && method === "GET") {
+      return Response.json(await listConversations(tenant, assistantId, readPagingParams(url)));
+    }
+    if (action === "gaps" && method === "GET") {
+      return Response.json({ gaps: await listGaps(tenant, assistantId) });
+    }
+    if (action === "answers" && method === "POST") {
+      const fields = readAnswerFields(await readJsonBody(request));
+      const result = await writeTheRightAnswer(
+        { tenant, docs: deps.docs, queue: deps.queue, publicBaseUrl: deps.publicBaseUrl },
+        { orgId: deps.orgId },
+        { assistantId, ...fields },
+      );
+      return Response.json(result, { status: 201 });
+    }
+    if (action === "overview" && method === "GET") {
+      return Response.json(await overviewFor(tenant, assistantId));
+    }
+    if (action === "install" && method === "GET") {
+      return Response.json(await getInstallInfo(tenant, assistantId, deps.publicBaseUrl));
+    }
     throw new NotFound();
   }
 
@@ -186,16 +237,7 @@ async function sourceRoutes(
   if (segments.length === 3) {
     const sub = segments[2];
     if (sub === "documents" && method === "GET") {
-      const rawLimit = url.searchParams.get("limit");
-      const rawOffset = url.searchParams.get("offset");
-      const limit = rawLimit !== null ? Number(rawLimit) : undefined;
-      const offset = rawOffset !== null ? Number(rawOffset) : undefined;
-      return Response.json(
-        await listSourceDocuments(tenant, sourceId, {
-          ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
-          ...(offset !== undefined && Number.isFinite(offset) ? { offset } : {}),
-        }),
-      );
+      return Response.json(await listSourceDocuments(tenant, sourceId, readPagingParams(url)));
     }
     if (sub === "entries" && method === "POST") {
       const source = await tenant.sources.get(sourceId);
@@ -235,6 +277,18 @@ async function sourceRoutes(
   throw new NotFound();
 }
 
+async function conversationRoutes(
+  request: Request,
+  segments: string[],
+  deps: AdminRouteDeps,
+): Promise<Response> {
+  const conversationId = segments[1];
+  if (!conversationId || segments.length !== 2 || request.method !== "GET") {
+    throw new NotFound();
+  }
+  return Response.json(await getConversation(deps.tenant, conversationId));
+}
+
 /** Dispatches authenticated `/api/admin/*` requests with a tenant-scoped handle. */
 export async function adminRoutes(
   request: Request,
@@ -245,6 +299,7 @@ export async function adminRoutes(
   try {
     if (segments[0] === "assistants") return await assistantRoutes(request, url, segments, deps);
     if (segments[0] === "sources") return await sourceRoutes(request, url, segments, deps);
+    if (segments[0] === "conversations") return await conversationRoutes(request, segments, deps);
     return Response.json({ error: "Not found." }, { status: 404 });
   } catch (error) {
     // Mapped here, once: a handler building its own responses would eventually
