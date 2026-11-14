@@ -484,4 +484,86 @@ describe("chat/answer", () => {
       { type: "error", message: "Too many questions just now. Please wait a moment." },
     ]);
   });
+
+  it("returns a sanitized SSE error event with CORS headers when embeddingKey initialization fails", async () => {
+    const app = createApp(
+      fakeSeams({
+        keys: {
+          modelKey: async () => "test-anthropic-key",
+          embeddingKey: async () => {
+            throw new Error("Missing required secret: SOLV_OPENAI_KEY");
+          },
+        },
+      }),
+      {
+        chat: { retriever },
+      },
+    );
+
+    const ctx = createExecutionContext();
+    const res = await app.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://site.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_ans_1",
+          visitorId: "vis_1",
+          message: "How do I reset my password?",
+        }),
+      }),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://site.example");
+    expect(res.headers.get("vary")).toBe("Origin");
+
+    const events = parseSseBody(await res.text());
+    expect(events).toEqual([{ type: "error", message: "Something went wrong. Please try again." }]);
+  });
+
+  it("returns a sanitized SSE error event with CORS headers when modelKey initialization fails", async () => {
+    const app = createApp(
+      fakeSeams({
+        keys: {
+          modelKey: async () => {
+            throw new Error("Missing required secret: SOLV_ANTHROPIC_KEY");
+          },
+          embeddingKey: async () => "test-embedding-key",
+        },
+      }),
+      {
+        chat: { embedder, retriever },
+      },
+    );
+
+    const ctx = createExecutionContext();
+    const res = await app.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://site.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_ans_1",
+          visitorId: "vis_1",
+          message: "How do I reset my password?",
+        }),
+      }),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://site.example");
+    expect(res.headers.get("vary")).toBe("Origin");
+
+    const events = parseSseBody(await res.text());
+    expect(events).toEqual([{ type: "error", message: "Something went wrong. Please try again." }]);
+  });
 });

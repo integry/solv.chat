@@ -172,19 +172,22 @@ export async function chatRoute(
     overrides?.model ??
     (providerKind === "anthropic" ? ANTHROPIC_MODELS[tier] : OPENAI_MODELS[tier]);
 
-  const embedder =
-    overrides?.embedder ??
-    openAIEmbedder({ apiKey: await seams.keys.embeddingKey(assistant.orgId) });
-  const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
-  const provider =
-    overrides?.provider ??
-    (await llmProviderFor({ orgId: assistant.orgId, provider: providerKind, tier }, seams.keys));
-
   let cancelled = false;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const pipeline = (async () => {
         try {
+          const embedder =
+            overrides?.embedder ??
+            openAIEmbedder({ apiKey: await seams.keys.embeddingKey(assistant.orgId) });
+          const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
+          const provider =
+            overrides?.provider ??
+            (await llmProviderFor(
+              { orgId: assistant.orgId, provider: providerKind, tier },
+              seams.keys,
+            ));
+
           for await (const event of answerMessage(
             {
               tenant,
