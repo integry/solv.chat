@@ -1,5 +1,5 @@
 import type { BehaviourConfig } from "@solvchat/core";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, postJson, putJson } from "../api/client.js";
 import type { VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
@@ -52,6 +52,10 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const [formError, setFormError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
+  const latestRef = useRef({ greeting, persona, fallbackText, questionsText });
+  latestRef.current = { greeting, persona, fallbackText, questionsText };
+  const inFlightRef = useRef(false);
+
   useEffect(() => {
     if (!savedBehaviour) return;
     const key = `${assistantId}:${draft.value?.draft.id ?? ""}`;
@@ -88,10 +92,14 @@ export function Behaviour({ assistantId }: BehaviourProps) {
 
   async function handleSave(event: FormEvent) {
     event.preventDefault();
+    if (inFlightRef.current || saving || publishing) return;
+    inFlightRef.current = true;
     setSaving(true);
     setFieldErrors({});
     setFormError(null);
     setStatusMessage(null);
+
+    const submitted = { greeting, persona, fallbackText, questionsText };
 
     try {
       const res = await putJson<{ draft: VersionRow }>(
@@ -99,10 +107,18 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         { behaviour: current },
       );
       draft.setValue(res);
-      setGreeting(res.draft.config.behaviour.greeting);
-      setPersona(res.draft.config.behaviour.persona);
-      setFallbackText(res.draft.config.behaviour.fallbackText);
-      setQuestionsText(res.draft.config.behaviour.suggestedQuestions.join("\n"));
+      if (latestRef.current.greeting === submitted.greeting) {
+        setGreeting(res.draft.config.behaviour.greeting);
+      }
+      if (latestRef.current.persona === submitted.persona) {
+        setPersona(res.draft.config.behaviour.persona);
+      }
+      if (latestRef.current.fallbackText === submitted.fallbackText) {
+        setFallbackText(res.draft.config.behaviour.fallbackText);
+      }
+      if (latestRef.current.questionsText === submitted.questionsText) {
+        setQuestionsText(res.draft.config.behaviour.suggestedQuestions.join("\n"));
+      }
       setStatusMessage("Draft saved.");
     } catch (err) {
       if (err instanceof ApiError) {
@@ -114,11 +130,14 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         setFormError("Could not save draft.");
       }
     } finally {
+      inFlightRef.current = false;
       setSaving(false);
     }
   }
 
   async function handlePublish() {
+    if (inFlightRef.current || saving || publishing) return;
+    inFlightRef.current = true;
     setPublishing(true);
     setFormError(null);
     setStatusMessage(null);
@@ -134,6 +153,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : "Could not publish.");
     } finally {
+      inFlightRef.current = false;
       setPublishing(false);
     }
   }
@@ -159,7 +179,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={publishing}
+            disabled={saving || publishing}
             onClick={handlePublish}
           >
             {publishing ? "Publishing…" : "Publish"}
@@ -186,6 +206,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
             type="text"
             value={greeting}
             onChange={(e) => setGreeting(e.target.value)}
+            disabled={saving}
           />
           {fieldErrors["behaviour.greeting"] && (
             <p className="field-error" role="alert">
@@ -202,6 +223,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
             value={persona}
             onChange={(e) => setPersona(e.target.value)}
             placeholder="Friendly, concise, and helpful."
+            disabled={saving}
           />
           {fieldErrors["behaviour.persona"] && (
             <p className="field-error" role="alert">
@@ -217,6 +239,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
             rows={2}
             value={fallbackText}
             onChange={(e) => setFallbackText(e.target.value)}
+            disabled={saving}
           />
           {fieldErrors["behaviour.fallbackText"] && (
             <p className="field-error" role="alert">
@@ -233,6 +256,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
             value={questionsText}
             onChange={(e) => setQuestionsText(e.target.value)}
             placeholder="One question per line (up to 6)"
+            disabled={saving}
           />
           <span className="field-hint">One question per line, up to 6.</span>
           {questionError && (
@@ -243,7 +267,11 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         </div>
 
         <div className="actions">
-          <button type="submit" className="btn btn-primary" disabled={!unsaved || saving}>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={!unsaved || saving || publishing}
+          >
             {saving ? "Saving…" : "Save"}
           </button>
         </div>

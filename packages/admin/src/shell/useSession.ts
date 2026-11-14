@@ -51,7 +51,7 @@ export function useSession(): UseSessionResult {
   }, []);
 
   const signOut = useCallback(async () => {
-    await logoutRequest().catch(() => {});
+    await logoutRequest();
     setState("signed-out");
   }, []);
 

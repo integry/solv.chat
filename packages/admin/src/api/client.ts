@@ -135,8 +135,13 @@ export async function loginRequest(password: string): Promise<void> {
 }
 
 export async function logoutRequest(): Promise<void> {
-  await fetch("/api/admin/logout", {
+  const response = await fetch("/api/admin/logout", {
     method: "POST",
     credentials: "same-origin",
   });
+
+  if (!response.ok) {
+    const { message } = await readErrorBody(response);
+    throw new ApiError(response.status, message);
+  }
 }

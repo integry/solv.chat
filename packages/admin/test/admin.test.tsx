@@ -52,6 +52,16 @@ interface FakeServerOptions {
   assistants?: Assistant[];
 }
 
+function createDeferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function installFakeServer(options: FakeServerOptions = {}) {
   let signedIn = options.signedIn ?? true;
   const assistants: Assistant[] = options.assistants
@@ -72,6 +82,10 @@ function installFakeServer(options: FakeServerOptions = {}) {
   }
 
   let forceNext401 = false;
+  let nextLogoutFailure: "http" | "network" | null = null;
+  let pendingDraftSave: Promise<void> | null = null;
+  let pendingAssistantPatch: Promise<void> | null = null;
+  let pendingPublish: Promise<void> | null = null;
   const chatBodies: Array<Record<string, unknown>> = [];
   const calls: Array<{ method: string; path: string }> = [];
 
@@ -92,6 +106,14 @@ function installFakeServer(options: FakeServerOptions = {}) {
     }
 
     if (path === "/api/admin/logout" && method === "POST") {
+      if (nextLogoutFailure === "network") {
+        nextLogoutFailure = null;
+        throw new TypeError("Failed to fetch");
+      }
+      if (nextLogoutFailure === "http") {
+        nextLogoutFailure = null;
+        return Response.json({ error: "Could not clear session." }, { status: 500 });
+      }
       signedIn = false;
       return Response.json({ ok: true });
     }
@@ -136,6 +158,11 @@ function installFakeServer(options: FakeServerOptions = {}) {
         return Response.json({ assistant: found });
       }
       if (method === "PATCH") {
+        if (pendingAssistantPatch) {
+          const wait = pendingAssistantPatch;
+          pendingAssistantPatch = null;
+          await wait;
+        }
         const body = JSON.parse(String(init?.body ?? "{}")) as {
           name: string;
           allowedOrigins: string[];
@@ -170,6 +197,11 @@ function installFakeServer(options: FakeServerOptions = {}) {
         return Response.json({ draft });
       }
       if (method === "PUT") {
+        if (pendingDraftSave) {
+          const wait = pendingDraftSave;
+          pendingDraftSave = null;
+          await wait;
+        }
         const body = JSON.parse(String(init?.body ?? "{}")) as Partial<VersionRow["config"]>;
         if (body.behaviour) {
           draft.config = { ...draft.config, behaviour: body.behaviour };
@@ -183,6 +215,11 @@ function installFakeServer(options: FakeServerOptions = {}) {
 
     const publishMatch = /^\/api\/admin\/assistants\/([^/]+)\/publish$/.exec(path);
     if (publishMatch?.[1] && method === "POST") {
+      if (pendingPublish) {
+        const wait = pendingPublish;
+        pendingPublish = null;
+        await wait;
+      }
       const id = publishMatch[1];
       const draft = drafts.get(id);
       if (!draft) return Response.json({ error: "Not found." }, { status: 404 });
@@ -249,6 +286,24 @@ function installFakeServer(options: FakeServerOptions = {}) {
     chatBodies,
     triggerNext401() {
       forceNext401 = true;
+    },
+    failNextLogout(kind: "http" | "network") {
+      nextLogoutFailure = kind;
+    },
+    holdNextDraftSave() {
+      const d = createDeferred();
+      pendingDraftSave = d.promise;
+      return d;
+    },
+    holdNextAssistantPatch() {
+      const d = createDeferred();
+      pendingAssistantPatch = d.promise;
+      return d;
+    },
+    holdNextPublish() {
+      const d = createDeferred();
+      pendingPublish = d.promise;
+      return d;
     },
   };
 }
@@ -411,5 +466,157 @@ describe("admin app", () => {
     }
 
     expect(screen.queryByText(/model|temperature|chunking/i)).toBeNull();
+  });
+
+  it("F1: disables inputs during save and preserves newer edits on Behaviour", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
+    fireEvent.change(greeting, { target: { value: "First edit" } });
+
+    const deferred = server.holdNextDraftSave();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(greeting.disabled).toBe(true);
+    });
+
+    // Simulate a change arriving while the save request is still in flight.
+    fireEvent.change(greeting, { target: { value: "Newer edit" } });
+    deferred.resolve();
+
+    expect(await screen.findByText("Draft saved.")).toBeTruthy();
+    expect(greeting.disabled).toBe(false);
+    expect(greeting.value).toBe("Newer edit");
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+  });
+
+  it("F1: disables inputs during save and preserves newer edits on Widget origins and settings", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/widget");
+    render(<App />);
+
+    const title = (await screen.findByLabelText("Title")) as HTMLInputElement;
+    const origins = screen.getByLabelText("Allowed origins") as HTMLTextAreaElement;
+
+    fireEvent.change(origins, { target: { value: "https://first.example.com" } });
+    fireEvent.change(title, { target: { value: "First Title" } });
+
+    const patchDeferred = server.holdNextAssistantPatch();
+    const putDeferred = server.holdNextDraftSave();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(title.disabled).toBe(true);
+      expect(origins.disabled).toBe(true);
+    });
+
+    fireEvent.change(origins, { target: { value: "https://newer.example.com" } });
+    patchDeferred.resolve();
+
+    await waitFor(() => {
+      expect(
+        server.calls.some(
+          (c) => c.method === "PUT" && c.path === "/api/admin/assistants/ast_1/draft",
+        ),
+      ).toBe(true);
+    });
+
+    fireEvent.change(title, { target: { value: "Newer Title" } });
+    putDeferred.resolve();
+
+    expect(await screen.findByText("Draft saved.")).toBeTruthy();
+    expect(origins.value).toBe("https://newer.example.com");
+    expect(title.value).toBe("Newer Title");
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+  });
+
+  it("F2: serializes saving and publishing on Behaviour and Widget", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
+    fireEvent.change(greeting, { target: { value: "Updated greeting" } });
+
+    const saveDeferred = server.holdNextDraftSave();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    const publishBtn = screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement;
+    await waitFor(() => {
+      expect(publishBtn.disabled).toBe(true);
+    });
+    fireEvent.click(publishBtn);
+    expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/publish"))).toBe(
+      false,
+    );
+
+    saveDeferred.resolve();
+    expect(await screen.findByText("Draft saved.")).toBeTruthy();
+
+    fireEvent.change(greeting, { target: { value: "Another unsaved edit" } });
+    const publishDeferred = server.holdNextPublish();
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+
+    const saveBtn = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    await waitFor(() => {
+      expect(saveBtn.disabled).toBe(true);
+    });
+    publishDeferred.resolve();
+    expect(await screen.findByText(/^Published \(/)).toBeTruthy();
+
+    // Verify the same serialization on Widget.
+    fireEvent.click(screen.getByRole("link", { name: "Widget" }));
+    const widgetTitle = (await screen.findByLabelText("Title")) as HTMLInputElement;
+    fireEvent.change(widgetTitle, { target: { value: "Updated Widget" } });
+
+    const widgetSaveDeferred = server.holdNextDraftSave();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    const widgetPublishBtn = screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement;
+    await waitFor(() => {
+      expect(widgetPublishBtn.disabled).toBe(true);
+    });
+    widgetSaveDeferred.resolve();
+    expect(await screen.findByText("Draft saved.")).toBeTruthy();
+
+    fireEvent.change(widgetTitle, { target: { value: "Unsaved Widget" } });
+    const widgetPublishDeferred = server.holdNextPublish();
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+
+    const widgetSaveBtn = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    await waitFor(() => {
+      expect(widgetSaveBtn.disabled).toBe(true);
+    });
+    widgetPublishDeferred.resolve();
+    expect(await screen.findByText(/^Published \(/)).toBeTruthy();
+  });
+
+  it("F3: keeps the owner signed in with a retryable error when logout fails, then signs out on retry", async () => {
+    const server = installFakeServer({ signedIn: true });
+    render(<App />);
+
+    await screen.findByRole("navigation", { name: "Primary" });
+
+    server.failNextLogout("http");
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Could not clear session.");
+    expect(screen.queryByLabelText("Password")).toBeNull();
+
+    server.failNextLogout("network");
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("Could not sign out. Try again.");
+    });
+    expect(screen.queryByLabelText("Password")).toBeNull();
+
+    // Retry succeeds and returns to the login screen.
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(await screen.findByLabelText("Password")).toBeTruthy();
   });
 });

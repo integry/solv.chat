@@ -1,5 +1,5 @@
 import type { WidgetConfig, WidgetPosition } from "@solvchat/core";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, patchJson, postJson, putJson } from "../api/client.js";
 import type { Assistant, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
@@ -56,6 +56,10 @@ export function Widget({ assistantId }: WidgetProps) {
   const [formError, setFormError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
+  const latestRef = useRef({ title, accentColor, position, originsText });
+  latestRef.current = { title, accentColor, position, originsText };
+  const inFlightRef = useRef(false);
+
   useEffect(() => {
     if (!savedWidget) return;
     const key = `${assistantId}:${draftRes.value?.draft.id ?? ""}`;
@@ -69,7 +73,7 @@ export function Widget({ assistantId }: WidgetProps) {
 
   useEffect(() => {
     if (!savedAssistant) return;
-    const key = `${assistantId}:${savedAssistant.allowedOrigins.join("\n")}`;
+    const key = `${assistantId}:${savedAssistant.id}`;
     if (initOriginsKey !== key) {
       setOriginsText(savedAssistant.allowedOrigins.join("\n"));
       setInitOriginsKey(key);
@@ -109,65 +113,81 @@ export function Widget({ assistantId }: WidgetProps) {
 
   async function handleSave(event: FormEvent) {
     event.preventDefault();
-    if (!savedAssistant) return;
+    if (!savedAssistant || inFlightRef.current || saving || publishing) return;
 
+    inFlightRef.current = true;
     setSaving(true);
     setFieldErrors({});
     setFormError(null);
     setStatusMessage(null);
 
+    const submittedOriginsText = originsText;
+    const submittedWidget = { title, accentColor, position };
     const nextFieldErrors: Record<string, string> = {};
     let generalError: string | null = null;
 
-    if (originsChanged) {
-      try {
-        const res = await patchJson<{ assistant: Assistant }>(
-          `/api/admin/assistants/${assistantId}`,
-          { name: savedAssistant.name, allowedOrigins: currentOrigins },
-        );
-        assistantRes.setValue(res);
-        setOriginsText(res.assistant.allowedOrigins.join("\n"));
-      } catch (err) {
-        if (err instanceof ApiError) {
-          Object.assign(nextFieldErrors, err.fields);
-          if (Object.keys(err.fields).length === 0) generalError = err.message;
-        } else {
-          generalError = "Could not save allowed origins.";
+    try {
+      if (originsChanged) {
+        try {
+          const res = await patchJson<{ assistant: Assistant }>(
+            `/api/admin/assistants/${assistantId}`,
+            { name: savedAssistant.name, allowedOrigins: currentOrigins },
+          );
+          assistantRes.setValue(res);
+          if (latestRef.current.originsText === submittedOriginsText) {
+            setOriginsText(res.assistant.allowedOrigins.join("\n"));
+          }
+        } catch (err) {
+          if (err instanceof ApiError) {
+            Object.assign(nextFieldErrors, err.fields);
+            if (Object.keys(err.fields).length === 0) generalError = err.message;
+          } else {
+            generalError = "Could not save allowed origins.";
+          }
         }
       }
-    }
 
-    if (widgetChanged) {
-      try {
-        const res = await putJson<{ draft: VersionRow }>(
-          `/api/admin/assistants/${assistantId}/draft`,
-          { widget: currentWidget },
-        );
-        draftRes.setValue(res);
-        setTitle(res.draft.config.widget.title);
-        setAccentColor(res.draft.config.widget.accentColor);
-        setPosition(res.draft.config.widget.position);
-      } catch (err) {
-        if (err instanceof ApiError) {
-          Object.assign(nextFieldErrors, err.fields);
-          if (Object.keys(err.fields).length === 0) generalError = err.message;
-        } else {
-          generalError = "Could not save widget settings.";
+      if (widgetChanged) {
+        try {
+          const res = await putJson<{ draft: VersionRow }>(
+            `/api/admin/assistants/${assistantId}/draft`,
+            { widget: currentWidget },
+          );
+          draftRes.setValue(res);
+          if (latestRef.current.title === submittedWidget.title) {
+            setTitle(res.draft.config.widget.title);
+          }
+          if (latestRef.current.accentColor === submittedWidget.accentColor) {
+            setAccentColor(res.draft.config.widget.accentColor);
+          }
+          if (latestRef.current.position === submittedWidget.position) {
+            setPosition(res.draft.config.widget.position);
+          }
+        } catch (err) {
+          if (err instanceof ApiError) {
+            Object.assign(nextFieldErrors, err.fields);
+            if (Object.keys(err.fields).length === 0) generalError = err.message;
+          } else {
+            generalError = "Could not save widget settings.";
+          }
         }
       }
-    }
 
-    if (Object.keys(nextFieldErrors).length > 0 || generalError !== null) {
-      setFieldErrors(nextFieldErrors);
-      setFormError(generalError);
-    } else {
-      setStatusMessage("Draft saved.");
+      if (Object.keys(nextFieldErrors).length > 0 || generalError !== null) {
+        setFieldErrors(nextFieldErrors);
+        setFormError(generalError);
+      } else {
+        setStatusMessage("Draft saved.");
+      }
+    } finally {
+      inFlightRef.current = false;
+      setSaving(false);
     }
-
-    setSaving(false);
   }
 
   async function handlePublish() {
+    if (inFlightRef.current || saving || publishing) return;
+    inFlightRef.current = true;
     setPublishing(true);
     setFormError(null);
     setStatusMessage(null);
@@ -183,6 +203,7 @@ export function Widget({ assistantId }: WidgetProps) {
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : "Could not publish.");
     } finally {
+      inFlightRef.current = false;
       setPublishing(false);
     }
   }
@@ -208,7 +229,7 @@ export function Widget({ assistantId }: WidgetProps) {
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={publishing}
+            disabled={saving || publishing}
             onClick={handlePublish}
           >
             {publishing ? "Publishing…" : "Publish"}
@@ -235,6 +256,7 @@ export function Widget({ assistantId }: WidgetProps) {
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
+            disabled={saving}
           />
           {fieldErrors["widget.title"] && (
             <p className="field-error" role="alert">
@@ -252,6 +274,7 @@ export function Widget({ assistantId }: WidgetProps) {
               value={accentColor}
               onChange={(e) => setAccentColor(e.target.value)}
               placeholder="#2563eb"
+              disabled={saving}
             />
             <span
               className="color-swatch"
@@ -277,6 +300,7 @@ export function Widget({ assistantId }: WidgetProps) {
             className="select"
             value={position}
             onChange={(e) => setPosition(e.target.value as WidgetPosition)}
+            disabled={saving}
           >
             <option value="right">Right</option>
             <option value="left">Left</option>
@@ -296,6 +320,7 @@ export function Widget({ assistantId }: WidgetProps) {
             value={originsText}
             onChange={(e) => setOriginsText(e.target.value)}
             placeholder="https://example.com"
+            disabled={saving}
           />
           <span className="field-hint">Websites allowed to embed this widget, one per line.</span>
           {originsError && (
@@ -306,7 +331,11 @@ export function Widget({ assistantId }: WidgetProps) {
         </div>
 
         <div className="actions">
-          <button type="submit" className="btn btn-primary" disabled={!unsaved || saving}>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={!unsaved || saving || publishing}
+          >
             {saving ? "Saving…" : "Save"}
           </button>
         </div>

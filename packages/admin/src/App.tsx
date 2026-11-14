@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ApiError } from "./api/client.js";
 import type { Assistant } from "./api/types.js";
 import { useResource } from "./api/useResource.js";
 import { NAV_ITEMS, type ScreenId, useRoute } from "./routing.js";
@@ -29,6 +30,21 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
+
+  async function handleSignOut() {
+    if (signingOut) return;
+    setSigningOut(true);
+    setSignOutError(null);
+    try {
+      await onSignOut();
+    } catch (err) {
+      setSignOutError(err instanceof ApiError ? err.message : "Could not sign out. Try again.");
+    } finally {
+      setSigningOut(false);
+    }
+  }
 
   const effectiveSelectedId =
     selectedId !== null && assistants.some((a) => a.id === selectedId)
@@ -49,10 +65,20 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
             setSelectedId(created.id);
           }}
         />
-        <button type="button" className="btn btn-secondary btn-sm" onClick={() => void onSignOut()}>
-          Sign out
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          disabled={signingOut}
+          onClick={() => void handleSignOut()}
+        >
+          {signingOut ? "Signing out…" : "Sign out"}
         </button>
       </header>
+      {signOutError && (
+        <div className="shell-alert" role="alert">
+          <p className="error-text">{signOutError}</p>
+        </div>
+      )}
 
       <div className="shell-body">
         <Navigation current={screen} onNavigate={navigate} />
