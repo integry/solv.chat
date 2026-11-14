@@ -57,7 +57,7 @@ export function Overview({ assistantId }: OverviewProps) {
             <section className="source-card stack" aria-label="Today's cost">
               <div className="stat-label">Today&apos;s cost</div>
               <div className="stat-value">{formatUsd(overviewRes.value.todayCostMicros)}</div>
-              <p className="muted">Estimated model cost so far today.</p>
+              <p className="muted">Estimated cost so far today.</p>
             </section>
           </div>
 

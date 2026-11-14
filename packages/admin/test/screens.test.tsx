@@ -198,7 +198,7 @@ describe("admin phase 1 screens", () => {
       screen.getByText("Share of questions your assistant could answer from your content."),
     ).toBeTruthy();
     expect(screen.getByText("$0.02")).toBeTruthy();
-    expect(screen.getByText("Estimated model cost so far today.")).toBeTruthy();
+    expect(screen.getByText("Estimated cost so far today.")).toBeTruthy();
     expect(screen.getByText("how much does it cost?")).toBeTruthy();
     expect(screen.getByText("7 times")).toBeTruthy();
   });
