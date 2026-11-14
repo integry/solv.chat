@@ -40,6 +40,7 @@ export interface App {
 
 export interface AppOptions {
   chat?: ChatRouteOverrides | undefined;
+  fetch?: typeof fetch | undefined;
 }
 
 /** Creates the Worker fetch and queue handlers wired to the given extension seams. */
@@ -107,7 +108,14 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         if (url.pathname === "/api/admin/chat") {
           return adminChatRoute(request, env, seams, ctx, principal, options?.chat);
         }
-        return adminRoutes(request, url, forPrincipal(env.DB, principal));
+        return adminRoutes(request, url, {
+          tenant: forPrincipal(env.DB, principal),
+          orgId: principal.orgId,
+          docs: env.DOCS,
+          queue: env.INGEST_QUEUE,
+          publicBaseUrl: url.origin,
+          fetchImpl: options?.fetch,
+        });
       }
       if (
         (request.method === "GET" || request.method === "HEAD") &&

@@ -21,6 +21,16 @@ export interface SourceRow {
   createdAt: number;
 }
 
+export interface SourceWithStatsRow extends SourceRow {
+  documentCount: number;
+  lastUpdatedAt: number | null;
+}
+
+interface StatsRow extends Row {
+  document_count: number;
+  last_updated_at: number | null;
+}
+
 export interface CreateSourceInput {
   id: string;
   assistantId: string;
@@ -58,6 +68,37 @@ export function sourcesFor(db: D1Database, orgId: string) {
         .bind(orgId, assistantId)
         .all<Row>();
       return res.results.map(map);
+    },
+
+    async listWithStats(assistantId: string): Promise<SourceWithStatsRow[]> {
+      const res = await prepare(
+        db,
+        `SELECT s.id, s.org_id, s.assistant_id, s.kind, s.label, s.settings, s.created_at,
+                COUNT(d.id) AS document_count,
+                MAX(d.updated_at) AS last_updated_at
+         FROM sources s
+         LEFT JOIN documents d ON d.org_id = s.org_id AND d.source_id = s.id
+         WHERE s.org_id = ?1 AND s.assistant_id = ?2
+         GROUP BY s.id
+         ORDER BY s.created_at ASC`,
+      )
+        .bind(orgId, assistantId)
+        .all<StatsRow>();
+      return res.results.map((row) => ({
+        ...map(row),
+        documentCount: Number(row.document_count ?? 0),
+        lastUpdatedAt: row.last_updated_at ?? null,
+      }));
+    },
+
+    async getFirstByKind(assistantId: string, kind: SourceKind): Promise<SourceRow | null> {
+      const row = await prepare(
+        db,
+        `SELECT ${COLUMNS} FROM sources WHERE org_id = ?1 AND assistant_id = ?2 AND kind = ?3 ORDER BY created_at ASC LIMIT 1`,
+      )
+        .bind(orgId, assistantId, kind)
+        .first<Row>();
+      return row ? map(row) : null;
     },
 
     async get(id: string): Promise<SourceRow | null> {

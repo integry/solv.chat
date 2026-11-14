@@ -6,6 +6,7 @@ import { NAV_ITEMS, type ScreenId, useRoute } from "./routing.js";
 import { Behaviour } from "./screens/Behaviour.js";
 import { Login } from "./screens/Login.js";
 import { Placeholder } from "./screens/Placeholder.js";
+import { Sources } from "./screens/Sources.js";
 import { Widget } from "./screens/Widget.js";
 import { AssistantSwitcher } from "./shell/AssistantSwitcher.js";
 import { Navigation } from "./shell/Navigation.js";
@@ -15,6 +16,8 @@ import { useSession } from "./shell/useSession.js";
 
 function renderScreen(screen: ScreenId, assistantId: string) {
   switch (screen) {
+    case "sources":
+      return <Sources key={assistantId} assistantId={assistantId} />;
     case "behaviour":
       return <Behaviour key={assistantId} assistantId={assistantId} />;
     case "widget":

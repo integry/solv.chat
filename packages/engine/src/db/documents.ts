@@ -35,6 +35,15 @@ export interface DocumentRow {
   updatedAt: number;
 }
 
+export interface DocumentSummaryRow {
+  id: string;
+  sourceId: string;
+  externalId: string;
+  url: string;
+  title: string;
+  updatedAt: number;
+}
+
 export interface ExistingDocumentState {
   id: string;
   url: string;
@@ -116,6 +125,45 @@ export function documentsFor(db: D1Database, orgId: string) {
         .bind(orgId, sourceId)
         .all<DocumentDbRow>();
       return res.results.map(mapDocument);
+    },
+
+    async listBySourcePaged(
+      sourceId: string,
+      options: { limit: number; offset: number },
+    ): Promise<{ documents: DocumentSummaryRow[]; total: number }> {
+      const [rows, countRow] = await Promise.all([
+        prepare(
+          db,
+          `SELECT id, source_id, external_id, url, title, updated_at
+           FROM documents
+           WHERE org_id = ?1 AND source_id = ?2
+           ORDER BY updated_at DESC, id ASC
+           LIMIT ?3 OFFSET ?4`,
+        )
+          .bind(orgId, sourceId, options.limit, options.offset)
+          .all<{
+            id: string;
+            source_id: string;
+            external_id: string;
+            url: string;
+            title: string;
+            updated_at: number;
+          }>(),
+        prepare(db, "SELECT COUNT(*) AS total FROM documents WHERE org_id = ?1 AND source_id = ?2")
+          .bind(orgId, sourceId)
+          .first<{ total: number }>(),
+      ]);
+      return {
+        documents: rows.results.map((row) => ({
+          id: row.id,
+          sourceId: row.source_id,
+          externalId: row.external_id,
+          url: row.url,
+          title: row.title,
+          updatedAt: row.updated_at,
+        })),
+        total: Number(countRow?.total ?? 0),
+      };
     },
 
     async get(id: string): Promise<DocumentRow | null> {
