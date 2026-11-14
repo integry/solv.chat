@@ -571,7 +571,11 @@ describe("<solv-chat>", () => {
     expect(saved.conversationId).toBe("conv_re2");
     expect(saved.turns).toEqual([
       { role: "user", text: "First question" },
-      { role: "assistant", text: "Partial " },
+      {
+        role: "assistant",
+        text: "Partial ",
+        error: "Response interrupted. Please try again.",
+      },
       { role: "user", text: "Second question" },
       { role: "assistant", text: "Second answer", messageId: "msg_re2" },
     ]);
@@ -1146,6 +1150,98 @@ describe("<solv-chat>", () => {
       { role: "assistant", text: "Answer A", messageId: "msg_a" },
       { role: "user", text: "Question B" },
       { role: "assistant", text: "Answer B", messageId: "msg_b" },
+    ]);
+  });
+
+  it("reloads sessionStorage on reconnect so a re-attached element reflects a newer conversation", async () => {
+    const sentBodies: Array<{ message: string; conversationId?: string }> = [];
+    let chatCall = 0;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        chatCall += 1;
+        sentBodies.push(
+          JSON.parse(String(init?.body)) as { message: string; conversationId?: string },
+        );
+        if (chatCall === 1) {
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"Answer A"}\n\n',
+              'event: done\ndata: {"messageId":"msg_a","conversationId":"conv_a"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        if (chatCall === 2) {
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"Answer B"}\n\n',
+              'event: done\ndata: {"messageId":"msg_b","conversationId":"conv_b"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response(
+          sseStream([
+            'event: token\ndata: {"text":"Answer C"}\n\n',
+            'event: done\ndata: {"messageId":"msg_c","conversationId":"conv_b"}\n\n',
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const widgetA = mountWidget("pk_reattach");
+    await flushAsync();
+    const rootA = shadow(widgetA);
+
+    mustQuery<HTMLButtonElement>(rootA, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(rootA, "#solv-input").value = "Question A";
+    mustQuery<HTMLFormElement>(rootA, ".solv-form").requestSubmit();
+    await flushAsync();
+    widgetA.remove();
+
+    const widgetB = mountWidget("pk_reattach");
+    await flushAsync();
+    const rootB = shadow(widgetB);
+    expect(rootB.textContent).toContain("Question A");
+    expect(rootB.textContent).toContain("Answer A");
+
+    mustQuery<HTMLTextAreaElement>(rootB, "#solv-input").value = "Question B";
+    mustQuery<HTMLFormElement>(rootB, ".solv-form").requestSubmit();
+    await flushAsync();
+    widgetB.remove();
+
+    document.body.append(widgetA);
+    await flushAsync();
+
+    expect(rootA.textContent).toContain("Question A");
+    expect(rootA.textContent).toContain("Answer A");
+    expect(rootA.textContent).toContain("Question B");
+    expect(rootA.textContent).toContain("Answer B");
+
+    mustQuery<HTMLTextAreaElement>(rootA, "#solv-input").value = "Question C";
+    mustQuery<HTMLFormElement>(rootA, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    expect(sentBodies.map((b) => b.conversationId)).toEqual([undefined, "conv_a", "conv_b"]);
+
+    const rawSaved = sessionStorage.getItem("solv-chat-open:pk_reattach");
+    expect(rawSaved).not.toBeNull();
+    const saved = JSON.parse(String(rawSaved)) as {
+      conversationId: string | null;
+      turns: Array<{ role: string; text: string; messageId?: string }>;
+    };
+    expect(saved.conversationId).toBe("conv_b");
+    expect(saved.turns).toEqual([
+      { role: "user", text: "Question A" },
+      { role: "assistant", text: "Answer A", messageId: "msg_a" },
+      { role: "user", text: "Question B" },
+      { role: "assistant", text: "Answer B", messageId: "msg_b" },
+      { role: "user", text: "Question C" },
+      { role: "assistant", text: "Answer C", messageId: "msg_c" },
     ]);
   });
 });

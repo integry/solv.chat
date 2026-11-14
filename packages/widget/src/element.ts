@@ -80,7 +80,6 @@ function parsePublicConfig(raw: unknown): Partial<WidgetPublicConfig> {
 export class SolvChat extends HTMLElement {
   #root = this.attachShadow({ mode: "open" });
   #owner = Symbol();
-  #claimedAssistant: string | null = null;
   #initialized = false;
   #open = false;
   #sending = false;
@@ -109,13 +108,8 @@ export class SolvChat extends HTMLElement {
     const assistant = this.#assistant();
     if (assistant) {
       claimConversation(assistant, this.#owner);
-      if (this.#claimedAssistant === null) {
-        this.#claimedAssistant = assistant;
-        const saved = loadConversation(assistant);
-        if (saved !== null) {
-          this.#restore(saved);
-        }
-      }
+      const saved = loadConversation(assistant);
+      this.#restore(saved ?? { conversationId: null, open: false, turns: [] });
     }
 
     void this.#loadConfig();
@@ -388,8 +382,14 @@ export class SolvChat extends HTMLElement {
 
     if (saved.open) {
       this.#openPanel(false);
-    } else if (restoredUnfinished) {
-      this.#persist();
+    } else {
+      this.#open = false;
+      this.#panel.hidden = true;
+      this.#launcher.setAttribute("aria-expanded", "false");
+      this.#launcher.setAttribute("aria-label", "Open chat");
+      if (restoredUnfinished) {
+        this.#persist();
+      }
     }
   }
 
