@@ -1,4 +1,15 @@
 import type { Seams } from "./seams/types.js";
+import { WIDGET_BUNDLE } from "./widgetBundle.js";
+
+function widgetAsset(): Response {
+  return new Response(WIDGET_BUNDLE, {
+    status: 200,
+    headers: {
+      "content-type": "application/javascript; charset=utf-8",
+      "cache-control": "public, max-age=86400",
+    },
+  });
+}
 
 export interface Env {
   DB: D1Database;
@@ -22,6 +33,13 @@ export function createApp(seams: Seams): App {
         // than one that fails, because deploys look healthy.
         await env.DB.prepare("SELECT 1").first();
         return Response.json({ ok: true });
+      }
+      if (request.method === "GET" && url.pathname === "/widget.js") {
+        // Long cache: the owner embeds a stable URL, so a long max-age keeps
+        // the script tag from costing a round trip on every page view. Forward
+        // compatibility is handled by the protocol version rather than by
+        // making owners bust a cache.
+        return widgetAsset();
       }
       if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
         if (request.method !== "GET" && request.method !== "HEAD") {
