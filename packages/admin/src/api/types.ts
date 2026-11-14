@@ -82,6 +82,8 @@ export interface ConversationTurn {
   createdAt: number;
   feedback: ConversationFeedback[];
   answerDocumentId: string | null;
+  /** For a reply, the question it answered; null for questions and older rows. */
+  replyTo: string | null;
 }
 
 export interface ConversationDetail {

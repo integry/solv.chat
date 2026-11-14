@@ -256,6 +256,72 @@ describe("<solv-chat>", () => {
     expect(document.cookie).toBe("");
   });
 
+  describe("on a plain-http page, where crypto.randomUUID does not exist", () => {
+    beforeEach(() => {
+      // Secure-context-only: an owner may list an http: origin, and there the
+      // browser exposes getRandomValues but not randomUUID.
+      Object.defineProperty(crypto, "randomUUID", { value: undefined, configurable: true });
+    });
+
+    afterEach(() => {
+      Reflect.deleteProperty(crypto, "randomUUID");
+    });
+
+    async function askAndVote(): Promise<{ chat: string[]; feedback: string[] }> {
+      const chat: string[] = [];
+      const feedback: string[] = [];
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const body = JSON.parse(String(init?.body ?? "{}")) as { visitorId?: string };
+        if (url.endsWith("/v1/chat")) {
+          chat.push(body.visitorId ?? "");
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"Hi"}\n\n',
+              'event: done\ndata: {"messageId":"msg_http_1","conversationId":"cnv_http_1"}\n\n',
+            ]),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/v1/feedback")) {
+          feedback.push(body.visitorId ?? "");
+          return new Response(null, { status: 204 });
+        }
+        return Response.json({});
+      }) as typeof fetch;
+
+      const el = mountWidget("pk_http");
+      await flushAsync();
+      const root = shadow(el);
+      mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Q over http";
+      mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+      await flushAsync();
+      expect(root.textContent).not.toContain("Unable to reach the assistant");
+      mustQuery<HTMLButtonElement>(root, 'button[aria-label="Helpful"]').click();
+      await flushAsync();
+      expect(root.textContent).toContain("Thanks for the feedback.");
+      return { chat, feedback };
+    }
+
+    it("still sends messages and feedback with a stored visitor id", async () => {
+      const { chat, feedback } = await askAndVote();
+      expect(chat).toHaveLength(1);
+      expect(chat[0]).toMatch(/^[0-9a-f]{32}$/);
+      expect(feedback).toEqual(chat);
+      expect(localStorage.getItem("solv-chat-visitor")).toBe(chat[0]);
+    });
+
+    it("still sends when localStorage is unavailable too", async () => {
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new Error("storage blocked");
+      });
+      const { chat, feedback } = await askAndVote();
+      expect(chat).toHaveLength(1);
+      expect(chat[0]).toMatch(/^[0-9a-f]{32}$/);
+      expect(feedback).toEqual(chat);
+    });
+  });
+
   it("posts feedback once per message and shows an acknowledgement", async () => {
     const feedbackPosts: Array<Record<string, unknown>> = [];
 

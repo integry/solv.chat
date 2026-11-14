@@ -4,6 +4,7 @@ import {
   MAX_DOCUMENT_MARKDOWN_BYTES,
   newId,
   parseDocumentInput,
+  type SourceKind,
 } from "@solvchat/core";
 import { BadRequest, NotFound } from "../admin/errors.js";
 import type { DocumentRow } from "../db/documents.js";
@@ -15,6 +16,15 @@ import { sha256Hex } from "../util/crypto.js";
 export const MAX_BATCH_DOCUMENTS = 100;
 
 export class TooLarge extends Error {}
+
+export interface SourceOptions {
+  /**
+   * When set, a `sourceId` in the body must name a source of this kind. The
+   * ingest route passes `"push"`: an ingest key with a mistyped `--source-id`
+   * must not overwrite or prune hand-written answers or a sitemap import.
+   */
+  requireKind?: SourceKind | undefined;
+}
 
 export interface IngestCounts {
   written: number;
@@ -89,6 +99,7 @@ async function findExistingSource(
   tenant: Tenant,
   assistantId: string,
   sourceId: unknown,
+  options: SourceOptions,
 ): Promise<SourceRow | null> {
   if (sourceId !== undefined && sourceId !== null) {
     if (typeof sourceId !== "string" || sourceId.trim() === "") {
@@ -97,6 +108,9 @@ async function findExistingSource(
     const source = await tenant.sources.get(sourceId);
     if (source === null || source.assistantId !== assistantId) {
       throw new NotFound();
+    }
+    if (options.requireKind !== undefined && source.kind !== options.requireKind) {
+      throw new BadRequest([`sourceId: must be a ${options.requireKind} source`]);
     }
     return source;
   }
@@ -108,9 +122,10 @@ async function resolveOrCreatePushSource(
   tenant: Tenant,
   assistantId: string,
   sourceId: unknown,
+  options: SourceOptions,
 ): Promise<SourceRow> {
   if (sourceId !== undefined && sourceId !== null) {
-    const existing = await findExistingSource(tenant, assistantId, sourceId);
+    const existing = await findExistingSource(tenant, assistantId, sourceId, options);
     if (existing !== null) return existing;
     throw new NotFound();
   }
@@ -145,6 +160,7 @@ export async function pushDocuments(
   deps: PushDeps,
   scope: IngestScope,
   rawBody: unknown,
+  options: SourceOptions = {},
 ): Promise<IngestCounts> {
   if (!isPlainObject(rawBody)) {
     throw new BadRequest(["body: must be a JSON object"]);
@@ -173,7 +189,12 @@ export async function pushDocuments(
     return parsed.value;
   });
 
-  const source = await resolveOrCreatePushSource(deps.tenant, scope.assistantId, rawBody.sourceId);
+  const source = await resolveOrCreatePushSource(
+    deps.tenant,
+    scope.assistantId,
+    rawBody.sourceId,
+    options,
+  );
   const existing = await deps.tenant.documents.existingFor(
     source.id,
     documents.map((doc) => doc.externalId),
@@ -269,6 +290,7 @@ export async function deleteDocuments(
   deps: DeleteDeps,
   scope: IngestScope,
   rawBody: unknown,
+  options: SourceOptions = {},
 ): Promise<IngestCounts> {
   if (!isPlainObject(rawBody)) {
     throw new BadRequest(["body: must be a JSON object"]);
@@ -287,7 +309,12 @@ export async function deleteDocuments(
     ? [...new Set(readStringArray(rawBody.externalIds, "externalIds"))]
     : [];
 
-  const source = await findExistingSource(deps.tenant, scope.assistantId, rawBody.sourceId);
+  const source = await findExistingSource(
+    deps.tenant,
+    scope.assistantId,
+    rawBody.sourceId,
+    options,
+  );
   if (source === null) {
     return { written: 0, unchanged: 0, deleted: 0 };
   }

@@ -3,6 +3,12 @@ import type { Limits } from "../seams/types.js";
 
 export type CheckFailureReason = "origin" | "rate_limit" | "spend_cap";
 
+/**
+ * Which budget a public request spends. `config` is the widget's config read:
+ * limited separately so page loads never use up the visitor's questions.
+ */
+export type PublicActionKind = "chat" | "config";
+
 export interface CheckFailure {
   reason: CheckFailureReason;
   message: string;
@@ -42,17 +48,20 @@ export async function checkLimits(
   limits: Limits,
   assistant: Pick<PublicAssistant, "id" | "orgId">,
   request: Request,
+  kind: PublicActionKind = "chat",
 ): Promise<CheckFailure | null> {
   const ip = request.headers.get("cf-connecting-ip") ?? "";
   // Rate limit and spend cap are one seam call: the hosted service replaces the
   // whole policy at once, which is what "Extension seams" intends.
-  const decision = await limits.check(assistant.orgId, assistant.id, { kind: "chat", ip });
+  const decision = await limits.check(assistant.orgId, assistant.id, { kind, ip });
   if (!decision.ok) {
     return {
       reason: decision.reason,
       message:
         decision.reason === "rate_limit"
-          ? "Too many questions just now. Please wait a moment."
+          ? kind === "config"
+            ? "Too many requests just now. Please wait a moment."
+            : "Too many questions just now. Please wait a moment."
           : "This assistant has reached its limit for today.",
     };
   }
@@ -67,6 +76,7 @@ export async function runPublicChecks(
   limits: Limits,
   assistant: Pick<PublicAssistant, "id" | "orgId" | "allowedOrigins">,
   request: Request,
+  kind: PublicActionKind = "chat",
 ): Promise<CheckFailure | null> {
   // A missing Origin is a failure, not a pass: browsers send it on cross-origin
   // POSTs, and treating absence as "fine" would hand anyone with curl a free
@@ -76,5 +86,5 @@ export async function runPublicChecks(
     // which origins are configured.
     return { reason: "origin", message: "This assistant is not available on this page." };
   }
-  return checkLimits(limits, assistant, request);
+  return checkLimits(limits, assistant, request, kind);
 }

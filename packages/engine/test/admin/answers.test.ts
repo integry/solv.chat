@@ -457,5 +457,15 @@ describe("admin answers API", () => {
     const docByTurn = Object.fromEntries(detail.turns.map((t) => [t.id, t.answerDocumentId]));
     expect(docByTurn[replyA]).toBe(saved.documentId);
     expect(docByTurn[replyB]).toBeNull();
+
+    // The admin resolves a reply's question from this field, not from the
+    // turn order the timestamps produce.
+    const replyToByTurn = Object.fromEntries(detail.turns.map((t) => [t.id, t.replyTo]));
+    expect(replyToByTurn).toEqual({
+      [questionA]: null,
+      [questionB]: null,
+      [replyA]: questionA,
+      [replyB]: questionB,
+    });
   });
 });

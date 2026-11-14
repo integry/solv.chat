@@ -4,10 +4,15 @@ import { isPlainObject } from "@solvchat/core";
 import { assertValidHeaderValue, CliError, normalizeEndpoint, requestJson } from "./http.js";
 import { externalIdFor, firstHeading, markdownFiles, splitFrontMatter } from "./markdown.js";
 
-// One request per 50 documents: the ingest API caps a batch at 100, and staying
-// under it leaves room for the API to lower the cap without breaking older
-// CLIs in the middle of a deploy.
-export const BATCH_SIZE = 50;
+// One request per 10 documents, sized to Workers Free rather than the ingest
+// API's cap of 100. Cloudflare counts calls to R2 and D1 as subrequests, and
+// Free allows "50/request" ("10,000/request" on Paid). A changed document
+// costs an R2 put, a D1 upsert and a queue send, plus a few fixed lookups per
+// request, so ten documents stay under 50 with room to spare; this is the same
+// accounting the sitemap import uses for its five-page batches. Ingest has no
+// rate limit, so more, smaller requests cost nothing else.
+// Source: https://developers.cloudflare.com/workers/platform/limits/ — checked 2026-11-14
+export const BATCH_SIZE = 10;
 
 export interface PushDocument {
   externalId?: unknown;

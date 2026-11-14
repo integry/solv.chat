@@ -77,6 +77,51 @@ describe("basicLimits", () => {
     ).toEqual({ ok: true });
   });
 
+  it("counts config reads separately from questions, with their own larger budget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-01T12:00:00Z"));
+    const limits = basicLimits(env.DB, async () => 0);
+    const ip = "198.51.100.40";
+
+    for (let i = 0; i < 60; i++) {
+      expect(await limits.check(SINGLE_ORG_ID, "ast_1", { kind: "config", ip })).toEqual({
+        ok: true,
+      });
+    }
+    expect(await limits.check(SINGLE_ORG_ID, "ast_1", { kind: "config", ip })).toEqual({
+      ok: false,
+      reason: "rate_limit",
+    });
+
+    // Sixty page loads later, all twenty questions are still there.
+    for (let i = 0; i < 20; i++) {
+      expect(await limits.check(SINGLE_ORG_ID, "ast_1", { kind: "chat", ip })).toEqual({
+        ok: true,
+      });
+    }
+    expect(await limits.check(SINGLE_ORG_ID, "ast_1", { kind: "chat", ip })).toEqual({
+      ok: false,
+      reason: "rate_limit",
+    });
+  });
+
+  it("still applies the spend cap to config reads", async () => {
+    const now = Date.now();
+    await usageDaily(env.DB).record({
+      orgId: SINGLE_ORG_ID,
+      assistantId: "ast_1",
+      at: now,
+      messages: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costMicros: 1000,
+    });
+    const limits = basicLimits(env.DB, async () => 1000);
+    expect(
+      await limits.check(SINGLE_ORG_ID, "ast_1", { kind: "config", ip: "198.51.100.41" }),
+    ).toEqual({ ok: false, reason: "spend_cap" });
+  });
+
   it("does not refuse ingest when the day's chat spend has reached the cap", async () => {
     const sink = usageDaily(env.DB);
     const limits = basicLimits(env.DB, async () => 1000);

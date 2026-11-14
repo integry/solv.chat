@@ -57,6 +57,8 @@ SOLV_INGEST_KEY=<the key> npx solv push ./content \
   --endpoint https://<your-worker> --assistant ast_… --base-url https://example.com
 ```
 
+`solv push` sends 10 documents per request so each request fits the Workers Free limit of 50 subrequests (calls to R2 and D1 count; see [Cloudflare's limits page](https://developers.cloudflare.com/workers/platform/limits/)). If you call the ingest API yourself, keep batches that small on Free; batches up to the API's cap of 100 need the Paid plan.
+
 5. In `/admin`, open **Behaviour** (or **Widget**) and click **Publish** so the assistant goes live.
 6. Open **Install**, copy the `<script>` tag, paste it into your site, and ask a question.
 

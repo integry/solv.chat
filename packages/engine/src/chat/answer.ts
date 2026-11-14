@@ -197,6 +197,9 @@ export async function* answerMessage(
     // request to have the model say so is waste — and it might answer anyway
     // from its own training.
     yield { type: "token", text: input.behaviour.fallbackText };
+    // Counted before the reply is stored, as on the model path below: the
+    // visitor has already been answered, so a failing write must not erase it.
+    await recordMessageUsage(deps, input, clock(), 0, 0, 0);
     const messageId = newId("msg");
     if (!input.preview) {
       await deps.tenant.messages.create({
@@ -213,7 +216,6 @@ export async function* answerMessage(
         replyTo: questionId,
       });
     }
-    await recordMessageUsage(deps, input, clock(), 0, 0, 0);
     yield { type: "done", messageId, conversationId };
     return;
   }
@@ -244,22 +246,37 @@ export async function* answerMessage(
       }
     }
   } catch (err) {
+    // Whatever ended the stream, tokens the provider already reported are
+    // billed and must reach the usage sink.
+    if (usageReported) {
+      await recordMessageUsage(
+        deps,
+        input,
+        clock(),
+        tokensIn,
+        tokensOut,
+        costMicros(deps.model, tokensIn, tokensOut),
+      );
+    }
     if (err instanceof ProviderError) {
-      if (usageReported) {
-        await recordMessageUsage(
-          deps,
-          input,
-          clock(),
-          tokensIn,
-          tokensOut,
-          costMicros(deps.model, tokensIn, tokensOut),
-        );
-      }
       yield { type: "error", message: "The assistant could not complete this response." };
       return;
     }
     throw err;
   }
+
+  // The model request is billed the moment the stream completes, so its usage
+  // is recorded before anything else can fail: emitting citations and storing
+  // the reply both come after, and a rejected D1 write must not leave spend
+  // out of Overview or the cap check. Recorded exactly once on this path.
+  await recordMessageUsage(
+    deps,
+    input,
+    clock(),
+    tokensIn,
+    tokensOut,
+    costMicros(deps.model, tokensIn, tokensOut),
+  );
 
   // Citations after the text: the widget renders them under the answer, and
   // emitting them first would show links before there is anything to link to.
@@ -285,15 +302,6 @@ export async function* answerMessage(
       replyTo: questionId,
     });
   }
-
-  await recordMessageUsage(
-    deps,
-    input,
-    clock(),
-    tokensIn,
-    tokensOut,
-    costMicros(deps.model, tokensIn, tokensOut),
-  );
 
   yield { type: "done", messageId, conversationId };
 }

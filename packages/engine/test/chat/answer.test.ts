@@ -2,11 +2,13 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import { defaultVersionConfig, parseChatEventLine } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/app.js";
+import { answerMessage } from "../../src/chat/answer.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { ANTHROPIC_MODELS, costMicros, OPENAI_MODELS } from "../../src/models.js";
 import { ProviderError } from "../../src/providers/error.js";
 import { embeddingCostMicros } from "../../src/providers/retrieval.js";
 import type { LlmProvider, LlmRequest } from "../../src/providers/types.js";
+import type { UsageEvent } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
@@ -846,6 +848,153 @@ describe("chat/answer", () => {
       );
     },
   );
+
+  describe("F19: model usage survives a failing reply write", () => {
+    // A tenant whose assistant-message insert rejects; the visitor's question
+    // is still written for real.
+    function tenantFailingReplyWrite(): typeof tenant {
+      return {
+        ...tenant,
+        messages: {
+          ...tenant.messages,
+          async create(row: Parameters<typeof tenant.messages.create>[0]) {
+            if (row.role === "assistant") throw new Error("d1 write rejected");
+            return tenant.messages.create(row);
+          },
+        },
+      };
+    }
+
+    async function drain(events: AsyncIterable<unknown>): Promise<unknown[]> {
+      const out: unknown[] = [];
+      for await (const event of events) out.push(event);
+      return out;
+    }
+
+    const behaviour = defaultVersionConfig().behaviour;
+
+    it("records the billed model tokens once when the reply write rejects after a complete stream", async () => {
+      const usage = vi.fn(async (_event: UsageEvent) => {});
+      const provider: LlmProvider = {
+        name: "anthropic",
+        model: ANTHROPIC_MODELS.fast.id,
+        async *stream() {
+          yield { kind: "text", text: "Click Forgot Password." };
+          yield { kind: "usage", tokensIn: 210, tokensOut: 45 };
+        },
+      };
+
+      await expect(
+        drain(
+          answerMessage(
+            {
+              tenant: tenantFailingReplyWrite(),
+              embedder,
+              retriever,
+              provider,
+              model: ANTHROPIC_MODELS.fast,
+              usage: { record: usage },
+            },
+            {
+              orgId: TEST_ORG_ID,
+              assistantId: "ast_1",
+              visitorId: "vis_1",
+              message: "How do I reset my password?",
+              behaviour,
+            },
+          ),
+        ),
+      ).rejects.toThrow("d1 write rejected");
+
+      const modelEvents = usage.mock.calls
+        .map(([event]) => event)
+        .filter((event) => event.messages === 1);
+      expect(modelEvents).toEqual([
+        expect.objectContaining({
+          tokensIn: 210,
+          tokensOut: 45,
+          costMicros: costMicros(ANTHROPIC_MODELS.fast, 210, 45),
+        }),
+      ]);
+    });
+
+    it("records reported usage when the stream ends with a non-provider error", async () => {
+      const usage = vi.fn(async (_event: UsageEvent) => {});
+      const provider: LlmProvider = {
+        name: "anthropic",
+        model: ANTHROPIC_MODELS.fast.id,
+        async *stream() {
+          yield { kind: "text", text: "Partial" };
+          yield { kind: "usage", tokensIn: 90, tokensOut: 12 };
+          throw new TypeError("malformed frame");
+        },
+      };
+
+      await expect(
+        drain(
+          answerMessage(
+            {
+              tenant,
+              embedder,
+              retriever,
+              provider,
+              model: ANTHROPIC_MODELS.fast,
+              usage: { record: usage },
+            },
+            {
+              orgId: TEST_ORG_ID,
+              assistantId: "ast_1",
+              visitorId: "vis_1",
+              message: "How do I reset my password?",
+              behaviour,
+            },
+          ),
+        ),
+      ).rejects.toThrow("malformed frame");
+
+      expect(usage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: 1,
+          tokensIn: 90,
+          tokensOut: 12,
+          costMicros: costMicros(ANTHROPIC_MODELS.fast, 90, 12),
+        }),
+      );
+    });
+
+    it("counts a fallback answer the visitor already saw when the reply write rejects", async () => {
+      const usage = vi.fn(async (_event: UsageEvent) => {});
+      await expect(
+        drain(
+          answerMessage(
+            {
+              tenant: tenantFailingReplyWrite(),
+              embedder,
+              retriever: memoryRetriever(),
+              provider: {
+                name: "anthropic",
+                model: ANTHROPIC_MODELS.fast.id,
+                async *stream() {
+                  yield { kind: "text", text: "unused" };
+                },
+              },
+              model: ANTHROPIC_MODELS.fast,
+              usage: { record: usage },
+            },
+            {
+              orgId: TEST_ORG_ID,
+              assistantId: "ast_1",
+              visitorId: "vis_1",
+              message: "How do I reset my password?",
+              behaviour,
+            },
+          ),
+        ),
+      ).rejects.toThrow("d1 write rejected");
+
+      expect(usage).toHaveBeenCalledWith(expect.objectContaining({ messages: 1, costMicros: 0 }));
+    });
+  });
 
   it("F5: /api/admin/chat serves draft for authenticated owner and returns 401 on expired session even when Worker origin is allowed", async () => {
     await tenant.assistants.update("ast_1", {

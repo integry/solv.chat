@@ -170,7 +170,7 @@ describe("chat/publicConfig", () => {
     await tenant.versions.publishDraft("ast_1", draft.id, "ver_2", 2000);
 
     for (const [reason, expectedMessage] of [
-      ["rate_limit", "Too many questions just now. Please wait a moment."],
+      ["rate_limit", "Too many requests just now. Please wait a moment."],
       ["spend_cap", "This assistant has reached its limit for today."],
     ] as const) {
       const limitsCheck = vi.fn(async () => ({ ok: false as const, reason }));
@@ -189,10 +189,46 @@ describe("chat/publicConfig", () => {
       expect(res.status).toBe(429);
       expect(res.headers.get("access-control-allow-origin")).toBe("https://site.example");
       expect(await res.json()).toEqual({ error: expectedMessage });
+      // Its own action kind, so the seam can keep config reads off the
+      // visitor's chat budget.
       expect(limitsCheck).toHaveBeenCalledWith(TEST_ORG_ID, "ast_1", {
-        kind: "chat",
+        kind: "config",
         ip: "1.2.3.4",
       });
     }
+  });
+
+  it("leaves a visitor's questions untouched after many page loads with the open limits", async () => {
+    const draft = await tenant.versions.createDraft({
+      id: "ver_1",
+      assistantId: "ast_1",
+      config: defaultVersionConfig(),
+      createdAt: 1000,
+    });
+    await tenant.versions.publishDraft("ast_1", draft.id, "ver_2", 2000);
+    await env.DB.prepare("DELETE FROM rate_counters").run();
+
+    // createTestApp uses basicLimits, the open implementation.
+    const app = createTestApp();
+    const ip = "203.0.113.77";
+    for (let i = 0; i < 25; i++) {
+      const ctx = createExecutionContext();
+      const res = await app.fetch(
+        new Request("https://engine.example/v1/assistants/pk_pub_1", {
+          headers: { origin: "https://site.example", "cf-connecting-ip": ip },
+        }),
+        env,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      expect(res.status).toBe(200);
+    }
+
+    const chatHits = await env.DB.prepare(
+      "SELECT COALESCE(SUM(hits), 0) AS hits FROM rate_counters WHERE org_id = ?1 AND ip = ?2",
+    )
+      .bind(TEST_ORG_ID, ip)
+      .first<{ hits: number }>();
+    expect(chatHits?.hits).toBe(0);
   });
 });

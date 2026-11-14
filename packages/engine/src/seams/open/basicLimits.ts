@@ -6,6 +6,13 @@ import type { Limits } from "../types.js";
 // says "per-IP rate limit" and gives no number, so this one is ours.
 const WINDOW_MS = 60_000;
 const MAX_PER_WINDOW = 20;
+// Config reads get their own, larger per-IP budget, also ours: one per page
+// load, so someone clicking quickly through a site never meets it, and it
+// never uses up the questions above.
+const MAX_CONFIG_PER_WINDOW = 60;
+// Config hits share the counter table under a prefixed key, so the two
+// budgets never add up and no migration is needed.
+const CONFIG_KEY_PREFIX = "config:";
 export const DEFAULT_DAILY_CAP_MICROS = 2_000_000;
 
 export type CapMicrosResolver = (orgId: string, assistantId: string) => Promise<number>;
@@ -31,7 +38,10 @@ export function basicLimits(
 ): Limits {
   return {
     async check(orgId, assistantId, action) {
-      if (action.kind === "chat") {
+      if (action.kind === "chat" || action.kind === "config") {
+        const counterKey =
+          action.kind === "config" ? `${CONFIG_KEY_PREFIX}${action.ip}` : action.ip;
+        const max = action.kind === "config" ? MAX_CONFIG_PER_WINDOW : MAX_PER_WINDOW;
         const windowStart = Math.floor(Date.now() / WINDOW_MS) * WINDOW_MS;
         // Increment and read in one statement: two statements would let two
         // simultaneous requests both see the pre-increment count and pass.
@@ -42,7 +52,7 @@ export function basicLimits(
              ON CONFLICT(org_id, assistant_id, ip, window_start) DO UPDATE SET hits = hits + 1
              RETURNING hits`,
           )
-          .bind(orgId, assistantId, action.ip, windowStart)
+          .bind(orgId, assistantId, counterKey, windowStart)
           .first<{ hits: number }>();
         if (row?.hits === 1) {
           // The first hit of a new window for this IP: a cheap moment to drop
@@ -53,11 +63,14 @@ export function basicLimits(
             .bind(orgId, windowStart)
             .run();
         }
-        if ((row?.hits ?? 0) > MAX_PER_WINDOW) {
+        if ((row?.hits ?? 0) > max) {
           return { ok: false, reason: "rate_limit" };
         }
       }
-      if (action.kind !== "chat") return { ok: true };
+      // The spend cap applies to config reads too: the specification runs it
+      // on every public request, and a widget that cannot answer today
+      // should say so before the visitor types.
+      if (action.kind === "ingest") return { ok: true };
       const cap = await capMicrosFor(orgId, assistantId);
       // 0 means "no cap": an owner who never set one should not be locked out.
       if (cap > 0 && (await todaysSpend(db, orgId, assistantId)) >= cap) {

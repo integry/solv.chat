@@ -26,7 +26,7 @@ Options:
   --assistant <id>    Assistant ID, e.g. ast_... (required)
   --base-url <url>    Site URL that document paths are joined to
   --json <file>       Push a prepared JSON batch instead of a Markdown folder
-  --source-id <id>    Target source ID (optional)
+  --source-id <id>    Target pushed-content source ID (optional)
   --prune             Delete documents not in the pushed set
   --dry-run           Print what would be pushed without sending requests
   -h, --help          Show this help message

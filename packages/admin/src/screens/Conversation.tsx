@@ -28,8 +28,20 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
 
   const detail = detailRes.value;
 
+  /**
+   * The question a reply answered. The engine records it on the reply, and
+   * that link is the only reliable one: two requests in one conversation can
+   * interleave, so the nearest preceding question may belong to the other
+   * request. The scan backwards is kept only for replies stored before the
+   * link existed.
+   */
   function findQuestionForTurn(index: number): { id: string; content: string } | null {
     if (!detail) return null;
+    const reply = detail.turns[index];
+    if (reply?.replyTo) {
+      const question = detail.turns.find((t) => t.id === reply.replyTo && t.role === "user");
+      return question ? { id: question.id, content: question.content } : null;
+    }
     for (let i = index - 1; i >= 0; i--) {
       const turn = detail.turns[i];
       if (turn?.role === "user") {
@@ -108,7 +120,9 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                         onClick={() =>
                           setAnswering({
                             turnId: turn.id,
-                            fromMessageId: questionTurn?.id ?? turn.id,
+                            // The reply's own id: the engine links the
+                            // answer through the question the reply records.
+                            fromMessageId: turn.id,
                             question: questionTurn?.content ?? "",
                           })
                         }

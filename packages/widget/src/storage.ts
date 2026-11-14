@@ -26,6 +26,25 @@ let fallbackVisitorId: string | null = null;
 const activeOwners = new Map<string, symbol>();
 
 /**
+ * A random id that works on plain-http pages too. `crypto.randomUUID` exists
+ * only in secure contexts, and an owner may list an `http:` origin; there the
+ * id comes from `crypto.getRandomValues`, which every context exposes.
+ */
+function randomId(): string {
+  if (typeof crypto.randomUUID === "function") {
+    try {
+      return crypto.randomUUID();
+    } catch {
+      // Fall through to getRandomValues.
+    }
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  let hex = "";
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+  return hex;
+}
+
+/**
  * A random id in localStorage, not a cookie. The specification is explicit:
  * the widget sets no cookies, so there is nothing to consent to and nothing
  * sent to a third party.
@@ -34,13 +53,13 @@ export function visitorId(): string {
   try {
     let id = localStorage.getItem(VISITOR_KEY);
     if (id === null) {
-      id = crypto.randomUUID();
+      id = randomId();
       localStorage.setItem(VISITOR_KEY, id);
     }
     return id;
   } catch {
     if (fallbackVisitorId === null) {
-      fallbackVisitorId = crypto.randomUUID();
+      fallbackVisitorId = randomId();
     }
     return fallbackVisitorId;
   }

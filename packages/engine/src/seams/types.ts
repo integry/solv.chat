@@ -59,7 +59,15 @@ export interface UsageSink {
   record(event: UsageEvent): Promise<void>;
 }
 
-export type LimitAction = { kind: "chat"; ip: string } | { kind: "ingest" };
+/**
+ * `config` is the widget's config read on page load. It is a public request,
+ * so it is limited, but it costs nothing and must not spend the visitor's
+ * chat budget: an implementation counts it separately from `chat`.
+ */
+export type LimitAction =
+  | { kind: "chat"; ip: string }
+  | { kind: "config"; ip: string }
+  | { kind: "ingest" };
 
 export type LimitDecision = { ok: true } | { ok: false; reason: "spend_cap" | "rate_limit" };
 

@@ -802,4 +802,128 @@ describe("ingest documents", () => {
     expect(finalDoc?.contentHash).toBe(queue.sent[0]?.contentHash);
     expect(queue.sent).toHaveLength(3);
   });
+
+  it.each(["entry", "sitemap"] as const)(
+    "refuses an ingest-key push or prune aimed at a %s source and leaves its documents alone",
+    async (kind) => {
+      const app = createTestApp();
+      const { id: assistantId, key } = await createAssistantWithKey();
+      const scope = { orgId: TEST_ORG_ID, assistantId };
+      const tenant = forIngestScope(env.DB, scope);
+      const owned = await tenant.sources.create({
+        id: newId("src"),
+        assistantId,
+        kind,
+        label: "Owner content",
+        settings: {},
+        createdAt: Date.now(),
+      });
+      // Written the way the admin writes it: no kind restriction there.
+      await pushDocuments({ tenant, docs: env.DOCS, queue: countingQueue() }, scope, {
+        sourceId: owned.id,
+        documents: [
+          {
+            externalId: "hand-written",
+            url: "https://example.com/hand-written",
+            title: "Hand written",
+            markdown: "# Hand written",
+          },
+        ],
+      });
+
+      const call = (method: "PUT" | "DELETE", body: unknown) =>
+        app.fetch(
+          new Request(`https://example.com/v1/ingest/${assistantId}/documents`, {
+            method,
+            headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+          env,
+          ctx,
+        );
+
+      const push = await call("PUT", {
+        sourceId: owned.id,
+        documents: [
+          {
+            externalId: "hand-written",
+            url: "https://example.com/overwritten",
+            title: "Overwritten",
+            markdown: "# Overwritten",
+          },
+        ],
+      });
+      expect(push.status).toBe(400);
+      expect(await push.json()).toMatchObject({ errors: ["sourceId: must be a push source"] });
+
+      const prune = await call("DELETE", { sourceId: owned.id, prune: true, keep: [] });
+      expect(prune.status).toBe(400);
+      const remove = await call("DELETE", { sourceId: owned.id, externalIds: ["hand-written"] });
+      expect(remove.status).toBe(400);
+
+      const kept = await tenant.documents.getByExternalId(owned.id, "hand-written");
+      expect(kept?.title).toBe("Hand written");
+      expect(kept?.url).toBe("https://example.com/hand-written");
+    },
+  );
+
+  it("keeps a 10-document push, the CLI's batch, under the Workers Free 50-subrequest budget", async () => {
+    // Every binding call counts: each D1 statement prepared (an overcount for
+    // batches, which run as one call), each R2 call and each queue send.
+    let calls = 0;
+    const countingDb = new Proxy(env.DB, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+        if (prop === "prepare" || prop === "batch" || prop === "exec") {
+          return (...args: unknown[]) => {
+            calls++;
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        }
+        return value.bind(target);
+      },
+    }) as D1Database;
+    const countingBucket = new Proxy(env.DOCS, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          calls++;
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as R2Bucket;
+    const countingQueueBinding = {
+      async send() {
+        calls++;
+      },
+      async sendBatch() {
+        calls++;
+      },
+    } as unknown as Queue;
+
+    const app = createTestApp();
+    const { id: assistantId, key } = await createAssistantWithKey();
+    const documents = Array.from({ length: 10 }, (_, i) => ({
+      externalId: `budget-${i}`,
+      url: `https://example.com/budget-${i}`,
+      title: `Budget ${i}`,
+      markdown: `# Budget ${i}`,
+    }));
+    const res = await app.fetch(
+      new Request(`https://example.com/v1/ingest/${assistantId}/documents`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({ documents }),
+      }),
+      { ...env, DB: countingDb, DOCS: countingBucket, INGEST_QUEUE: countingQueueBinding },
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ written: 10, unchanged: 0, deleted: 0 });
+    // An R2 put, a D1 upsert and a queue send per document: proves the count works.
+    expect(calls).toBeGreaterThanOrEqual(30);
+    expect(calls).toBeLessThan(50);
+  });
 });

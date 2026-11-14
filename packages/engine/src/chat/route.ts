@@ -461,7 +461,7 @@ export async function publicConfigRoute(
   }
 
   const origin = matchedOrigin(assistant, request);
-  const failure = await runPublicChecks(seams.limits, assistant, request);
+  const failure = await runPublicChecks(seams.limits, assistant, request, "config");
   if (failure !== null) {
     return Response.json(
       { error: failure.message },

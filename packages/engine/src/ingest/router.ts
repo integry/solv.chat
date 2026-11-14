@@ -56,11 +56,15 @@ export async function ingestRoutes(
     }
 
     const body = await readJsonBody(request);
+    // An ingest key only ever writes pushed content; entries and sitemap
+    // imports are the owner's, edited in the admin.
+    const pushOnly = { requireKind: "push" } as const;
     if (request.method === "PUT") {
       const result = await pushDocuments(
         { tenant, docs: deps.docs, queue: deps.queue },
         scope,
         body,
+        pushOnly,
       );
       return Response.json(result);
     }
@@ -69,6 +73,7 @@ export async function ingestRoutes(
       { tenant, docs: deps.docs, retriever: deps.retriever },
       scope,
       body,
+      pushOnly,
     );
     return Response.json(result);
   } catch (err) {

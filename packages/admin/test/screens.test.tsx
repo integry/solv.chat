@@ -113,6 +113,7 @@ function installFakeServer(options?: {
             createdAt: 1_700_000_101_000,
             feedback: [],
             answerDocumentId: null,
+            replyTo: null,
           },
           {
             id: "msg_a1",
@@ -125,6 +126,7 @@ function installFakeServer(options?: {
               { id: "fbk_1", value: "up", note: "Helpful!", createdAt: 1_700_000_103_000 },
             ],
             answerDocumentId: null,
+            replyTo: "msg_u1",
           },
         ],
       };
@@ -321,6 +323,7 @@ describe("admin phase 1 screens", () => {
               createdAt: 1_700_000_101_000,
               feedback: [],
               answerDocumentId: null,
+              replyTo: null,
             },
             {
               id: "msg_a_sla",
@@ -331,6 +334,7 @@ describe("admin phase 1 screens", () => {
               createdAt: 1_700_000_102_000,
               feedback: [],
               answerDocumentId: null,
+              replyTo: "msg_q_sla",
             },
           ],
         },
@@ -354,7 +358,104 @@ describe("admin phase 1 screens", () => {
     expect(server.answerPosts[0]).toEqual({
       question: "Do you have an SLA?",
       answer: "99.9% uptime SLA on Business plans.",
-      fromMessageId: "msg_q_sla",
+      // The reply's id: the engine links through the question it records.
+      fromMessageId: "msg_a_sla",
+    });
+  });
+
+  it("links Write the right answer to the question the reply answered when two requests interleave", async () => {
+    // Both questions were stored before the first reply arrived, so the
+    // nearest preceding question of the unanswered reply is the other one.
+    const server = installFakeServer({
+      conversations: [
+        {
+          id: "cnv_interleaved",
+          assistantId: "ast_1",
+          visitorId: "vis_1",
+          startedAt: 1_700_000_200_000,
+          pageUrl: "https://docs.example.com",
+          firstQuestion: "Do you ship to Spain?",
+          turnCount: 4,
+          hasUnanswered: true,
+        },
+      ],
+      conversationDetails: {
+        cnv_interleaved: {
+          conversation: {
+            id: "cnv_interleaved",
+            assistantId: "ast_1",
+            visitorId: "vis_1",
+            startedAt: 1_700_000_200_000,
+            pageUrl: "https://docs.example.com",
+          },
+          turns: [
+            {
+              id: "msg_q_ship",
+              role: "user",
+              content: "Do you ship to Spain?",
+              citations: [],
+              answered: true,
+              createdAt: 1_700_000_201_000,
+              feedback: [],
+              answerDocumentId: null,
+              replyTo: null,
+            },
+            {
+              id: "msg_q_sso",
+              role: "user",
+              content: "Do you support SSO?",
+              citations: [],
+              answered: true,
+              createdAt: 1_700_000_202_000,
+              feedback: [],
+              answerDocumentId: null,
+              replyTo: null,
+            },
+            {
+              id: "msg_a_ship",
+              role: "assistant",
+              content: "I could not find an answer.",
+              citations: [],
+              answered: false,
+              createdAt: 1_700_000_203_000,
+              feedback: [],
+              answerDocumentId: null,
+              replyTo: "msg_q_ship",
+            },
+            {
+              id: "msg_a_sso",
+              role: "assistant",
+              content: "Yes, on Business plans.",
+              citations: [],
+              answered: true,
+              createdAt: 1_700_000_204_000,
+              feedback: [],
+              answerDocumentId: null,
+              replyTo: "msg_q_sso",
+            },
+          ],
+        },
+      },
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Write the right answer" }));
+
+    const questionInput = (await screen.findByLabelText("Question")) as HTMLInputElement;
+    expect(questionInput.value).toBe("Do you ship to Spain?");
+
+    fireEvent.change(screen.getByLabelText("Answer"), {
+      target: { value: "Yes, within five working days." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
+
+    await waitFor(() => expect(server.answerPosts).toHaveLength(1));
+    expect(server.answerPosts[0]).toEqual({
+      question: "Do you ship to Spain?",
+      answer: "Yes, within five working days.",
+      fromMessageId: "msg_a_ship",
     });
   });
 
@@ -489,6 +590,7 @@ describe("admin phase 1 screens", () => {
               createdAt: 1_700_000_101_000,
               feedback: [],
               answerDocumentId: null,
+              replyTo: null,
             },
             {
               id: "msg_a_1",
@@ -499,6 +601,7 @@ describe("admin phase 1 screens", () => {
               createdAt: 1_700_000_102_000,
               feedback: [],
               answerDocumentId: null,
+              replyTo: "msg_q_1",
             },
             {
               id: "msg_q_2",
@@ -509,6 +612,7 @@ describe("admin phase 1 screens", () => {
               createdAt: 1_700_000_103_000,
               feedback: [],
               answerDocumentId: null,
+              replyTo: null,
             },
             {
               id: "msg_a_2",
@@ -519,12 +623,13 @@ describe("admin phase 1 screens", () => {
               createdAt: 1_700_000_104_000,
               feedback: [],
               answerDocumentId: null,
+              replyTo: "msg_q_2",
             },
           ],
         },
       },
       onAnswerPost: async (body) => {
-        if (body.fromMessageId === "msg_q_1") {
+        if (body.fromMessageId === "msg_a_1") {
           return firstSavePromise;
         }
         return Response.json(

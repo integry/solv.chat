@@ -9,10 +9,13 @@ const OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings";
 // most 300,000 tokens summed across all inputs in one request.
 export const OPENAI_EMBEDDING_BATCH_LIMIT = 2048;
 export const OPENAI_EMBEDDING_MAX_TOKENS_PER_REQUEST = 300_000;
-// Tokens are counted by the provider, not here. A token is never shorter than
-// one character for this model's tokenizer in practice, so a character budget
-// below the token cap keeps a request under it without shipping a tokenizer.
-export const OPENAI_EMBEDDING_MAX_CHARS_PER_REQUEST = 250_000;
+// Tokens are counted by the provider, not here, and the engine ships no
+// tokenizer. The budget is measured in UTF-8 bytes rather than characters:
+// CJK or emoji-heavy text can take more than one token per character, but
+// several bytes per character too, so a byte budget below the token cap is far
+// less likely to overshoot it. It is still an estimate, so a request the
+// provider refuses with 400 is split in half and retried (see `embedBatch`).
+export const OPENAI_EMBEDDING_MAX_BYTES_PER_REQUEST = 250_000;
 
 // Source: https://developers.cloudflare.com/vectorize/platform/limits/ — checked 2026-11-14
 // "Upsert batch size: 1000 (Workers) / 5000 (HTTP API)".
@@ -84,23 +87,26 @@ interface OpenAIEmbeddingResponse {
   usage?: { prompt_tokens?: number; total_tokens?: number };
 }
 
+const utf8 = new TextEncoder();
+
 /** Splits inputs into requests that respect both the count and size caps. */
 function requestBatches(texts: string[]): string[][] {
   const batches: string[][] = [];
   let current: string[] = [];
-  let chars = 0;
+  let bytes = 0;
   for (const text of texts) {
+    const size = utf8.encode(text).byteLength;
     if (
       current.length > 0 &&
       (current.length >= OPENAI_EMBEDDING_BATCH_LIMIT ||
-        chars + text.length > OPENAI_EMBEDDING_MAX_CHARS_PER_REQUEST)
+        bytes + size > OPENAI_EMBEDDING_MAX_BYTES_PER_REQUEST)
     ) {
       batches.push(current);
       current = [];
-      chars = 0;
+      bytes = 0;
     }
     current.push(text);
-    chars += text.length;
+    bytes += size;
   }
   if (current.length > 0) batches.push(current);
   return batches;
@@ -117,6 +123,92 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
   const dimensions = options.dimensions ?? EMBEDDING_MODEL.dimensions;
   const doFetch = options.fetchImpl ?? fetch;
 
+  /** One provider request for `batch`, in input order. */
+  async function requestOnce(batch: string[], onBilled: EmbeddingBilled): Promise<number[][]> {
+    let response: Response;
+    try {
+      response = await doFetch(OPENAI_EMBEDDINGS_URL, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${options.apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          input: batch,
+        }),
+      });
+    } catch (err) {
+      throw toProviderError(err, "openai embeddings request failed");
+    }
+
+    if (!response.ok) {
+      throw new ProviderError(
+        `openai embeddings request failed with ${response.status}`,
+        isRetryableStatus(response.status),
+        response.status,
+      );
+    }
+
+    let payload: OpenAIEmbeddingResponse;
+    try {
+      payload = (await response.json()) as OpenAIEmbeddingResponse;
+    } catch (err) {
+      throw toProviderError(err, "openai embeddings response was not valid JSON");
+    }
+
+    // Reported before the payload is validated: a malformed body was
+    // still billed, and so was this request if a later one fails.
+    const billed = payload.usage?.total_tokens ?? payload.usage?.prompt_tokens;
+    if (typeof billed === "number" && Number.isFinite(billed) && billed > 0) {
+      await onBilled(billed);
+    }
+
+    if (!Array.isArray(payload.data) || payload.data.length !== batch.length) {
+      throw new ProviderError("openai embeddings response length mismatch", true);
+    }
+
+    const ordered: Array<number[] | undefined> = new Array(batch.length);
+    for (const item of payload.data) {
+      if (
+        typeof item.index !== "number" ||
+        item.index < 0 ||
+        item.index >= batch.length ||
+        !Array.isArray(item.embedding)
+      ) {
+        throw new ProviderError("openai embeddings response item malformed", true);
+      }
+      ordered[item.index] = item.embedding;
+    }
+
+    const vectors: number[][] = [];
+    for (const vector of ordered) {
+      if (vector === undefined) {
+        throw new ProviderError("openai embeddings response missing index", true);
+      }
+      vectors.push(vector);
+    }
+    return vectors;
+  }
+
+  /**
+   * The size budget is an estimate, so a 400 on a request with more than one
+   * input is retried as two halves rather than failing the whole document:
+   * a non-retryable error would send it to the dead-letter queue unindexed.
+   * A single input that still gets 400 fails as before.
+   */
+  async function embedBatch(batch: string[], onBilled: EmbeddingBilled): Promise<number[][]> {
+    try {
+      return await requestOnce(batch, onBilled);
+    } catch (err) {
+      if (!(err instanceof ProviderError) || err.status !== 400 || batch.length < 2) throw err;
+      const mid = Math.ceil(batch.length / 2);
+      const first = await embedBatch(batch.slice(0, mid), onBilled);
+      const second = await embedBatch(batch.slice(mid), onBilled);
+      return [...first, ...second];
+    }
+  }
+
   return {
     dimensions,
     async embed(texts, onBilled) {
@@ -124,70 +216,8 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
 
       const out: number[][] = [];
       for (const batch of requestBatches(texts)) {
-        let response: Response;
-        try {
-          response = await doFetch(OPENAI_EMBEDDINGS_URL, {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${options.apiKey}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              model,
-              input: batch,
-            }),
-          });
-        } catch (err) {
-          throw toProviderError(err, "openai embeddings request failed");
-        }
-
-        if (!response.ok) {
-          throw new ProviderError(
-            `openai embeddings request failed with ${response.status}`,
-            isRetryableStatus(response.status),
-            response.status,
-          );
-        }
-
-        let payload: OpenAIEmbeddingResponse;
-        try {
-          payload = (await response.json()) as OpenAIEmbeddingResponse;
-        } catch (err) {
-          throw toProviderError(err, "openai embeddings response was not valid JSON");
-        }
-
-        // Reported before the payload is validated: a malformed body was
-        // still billed, and so was this request if a later one fails.
-        const billed = payload.usage?.total_tokens ?? payload.usage?.prompt_tokens;
-        if (typeof billed === "number" && Number.isFinite(billed) && billed > 0) {
-          await onBilled(billed);
-        }
-
-        if (!Array.isArray(payload.data) || payload.data.length !== batch.length) {
-          throw new ProviderError("openai embeddings response length mismatch", true);
-        }
-
-        const ordered: Array<number[] | undefined> = new Array(batch.length);
-        for (const item of payload.data) {
-          if (
-            typeof item.index !== "number" ||
-            item.index < 0 ||
-            item.index >= batch.length ||
-            !Array.isArray(item.embedding)
-          ) {
-            throw new ProviderError("openai embeddings response item malformed", true);
-          }
-          ordered[item.index] = item.embedding;
-        }
-
-        for (const vector of ordered) {
-          if (vector === undefined) {
-            throw new ProviderError("openai embeddings response missing index", true);
-          }
-          out.push(vector);
-        }
+        out.push(...(await embedBatch(batch, onBilled)));
       }
-
       return { vectors: out };
     },
   };

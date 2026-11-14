@@ -3,7 +3,7 @@ import { ProviderError } from "../../src/providers/error.js";
 import {
   embeddingCostMicros,
   OPENAI_EMBEDDING_BATCH_LIMIT,
-  OPENAI_EMBEDDING_MAX_CHARS_PER_REQUEST,
+  OPENAI_EMBEDDING_MAX_BYTES_PER_REQUEST,
   openAIEmbedder,
   VECTORIZE_UPSERT_BATCH_LIMIT,
   vectorizeRetriever,
@@ -73,7 +73,7 @@ describe("openAIEmbedder", () => {
 
   it("splits requests before their total size could pass the per-request token cap, and reports each request's billed tokens", async () => {
     const text = "z".repeat(1200);
-    const total = Math.ceil((OPENAI_EMBEDDING_MAX_CHARS_PER_REQUEST * 2.5) / text.length);
+    const total = Math.ceil((OPENAI_EMBEDDING_MAX_BYTES_PER_REQUEST * 2.5) / text.length);
     const texts = Array.from({ length: total }, () => text);
     const requestChars: number[] = [];
 
@@ -95,7 +95,7 @@ describe("openAIEmbedder", () => {
     });
     expect(vectors).toHaveLength(total);
     expect(requestChars).toHaveLength(3);
-    expect(requestChars.every((c) => c <= OPENAI_EMBEDDING_MAX_CHARS_PER_REQUEST)).toBe(true);
+    expect(requestChars.every((c) => c <= OPENAI_EMBEDDING_MAX_BYTES_PER_REQUEST)).toBe(true);
     expect(billed).toHaveLength(3);
     expect(billed.reduce((a, b) => a + b, 0)).toBe(total * 300);
     expect(embeddingCostMicros(total * 300)).toBeGreaterThan(0);
@@ -103,7 +103,7 @@ describe("openAIEmbedder", () => {
 
   it("reports a billed request before a later request fails, and before validating a malformed body", async () => {
     const text = "z".repeat(1200);
-    const total = Math.ceil((OPENAI_EMBEDDING_MAX_CHARS_PER_REQUEST * 1.5) / text.length);
+    const total = Math.ceil((OPENAI_EMBEDDING_MAX_BYTES_PER_REQUEST * 1.5) / text.length);
     let call = 0;
     const embedder = openAIEmbedder({
       apiKey: "test-key",
@@ -212,5 +212,81 @@ describe("openAIEmbedder", () => {
         );
       },
     );
+  });
+
+  it("sizes requests by UTF-8 bytes, so CJK text gets smaller batches than ASCII of the same length", async () => {
+    // 1,200 CJK characters are 3,600 bytes in UTF-8.
+    const text = "漢".repeat(1200);
+    const bytes = new TextEncoder().encode(text).byteLength;
+    const total = Math.ceil(OPENAI_EMBEDDING_MAX_BYTES_PER_REQUEST / text.length);
+    const requestBytes: number[] = [];
+    const embedder = openAIEmbedder({
+      apiKey: "test-key",
+      fetchImpl: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { input: string[] };
+        requestBytes.push(body.input.length * bytes);
+        return Response.json({
+          data: body.input.map((_t, index) => ({ index, embedding: [index] })),
+        });
+      },
+    });
+
+    const { vectors } = await embedder.embed(
+      Array.from({ length: total }, () => text),
+      async () => {},
+    );
+    expect(vectors).toHaveLength(total);
+    // A character budget would have sent this as one request.
+    expect(requestBytes.length).toBeGreaterThan(1);
+    expect(requestBytes.every((b) => b <= OPENAI_EMBEDDING_MAX_BYTES_PER_REQUEST)).toBe(true);
+  });
+
+  it("halves a batch the provider refuses with 400 and keeps vectors in input order", async () => {
+    // The provider refuses any request with more than two inputs, as it would
+    // one whose token total passed the cap.
+    const sizes: number[] = [];
+    const embedder = openAIEmbedder({
+      apiKey: "test-key",
+      fetchImpl: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { input: string[] };
+        sizes.push(body.input.length);
+        if (body.input.length > 2) return new Response("too many tokens", { status: 400 });
+        return Response.json({
+          data: body.input.map((text, index) => ({ index, embedding: [Number(text)] })),
+          usage: { total_tokens: body.input.length },
+        });
+      },
+    });
+    const billed: number[] = [];
+    const { vectors } = await embedder.embed(["0", "1", "2", "3", "4"], async (t) => {
+      billed.push(t);
+    });
+    expect(vectors).toEqual([[0], [1], [2], [3], [4]]);
+    expect(sizes).toEqual([5, 3, 2, 1, 2]);
+    expect(billed.reduce((a, b) => a + b, 0)).toBe(5);
+
+    // A single input still refused fails as a non-retryable error.
+    const single = openAIEmbedder({
+      apiKey: "test-key",
+      fetchImpl: async () => new Response("bad request", { status: 400 }),
+    });
+    let calls = 0;
+    const counted = openAIEmbedder({
+      apiKey: "test-key",
+      fetchImpl: async () => {
+        calls++;
+        return new Response("bad request", { status: 400 });
+      },
+    });
+    await expect(single.embed(["only"], async () => {})).rejects.toMatchObject({
+      retryable: false,
+      status: 400,
+    });
+    await expect(counted.embed(["a", "b", "c", "d"], async () => {})).rejects.toMatchObject({
+      status: 400,
+    });
+    // Bounded: the 4-input request, its first half, then that half's first
+    // single, which fails for good.
+    expect(calls).toBe(3);
   });
 });

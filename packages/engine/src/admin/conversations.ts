@@ -20,6 +20,8 @@ export interface ConversationTurn {
   createdAt: number;
   feedback: ConversationFeedback[];
   answerDocumentId: string | null;
+  /** For a reply, the question it answered; null for questions and older rows. */
+  replyTo: string | null;
 }
 
 export interface ConversationsPage {
@@ -101,6 +103,7 @@ export async function getConversation(
       createdAt: msg.createdAt,
       feedback: feedbackByMessage.get(msg.id) ?? [],
       answerDocumentId,
+      replyTo: msg.role === "assistant" ? msg.replyTo : null,
     };
   });
 
