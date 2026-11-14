@@ -17,3 +17,14 @@ export class ProviderError extends Error {
 export function isRetryableStatus(status: number): boolean {
   return status === 429 || (status >= 500 && status <= 599);
 }
+
+/**
+ * Normalizes an unknown failure into a sanitized ProviderError, preserving
+ * existing ProviderError instances.
+ */
+export function toProviderError(err: unknown, message: string, retryable = true): ProviderError {
+  if (err instanceof ProviderError) {
+    return err;
+  }
+  return new ProviderError(message, retryable);
+}

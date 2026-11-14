@@ -1,4 +1,4 @@
-import { isRetryableStatus, ProviderError } from "./error.js";
+import { isRetryableStatus, ProviderError, toProviderError } from "./error.js";
 import { readEventStream } from "./sse.js";
 import type { LlmProvider } from "./types.js";
 
@@ -49,23 +49,28 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
     name: "anthropic",
     model: options.model,
     async *stream(request) {
-      const response = await doFetch(ANTHROPIC_MESSAGES_URL, {
-        method: "POST",
-        headers: {
-          // Header only: never a query string, which ends up in logs we do not
-          // control.
-          "x-api-key": options.apiKey,
-          "anthropic-version": ANTHROPIC_VERSION,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          model: options.model,
-          system: request.system,
-          messages: request.messages,
-          max_tokens: request.maxTokens,
-          stream: true,
-        }),
-      });
+      let response: Response;
+      try {
+        response = await doFetch(ANTHROPIC_MESSAGES_URL, {
+          method: "POST",
+          headers: {
+            // Header only: never a query string, which ends up in logs we do not
+            // control.
+            "x-api-key": options.apiKey,
+            "anthropic-version": ANTHROPIC_VERSION,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            model: options.model,
+            system: request.system,
+            messages: request.messages,
+            max_tokens: request.maxTokens,
+            stream: true,
+          }),
+        });
+      } catch (err) {
+        throw toProviderError(err, "anthropic request failed");
+      }
 
       if (!response.ok || response.body === null) {
         // The provider's error body is not forwarded: it can echo request
@@ -77,47 +82,53 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
         );
       }
 
-      let tokensIn = 0;
-      let tokensOut = 0;
+      let tokensIn: number | undefined;
+      let tokensOut: number | undefined;
       let sawTerminal = false;
 
-      for await (const event of readEventStream(response.body)) {
-        const payload = event.data as AnthropicEventPayload;
-        const eventType = event.event ?? payload.type;
+      try {
+        for await (const event of readEventStream(response.body)) {
+          const payload = event.data as AnthropicEventPayload;
+          const eventType = event.event ?? payload.type;
 
-        if (eventType === "error") {
-          const errorType = payload.error?.type;
-          throw new ProviderError(
-            `anthropic stream error: ${errorType ?? "unknown"}`,
-            isRetryableStreamError(errorType),
-          );
-        }
-
-        if (eventType === "message_start") {
-          if (typeof payload.message?.usage?.input_tokens === "number") {
-            tokensIn = payload.message.usage.input_tokens;
+          if (eventType === "error") {
+            const errorType = payload.error?.type;
+            throw new ProviderError(
+              `anthropic stream error: ${errorType ?? "unknown"}`,
+              isRetryableStreamError(errorType),
+            );
           }
-          continue;
-        }
 
-        if (eventType === "content_block_delta") {
-          if (payload.delta?.type === "text_delta" && typeof payload.delta.text === "string") {
-            yield { kind: "text", text: payload.delta.text };
+          if (eventType === "message_start") {
+            const inputTokens = payload.message?.usage?.input_tokens;
+            if (typeof inputTokens === "number" && Number.isFinite(inputTokens)) {
+              tokensIn = inputTokens;
+            }
+            continue;
           }
-          continue;
-        }
 
-        if (eventType === "message_delta") {
-          if (typeof payload.usage?.output_tokens === "number") {
-            tokensOut = payload.usage.output_tokens;
+          if (eventType === "content_block_delta") {
+            if (payload.delta?.type === "text_delta" && typeof payload.delta.text === "string") {
+              yield { kind: "text", text: payload.delta.text };
+            }
+            continue;
           }
-          continue;
-        }
 
-        if (eventType === "message_stop") {
-          sawTerminal = true;
-          break;
+          if (eventType === "message_delta") {
+            const outputTokens = payload.usage?.output_tokens;
+            if (typeof outputTokens === "number" && Number.isFinite(outputTokens)) {
+              tokensOut = outputTokens;
+            }
+            continue;
+          }
+
+          if (eventType === "message_stop") {
+            sawTerminal = true;
+            break;
+          }
         }
+      } catch (err) {
+        throw toProviderError(err, "anthropic stream failed");
       }
 
       // A stream stopping without its terminal event truncated the answer;
@@ -125,6 +136,10 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
       // answer as complete.
       if (!sawTerminal) {
         throw new ProviderError("anthropic stream ended early", true);
+      }
+
+      if (tokensIn === undefined || tokensOut === undefined) {
+        throw new ProviderError("anthropic stream ended without usage", true);
       }
 
       yield { kind: "usage", tokensIn, tokensOut };

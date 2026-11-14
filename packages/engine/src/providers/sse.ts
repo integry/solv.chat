@@ -1,3 +1,5 @@
+import { toProviderError } from "./error.js";
+
 export interface RawEvent {
   event?: string | undefined;
   data: unknown;
@@ -50,11 +52,19 @@ export async function* readEventStream(body: ReadableStream<Uint8Array>): AsyncI
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let finished = false;
 
   try {
     for (;;) {
-      const { value, done } = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (err) {
+        throw toProviderError(err, "stream read failed");
+      }
+      const { value, done } = chunk;
       if (done) {
+        finished = true;
         buffer = (buffer + decoder.decode()).replace(/\r\n/g, "\n");
         break;
       }
@@ -64,7 +74,6 @@ export async function* readEventStream(body: ReadableStream<Uint8Array>): AsyncI
         buffer = buffer.slice(at + 2);
         const parsed = parseBlock(block);
         if (parsed === "done") {
-          await reader.cancel().catch(() => {});
           return;
         }
         if (parsed !== null) {
@@ -80,6 +89,9 @@ export async function* readEventStream(body: ReadableStream<Uint8Array>): AsyncI
       }
     }
   } finally {
+    if (!finished) {
+      await reader.cancel().catch(() => {});
+    }
     reader.releaseLock();
   }
 }

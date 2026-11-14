@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ProviderError } from "../../src/providers/error.js";
 import { openaiProvider } from "../../src/providers/openai.js";
 import type { LlmChunk, LlmRequest } from "../../src/providers/types.js";
@@ -144,5 +144,120 @@ describe("openaiProvider", () => {
     });
 
     await expect(collect(provider.stream(SAMPLE_REQUEST))).rejects.toBeInstanceOf(ProviderError);
+  });
+
+  it("cancels the underlying stream when the consumer breaks early", async () => {
+    const cancelSpy = vi.fn();
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n',
+          ),
+        );
+      },
+      cancel: cancelSpy,
+    });
+
+    const provider = openaiProvider({
+      apiKey: "test-key",
+      model: "gpt-5-mini",
+      fetchImpl: async () =>
+        new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+    });
+
+    const received: LlmChunk[] = [];
+    for await (const chunk of provider.stream(SAMPLE_REQUEST)) {
+      received.push(chunk);
+      break;
+    }
+
+    expect(received).toEqual([{ kind: "text", text: "Hello" }]);
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws ProviderError on EOF after finish_reason but before usage", async () => {
+    const provider = openaiProvider({
+      apiKey: "test-key",
+      model: "gpt-5-mini",
+      fetchImpl: async () =>
+        sseResponse(
+          [
+            'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          ].join(""),
+        ),
+    });
+
+    await expect(collect(provider.stream(SAMPLE_REQUEST))).rejects.toMatchObject({
+      name: "ProviderError",
+      retryable: true,
+    });
+  });
+
+  it("normalizes rejected fetch into a sanitized retryable ProviderError and preserves ProviderError", async () => {
+    const secret = "sk-openai-fetch-secret";
+    const rejecting = openaiProvider({
+      apiKey: secret,
+      model: "gpt-5-mini",
+      fetchImpl: async () => {
+        throw new TypeError(`connection reset for ${secret}`);
+      },
+    });
+
+    let caught: unknown;
+    try {
+      await collect(rejecting.stream(SAMPLE_REQUEST));
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ProviderError);
+    expect((caught as ProviderError).retryable).toBe(true);
+    expect((caught as ProviderError).message).not.toContain(secret);
+
+    const existing = new ProviderError("custom non-retryable", false, 403);
+    const preserving = openaiProvider({
+      apiKey: secret,
+      model: "gpt-5-mini",
+      fetchImpl: async () => {
+        throw existing;
+      },
+    });
+    await expect(collect(preserving.stream(SAMPLE_REQUEST))).rejects.toBe(existing);
+  });
+
+  it("normalizes rejected stream reads into a retryable ProviderError", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
+          ),
+        );
+      },
+      pull() {
+        return Promise.reject(new Error("stream connection dropped"));
+      },
+    });
+
+    const provider = openaiProvider({
+      apiKey: "test-key",
+      model: "gpt-5-mini",
+      fetchImpl: async () =>
+        new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+    });
+
+    await expect(collect(provider.stream(SAMPLE_REQUEST))).rejects.toMatchObject({
+      name: "ProviderError",
+      retryable: true,
+    });
   });
 });

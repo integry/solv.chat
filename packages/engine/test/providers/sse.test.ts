@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ProviderError } from "../../src/providers/error.js";
 import { readEventStream } from "../../src/providers/sse.js";
 
 function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
@@ -66,5 +67,51 @@ describe("readEventStream", () => {
     }
 
     expect(events).toEqual([{ event: undefined, data: { n: 1 } }]);
+  });
+
+  it("cancels an open stream when the consumer exits early", async () => {
+    const encoder = new TextEncoder();
+    const cancelSpy = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"n":1}\n\n'));
+        // Intentionally left open to simulate an ongoing provider response.
+      },
+      cancel: cancelSpy,
+    });
+
+    const events = [];
+    for await (const event of readEventStream(stream)) {
+      events.push(event);
+      break;
+    }
+
+    expect(events).toEqual([{ event: undefined, data: { n: 1 } }]);
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
+    expect(stream.locked).toBe(false);
+  });
+
+  it("normalizes read rejections to ProviderError without masking by cancel failures", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"n":1}\n\n'));
+      },
+      pull() {
+        return Promise.reject(new Error("socket reset"));
+      },
+      cancel() {
+        return Promise.reject(new Error("cancel failed"));
+      },
+    });
+
+    const iter = readEventStream(stream)[Symbol.asyncIterator]();
+    const first = await iter.next();
+    expect(first.value).toEqual({ event: undefined, data: { n: 1 } });
+
+    await expect(iter.next()).rejects.toSatisfy(
+      (err: unknown) => err instanceof ProviderError && err.retryable === true,
+    );
+    expect(stream.locked).toBe(false);
   });
 });
