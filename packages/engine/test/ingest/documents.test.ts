@@ -258,4 +258,156 @@ describe("ingest documents", () => {
       .first<{ count: number }>();
     expect(count?.count).toBe(0);
   });
+
+  it("resumes unfinished R2 put and queue send on identical retry after push failure (F1)", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+
+    const payload = {
+      documents: [
+        {
+          externalId: "resumable",
+          url: "https://example.com/resumable",
+          title: "Resumable",
+          markdown: "# Resumable\n\nBody.",
+        },
+      ],
+    };
+
+    // 1. Fail on R2 put after documents.upsert persisted the content hash.
+    let failPut = true;
+    const flakyDocs = {
+      async put(key: string, value: string) {
+        if (failPut) {
+          throw new Error("R2 unavailable");
+        }
+        return docs.put(key, value);
+      },
+      async delete(key: string) {
+        return docs.delete(key);
+      },
+    };
+
+    await expect(pushDocuments({ tenant, docs: flakyDocs, queue }, scope, payload)).rejects.toThrow(
+      "R2 unavailable",
+    );
+    expect(docs.puts).toBe(0);
+    expect(queue.sent).toHaveLength(0);
+
+    // 2. Allow R2 put to succeed, but fail on Queue send.
+    failPut = false;
+    let failQueue = true;
+    const flakyQueue = {
+      async send(message: { documentId: string; orgId: string; revision?: number }) {
+        if (failQueue) {
+          throw new Error("Queue unavailable");
+        }
+        return queue.send(message);
+      },
+    };
+
+    await expect(
+      pushDocuments({ tenant, docs: flakyDocs, queue: flakyQueue }, scope, payload),
+    ).rejects.toThrow("Queue unavailable");
+    expect(docs.puts).toBe(1);
+    expect(queue.sent).toHaveLength(0);
+
+    // 3. Retry identical payload: must resume queue send without re-putting R2.
+    failQueue = false;
+    const resumed = await pushDocuments(
+      { tenant, docs: flakyDocs, queue: flakyQueue },
+      scope,
+      payload,
+    );
+    expect(resumed).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    expect(docs.puts).toBe(1);
+    expect(queue.sent).toHaveLength(1);
+
+    // 4. Subsequent identical push is now a true no-op.
+    const noop = await pushDocuments(
+      { tenant, docs: flakyDocs, queue: flakyQueue },
+      scope,
+      payload,
+    );
+    expect(noop).toEqual({ written: 0, unchanged: 1, deleted: 0 });
+    expect(docs.puts).toBe(1);
+    expect(queue.sent).toHaveLength(1);
+  });
+
+  it("converges concurrent first default-source pushes onto one source while allowing explicit sources (F4)", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+    const retriever = memoryRetriever();
+
+    const [resA, resB] = await Promise.all([
+      pushDocuments({ tenant, docs, queue }, scope, {
+        documents: [
+          {
+            externalId: "doc-a",
+            url: "https://example.com/a",
+            title: "Doc A",
+            markdown: "# A",
+          },
+        ],
+      }),
+      pushDocuments({ tenant, docs, queue }, scope, {
+        documents: [
+          {
+            externalId: "doc-b",
+            url: "https://example.com/b",
+            title: "Doc B",
+            markdown: "# B",
+          },
+        ],
+      }),
+    ]);
+
+    expect(resA).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    expect(resB).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+
+    const sources = await tenant.sources.list(assistantId);
+    expect(sources).toHaveLength(1);
+    const defaultSourceId = sources[0]?.id ?? "";
+    expect(await tenant.documents.getByExternalId(defaultSourceId, "doc-a")).not.toBeNull();
+    expect(await tenant.documents.getByExternalId(defaultSourceId, "doc-b")).not.toBeNull();
+
+    // Explicit push source can still be created and targeted via sourceId.
+    const explicit = await tenant.sources.create({
+      id: newId("src"),
+      assistantId,
+      kind: "push",
+      label: "Explicit Push",
+      settings: {},
+      createdAt: Date.now(),
+    });
+    const explicitPush = await pushDocuments({ tenant, docs, queue }, scope, {
+      sourceId: explicit.id,
+      documents: [
+        {
+          externalId: "doc-c",
+          url: "https://example.com/c",
+          title: "Doc C",
+          markdown: "# C",
+        },
+      ],
+    });
+    expect(explicitPush).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    expect(await tenant.documents.getByExternalId(explicit.id, "doc-c")).not.toBeNull();
+
+    // Default-source prune reaches both doc-a and doc-b without touching explicit source.
+    const pruned = await deleteDocuments({ tenant, docs, retriever }, scope, {
+      prune: true,
+      keep: ["doc-a"],
+    });
+    expect(pruned).toEqual({ written: 0, unchanged: 0, deleted: 1 });
+    expect(await tenant.documents.getByExternalId(defaultSourceId, "doc-a")).not.toBeNull();
+    expect(await tenant.documents.getByExternalId(defaultSourceId, "doc-b")).toBeNull();
+    expect(await tenant.documents.getByExternalId(explicit.id, "doc-c")).not.toBeNull();
+  });
 });

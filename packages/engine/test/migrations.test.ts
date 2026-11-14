@@ -11,6 +11,8 @@ const EXPECTED_TABLES = [
   "sources",
   "documents",
   "chunks",
+  "pending_vectors",
+  "stale_vectors",
   "conversations",
   "messages",
   "feedback",

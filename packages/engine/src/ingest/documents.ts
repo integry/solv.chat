@@ -23,6 +23,7 @@ export interface IngestCounts {
 export interface IngestQueueMessage {
   documentId: string;
   orgId: string;
+  revision?: number;
 }
 
 export interface PushDeps {
@@ -74,8 +75,7 @@ async function findExistingSource(
     return source;
   }
 
-  const sources = await tenant.sources.list(assistantId);
-  return sources.find((source) => source.kind === "push") ?? null;
+  return tenant.sources.getDefaultPush(assistantId);
 }
 
 async function resolveOrCreatePushSource(
@@ -83,15 +83,15 @@ async function resolveOrCreatePushSource(
   assistantId: string,
   sourceId: unknown,
 ): Promise<SourceRow> {
-  const existing = await findExistingSource(tenant, assistantId, sourceId);
-  if (existing !== null) return existing;
+  if (sourceId !== undefined && sourceId !== null) {
+    const existing = await findExistingSource(tenant, assistantId, sourceId);
+    if (existing !== null) return existing;
+    throw new NotFound();
+  }
 
-  return tenant.sources.create({
+  return tenant.sources.getOrCreateDefaultPush({
     id: newId("src"),
     assistantId,
-    kind: "push",
-    label: "Push",
-    settings: {},
     createdAt: Date.now(),
   });
 }
@@ -147,7 +147,7 @@ export async function pushDocuments(
   });
 
   const source = await resolveOrCreatePushSource(deps.tenant, scope.assistantId, rawBody.sourceId);
-  const existing = await deps.tenant.documents.hashesFor(
+  const existing = await deps.tenant.documents.pushStatesFor(
     source.id,
     documents.map((doc) => doc.externalId),
   );
@@ -157,7 +157,8 @@ export async function pushDocuments(
 
   for (const document of documents) {
     const hash = await contentHash(document.title, document.markdown);
-    if (existing.get(document.externalId) === hash) {
+    const prev = existing.get(document.externalId);
+    if (prev && prev.contentHash === hash && prev.complete) {
       unchanged++;
       continue;
     }
@@ -171,10 +172,21 @@ export async function pushDocuments(
       contentHash: hash,
       updatedAt: Date.now(),
     });
-    // Store the body before enqueuing so an immediate consumer never misses it.
-    await deps.docs.put(documentObjectKey(scope.orgId, saved.id), document.markdown);
-    await deps.queue.send({ documentId: saved.id, orgId: scope.orgId });
-    existing.set(document.externalId, hash);
+    // Store the body before enqueuing so an immediate consumer never misses it,
+    // and only mark each obligation complete after it succeeds so retries resume.
+    if (saved.storedRevision < saved.revision) {
+      await deps.docs.put(documentObjectKey(scope.orgId, saved.id), document.markdown);
+      await deps.tenant.documents.markBodyStored(saved.id, saved.revision);
+    }
+    if (saved.enqueuedRevision < saved.revision) {
+      await deps.queue.send({
+        documentId: saved.id,
+        orgId: scope.orgId,
+        revision: saved.revision,
+      });
+      await deps.tenant.documents.markEnqueued(saved.id, saved.revision);
+    }
+    existing.set(document.externalId, { contentHash: hash, complete: true });
     written++;
   }
 
@@ -231,9 +243,14 @@ export async function deleteDocuments(
 
   let deleted = 0;
   for (const doc of toDelete) {
-    const chunks = await deps.tenant.documents.listChunks(doc.id);
-    if (chunks.length > 0) {
-      await deps.retriever.remove(chunks.map((chunk) => chunk.id));
+    const [chunks, staleIds, pendingIds] = await Promise.all([
+      deps.tenant.documents.listChunks(doc.id),
+      deps.tenant.documents.listStaleVectors(doc.id),
+      deps.tenant.documents.listAllPendingVectors(doc.id),
+    ]);
+    const vectorIds = [...new Set([...chunks.map((c) => c.id), ...staleIds, ...pendingIds])];
+    if (vectorIds.length > 0) {
+      await deps.retriever.remove(vectorIds);
     }
     await deps.docs.delete(documentObjectKey(scope.orgId, doc.id));
     if (await deps.tenant.documents.remove(doc.id)) {

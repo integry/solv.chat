@@ -160,4 +160,244 @@ describe("ingest consumer", () => {
     expect(after).toEqual(before);
     expect(retriever.all().map((v) => v.chunkId)).toEqual(before.map((c) => c.id));
   });
+
+  it("retains and removes stale vectors on retry after retriever.remove fails (F2)", async () => {
+    const { assistantId, documentId } = await seedDocument("# V1\n\nOld A.\n\n# V1b\n\nOld B.");
+    const embedder = fakeEmbedder();
+    const retriever = memoryRetriever();
+
+    await runIngestBatch(
+      { messages: [makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 1 })] },
+      { db: env.DB, docs: env.DOCS, embedder, retriever },
+    );
+
+    const tenant = forIngestScope(env.DB, { orgId: TEST_ORG_ID, assistantId });
+    const oldIds = (await tenant.documents.listChunks(documentId)).map((c) => c.id);
+    expect(oldIds).toHaveLength(2);
+
+    // Advance document to revision 2.
+    await env.DB.prepare("UPDATE documents SET revision = 2 WHERE org_id = ?1 AND id = ?2")
+      .bind(TEST_ORG_ID, documentId)
+      .run();
+    await env.DOCS.put(documentObjectKey(TEST_ORG_ID, documentId), "# V2\n\nNew content.");
+
+    let failRemove = true;
+    const flakyRetriever = {
+      upsert: retriever.upsert.bind(retriever),
+      query: retriever.query.bind(retriever),
+      async remove(chunkIds: string[]) {
+        if (failRemove) {
+          throw new Error("vectorize remove failed");
+        }
+        return retriever.remove(chunkIds);
+      },
+    };
+
+    const firstAttempt = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 2 });
+    await expect(
+      runIngestBatch(
+        { messages: [firstAttempt] },
+        { db: env.DB, docs: env.DOCS, embedder, retriever: flakyRetriever },
+      ),
+    ).rejects.toThrow("vectorize remove failed");
+    expect(firstAttempt.ack).not.toHaveBeenCalled();
+
+    // Retry: stale vectors A are still durably recorded and removed without re-embedding.
+    failRemove = false;
+    const retryAttempt = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 2 });
+    await runIngestBatch(
+      { messages: [retryAttempt] },
+      { db: env.DB, docs: env.DOCS, embedder, retriever: flakyRetriever },
+    );
+    expect(retryAttempt.ack).toHaveBeenCalledTimes(1);
+
+    const currentChunks = await tenant.documents.listChunks(documentId);
+    expect(currentChunks).toHaveLength(1);
+    expect(retriever.all().map((v) => v.chunkId)).toEqual(currentChunks.map((c) => c.id));
+    for (const oldId of oldIds) {
+      expect(retriever.all().some((v) => v.chunkId === oldId)).toBe(false);
+    }
+    expect(await tenant.documents.listStaleVectors(documentId)).toEqual([]);
+  });
+
+  it("reuses pending vector IDs on retry after D1 replaceChunks fails post-upsert (F2)", async () => {
+    const { assistantId, documentId } = await seedDocument("# V1\n\nInitial.");
+    const embedder = fakeEmbedder();
+    const retriever = memoryRetriever();
+
+    await runIngestBatch(
+      { messages: [makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 1 })] },
+      { db: env.DB, docs: env.DOCS, embedder, retriever },
+    );
+
+    const tenant = forIngestScope(env.DB, { orgId: TEST_ORG_ID, assistantId });
+    const oldIds = (await tenant.documents.listChunks(documentId)).map((c) => c.id);
+
+    await env.DB.prepare("UPDATE documents SET revision = 2 WHERE org_id = ?1 AND id = ?2")
+      .bind(TEST_ORG_ID, documentId)
+      .run();
+    await env.DOCS.put(documentObjectKey(TEST_ORG_ID, documentId), "# V2\n\nSecond.");
+
+    const upsertedBatches: string[][] = [];
+    const trackingRetriever = {
+      query: retriever.query.bind(retriever),
+      remove: retriever.remove.bind(retriever),
+      async upsert(records: Parameters<typeof retriever.upsert>[0]) {
+        upsertedBatches.push(records.map((r) => r.chunkId));
+        return retriever.upsert(records);
+      },
+    };
+
+    // Simulate D1 batch failure on replaceChunks after retriever.upsert succeeds.
+    let failChunkInsert = true;
+    const flakyDb = new Proxy(env.DB, {
+      get(target, prop, receiver) {
+        if (prop === "batch") {
+          return async (stmts: D1PreparedStatement[]) => {
+            // replaceChunks batch has 5+ statements (savePendingVectors has 2 for 1 chunk).
+            if (failChunkInsert && stmts.length >= 5) {
+              throw new Error("D1 batch failed");
+            }
+            return target.batch(stmts);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    const firstAttempt = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 2 });
+    await expect(
+      runIngestBatch(
+        { messages: [firstAttempt] },
+        { db: flakyDb, docs: env.DOCS, embedder, retriever: trackingRetriever },
+      ),
+    ).rejects.toThrow("D1 batch failed");
+    expect(firstAttempt.ack).not.toHaveBeenCalled();
+    expect(upsertedBatches).toHaveLength(1);
+
+    failChunkInsert = false;
+    const retryAttempt = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 2 });
+    await runIngestBatch(
+      { messages: [retryAttempt] },
+      { db: flakyDb, docs: env.DOCS, embedder, retriever: trackingRetriever },
+    );
+    expect(retryAttempt.ack).toHaveBeenCalledTimes(1);
+    expect(upsertedBatches).toHaveLength(2);
+    // Exact same chunk IDs reused on retry — no orphaned vectors left behind.
+    expect(upsertedBatches[1]).toEqual(upsertedBatches[0]);
+
+    const finalChunks = await tenant.documents.listChunks(documentId);
+    expect(finalChunks.map((c) => c.id)).toEqual(upsertedBatches[0]);
+    expect(retriever.all().map((v) => v.chunkId)).toEqual(finalChunks.map((c) => c.id));
+    for (const oldId of oldIds) {
+      expect(retriever.all().some((v) => v.chunkId === oldId)).toBe(false);
+    }
+  });
+
+  it("discards superseded older consumer paused during embedding without overwriting newer revision (F3)", async () => {
+    const { assistantId, documentId } = await seedDocument("# Rev 1\n\nOlder content.");
+    const retriever = memoryRetriever();
+    const tenant = forIngestScope(env.DB, { orgId: TEST_ORG_ID, assistantId });
+
+    let releaseEmbedA!: () => void;
+    const embedAStarted = new Promise<void>((resolve) => {
+      const gate = new Promise<void>((res) => {
+        releaseEmbedA = res;
+      });
+      const embedderA: Embedder = {
+        dimensions: 4,
+        async embed(texts) {
+          resolve();
+          await gate;
+          return fakeEmbedder().embed(texts);
+        },
+      };
+
+      const msgA = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 1 });
+      void runIngestBatch(
+        { messages: [msgA] },
+        { db: env.DB, docs: env.DOCS, embedder: embedderA, retriever },
+      ).then(() => {
+        expect(msgA.ack).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    await embedAStarted;
+
+    // Revision 2 arrives and is processed by Consumer B while Consumer A is paused.
+    await env.DB.prepare("UPDATE documents SET revision = 2 WHERE org_id = ?1 AND id = ?2")
+      .bind(TEST_ORG_ID, documentId)
+      .run();
+    await env.DOCS.put(documentObjectKey(TEST_ORG_ID, documentId), "# Rev 2\n\nNewer content.");
+    const msgB = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 2 });
+    await runIngestBatch(
+      { messages: [msgB] },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+    expect(msgB.ack).toHaveBeenCalledTimes(1);
+
+    const rev2Chunks = await tenant.documents.listChunks(documentId);
+    expect(rev2Chunks.map((c) => c.text)).toEqual(["Newer content."]);
+
+    // Resume Consumer A; it must discard its work and leave rev 2 intact.
+    releaseEmbedA();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const finalChunks = await tenant.documents.listChunks(documentId);
+    expect(finalChunks).toEqual(rev2Chunks);
+    expect(retriever.all().map((v) => v.chunkId)).toEqual(rev2Chunks.map((c) => c.id));
+  });
+
+  it("cleans up superseded vectors when revision advances between upsert and replaceChunks (F3)", async () => {
+    const { assistantId, documentId } = await seedDocument("# Rev 1\n\nOlder content.");
+    const retriever = memoryRetriever();
+    const tenant = forIngestScope(env.DB, { orgId: TEST_ORG_ID, assistantId });
+
+    let releaseUpsertA!: () => void;
+    let upsertAEntered!: () => void;
+    const upsertAStarted = new Promise<void>((resolve) => {
+      upsertAEntered = resolve;
+    });
+    const upsertAGate = new Promise<void>((resolve) => {
+      releaseUpsertA = resolve;
+    });
+
+    const blockingRetrieverA = {
+      query: retriever.query.bind(retriever),
+      remove: retriever.remove.bind(retriever),
+      async upsert(records: Parameters<typeof retriever.upsert>[0]) {
+        await retriever.upsert(records);
+        upsertAEntered();
+        await upsertAGate;
+      },
+    };
+
+    const msgA = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 1 });
+    const promiseA = runIngestBatch(
+      { messages: [msgA] },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever: blockingRetrieverA },
+    );
+
+    await upsertAStarted;
+
+    // Document advances to revision 2 before Consumer A reaches replaceChunks.
+    await env.DB.prepare("UPDATE documents SET revision = 2 WHERE org_id = ?1 AND id = ?2")
+      .bind(TEST_ORG_ID, documentId)
+      .run();
+    await env.DOCS.put(documentObjectKey(TEST_ORG_ID, documentId), "# Rev 2\n\nNewer content.");
+    const msgB = makeMessage({ documentId, orgId: TEST_ORG_ID, revision: 2 });
+    await runIngestBatch(
+      { messages: [msgB] },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+
+    releaseUpsertA();
+    await promiseA;
+    expect(msgA.ack).toHaveBeenCalledTimes(1);
+
+    const finalChunks = await tenant.documents.listChunks(documentId);
+    expect(finalChunks.map((c) => c.text)).toEqual(["Newer content."]);
+    expect(retriever.all().map((v) => v.chunkId)).toEqual(finalChunks.map((c) => c.id));
+  });
 });
