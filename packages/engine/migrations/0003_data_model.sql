@@ -22,7 +22,7 @@ CREATE TABLE assistant_versions (
   created_at INTEGER NOT NULL,
   published_at INTEGER,
   UNIQUE (org_id, id),
-  FOREIGN KEY (org_id, assistant_id) REFERENCES assistants(org_id, id)
+  FOREIGN KEY (org_id, assistant_id) REFERENCES assistants(org_id, id) ON DELETE CASCADE
 );
 -- The spec's invariant, enforced by the database rather than handler
 -- discipline, so a publish bug fails loudly instead of leaving two drafts.
@@ -39,7 +39,7 @@ CREATE TABLE sources (
   settings TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL,
   UNIQUE (org_id, id),
-  FOREIGN KEY (org_id, assistant_id) REFERENCES assistants(org_id, id)
+  FOREIGN KEY (org_id, assistant_id) REFERENCES assistants(org_id, id) ON DELETE CASCADE
 );
 CREATE INDEX sources_assistant ON sources(org_id, assistant_id);
 
@@ -53,7 +53,7 @@ CREATE TABLE documents (
   content_hash TEXT NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE (org_id, id),
-  FOREIGN KEY (org_id, source_id) REFERENCES sources(org_id, id)
+  FOREIGN KEY (org_id, source_id) REFERENCES sources(org_id, id) ON DELETE CASCADE
 );
 -- Unique on the pushed identity: what makes a repeat push an update rather
 -- than a duplicate, and what `prune` deletes against.
@@ -66,7 +66,7 @@ CREATE TABLE chunks (
   ordinal INTEGER NOT NULL,
   text TEXT NOT NULL,
   heading_path TEXT NOT NULL DEFAULT '',
-  FOREIGN KEY (org_id, document_id) REFERENCES documents(org_id, id)
+  FOREIGN KEY (org_id, document_id) REFERENCES documents(org_id, id) ON DELETE CASCADE
 );
 CREATE INDEX chunks_document ON chunks(org_id, document_id, ordinal);
 
@@ -78,7 +78,7 @@ CREATE TABLE conversations (
   started_at INTEGER NOT NULL,
   page_url TEXT NOT NULL DEFAULT '',
   UNIQUE (org_id, id),
-  FOREIGN KEY (org_id, assistant_id) REFERENCES assistants(org_id, id)
+  FOREIGN KEY (org_id, assistant_id) REFERENCES assistants(org_id, id) ON DELETE CASCADE
 );
 CREATE INDEX conversations_assistant ON conversations(org_id, assistant_id, started_at);
 
@@ -97,7 +97,7 @@ CREATE TABLE messages (
   answered INTEGER NOT NULL DEFAULT 1 CHECK (answered IN (0, 1)),
   created_at INTEGER NOT NULL,
   UNIQUE (org_id, id),
-  FOREIGN KEY (org_id, conversation_id) REFERENCES conversations(org_id, id)
+  FOREIGN KEY (org_id, conversation_id) REFERENCES conversations(org_id, id) ON DELETE CASCADE
 );
 CREATE INDEX messages_conversation ON messages(org_id, conversation_id, created_at);
 CREATE INDEX messages_unanswered ON messages(org_id, answered, created_at);
@@ -110,7 +110,7 @@ CREATE TABLE feedback (
   value TEXT NOT NULL CHECK (value IN ('up', 'down')),
   note TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (org_id, message_id) REFERENCES messages(org_id, id)
+  FOREIGN KEY (org_id, message_id) REFERENCES messages(org_id, id) ON DELETE CASCADE
 );
 CREATE UNIQUE INDEX feedback_unique ON feedback(org_id, message_id, visitor_id);
 
@@ -125,7 +125,7 @@ CREATE TABLE mcp_servers (
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   created_at INTEGER NOT NULL,
   UNIQUE (org_id, id),
-  FOREIGN KEY (org_id, assistant_id) REFERENCES assistants(org_id, id)
+  FOREIGN KEY (org_id, assistant_id) REFERENCES assistants(org_id, id) ON DELETE CASCADE
 );
 CREATE INDEX mcp_servers_assistant ON mcp_servers(org_id, assistant_id);
 
@@ -148,7 +148,7 @@ CREATE TABLE tests (
   question TEXT NOT NULL,
   expectation TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (org_id, assistant_id) REFERENCES assistants(org_id, id)
+  FOREIGN KEY (org_id, assistant_id) REFERENCES assistants(org_id, id) ON DELETE CASCADE
 );
 CREATE INDEX tests_assistant ON tests(org_id, assistant_id);
 
@@ -159,6 +159,6 @@ CREATE TABLE test_runs (
   started_at INTEGER NOT NULL,
   results TEXT NOT NULL DEFAULT '[]',
   passed INTEGER NOT NULL CHECK (passed IN (0, 1)),
-  FOREIGN KEY (org_id, version_id) REFERENCES assistant_versions(org_id, id)
+  FOREIGN KEY (org_id, version_id) REFERENCES assistant_versions(org_id, id) ON DELETE CASCADE
 );
 CREATE INDEX test_runs_version ON test_runs(org_id, version_id, started_at);
