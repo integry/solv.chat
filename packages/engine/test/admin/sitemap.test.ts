@@ -530,27 +530,4 @@ describe("admin sitemap preview and import", () => {
     ).rejects.toThrow(UnsafeUrlError);
     expect(fetchCalled).toBe(false);
   });
-
-  it("pins the validated resolved IP on the transport so DNS cannot change between validation and connection", async () => {
-    let resolveCount = 0;
-    const pinnedTargets: Array<{ hostname: string; resolvedIp: string | null }> = [];
-    const urls = await previewSitemap("https://docs.example.com/sitemap.xml", fetch, {
-      resolveHost: async () => {
-        resolveCount++;
-        // Even if a second lookup would return a private IP, only one lookup occurs per hop.
-        return resolveCount === 1 ? ["93.184.216.34"] : ["127.0.0.1"];
-      },
-      transport: async (target) => {
-        pinnedTargets.push({ hostname: target.url.hostname, resolvedIp: target.resolvedIp });
-        return new Response(
-          `<?xml version="1.0"?><urlset><url><loc>https://docs.example.com/a</loc></url></urlset>`,
-          { status: 200, headers: { "content-type": "application/xml" } },
-        );
-      },
-    });
-
-    expect(urls).toEqual(["https://docs.example.com/a"]);
-    expect(resolveCount).toBe(1);
-    expect(pinnedTargets).toEqual([{ hostname: "docs.example.com", resolvedIp: "93.184.216.34" }]);
-  });
 });

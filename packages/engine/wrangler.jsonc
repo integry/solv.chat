@@ -3,7 +3,7 @@
   "name": "solvchat-engine",
   "main": "src/worker.ts",
   "compatibility_date": "2025-05-01",
-  "compatibility_flags": ["nodejs_compat", "enable_nodejs_http_modules"],
+  "compatibility_flags": ["nodejs_compat"],
   // Secrets (set via `wrangler secret put` or `.dev.vars` locally; never commit values):
   //   SOLV_ADMIN_PASSWORD
   //   SOLV_SECRET_KEY

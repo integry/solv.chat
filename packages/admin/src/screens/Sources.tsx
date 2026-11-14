@@ -10,6 +10,7 @@ export interface SourcesProps {
 }
 
 const DOCS_PAGE_SIZE = 20;
+const MAX_IMPORT_URLS = 100;
 
 const KIND_LABELS: Record<SourceKind, string> = {
   push: "Pushed from your site",
@@ -67,7 +68,7 @@ function SitemapImport({
         { url: targetUrl },
       );
       setPreview({ url: targetUrl, urls: res.urls });
-      setSelected(new Set(res.urls));
+      setSelected(new Set(res.urls.slice(0, MAX_IMPORT_URLS)));
       if (res.urls.length === 0) {
         setNotice("No pages found in that sitemap.");
       }
@@ -194,14 +195,15 @@ function SitemapImport({
         <div className="stack">
           <div className="sitemap-toolbar">
             <span className="muted">
-              {selected.size} of {preview.urls.length} selected
+              {selected.size} of {preview.urls.length} selected · Up to {MAX_IMPORT_URLS} pages per
+              import
             </span>
             <div className="actions">
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
                 disabled={fetching || importing}
-                onClick={() => setSelected(new Set(preview.urls))}
+                onClick={() => setSelected(new Set(preview.urls.slice(0, MAX_IMPORT_URLS)))}
               >
                 Select all
               </button>

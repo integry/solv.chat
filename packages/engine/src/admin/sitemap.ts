@@ -5,7 +5,6 @@ import {
   assertPublicHttpsUrl,
   fetchCapped,
   type HostResolver,
-  type PinnedFetch,
   UnsafeUrlError,
 } from "../security/urlGuard.js";
 import { BadRequest, NotFound } from "./errors.js";
@@ -120,7 +119,6 @@ function htmlToTitleAndMarkdown(
 export interface SitemapFetchOptions {
   timeoutMs?: number | undefined;
   resolveHost?: HostResolver | undefined;
-  transport?: PinnedFetch | undefined;
 }
 
 export async function previewSitemap(
@@ -137,7 +135,6 @@ export async function previewSitemap(
     maxBytes: MAX_SITEMAP_BYTES,
     accept: "application/xml, text/xml, */*",
     resolveHost: options?.resolveHost,
-    transport: options?.transport,
   });
   // A deliberately small extractor rather than an XML parser dependency: we
   // need <loc> values, and anything else in the document is not our business.
@@ -241,7 +238,6 @@ export async function importSitemapUrls(
       maxBytes: MAX_PAGE_BYTES,
       accept: "text/html, text/markdown, text/plain, */*",
       resolveHost: options?.resolveHost,
-      transport: options?.transport,
     });
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
 

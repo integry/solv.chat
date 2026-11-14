@@ -30,6 +30,7 @@ function installSourcesFakeServer(options?: {
     urls: string[];
     sourceId?: string;
   }) => Promise<Response> | Response | null;
+  previewUrls?: string[];
 }) {
   const assistant = makeAssistant();
   const sources: SourceSummary[] = [
@@ -140,7 +141,7 @@ function installSourcesFakeServer(options?: {
 
     if (path === `/api/admin/assistants/${assistant.id}/sitemap-preview` && method === "POST") {
       return Response.json({
-        urls: [
+        urls: options?.previewUrls ?? [
           "https://docs.example.com/getting-started",
           "https://docs.example.com/pricing",
           "https://docs.example.com/changelog",
@@ -825,5 +826,45 @@ describe("admin Sources screen", () => {
     expect(questionInput.value).toBe("Question B");
     expect(answerInput.value).toBe("Draft Answer B");
     expect(screen.queryByText("Answer saved.")).toBeNull();
+  });
+
+  it("selects at most 100 URLs by default and shows the 100-page import limit", async () => {
+    const previewUrls = Array.from(
+      { length: 150 },
+      (_, i) => `https://docs.example.com/page-${i + 1}`,
+    );
+    installSourcesFakeServer({ previewUrls });
+    window.history.replaceState(null, "", "/admin/sources");
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Sources" });
+
+    fireEvent.change(screen.getByLabelText("Sitemap URL"), {
+      target: { value: "https://docs.example.com/sitemap.xml" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch URLs" }));
+
+    expect(
+      await screen.findByText("100 of 150 selected · Up to 100 pages per import"),
+    ).toBeTruthy();
+
+    const firstCheckbox = screen.getByLabelText(
+      "https://docs.example.com/page-1",
+    ) as HTMLInputElement;
+    const hundredthCheckbox = screen.getByLabelText(
+      "https://docs.example.com/page-100",
+    ) as HTMLInputElement;
+    const hundredFirstCheckbox = screen.getByLabelText(
+      "https://docs.example.com/page-101",
+    ) as HTMLInputElement;
+    expect(firstCheckbox.checked).toBe(true);
+    expect(hundredthCheckbox.checked).toBe(true);
+    expect(hundredFirstCheckbox.checked).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    expect(screen.getByText("0 of 150 selected · Up to 100 pages per import")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+    expect(screen.getByText("100 of 150 selected · Up to 100 pages per import")).toBeTruthy();
   });
 });
