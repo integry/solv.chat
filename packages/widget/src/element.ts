@@ -94,11 +94,11 @@ export class SolvChat extends HTMLElement {
       this.#root.adoptedStyleSheets = [styles];
       this.#renderShell();
       this.#initialized = true;
-    }
 
-    const saved = loadConversation(this.#assistant());
-    if (saved !== null) {
-      this.#restore(saved);
+      const saved = loadConversation(this.#assistant());
+      if (saved !== null) {
+        this.#restore(saved);
+      }
     }
 
     void this.#loadConfig();
@@ -182,7 +182,17 @@ export class SolvChat extends HTMLElement {
     input.id = "solv-input";
     input.rows = 1;
     input.placeholder = "Ask a question...";
+    let composing = false;
+    input.addEventListener("compositionstart", () => {
+      composing = true;
+    });
+    input.addEventListener("compositionend", () => {
+      composing = false;
+    });
     input.addEventListener("keydown", (event) => {
+      if (composing || event.isComposing || event.keyCode === 229) {
+        return;
+      }
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         form.requestSubmit();

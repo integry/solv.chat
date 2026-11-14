@@ -454,4 +454,141 @@ describe("<solv-chat>", () => {
     expect(Object.keys(mod)).toEqual([]);
     expect(customElements.get("solv-chat")).toBeDefined();
   });
+
+  it("preserves live streaming state and final answer when reconnected mid-stream", async () => {
+    const encoder = new TextEncoder();
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const el = mountWidget("pk_reconnect");
+    await flushAsync();
+    const root = shadow(el);
+
+    mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Stream question";
+    mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    expect(streamController).toBeDefined();
+    streamController?.enqueue(encoder.encode('event: token\ndata: {"text":"First "}\n\n'));
+    await flushAsync();
+
+    // Reconnect the same element while the SSE stream is still open.
+    el.remove();
+    document.body.append(el);
+    await flushAsync();
+
+    streamController?.enqueue(encoder.encode('event: token\ndata: {"text":"second"}\n\n'));
+    streamController?.enqueue(
+      encoder.encode('event: done\ndata: {"messageId":"msg_re","conversationId":"conv_re"}\n\n'),
+    );
+    streamController?.close();
+    await flushAsync();
+
+    const assistantBubbles = root.querySelectorAll(".solv-bubble--assistant .solv-bubble-text");
+    expect(assistantBubbles[assistantBubbles.length - 1]?.textContent).toBe("First second");
+
+    const rawSaved = sessionStorage.getItem("solv-chat-open:pk_reconnect");
+    expect(rawSaved).not.toBeNull();
+    const saved = JSON.parse(String(rawSaved)) as {
+      conversationId: string | null;
+      turns: Array<{ role: string; text: string; messageId?: string }>;
+    };
+    expect(saved.conversationId).toBe("conv_re");
+    expect(saved.turns).toEqual([
+      { role: "user", text: "Stream question" },
+      { role: "assistant", text: "First second", messageId: "msg_re" },
+    ]);
+  });
+
+  it("ignores Enter during IME composition and submits on ordinary Enter", async () => {
+    const chatRequests: Array<{ message: string }> = [];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        chatRequests.push(JSON.parse(String(init?.body)) as { message: string });
+        return new Response(
+          sseStream([
+            'event: token\ndata: {"text":"Submitted"}\n\n',
+            'event: done\ndata: {"messageId":"msg_ime","conversationId":"conv_ime"}\n\n',
+          ]),
+          { status: 200 },
+        );
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const el = mountWidget("pk_ime");
+    await flushAsync();
+    const root = shadow(el);
+
+    mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+    const input = mustQuery<HTMLTextAreaElement>(root, "#solv-input");
+    input.value = "nihao";
+
+    // Enter with isComposing: true must not submit or clear the input.
+    const composingEvent = new KeyboardEvent("keydown", {
+      key: "Enter",
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(composingEvent);
+    await flushAsync();
+
+    expect(composingEvent.defaultPrevented).toBe(false);
+    expect(input.value).toBe("nihao");
+    expect(chatRequests).toHaveLength(0);
+
+    // Enter between compositionstart and compositionend must not submit either.
+    input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    const trackedComposingEvent = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(trackedComposingEvent);
+    await flushAsync();
+
+    expect(trackedComposingEvent.defaultPrevented).toBe(false);
+    expect(input.value).toBe("nihao");
+    expect(chatRequests).toHaveLength(0);
+
+    input.dispatchEvent(new Event("compositionend", { bubbles: true }));
+
+    // Ordinary Enter after composition ends submits the message.
+    const submitEvent = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(submitEvent);
+    await flushAsync();
+
+    expect(submitEvent.defaultPrevented).toBe(true);
+    expect(input.value).toBe("");
+    expect(chatRequests).toHaveLength(1);
+    expect(chatRequests[0]).toMatchObject({
+      protocol: CHAT_PROTOCOL_VERSION,
+      assistant: "pk_ime",
+      message: "nihao",
+    });
+    expect(root.textContent).toContain("Submitted");
+  });
 });
