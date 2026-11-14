@@ -333,7 +333,7 @@ describe("admin app", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
     expect(await screen.findByRole("navigation", { name: "Primary" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Overview" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
     expect(screen.getByText("This screen is not built yet.")).toBeTruthy();
   });
 
