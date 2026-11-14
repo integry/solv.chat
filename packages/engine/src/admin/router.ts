@@ -1,5 +1,6 @@
 import type { Tenant } from "../db/tenant.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
+import type { Retriever } from "../providers/retrieval.js";
 import {
   createAssistant,
   getAssistant,
@@ -25,6 +26,7 @@ export interface AdminRouteDeps {
   orgId: string;
   docs: Pick<R2Bucket, "get" | "put" | "delete">;
   queue: { send(message: IngestQueueMessage): Promise<unknown> };
+  retriever: Pick<Retriever, "remove">;
   publicBaseUrl: string;
   fetchImpl?: typeof fetch | undefined;
 }
@@ -174,7 +176,9 @@ async function sourceRoutes(
       return Response.json({ source });
     }
     if (method === "DELETE") {
-      return Response.json(await deleteSource(tenant, sourceId));
+      return Response.json(
+        await deleteSource({ tenant, docs: deps.docs, retriever: deps.retriever }, sourceId),
+      );
     }
     throw new NotFound();
   }

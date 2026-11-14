@@ -93,14 +93,17 @@ export async function saveEntry(
     externalId = existing.externalId;
     url = existing.url;
   } else {
-    const candidateExternalId = `entry:${await shortHash(parsed.value.question)}`;
-    const existing = await deps.tenant.documents.getByExternalId(sourceId, candidateExternalId);
-    if (existing !== null && existing.title !== parsed.value.question) {
+    const baseExternalId = `entry:${await shortHash(parsed.value.question)}`;
+    let candidate = baseExternalId;
+    for (let suffix = 2; ; suffix++) {
+      const existing = await deps.tenant.documents.getByExternalId(sourceId, candidate);
+      if (existing === null || existing.title === parsed.value.question) {
+        externalId = candidate;
+        break;
+      }
       // The document that originally held this question-derived ID was renamed;
-      // allocate a fresh identity so creating a new entry does not overwrite it.
-      externalId = `entry:${newId("doc").slice(4)}`;
-    } else {
-      externalId = candidateExternalId;
+      // probe a deterministic suffix so retries preserve the same identity.
+      candidate = `${baseExternalId}:${suffix}`;
     }
     const baseUrl = deps.publicBaseUrl.replace(/\/+$/, "");
     url = `${baseUrl}/admin/sources#${externalId}`;

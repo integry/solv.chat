@@ -113,6 +113,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           orgId: principal.orgId,
           docs: env.DOCS,
           queue: env.INGEST_QUEUE,
+          retriever: vectorizeRetriever(env.VECTORS),
           publicBaseUrl: url.origin,
           fetchImpl: options?.fetch,
         });

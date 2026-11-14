@@ -2,6 +2,7 @@ import { newId, parseSourceInput } from "@solvchat/core";
 import type { DocumentSummaryRow } from "../db/documents.js";
 import type { SourceRow, SourceWithStatsRow } from "../db/sources.js";
 import type { Tenant } from "../db/tenant.js";
+import { type DeleteDeps, deleteDocuments } from "../ingest/documents.js";
 import { BadRequest, NotFound } from "./errors.js";
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -77,15 +78,23 @@ export async function updateSource(
   };
 }
 
-/** Deletes an `entry` or `sitemap` source. `push` sources cannot be deleted by hand. */
-export async function deleteSource(tenant: Tenant, sourceId: string): Promise<{ deleted: true }> {
-  const existing = await tenant.sources.get(sourceId);
+/**
+ * Deletes an `entry` or `sitemap` source and cleans up its documents, R2
+ * bodies, and retriever vectors. `push` sources cannot be deleted by hand.
+ */
+export async function deleteSource(deps: DeleteDeps, sourceId: string): Promise<{ deleted: true }> {
+  const existing = await deps.tenant.sources.get(sourceId);
   if (existing === null) throw new NotFound("source");
   if (existing.kind === "push") {
     throw new BadRequest(["source: push sources cannot be deleted"]);
   }
 
-  await tenant.sources.remove(sourceId);
+  await deleteDocuments(
+    deps,
+    { orgId: existing.orgId, assistantId: existing.assistantId },
+    { sourceId, prune: true, keep: [] },
+  );
+  await deps.tenant.sources.remove(sourceId);
   return { deleted: true };
 }
 

@@ -379,6 +379,7 @@ describe("admin versions API", () => {
         orgId: TEST_ORG_ID,
         docs: env.DOCS,
         queue: env.INGEST_QUEUE,
+        retriever: { async remove() {} },
         publicBaseUrl: "https://example.com",
       },
     );
@@ -424,6 +425,7 @@ describe("admin versions API", () => {
         orgId: TEST_ORG_ID,
         docs: env.DOCS,
         queue: env.INGEST_QUEUE,
+        retriever: { async remove() {} },
         publicBaseUrl: "https://example.com",
       },
     );

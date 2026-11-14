@@ -42,7 +42,7 @@ function SitemapImport({
   onImported: () => void;
 }) {
   const [sitemapUrl, setSitemapUrl] = useState("");
-  const [previewUrls, setPreviewUrls] = useState<string[] | null>(null);
+  const [preview, setPreview] = useState<{ url: string; urls: string[] } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [importSourceId, setImportSourceId] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
@@ -53,23 +53,26 @@ function SitemapImport({
   async function handlePreview(event: FormEvent) {
     event.preventDefault();
     if (fetching || importing) return;
+    const targetUrl = sitemapUrl.trim();
     setFetching(true);
     setError(null);
     setNotice(null);
+    setPreview(null);
+    setSelected(new Set());
     setImportSourceId(null);
 
     try {
       const res = await postJson<{ urls: string[] }>(
         `/api/admin/assistants/${assistantId}/sitemap-preview`,
-        { url: sitemapUrl },
+        { url: targetUrl },
       );
-      setPreviewUrls(res.urls);
+      setPreview({ url: targetUrl, urls: res.urls });
       setSelected(new Set(res.urls));
       if (res.urls.length === 0) {
         setNotice("No pages found in that sitemap.");
       }
     } catch (err) {
-      setPreviewUrls(null);
+      setPreview(null);
       setSelected(new Set());
       if (err instanceof ApiError) {
         setError(err.fields.url ?? err.message);
@@ -94,16 +97,16 @@ function SitemapImport({
   }
 
   async function handleImport() {
-    if (importing || !previewUrls || selected.size === 0) return;
+    if (fetching || importing || !preview || selected.size === 0) return;
     setImporting(true);
     setError(null);
     setNotice(null);
 
     try {
-      const chosen = previewUrls.filter((u) => selected.has(u));
+      const chosen = preview.urls.filter((u) => selected.has(u));
       let sourceId = importSourceId;
       if (sourceId === null) {
-        const targetUrl = sitemapUrl.trim() || chosen[0] || "";
+        const targetUrl = preview.url || chosen[0] || "";
         let label = "Sitemap";
         try {
           label = new URL(targetUrl).hostname.slice(0, 80) || "Sitemap";
@@ -120,9 +123,9 @@ function SitemapImport({
 
       const res = await postJson<{ total: number }>(
         `/api/admin/assistants/${assistantId}/sitemap-import`,
-        { sitemapUrl, urls: chosen, sourceId },
+        { sitemapUrl: preview.url, urls: chosen, sourceId },
       );
-      setPreviewUrls(null);
+      setPreview(null);
       setSelected(new Set());
       setImportSourceId(null);
       setSitemapUrl("");
@@ -167,7 +170,11 @@ function SitemapImport({
             disabled={fetching || importing}
             onChange={(e) => {
               setSitemapUrl(e.target.value);
+              setPreview(null);
+              setSelected(new Set());
               setImportSourceId(null);
+              setError(null);
+              setNotice(null);
             }}
             placeholder="https://example.com/sitemap.xml"
           />
@@ -183,25 +190,25 @@ function SitemapImport({
         </div>
       </form>
 
-      {previewUrls && previewUrls.length > 0 && (
+      {preview && preview.urls.length > 0 && (
         <div className="stack">
           <div className="sitemap-toolbar">
             <span className="muted">
-              {selected.size} of {previewUrls.length} selected
+              {selected.size} of {preview.urls.length} selected
             </span>
             <div className="actions">
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                disabled={importing}
-                onClick={() => setSelected(new Set(previewUrls))}
+                disabled={fetching || importing}
+                onClick={() => setSelected(new Set(preview.urls))}
               >
                 Select all
               </button>
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                disabled={importing}
+                disabled={fetching || importing}
                 onClick={() => setSelected(new Set())}
               >
                 Clear all
@@ -210,13 +217,13 @@ function SitemapImport({
           </div>
 
           <ul className="sitemap-url-list">
-            {previewUrls.map((url) => (
+            {preview.urls.map((url) => (
               <li key={url} className="sitemap-url-item">
                 <label className="checkbox-label">
                   <input
                     type="checkbox"
                     checked={selected.has(url)}
-                    disabled={importing}
+                    disabled={fetching || importing}
                     onChange={() => toggleUrl(url)}
                   />
                   <span>{url}</span>
@@ -229,7 +236,7 @@ function SitemapImport({
             <button
               type="button"
               className="btn btn-primary"
-              disabled={importing || selected.size === 0}
+              disabled={fetching || importing || selected.size === 0}
               onClick={() => void handleImport()}
             >
               {importing ? "Importing…" : "Import selected"}

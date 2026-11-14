@@ -214,6 +214,64 @@ describe("admin entries", () => {
     expect(allDocs.find((d) => d.id === recreated.documentId)?.title).toBe("Original question");
   });
 
+  it("preserves entry identity without creating duplicates when retrying a failed queue send after a rename", async () => {
+    const assistantId = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+    const deps = { tenant, docs, queue, publicBaseUrl: "https://admin.example.com" };
+
+    // 1. Create question A and rename it to question B.
+    const original = await saveEntry(
+      deps,
+      { orgId: ORG_A },
+      { assistantId, question: "Question A", answer: "Answer A1" },
+    );
+    await saveEntry(
+      deps,
+      { orgId: ORG_A },
+      {
+        assistantId,
+        sourceId: original.sourceId,
+        documentId: original.documentId,
+        question: "Question B",
+        answer: "Answer B",
+      },
+    );
+
+    // 2. Submit a new entry for Question A where queue.send fails after R2 + D1 write.
+    const failingQueue = {
+      async send() {
+        throw new Error("queue unavailable");
+      },
+    };
+    await expect(
+      saveEntry(
+        { tenant, docs, queue: failingQueue, publicBaseUrl: "https://admin.example.com" },
+        { orgId: ORG_A },
+        { assistantId, question: "Question A", answer: "Answer A2" },
+      ),
+    ).rejects.toThrow("queue unavailable");
+
+    const docsAfterFailure = await tenant.documents.listBySource(original.sourceId);
+    expect(docsAfterFailure).toHaveLength(2);
+    const pendingDoc = docsAfterFailure.find((d) => d.id !== original.documentId);
+    expect(pendingDoc?.title).toBe("Question A");
+
+    // 3. Retry the exact same submission; it must recover the pending entry without duplicating it.
+    const retried = await saveEntry(
+      deps,
+      { orgId: ORG_A },
+      { assistantId, question: "Question A", answer: "Answer A2" },
+    );
+
+    expect(retried.documentId).toBe(pendingDoc?.id);
+    expect(retried.url).toBe(pendingDoc?.url);
+    expect(retried.counts).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    expect(await tenant.documents.listBySource(original.sourceId)).toHaveLength(2);
+    expect(queue.sent.at(-1)?.documentId).toBe(pendingDoc?.id);
+  });
+
   it("rejects cross-org assistant or source access with NotFound", async () => {
     const assistantA = await seedAssistant(ORG_A);
     const tenantB = forPrincipal(env.DB, { orgId: ORG_B, userId: "owner", role: "owner" });

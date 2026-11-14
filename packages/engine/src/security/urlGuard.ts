@@ -183,11 +183,88 @@ export function assertPublicHttpsUrl(rawUrl: string): URL {
   return url;
 }
 
+export type HostResolver = (hostname: string, signal?: AbortSignal) => Promise<string[]>;
+
+export interface ResolvedTarget {
+  url: URL;
+  /** Validated public IP address pinned for this connection, or null if not resolved. */
+  resolvedIp: string | null;
+}
+
+export type PinnedFetch = (target: ResolvedTarget, init: RequestInit) => Promise<Response>;
+
+/**
+ * Validates that a resolved IP address string is a public IPv4 or IPv6 address
+ * and not private, loopback, link-local, or reserved.
+ */
+export function assertPublicIpAddress(rawIp: string): string {
+  const ip = rawIp.trim().replace(/^\[|\]$/g, "");
+  const ipv4 = parseIpv4(ip);
+  if (ipv4) {
+    if (isPrivateOrReservedIpv4(ipv4)) {
+      throw new UnsafeUrlError("must not point to a private or loopback address");
+    }
+    return ip;
+  }
+  if (ip.includes(":")) {
+    const ipv6 = parseIpv6Groups(ip);
+    if (!ipv6 || isPrivateOrReservedIpv6(ipv6)) {
+      throw new UnsafeUrlError("must not point to a private or loopback address");
+    }
+    return ip;
+  }
+  throw new UnsafeUrlError("must not point to a private or loopback address");
+}
+
+async function queryDnsJson(
+  hostname: string,
+  type: "A" | "AAAA",
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const endpoint = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`;
+  const res = await fetch(endpoint, {
+    headers: { accept: "application/dns-json" },
+    ...(signal ? { signal } : {}),
+  });
+  if (!res.ok) {
+    throw new UnsafeUrlError("could not resolve host");
+  }
+  const data = (await res.json()) as {
+    Status?: number;
+    Answer?: Array<{ type?: number; data?: string }>;
+  };
+  if (data.Status !== undefined && data.Status !== 0) {
+    return [];
+  }
+  const expectedType = type === "A" ? 1 : 28;
+  const ips: string[] = [];
+  for (const ans of data.Answer ?? []) {
+    if (ans.type === expectedType && typeof ans.data === "string") {
+      ips.push(ans.data);
+    }
+  }
+  return ips;
+}
+
+/** Resolves A and AAAA records for `hostname` via Cloudflare DNS-over-HTTPS. */
+export async function defaultResolveHost(
+  hostname: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const [v4, v6] = await Promise.all([
+    queryDnsJson(hostname, "A", signal),
+    queryDnsJson(hostname, "AAAA", signal),
+  ]);
+  return [...v4, ...v6];
+}
+
 export interface FollowOptions {
   maxRedirects: number;
   timeoutMs: number;
   accept?: string;
   signal?: AbortSignal;
+  resolveHost?: HostResolver | undefined;
+  transport?: PinnedFetch | undefined;
 }
 
 export interface FetchCappedOptions extends FollowOptions {
@@ -257,10 +334,50 @@ function raceWithAbort<T>(
   });
 }
 
+async function resolveAndAssertPublicIp(
+  url: URL,
+  fetchImpl: typeof fetch,
+  resolveHost: HostResolver | undefined,
+  signal: AbortSignal,
+): Promise<string | null> {
+  const host = url.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "");
+  if (parseIpv4(host) !== null || host.includes(":")) {
+    return host;
+  }
+
+  const resolver = resolveHost ?? (fetchImpl === fetch ? defaultResolveHost : undefined);
+  if (!resolver) {
+    return null;
+  }
+
+  let ips: string[];
+  try {
+    ips = await resolver(host, signal);
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) throw err;
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new UnsafeUrlError("request timed out");
+    }
+    throw new UnsafeUrlError("could not resolve host");
+  }
+
+  if (ips.length === 0) {
+    throw new UnsafeUrlError("could not resolve host");
+  }
+  for (const ip of ips) {
+    assertPublicIpAddress(ip);
+  }
+  return ips[0] ?? null;
+}
+
 /**
  * Fetches `target` with `redirect: "manual"` and validates every redirect hop
- * through `assertPublicHttpsUrl` so a public URL cannot bounce to a private or
- * link-local address. Enforces both redirect and time budgets.
+ * through `assertPublicHttpsUrl` and host resolution so a public URL cannot
+ * resolve or bounce to a private or link-local address. Enforces both redirect
+ * and time budgets.
  */
 export async function followCheckingEachHop(
   target: URL,
@@ -279,12 +396,21 @@ export async function followCheckingEachHop(
       if (controller.signal.aborted) {
         throw new UnsafeUrlError("request timed out");
       }
-      const response = await fetchImpl(current.href, {
+      const resolvedIp = await resolveAndAssertPublicIp(
+        current,
+        fetchImpl,
+        options.resolveHost,
+        controller.signal,
+      );
+      const init: RequestInit = {
         method: "GET",
         redirect: "manual",
         signal: controller.signal,
         headers: options.accept ? { accept: options.accept } : {},
-      });
+      };
+      const response = options.transport
+        ? await options.transport({ url: current, resolvedIp }, init)
+        : await fetchImpl(current.href, init);
 
       if (REDIRECT_STATUSES.has(response.status)) {
         // Cancel the redirect body so connections are not held open.

@@ -1,8 +1,11 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
-import { forIngestScope } from "../../src/db/tenant.js";
+import { forIngestScope, forPrincipal } from "../../src/db/tenant.js";
+import { runIngestBatch } from "../../src/ingest/consumer.js";
 import { pushDocuments } from "../../src/ingest/documents.js";
+import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
+import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
 const ORG_A = TEST_ORG_ID;
@@ -276,5 +279,68 @@ describe("admin sources API", () => {
     const docBody = (await checkA.json()) as { markdown: string };
     expect(docBody.markdown).toContain("A");
     void newId;
+  });
+
+  it("cleans up R2 bodies and retriever vectors when deleting an indexed source", async () => {
+    const app = appForOrg(ORG_A);
+    const assistantId = await createAssistant(app);
+
+    const createRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/sources`, {
+      kind: "entry",
+      label: "Indexed entries",
+      settings: {},
+    });
+    expect(createRes.status).toBe(201);
+    const { source } = (await createRes.json()) as { source: { id: string } };
+
+    const entryRes = await call(app, "POST", `/api/admin/sources/${source.id}/entries`, {
+      question: "How do I delete a source?",
+      answer: "Click Delete and clean up bodies and vectors.",
+    });
+    expect(entryRes.status).toBe(201);
+    const { documentId } = (await entryRes.json()) as { documentId: string };
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const docBefore = await tenant.documents.get(documentId);
+    expect(docBefore).not.toBeNull();
+    expect(docBefore?.bodyKey).not.toBeNull();
+    const bodyKey = docBefore?.bodyKey ?? "";
+    expect(await env.DOCS.head(bodyKey)).not.toBeNull();
+
+    // Index the document so D1 chunks and retriever vectors are populated.
+    const retriever = memoryRetriever();
+    await runIngestBatch(
+      {
+        messages: [
+          {
+            id: newId("msg"),
+            timestamp: new Date(),
+            attempts: 1,
+            body: {
+              orgId: ORG_A,
+              documentId,
+              contentHash: docBefore?.contentHash ?? "",
+            },
+            ack() {},
+            retry() {},
+          },
+        ],
+      },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+
+    const chunksBefore = await tenant.documents.listChunks(documentId);
+    expect(chunksBefore.length).toBeGreaterThan(0);
+    expect(retriever.all()).toHaveLength(chunksBefore.length);
+
+    // Delete the source through deleteSource / admin router and verify R2 + vectors + D1 cleanup.
+    const { deleteSource } = await import("../../src/admin/sources.js");
+    await deleteSource({ tenant, docs: env.DOCS, retriever }, source.id);
+
+    expect(await tenant.sources.get(source.id)).toBeNull();
+    expect(await tenant.documents.get(documentId)).toBeNull();
+    expect(await tenant.documents.listChunks(documentId)).toHaveLength(0);
+    expect(await env.DOCS.head(bodyKey)).toBeNull();
+    expect(retriever.all()).toHaveLength(0);
   });
 });

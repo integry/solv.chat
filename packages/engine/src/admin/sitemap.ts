@@ -1,7 +1,13 @@
 import { MAX_DOCUMENT_MARKDOWN_BYTES, newId } from "@solvchat/core";
 import type { SourceRow } from "../db/sources.js";
 import { type PushDeps, pushDocuments } from "../ingest/documents.js";
-import { assertPublicHttpsUrl, fetchCapped, UnsafeUrlError } from "../security/urlGuard.js";
+import {
+  assertPublicHttpsUrl,
+  fetchCapped,
+  type HostResolver,
+  type PinnedFetch,
+  UnsafeUrlError,
+} from "../security/urlGuard.js";
 import { BadRequest, NotFound } from "./errors.js";
 
 const textEncoder = new TextEncoder();
@@ -111,10 +117,16 @@ function htmlToTitleAndMarkdown(
  * never a private or loopback address — applied here because the hazard is the
  * same: an owner-supplied URL fetched with the Worker's own network position.
  */
+export interface SitemapFetchOptions {
+  timeoutMs?: number | undefined;
+  resolveHost?: HostResolver | undefined;
+  transport?: PinnedFetch | undefined;
+}
+
 export async function previewSitemap(
   url: string,
   fetchImpl: typeof fetch = fetch,
-  options?: { timeoutMs?: number },
+  options?: SitemapFetchOptions,
 ): Promise<string[]> {
   const target = assertPublicHttpsUrl(url);
   // Redirects are followed manually so each hop is checked: `redirect: "follow"`
@@ -124,6 +136,8 @@ export async function previewSitemap(
     timeoutMs: options?.timeoutMs ?? FETCH_TIMEOUT_MS,
     maxBytes: MAX_SITEMAP_BYTES,
     accept: "application/xml, text/xml, */*",
+    resolveHost: options?.resolveHost,
+    transport: options?.transport,
   });
   // A deliberately small extractor rather than an XML parser dependency: we
   // need <loc> values, and anything else in the document is not our business.
@@ -154,7 +168,7 @@ export async function importSitemapUrls(
   scope: { orgId: string; assistantId: string },
   input: SitemapImportInput,
   fetchImpl: typeof fetch = fetch,
-  options?: { timeoutMs?: number },
+  options?: SitemapFetchOptions,
 ): Promise<SitemapImportResult> {
   const assistant = await deps.tenant.assistants.get(scope.assistantId);
   if (assistant === null) throw new NotFound("assistant");
@@ -226,6 +240,8 @@ export async function importSitemapUrls(
       timeoutMs: options?.timeoutMs ?? FETCH_TIMEOUT_MS,
       maxBytes: MAX_PAGE_BYTES,
       accept: "text/html, text/markdown, text/plain, */*",
+      resolveHost: options?.resolveHost,
+      transport: options?.transport,
     });
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
 

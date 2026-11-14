@@ -512,4 +512,32 @@ describe("admin Sources screen", () => {
       expect(screen.queryByText("Could not load documents.")).toBeNull();
     });
   });
+
+  it("clears preview and selections when editing the sitemap URL", async () => {
+    const server = installSourcesFakeServer();
+    window.history.replaceState(null, "", "/admin/sources");
+
+    render(<App />);
+    await screen.findByText("Import once from a sitemap");
+
+    const urlInput = screen.getByLabelText("Sitemap URL");
+    fireEvent.change(urlInput, {
+      target: { value: "https://docs.example.com/sitemap-a.xml" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch URLs" }));
+
+    expect(await screen.findByText("https://docs.example.com/getting-started")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Import selected" })).toBeTruthy();
+
+    // Editing the sitemap URL must invalidate the previous preview and selections.
+    fireEvent.change(urlInput, {
+      target: { value: "https://docs.example.com/sitemap-b.xml" },
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("https://docs.example.com/getting-started")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Import selected" })).toBeNull();
+    });
+    expect(server.importedPayloads).toHaveLength(0);
+  });
 });

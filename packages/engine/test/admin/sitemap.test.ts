@@ -464,4 +464,93 @@ describe("admin sitemap preview and import", () => {
       expect(chunks.length).toBeGreaterThan(0);
     }
   });
+
+  it("refuses hostnames resolving to private or loopback addresses on initial, redirect, and imported page fetches", async () => {
+    let fetchCalled = false;
+    const fetchImpl: typeof fetch = async () => {
+      fetchCalled = true;
+      return new Response("");
+    };
+
+    // 1. Initial sitemap hostname resolves to loopback.
+    await expect(
+      previewSitemap("https://internal.example.com/sitemap.xml", fetchImpl, {
+        resolveHost: async () => ["127.0.0.1"],
+      }),
+    ).rejects.toThrow(UnsafeUrlError);
+    expect(fetchCalled).toBe(false);
+
+    // 2. Hostname resolving to a mix of public and private IPs is rejected.
+    await expect(
+      previewSitemap("https://dual.example.com/sitemap.xml", fetchImpl, {
+        resolveHost: async () => ["93.184.216.34", "169.254.169.254"],
+      }),
+    ).rejects.toThrow(UnsafeUrlError);
+    expect(fetchCalled).toBe(false);
+
+    // 3. Empty resolution is rejected.
+    await expect(
+      previewSitemap("https://missing.example.com/sitemap.xml", fetchImpl, {
+        resolveHost: async () => [],
+      }),
+    ).rejects.toThrow(UnsafeUrlError);
+    expect(fetchCalled).toBe(false);
+
+    // 4. Redirect to a hostname resolving to a private IP is rejected before fetching the hop.
+    const redirectFetch: typeof fetch = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url === "https://public.example.com/sitemap.xml") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://rebind.example.com/secret" },
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    };
+
+    await expect(
+      previewSitemap("https://public.example.com/sitemap.xml", redirectFetch, {
+        resolveHost: async (host) =>
+          host === "public.example.com" ? ["93.184.216.34"] : ["10.0.0.42"],
+      }),
+    ).rejects.toThrow(UnsafeUrlError);
+
+    // 5. Imported page URL resolving to private IPv6 loopback is rejected.
+    const assistantId = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const queue = makeQueue();
+    await expect(
+      importSitemapUrls(
+        { tenant, docs: env.DOCS, queue },
+        { orgId: ORG_A, assistantId },
+        { urls: ["https://v6loop.example.com/page"] },
+        fetchImpl,
+        { resolveHost: async () => ["::1"] },
+      ),
+    ).rejects.toThrow(UnsafeUrlError);
+    expect(fetchCalled).toBe(false);
+  });
+
+  it("pins the validated resolved IP on the transport so DNS cannot change between validation and connection", async () => {
+    let resolveCount = 0;
+    const pinnedTargets: Array<{ hostname: string; resolvedIp: string | null }> = [];
+    const urls = await previewSitemap("https://docs.example.com/sitemap.xml", fetch, {
+      resolveHost: async () => {
+        resolveCount++;
+        // Even if a second lookup would return a private IP, only one lookup occurs per hop.
+        return resolveCount === 1 ? ["93.184.216.34"] : ["127.0.0.1"];
+      },
+      transport: async (target) => {
+        pinnedTargets.push({ hostname: target.url.hostname, resolvedIp: target.resolvedIp });
+        return new Response(
+          `<?xml version="1.0"?><urlset><url><loc>https://docs.example.com/a</loc></url></urlset>`,
+          { status: 200, headers: { "content-type": "application/xml" } },
+        );
+      },
+    });
+
+    expect(urls).toEqual(["https://docs.example.com/a"]);
+    expect(resolveCount).toBe(1);
+    expect(pinnedTargets).toEqual([{ hostname: "docs.example.com", resolvedIp: "93.184.216.34" }]);
+  });
 });
