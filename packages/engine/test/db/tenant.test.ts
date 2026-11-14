@@ -201,9 +201,9 @@ describe("db/tenant isolation", () => {
     expect(await tenantA.documents.listBySource("src_b")).toEqual([]);
     expect(await tenantA.documents.get("doc_b")).toBeNull();
     expect(await tenantA.documents.listChunks("doc_b")).toEqual([]);
-    expect(await tenantA.documents.updateMetadata("doc_b", "Hacked", "https://bad.test")).toBe(
-      false,
-    );
+    expect(
+      await tenantA.documents.updateMetadata("doc_b", "Hacked", "https://bad.test", "hb"),
+    ).toBe(false);
     expect(await tenantA.documents.remove("doc_b")).toBe(false);
     expect(await tenantB.documents.get("doc_b")).not.toBeNull();
   });

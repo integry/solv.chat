@@ -96,7 +96,21 @@ describe("ingest documents", () => {
       contentHash: expect.any(String),
     });
 
-    // Re-pushing identical content must perform zero R2 puts and zero queue sends.
+    await runIngestBatch(
+      {
+        messages: queue.sent.map((body) => ({
+          id: newId("msg"),
+          timestamp: new Date(),
+          attempts: 1,
+          body,
+          ack() {},
+          retry() {},
+        })),
+      },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever: memoryRetriever() },
+    );
+
+    // Re-pushing identical content after indexing must perform zero R2 puts and zero queue sends.
     const repeat = await pushDocuments({ tenant, docs, queue }, scope, {
       documents: [
         {
@@ -359,6 +373,20 @@ describe("ingest documents", () => {
     expect(docs.puts).toBe(1);
     expect(queue.sent).toHaveLength(1);
 
+    await runIngestBatch(
+      {
+        messages: queue.sent.map((body) => ({
+          id: newId("msg"),
+          timestamp: new Date(),
+          attempts: 1,
+          body,
+          ack() {},
+          retry() {},
+        })),
+      },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever: memoryRetriever() },
+    );
+
     const urlUpdate = await pushDocuments({ tenant, docs, queue }, scope, {
       documents: [
         {
@@ -446,5 +474,161 @@ describe("ingest documents", () => {
     const sources = await tenant.sources.list(assistantId);
     const pushSourceId = sources[0]?.id ?? "";
     expect(await tenant.documents.getByExternalId(pushSourceId, "best-effort")).toBeNull();
+  });
+
+  it("self-heals a lost enqueue on identical retry without rewriting R2, then treats a third push as unchanged", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const docs = countingDocs(env.DOCS);
+    const retriever = memoryRetriever();
+    const sent: IngestQueueMessage[] = [];
+    let failNextSend = true;
+    const queue = {
+      sent,
+      async send(message: IngestQueueMessage) {
+        if (failNextSend) {
+          failNextSend = false;
+          throw new Error("queue unavailable");
+        }
+        sent.push(message);
+      },
+    };
+
+    const payload = {
+      documents: [
+        {
+          externalId: "heal-me",
+          url: "https://example.com/heal",
+          title: "Heal Me",
+          markdown: "# Heal Me\n\nRetry body.",
+        },
+      ],
+    };
+
+    await expect(pushDocuments({ tenant, docs, queue }, scope, payload)).rejects.toThrow(
+      "queue unavailable",
+    );
+    expect(docs.puts).toBe(1);
+    expect(queue.sent).toHaveLength(0);
+
+    const retry = await pushDocuments({ tenant, docs, queue }, scope, payload);
+    expect(retry).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    expect(docs.puts).toBe(1);
+    expect(queue.sent).toHaveLength(1);
+
+    await runIngestBatch(
+      {
+        messages: queue.sent.map((body) => ({
+          id: newId("msg"),
+          timestamp: new Date(),
+          attempts: 1,
+          body,
+          ack() {},
+          retry() {},
+        })),
+      },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+
+    expect(retriever.all()).toHaveLength(1);
+    const sources = await tenant.sources.list(assistantId);
+    const saved = await tenant.documents.getByExternalId(sources[0]?.id ?? "", "heal-me");
+    expect(saved?.indexedHash).toBe(saved?.contentHash);
+
+    const third = await pushDocuments({ tenant, docs, queue }, scope, payload);
+    expect(third).toEqual({ written: 0, unchanged: 1, deleted: 0 });
+    expect(docs.puts).toBe(1);
+    expect(queue.sent).toHaveLength(1);
+  });
+
+  it("guards updateMetadata by content_hash and falls back to changed-content path when another push races it", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+
+    await pushDocuments({ tenant, docs, queue }, scope, {
+      documents: [
+        {
+          externalId: "race",
+          url: "https://example.com/v1",
+          title: "Title A",
+          markdown: "# A\n\nBody A.",
+        },
+      ],
+    });
+
+    const sources = await tenant.sources.list(assistantId);
+    const sourceId = sources[0]?.id ?? "";
+
+    let concurrentPushTitle: string | undefined;
+    let concurrentPushHash: string | undefined;
+    let guardResult: boolean | undefined;
+    let rowRightAfterGuard: { title: string; contentHash: string } | null = null;
+    let racedOnce = false;
+
+    const racingTenant: typeof tenant = {
+      ...tenant,
+      documents: {
+        ...tenant.documents,
+        async updateMetadata(id, title, url, expectedContentHash, updatedAt) {
+          if (!racedOnce) {
+            racedOnce = true;
+            await pushDocuments({ tenant, docs, queue }, scope, {
+              documents: [
+                {
+                  externalId: "race",
+                  url: "https://example.com/v1",
+                  title: "Title B",
+                  markdown: "# B\n\nBody B.",
+                },
+              ],
+            });
+            const concurrentRow = await tenant.documents.get(id);
+            concurrentPushTitle = concurrentRow?.title;
+            concurrentPushHash = concurrentRow?.contentHash;
+          }
+          const updated = await tenant.documents.updateMetadata(
+            id,
+            title,
+            url,
+            expectedContentHash,
+            updatedAt,
+          );
+          guardResult = updated;
+          const afterGuard = await tenant.documents.get(id);
+          rowRightAfterGuard = afterGuard
+            ? { title: afterGuard.title, contentHash: afterGuard.contentHash }
+            : null;
+          return updated;
+        },
+      },
+    };
+
+    const res = await pushDocuments({ tenant: racingTenant, docs, queue }, scope, {
+      documents: [
+        {
+          externalId: "race",
+          url: "https://example.com/v2",
+          title: "Title A",
+          markdown: "# A\n\nBody A.",
+        },
+      ],
+    });
+
+    expect(res).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+    expect(guardResult).toBe(false);
+    expect(rowRightAfterGuard).toEqual({
+      title: concurrentPushTitle,
+      contentHash: concurrentPushHash,
+    });
+
+    const finalDoc = await tenant.documents.getByExternalId(sourceId, "race");
+    expect(finalDoc?.title).toBe("Title A");
+    expect(finalDoc?.url).toBe("https://example.com/v2");
+    expect(finalDoc?.contentHash).toBe(queue.sent[0]?.contentHash);
+    expect(queue.sent).toHaveLength(3);
   });
 });

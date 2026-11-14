@@ -182,20 +182,39 @@ export async function pushDocuments(
     const hash = await contentHash(document.title, document.markdown);
     const prev = existing.get(document.externalId);
     if (prev && prev.contentHash === hash) {
-      if (prev.url === document.url) {
-        unchanged++;
-        continue;
+      let metadataUpdated = false;
+      if (prev.url !== document.url) {
+        const updated = await deps.tenant.documents.updateMetadata(
+          prev.id,
+          document.title,
+          document.url,
+          prev.contentHash,
+          Date.now(),
+        );
+        if (updated) {
+          metadataUpdated = true;
+          existing.set(document.externalId, { ...prev, url: document.url });
+        }
       }
-      const updated = await deps.tenant.documents.updateMetadata(
-        prev.id,
-        document.title,
-        document.url,
-        Date.now(),
-      );
-      if (updated) {
-        existing.set(document.externalId, { ...prev, url: document.url });
-        written++;
-        continue;
+
+      if (prev.url === document.url || metadataUpdated) {
+        if (prev.indexedHash === hash) {
+          if (metadataUpdated) {
+            written++;
+          } else {
+            unchanged++;
+          }
+          continue;
+        }
+        if (prev.bodyKey !== null) {
+          await deps.queue.send({
+            orgId: scope.orgId,
+            documentId: prev.id,
+            contentHash: hash,
+          });
+          written++;
+          continue;
+        }
       }
     }
 
@@ -228,6 +247,7 @@ export async function pushDocuments(
       id: saved.id,
       url: saved.url,
       contentHash: hash,
+      indexedHash: saved.indexedHash,
       bodyKey: saved.bodyKey,
     });
     written++;
