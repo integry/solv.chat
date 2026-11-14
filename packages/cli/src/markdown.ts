@@ -1,5 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { join, posix } from "node:path";
+import { parse } from "yaml";
 
 export interface FrontMatter {
   title?: string;
@@ -51,21 +52,6 @@ export function externalIdFor(root: string, file: string): string {
 }
 
 /**
- * Strips matching single or double quotes around a scalar YAML value.
- */
-function unquote(value: string): string {
-  const trimmed = value.trim();
-  if (
-    trimmed.length >= 2 &&
-    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-      (trimmed.startsWith("'") && trimmed.endsWith("'")))
-  ) {
-    return trimmed.slice(1, -1).trim();
-  }
-  return trimmed;
-}
-
-/**
  * Splits optional YAML front matter (`--- ... ---`) at the start of a Markdown
  * file, extracting `title` when present.
  */
@@ -79,14 +65,20 @@ export function splitFrontMatter(raw: string): { frontMatter: FrontMatter; body:
   const body = raw.slice(match[0].length);
   const frontMatter: FrontMatter = {};
 
-  for (const line of block.split(/\r?\n/)) {
-    const kv = /^title\s*:\s*(.+)$/.exec(line.trim());
-    if (kv?.[1] !== undefined) {
-      const title = unquote(kv[1]);
-      if (title.length > 0) {
-        frontMatter.title = title;
+  let parsed: unknown;
+  try {
+    parsed = parse(block);
+  } catch {
+    return { frontMatter, body };
+  }
+
+  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    const title = (parsed as Record<string, unknown>).title;
+    if (typeof title === "string") {
+      const trimmed = title.trim();
+      if (trimmed.length > 0) {
+        frontMatter.title = trimmed;
       }
-      break;
     }
   }
 
@@ -100,18 +92,27 @@ export function splitFrontMatter(raw: string): { frontMatter: FrontMatter; body:
 export function firstHeading(markdown: string): string | undefined {
   let inFence = false;
   let fenceChar = "";
+  let fenceLength = 0;
 
   for (const line of markdown.split(/\r?\n/)) {
     const trimmed = line.trim();
-    const fenceMatch = /^(`{3,}|~{3,})/.exec(trimmed);
+    const fenceMatch = /^(`{3,}|~{3,})(.*)$/.exec(trimmed);
     if (fenceMatch?.[1]) {
-      const char = fenceMatch[1][0] ?? "";
+      const delimiter = fenceMatch[1];
+      const rest = fenceMatch[2] ?? "";
+      const char = delimiter[0] ?? "";
       if (!inFence) {
         inFence = true;
         fenceChar = char;
-      } else if (char === fenceChar) {
+        fenceLength = delimiter.length;
+      } else if (
+        char === fenceChar &&
+        delimiter.length >= fenceLength &&
+        rest.trim().length === 0
+      ) {
         inFence = false;
         fenceChar = "";
+        fenceLength = 0;
       }
       continue;
     }
