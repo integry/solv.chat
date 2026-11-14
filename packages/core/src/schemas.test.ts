@@ -1,0 +1,361 @@
+import { describe, expect, it } from "vitest";
+import {
+  CHAT_PROTOCOL_VERSION,
+  type ChatEvent,
+  defaultVersionConfig,
+  Errors,
+  fail,
+  MAX_DOCUMENT_MARKDOWN_BYTES,
+  ok,
+  parseAssistantInput,
+  parseChatEventLine,
+  parseChatRequest,
+  parseDocumentInput,
+  parseSourceInput,
+  parseVersionConfig,
+  SUPPORTED_CHAT_PROTOCOLS,
+  serializeChatEvent,
+} from "./index.js";
+
+describe("result", () => {
+  it("constructs ok and fail results and collects field-prefixed errors", () => {
+    expect(ok(42)).toEqual({ ok: true, value: 42 });
+    expect(fail("name: bad")).toEqual({ ok: false, errors: ["name: bad"] });
+
+    const errors = new Errors();
+    expect(errors.failed).toBe(false);
+    errors.add("name", "must be 1 to 80 characters");
+    expect(errors.failed).toBe(true);
+    expect(errors.list).toEqual(["name: must be 1 to 80 characters"]);
+  });
+});
+
+describe("parseAssistantInput", () => {
+  it("parses a valid assistant, normalises and de-duplicates origins, and drops unknown keys", () => {
+    const input = {
+      name: "  Docs Helper  ",
+      allowedOrigins: ["https://a.com/", "https://a.com", "http://localhost:3000/"],
+      role: "admin",
+    };
+    const res = parseAssistantInput(input);
+    expect(res).toEqual({
+      ok: true,
+      value: {
+        name: "Docs Helper",
+        allowedOrigins: ["https://a.com", "http://localhost:3000"],
+      },
+    });
+    if (res.ok) {
+      expect(res.value).not.toBe(input);
+      expect("role" in res.value).toBe(false);
+    }
+  });
+
+  it("rejects missing required fields with field names", () => {
+    const res = parseAssistantInput({});
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.errors.some((e) => e.startsWith("name:"))).toBe(true);
+      expect(res.errors.some((e) => e.startsWith("allowedOrigins:"))).toBe(true);
+    }
+  });
+
+  it("rejects relative URLs, paths, queries, fragments, file:, and wildcards in allowedOrigins", () => {
+    const bad = [
+      "/relative",
+      "https://a.com/docs",
+      "https://a.com?x=1",
+      "https://a.com#top",
+      "file:///etc/passwd",
+      "https://*",
+      "https://*.example.com",
+      "*",
+    ];
+    for (const origin of bad) {
+      const res = parseAssistantInput({ name: "Bot", allowedOrigins: [origin] });
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.errors[0]).toMatch(/^allowedOrigins\[0\]:/);
+      }
+    }
+  });
+});
+
+describe("parseVersionConfig", () => {
+  it("returns defaults for an empty object and does not return caller object by reference", () => {
+    const input = {};
+    const res = parseVersionConfig(input);
+    expect(res).toEqual({ ok: true, value: defaultVersionConfig() });
+    if (res.ok) {
+      expect(res.value).not.toBe(input);
+    }
+  });
+
+  it("merges partial sections over defaults and drops unknown keys", () => {
+    const input = {
+      behaviour: { greeting: "Hi there", extra: true },
+      widget: { title: "Support", accentColor: "#112233" },
+      unknownTopLevel: "ignored",
+    };
+    const res = parseVersionConfig(input);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const defaults = defaultVersionConfig();
+      expect(res.value.behaviour).toEqual({
+        ...defaults.behaviour,
+        greeting: "Hi there",
+      });
+      expect(res.value.widget).toEqual({
+        ...defaults.widget,
+        title: "Support",
+        accentColor: "#112233",
+      });
+      expect(res.value.limits).toEqual(defaults.limits);
+      expect(res.value.allowedTools).toEqual([]);
+      expect("unknownTopLevel" in res.value).toBe(false);
+      expect("extra" in res.value.behaviour).toBe(false);
+    }
+  });
+
+  it("rejects bad hex colour, bad position, negative cap, and over-cap suggestedQuestions", () => {
+    const res = parseVersionConfig({
+      behaviour: {
+        suggestedQuestions: ["q1", "q2", "q3", "q4", "q5", "q6", "q7"],
+      },
+      widget: {
+        accentColor: "red",
+        position: "center",
+      },
+      limits: {
+        dailyCostCapMicros: -1,
+      },
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.errors.some((e) => e.startsWith("behaviour.suggestedQuestions:"))).toBe(true);
+      expect(res.errors.some((e) => e.startsWith("widget.accentColor:"))).toBe(true);
+      expect(res.errors.some((e) => e.startsWith("widget.position:"))).toBe(true);
+      expect(res.errors.some((e) => e.startsWith("limits.dailyCostCapMicros:"))).toBe(true);
+    }
+  });
+});
+
+describe("parseSourceInput", () => {
+  it("parses valid push, entry, and sitemap sources and drops unknown keys", () => {
+    const push = parseSourceInput({ kind: "push", label: "CLI", extra: 1 });
+    expect(push).toEqual({ ok: true, value: { kind: "push", label: "CLI", settings: {} } });
+
+    const entry = parseSourceInput({ kind: "entry", label: "FAQ", settings: { ignored: true } });
+    expect(entry).toEqual({ ok: true, value: { kind: "entry", label: "FAQ", settings: {} } });
+
+    const sitemap = parseSourceInput({
+      kind: "sitemap",
+      label: "Site",
+      settings: { url: "https://example.com/sitemap.xml", ignored: true },
+    });
+    expect(sitemap).toEqual({
+      ok: true,
+      value: {
+        kind: "sitemap",
+        label: "Site",
+        settings: { url: "https://example.com/sitemap.xml" },
+      },
+    });
+  });
+
+  it("rejects missing required fields and non-https sitemap urls", () => {
+    const missing = parseSourceInput({});
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.errors.some((e) => e.startsWith("kind:"))).toBe(true);
+      expect(missing.errors.some((e) => e.startsWith("label:"))).toBe(true);
+    }
+
+    const httpSitemap = parseSourceInput({
+      kind: "sitemap",
+      label: "Site",
+      settings: { url: "http://example.com/sitemap.xml" },
+    });
+    expect(httpSitemap.ok).toBe(false);
+    if (!httpSitemap.ok) {
+      expect(httpSitemap.errors.some((e) => e.startsWith("settings.url:"))).toBe(true);
+    }
+  });
+});
+
+describe("parseDocumentInput", () => {
+  it("parses a valid document and drops unknown keys", () => {
+    const input = {
+      externalId: "docs/intro",
+      url: "https://example.com/docs/intro",
+      title: "Introduction",
+      markdown: "# Intro",
+      extra: "drop-me",
+    };
+    const res = parseDocumentInput(input);
+    expect(res).toEqual({
+      ok: true,
+      value: {
+        externalId: "docs/intro",
+        url: "https://example.com/docs/intro",
+        title: "Introduction",
+        markdown: "# Intro",
+      },
+    });
+    if (res.ok) {
+      expect(res.value).not.toBe(input);
+      expect("extra" in res.value).toBe(false);
+    }
+  });
+
+  it("rejects missing required fields, javascript: URLs, and markdown over 1 MiB", () => {
+    const missing = parseDocumentInput({});
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.errors.some((e) => e.startsWith("externalId:"))).toBe(true);
+      expect(missing.errors.some((e) => e.startsWith("url:"))).toBe(true);
+      expect(missing.errors.some((e) => e.startsWith("title:"))).toBe(true);
+      expect(missing.errors.some((e) => e.startsWith("markdown:"))).toBe(true);
+    }
+
+    const jsUrl = parseDocumentInput({
+      externalId: "1",
+      url: "javascript:alert(1)",
+      title: "Bad",
+      markdown: "hi",
+    });
+    expect(jsUrl.ok).toBe(false);
+    if (!jsUrl.ok) {
+      expect(jsUrl.errors.some((e) => e.startsWith("url:"))).toBe(true);
+    }
+
+    const tooBig = parseDocumentInput({
+      externalId: "1",
+      url: "https://example.com/big",
+      title: "Big",
+      markdown: "a".repeat(MAX_DOCUMENT_MARKDOWN_BYTES + 1),
+    });
+    expect(tooBig.ok).toBe(false);
+    if (!tooBig.ok) {
+      expect(tooBig.errors.some((e) => e.startsWith("markdown:"))).toBe(true);
+    }
+  });
+});
+
+describe("chat schema and protocol", () => {
+  it("exposes protocol version 1", () => {
+    expect(CHAT_PROTOCOL_VERSION).toBe(1);
+    expect(SUPPORTED_CHAT_PROTOCOLS).toEqual([1]);
+  });
+
+  it("parses a valid chat request and drops unknown keys", () => {
+    const input = {
+      protocol: 1,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "How do I reset my password?",
+      conversationId: "cnv_123",
+      pageUrl: "https://example.com/help",
+      target: "draft",
+      role: "admin",
+    };
+    const res = parseChatRequest(input);
+    expect(res).toEqual({
+      ok: true,
+      value: {
+        protocol: 1,
+        assistant: "pk_abc123",
+        visitorId: "vis_1",
+        message: "How do I reset my password?",
+        conversationId: "cnv_123",
+        pageUrl: "https://example.com/help",
+        target: "draft",
+      },
+    });
+    if (res.ok) {
+      expect(res.value).not.toBe(input);
+      expect("role" in res.value).toBe(false);
+    }
+  });
+
+  it("rejects missing protocol, unsupported protocol, empty/over-cap message, and non-pk_ key", () => {
+    const missingProtocol = parseChatRequest({
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "hi",
+    });
+    expect(missingProtocol.ok).toBe(false);
+    if (!missingProtocol.ok) {
+      expect(missingProtocol.errors).toContain("protocol: is required");
+    }
+
+    const unsupportedProtocol = parseChatRequest({
+      protocol: 99,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "hi",
+    });
+    expect(unsupportedProtocol.ok).toBe(false);
+    if (!unsupportedProtocol.ok) {
+      expect(unsupportedProtocol.errors[0]).toContain("unsupported");
+      expect(unsupportedProtocol.errors[0]).toContain("99");
+    }
+
+    const badFields = parseChatRequest({
+      protocol: 1,
+      assistant: "sk_secret",
+      visitorId: "",
+      message: "   ",
+    });
+    expect(badFields.ok).toBe(false);
+    if (!badFields.ok) {
+      expect(badFields.errors.some((e) => e.startsWith("assistant:"))).toBe(true);
+      expect(badFields.errors.some((e) => e.startsWith("visitorId:"))).toBe(true);
+      expect(badFields.errors.some((e) => e.startsWith("message:"))).toBe(true);
+    }
+
+    const overCap = parseChatRequest({
+      protocol: 1,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "x".repeat(4001),
+    });
+    expect(overCap.ok).toBe(false);
+    if (!overCap.ok) {
+      expect(overCap.errors.some((e) => e.startsWith("message:"))).toBe(true);
+    }
+  });
+
+  it("round-trips every ChatEvent through serializeChatEvent and parseChatEventLine", () => {
+    const events: ChatEvent[] = [
+      { type: "token", text: "Hello " },
+      { type: "citation", url: "https://example.com/docs", title: "Docs" },
+      { type: "tool", name: "lookup", state: "running" },
+      { type: "done", messageId: "msg_1", conversationId: "cnv_1" },
+      { type: "error", message: "Rate limit exceeded" },
+    ];
+
+    for (const event of events) {
+      const serialized = serializeChatEvent(event);
+      const lines = serialized.trim().split("\n");
+      const name = lines[0]?.replace(/^event: /, "") ?? "";
+      const data = lines[1]?.replace(/^data: /, "") ?? "";
+      expect(parseChatEventLine(name, data)).toEqual(event);
+    }
+  });
+
+  it("returns unknown for unrecognised event names and malformed data without throwing", () => {
+    expect(parseChatEventLine("action", '{"kind":"navigate"}')).toEqual({
+      type: "unknown",
+      name: "action",
+    });
+    expect(parseChatEventLine("token", "{not valid json")).toEqual({
+      type: "unknown",
+      name: "token",
+    });
+    expect(parseChatEventLine("token", '{"wrongField":123}')).toEqual({
+      type: "unknown",
+      name: "token",
+    });
+  });
+});
