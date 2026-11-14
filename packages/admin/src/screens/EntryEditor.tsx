@@ -28,12 +28,14 @@ export function EntryEditor({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   useEffect(() => {
+    void sourceId;
+    void documentId;
     setQuestion(initialQuestion);
     setAnswer(initialAnswer);
     setFieldErrors({});
     setFormError(null);
     setStatusMessage(null);
-  }, [initialQuestion, initialAnswer]);
+  }, [sourceId, documentId, initialQuestion, initialAnswer]);
 
   const isEditing = Boolean(sourceId && documentId);
 

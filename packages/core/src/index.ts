@@ -26,6 +26,7 @@ export {
 } from "./schemas/feedback.js";
 export {
   type EntryInput,
+  formatEntryMarkdown,
   parseEntryInput,
   parseSourceInput,
   type SourceInput,

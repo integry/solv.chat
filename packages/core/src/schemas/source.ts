@@ -16,6 +16,11 @@ export interface EntryInput {
 
 const textEncoder = new TextEncoder();
 
+/** Formats a hand-written entry into the Markdown document stored and ingested. */
+export function formatEntryMarkdown(question: string, answer: string): string {
+  return `# ${question}\n\n${answer}`;
+}
+
 /** Validates a hand-written entry (question and answer). */
 export function parseEntryInput(value: unknown): Result<EntryInput> {
   if (!isPlainObject(value)) return fail("body: must be a JSON object");
@@ -27,8 +32,18 @@ export function parseEntryInput(value: unknown): Result<EntryInput> {
   const answer = readTrimmedString(value.answer, 1, MAX_DOCUMENT_MARKDOWN_BYTES);
   if (answer === null) {
     errors.add("answer", "must not be empty");
-  } else if (textEncoder.encode(answer).byteLength > MAX_DOCUMENT_MARKDOWN_BYTES) {
-    errors.add("answer", `must be at most ${MAX_DOCUMENT_MARKDOWN_BYTES} bytes`);
+  } else {
+    const headingBytes =
+      question !== null ? textEncoder.encode(formatEntryMarkdown(question, "")).byteLength : 0;
+    const maxAnswerBytes = MAX_DOCUMENT_MARKDOWN_BYTES - headingBytes;
+    if (textEncoder.encode(answer).byteLength > maxAnswerBytes) {
+      errors.add(
+        "answer",
+        question !== null
+          ? `must be at most ${maxAnswerBytes} bytes with this question (total ${MAX_DOCUMENT_MARKDOWN_BYTES} bytes)`
+          : `must be at most ${MAX_DOCUMENT_MARKDOWN_BYTES} bytes`,
+      );
+    }
   }
 
   if (errors.failed || question === null || answer === null) return fail(...errors.list);

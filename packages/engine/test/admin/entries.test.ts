@@ -1,8 +1,8 @@
 import { env } from "cloudflare:test";
-import { newId } from "@solvchat/core";
+import { MAX_DOCUMENT_MARKDOWN_BYTES, newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { saveEntry } from "../../src/admin/entries.js";
-import { NotFound } from "../../src/admin/errors.js";
+import { BadRequest, NotFound } from "../../src/admin/errors.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { runIngestBatch } from "../../src/ingest/consumer.js";
 import type { IngestQueueMessage } from "../../src/ingest/documents.js";
@@ -312,5 +312,39 @@ describe("admin entries", () => {
       { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
     );
     expect(res.status).toBe(404);
+  });
+
+  it("rejects answers whose generated heading plus answer exceeds MAX_DOCUMENT_MARKDOWN_BYTES with 400 before creating a source", async () => {
+    const assistantId = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+    const deps = { tenant, docs, queue, publicBaseUrl: "https://admin.example.com" };
+
+    const exactLimitAnswer = "a".repeat(MAX_DOCUMENT_MARKDOWN_BYTES);
+    await expect(
+      saveEntry(deps, { orgId: ORG_A }, { assistantId, question: "Q", answer: exactLimitAnswer }),
+    ).rejects.toBeInstanceOf(BadRequest);
+
+    // Must not lazily create an empty entry source on validation failure.
+    expect(await tenant.sources.listWithStats(assistantId)).toEqual([]);
+    expect(docs.puts).toBe(0);
+    expect(queue.sent).toHaveLength(0);
+
+    // HTTP route returns 400 with an answer field error (not 413).
+    const app = createTestApp();
+    const res = await app.fetch(
+      new Request(`https://example.com/api/admin/assistants/${assistantId}/entries`, {
+        method: "POST",
+        headers: { Origin: "https://example.com", "Content-Type": "application/json" },
+        body: JSON.stringify({ question: "Q", answer: exactLimitAnswer }),
+      }),
+      env,
+      { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { fields?: string[] };
+    expect(body.fields?.some((f) => f.startsWith("answer: "))).toBe(true);
+    expect(await tenant.sources.listWithStats(assistantId)).toEqual([]);
   });
 });

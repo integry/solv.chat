@@ -19,6 +19,7 @@ function installSourcesFakeServer(options?: {
   extraSources?: SourceSummary[];
   extraDocuments?: Array<[string, Array<DocumentSummary & { markdown: string }>]>;
   onDocsRequest?: (sourceId: string, url: URL) => Promise<Response> | null;
+  onDocRequest?: (sourceId: string, docId: string) => Promise<Response> | null;
   onSitemapImport?: (body: {
     sitemapUrl?: string;
     urls: string[];
@@ -207,6 +208,31 @@ function installSourcesFakeServer(options?: {
         limit,
         offset,
       });
+    }
+
+    const docMatch = /^\/api\/admin\/sources\/([^/]+)\/documents\/([^/]+)$/.exec(path);
+    if (docMatch?.[1] && docMatch[2] && method === "GET") {
+      const intercepted = options?.onDocRequest?.(docMatch[1], docMatch[2]);
+      if (intercepted) {
+        return intercepted;
+      }
+      const list = documentsBySource.get(docMatch[1]) ?? [];
+      const found = list.find((d) => d.id === docMatch[2]);
+      if (!found) {
+        return Response.json({ error: "Not found." }, { status: 404 });
+      }
+      const { markdown, ...document } = found;
+      return Response.json({ document, markdown });
+    }
+
+    const deleteSourceMatch = /^\/api\/admin\/sources\/([^/]+)$/.exec(path);
+    if (deleteSourceMatch?.[1] && method === "DELETE") {
+      const idx = sources.findIndex((s) => s.id === deleteSourceMatch[1]);
+      if (idx !== -1) {
+        sources.splice(idx, 1);
+      }
+      documentsBySource.delete(deleteSourceMatch[1]);
+      return Response.json({ ok: true });
     }
 
     return Response.json({ error: "Not found." }, { status: 404 });
@@ -539,5 +565,144 @@ describe("admin Sources screen", () => {
       expect(screen.queryByRole("button", { name: "Import selected" })).toBeNull();
     });
     expect(server.importedPayloads).toHaveLength(0);
+  });
+
+  it("ignores stale entry-body loads so they cannot overwrite active edits or reopen after cancel/delete", async () => {
+    let resolveA!: (res: Response) => void;
+    let resolveA2!: (res: Response) => void;
+    let aCalls = 0;
+
+    installSourcesFakeServer({
+      extraSources: [
+        {
+          id: "src_entry_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          kind: "entry",
+          label: "Answers you wrote",
+          settings: {},
+          createdAt: 1_700_000_200_000,
+          documentCount: 2,
+          lastUpdatedAt: 1_700_000_200_000,
+        },
+      ],
+      extraDocuments: [
+        [
+          "src_entry_1",
+          [
+            {
+              id: "doc_a",
+              sourceId: "src_entry_1",
+              externalId: "entry:a",
+              url: "https://example.com/admin/sources#entry:a",
+              title: "Question A",
+              updatedAt: 1_700_000_200_000,
+              markdown: "# Question A\n\nAnswer A",
+            },
+            {
+              id: "doc_b",
+              sourceId: "src_entry_1",
+              externalId: "entry:b",
+              url: "https://example.com/admin/sources#entry:b",
+              title: "Question B",
+              updatedAt: 1_700_000_200_000,
+              markdown: "# Question B\n\nAnswer B",
+            },
+          ],
+        ],
+      ],
+      onDocRequest: (_sourceId, docId) => {
+        if (docId === "doc_a") {
+          aCalls++;
+          return new Promise<Response>((resolve) => {
+            if (aCalls === 1) {
+              resolveA = resolve;
+            } else {
+              resolveA2 = resolve;
+            }
+          });
+        }
+        return null;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+
+    render(<App />);
+    await screen.findAllByText("Answers you wrote");
+
+    // Expand the entry source.
+    const viewButtons = screen.getAllByRole("button", { name: "View documents" });
+    const entryViewBtn = viewButtons[1];
+    if (!entryViewBtn) throw new Error("Expected entry View documents button");
+    fireEvent.click(entryViewBtn);
+
+    expect(await screen.findByText("Question A")).toBeTruthy();
+    expect(screen.getByText("Question B")).toBeTruthy();
+
+    const [editA, editB] = screen.getAllByRole("button", { name: "Edit" });
+    if (!editA || !editB) throw new Error("Expected both Edit buttons");
+
+    // 1. Click Edit for entry A (remains pending), then click Edit for entry B (resolves first).
+    fireEvent.click(editA);
+    fireEvent.click(editB);
+
+    const questionInput = (await screen.findByLabelText("Question")) as HTMLInputElement;
+    const answerInput = screen.getByLabelText("Answer") as HTMLTextAreaElement;
+    await waitFor(() => {
+      expect(questionInput.value).toBe("Question B");
+      expect(answerInput.value).toBe("Answer B");
+    });
+
+    // 2. User modifies B's question and answer.
+    fireEvent.change(questionInput, { target: { value: "Edited B Question" } });
+    fireEvent.change(answerInput, { target: { value: "Edited B Answer" } });
+
+    // 3. Stale A response now resolves; B's unsaved edits must remain intact.
+    resolveA(
+      Response.json({
+        document: {
+          id: "doc_a",
+          sourceId: "src_entry_1",
+          externalId: "entry:a",
+          url: "https://example.com/admin/sources#entry:a",
+          title: "Question A",
+          updatedAt: 1_700_000_200_000,
+        },
+        markdown: "# Question A\n\nAnswer A",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(questionInput.value).toBe("Edited B Question");
+      expect(answerInput.value).toBe("Edited B Answer");
+    });
+
+    // 4. Cancel editing, start loading A again, then delete the source before A resolves.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(editA);
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("Answers you wrote")).toBeNull();
+    });
+
+    resolveA2(
+      Response.json({
+        document: {
+          id: "doc_a",
+          sourceId: "src_entry_1",
+          externalId: "entry:a",
+          url: "https://example.com/admin/sources#entry:a",
+          title: "Question A",
+          updatedAt: 1_700_000_200_000,
+        },
+        markdown: "# Question A\n\nAnswer A",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Edit answer" })).toBeNull();
+      expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("");
+    });
   });
 });

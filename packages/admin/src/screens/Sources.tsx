@@ -277,6 +277,21 @@ export function Sources({ assistantId }: SourcesProps) {
 
   const docsRequestRef = useRef<{ id: number; controller: AbortController } | null>(null);
   const docsRequestSeqRef = useRef(0);
+  const entryRequestRef = useRef<{
+    id: number;
+    sourceId: string;
+    controller: AbortController;
+  } | null>(null);
+  const entryRequestSeqRef = useRef(0);
+
+  function cancelEntryLoad(onlySourceId?: string) {
+    if (onlySourceId !== undefined && entryRequestRef.current?.sourceId !== onlySourceId) {
+      return;
+    }
+    entryRequestRef.current?.controller.abort();
+    entryRequestRef.current = null;
+    entryRequestSeqRef.current++;
+  }
 
   const [editingEntry, setEditingEntry] = useState<{
     sourceId: string;
@@ -293,6 +308,9 @@ export function Sources({ assistantId }: SourcesProps) {
     docsRequestRef.current?.controller.abort();
     docsRequestRef.current = null;
     docsRequestSeqRef.current++;
+    entryRequestRef.current?.controller.abort();
+    entryRequestRef.current = null;
+    entryRequestSeqRef.current++;
     setExpandedSourceId(null);
     setEditingEntry(null);
     setDocsState({
@@ -308,6 +326,7 @@ export function Sources({ assistantId }: SourcesProps) {
   useEffect(() => {
     return () => {
       docsRequestRef.current?.controller.abort();
+      entryRequestRef.current?.controller.abort();
     };
   }, []);
 
@@ -370,11 +389,21 @@ export function Sources({ assistantId }: SourcesProps) {
   }
 
   async function handleEditEntry(sourceId: string, doc: DocumentSummary) {
+    cancelEntryLoad();
+    const requestId = ++entryRequestSeqRef.current;
+    const controller = new AbortController();
+    entryRequestRef.current = { id: requestId, sourceId, controller };
+
     setActionError(null);
     try {
       const res = await getJson<{ document: DocumentSummary; markdown: string }>(
         `/api/admin/sources/${sourceId}/documents/${doc.id}`,
+        controller.signal,
       );
+      if (entryRequestSeqRef.current !== requestId || controller.signal.aborted) {
+        return;
+      }
+      entryRequestRef.current = null;
       setEditingEntry({
         sourceId,
         documentId: doc.id,
@@ -382,6 +411,10 @@ export function Sources({ assistantId }: SourcesProps) {
         answer: stripLeadingHeading(res.markdown, res.document.title),
       });
     } catch (err) {
+      if (entryRequestSeqRef.current !== requestId || controller.signal.aborted) {
+        return;
+      }
+      entryRequestRef.current = null;
       setActionError(err instanceof ApiError ? err.message : "Could not load entry.");
     }
   }
@@ -398,7 +431,8 @@ export function Sources({ assistantId }: SourcesProps) {
         docsRequestSeqRef.current++;
         setExpandedSourceId(null);
       }
-      if (editingEntry?.sourceId === sourceId) setEditingEntry(null);
+      cancelEntryLoad(sourceId);
+      setEditingEntry((prev) => (prev?.sourceId === sourceId ? null : prev));
       sourcesRes.reload();
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "Could not delete source.");
@@ -574,8 +608,16 @@ export function Sources({ assistantId }: SourcesProps) {
         documentId={editingEntry?.documentId}
         initialQuestion={editingEntry?.question}
         initialAnswer={editingEntry?.answer}
-        onCancel={editingEntry ? () => setEditingEntry(null) : undefined}
+        onCancel={
+          editingEntry
+            ? () => {
+                cancelEntryLoad();
+                setEditingEntry(null);
+              }
+            : undefined
+        }
         onSaved={(result) => {
+          cancelEntryLoad();
           setEditingEntry(null);
           sourcesRes.reload();
           if (expandedSourceId === result.sourceId) {

@@ -193,6 +193,181 @@ export interface ResolvedTarget {
 
 export type PinnedFetch = (target: ResolvedTarget, init: RequestInit) => Promise<Response>;
 
+export interface PinnedHttpsRequestOptions {
+  protocol: "https:";
+  host: string;
+  port: number;
+  path: string;
+  method: string;
+  headers: Record<string, string>;
+  servername: string;
+  lookup: (
+    hostname: string,
+    options: unknown,
+    callback: (err: Error | null, address: string, family: number) => void,
+  ) => void;
+  signal?: AbortSignal;
+}
+
+export interface PinnedHttpsIncomingMessage {
+  statusCode?: number | undefined;
+  headers: Record<string, string | string[] | undefined>;
+  on(event: "data", listener: (chunk: Uint8Array) => void): unknown;
+  on(event: "end", listener: () => void): unknown;
+  on(event: "error", listener: (err: Error) => void): unknown;
+  resume(): unknown;
+  destroy(error?: Error): unknown;
+}
+
+export interface PinnedHttpsClientRequest {
+  on(event: "error", listener: (err: Error) => void): unknown;
+  end(): unknown;
+  destroy(error?: Error): unknown;
+}
+
+export type HttpsRequestFn = (
+  options: PinnedHttpsRequestOptions,
+  callback: (res: PinnedHttpsIncomingMessage) => void,
+) => PinnedHttpsClientRequest;
+
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+
+async function loadNodeHttpsRequest(): Promise<HttpsRequestFn | null> {
+  try {
+    const mod = await import("node:https");
+    return typeof mod.request === "function" ? (mod.request as HttpsRequestFn) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Creates a `PinnedFetch` transport that connects directly to the validated
+ * `resolvedIp` via `node:https` while preserving TLS SNI and certificate
+ * hostname verification against `target.url.hostname`. Fails closed when
+ * `resolvedIp` or `node:https` is unavailable.
+ */
+export function createPinnedHttpsTransport(
+  loadHttpsRequest: () => Promise<HttpsRequestFn | null> = loadNodeHttpsRequest,
+): PinnedFetch {
+  return async (target, init) => {
+    if (!target.resolvedIp) {
+      throw new UnsafeUrlError("could not resolve host");
+    }
+    const resolvedIp = assertPublicIpAddress(target.resolvedIp);
+    const httpsRequest = await loadHttpsRequest();
+    if (!httpsRequest) {
+      throw new UnsafeUrlError("pinned transport unavailable");
+    }
+    if (init.signal?.aborted) {
+      throw new UnsafeUrlError("request timed out");
+    }
+
+    const requestHeaders: Record<string, string> = {};
+    if (init.headers) {
+      new Headers(init.headers).forEach((value, key) => {
+        requestHeaders[key] = value;
+      });
+    }
+    requestHeaders.host = target.url.host;
+
+    const port = target.url.port ? Number(target.url.port) : 443;
+    const path = `${target.url.pathname}${target.url.search}`;
+    const method = init.method ?? "GET";
+    const family = resolvedIp.includes(":") ? 6 : 4;
+
+    return new Promise<Response>((resolve, reject) => {
+      let settled = false;
+      const failOnce = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanupAbort();
+        reject(err);
+      };
+
+      const req = httpsRequest(
+        {
+          protocol: "https:",
+          host: resolvedIp,
+          port,
+          path,
+          method,
+          headers: requestHeaders,
+          servername: target.url.hostname,
+          lookup: (_hostname, _opts, cb) => {
+            cb(null, resolvedIp, family);
+          },
+          ...(init.signal ? { signal: init.signal } : {}),
+        },
+        (res) => {
+          if (settled) {
+            res.destroy();
+            return;
+          }
+          settled = true;
+          cleanupAbort();
+
+          const responseHeaders = new Headers();
+          for (const [key, val] of Object.entries(res.headers)) {
+            if (Array.isArray(val)) {
+              for (const item of val) {
+                responseHeaders.append(key, item);
+              }
+            } else if (typeof val === "string") {
+              responseHeaders.set(key, val);
+            }
+          }
+
+          const status = res.statusCode ?? 500;
+          if (NULL_BODY_STATUSES.has(status)) {
+            res.resume();
+            resolve(new Response(null, { status, headers: responseHeaders }));
+            return;
+          }
+
+          const stream = new ReadableStream<Uint8Array>({
+            start(streamController) {
+              res.on("data", (chunk) => {
+                streamController.enqueue(new Uint8Array(chunk));
+              });
+              res.on("end", () => {
+                streamController.close();
+              });
+              res.on("error", (err) => {
+                streamController.error(err);
+              });
+            },
+            cancel() {
+              res.destroy();
+              req.destroy();
+            },
+          });
+
+          resolve(new Response(stream, { status, headers: responseHeaders }));
+        },
+      );
+
+      const onAbort = () => {
+        req.destroy();
+        failOnce(new UnsafeUrlError("request timed out"));
+      };
+      const cleanupAbort = () => {
+        init.signal?.removeEventListener("abort", onAbort);
+      };
+      if (init.signal) {
+        init.signal.addEventListener("abort", onAbort, { once: true });
+      }
+
+      req.on("error", (err) => {
+        failOnce(err);
+      });
+      req.end();
+    });
+  };
+}
+
+const defaultPinnedTransport = createPinnedHttpsTransport();
+
 /**
  * Validates that a resolved IP address string is a public IPv4 or IPv6 address
  * and not private, loopback, link-local, or reserved.
@@ -410,7 +585,9 @@ export async function followCheckingEachHop(
       };
       const response = options.transport
         ? await options.transport({ url: current, resolvedIp }, init)
-        : await fetchImpl(current.href, init);
+        : fetchImpl !== fetch
+          ? await fetchImpl(current.href, init)
+          : await defaultPinnedTransport({ url: current, resolvedIp }, init);
 
       if (REDIRECT_STATUSES.has(response.status)) {
         // Cancel the redirect body so connections are not held open.

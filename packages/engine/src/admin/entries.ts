@@ -1,4 +1,4 @@
-import { newId, parseEntryInput } from "@solvchat/core";
+import { formatEntryMarkdown, newId, parseEntryInput } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { type IngestCounts, type PushDeps, pushDocuments } from "../ingest/documents.js";
 import { BadRequest, NotFound } from "./errors.js";
@@ -109,7 +109,7 @@ export async function saveEntry(
     url = `${baseUrl}/admin/sources#${externalId}`;
   }
 
-  const markdown = `# ${parsed.value.question}\n\n${parsed.value.answer}`;
+  const markdown = formatEntryMarkdown(parsed.value.question, parsed.value.answer);
   const counts = await pushDocuments(
     deps,
     { orgId: principal.orgId, assistantId: args.assistantId },
