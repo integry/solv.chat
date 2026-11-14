@@ -57,13 +57,14 @@ async function loadFromDir(dir: string, baseUrl: string): Promise<PushDocument[]
 
   for (const file of files) {
     const externalId = externalIdFor(root, file);
-    const existing = seen.get(externalId);
+    const normalizedId = externalId.trim();
+    const existing = seen.get(normalizedId);
     if (existing !== undefined) {
       throw new CliError(
-        `Duplicate document ID "${externalId}" generated from "${relative(root, existing)}" and "${relative(root, file)}"`,
+        `Duplicate document ID "${normalizedId}" generated from "${relative(root, existing)}" and "${relative(root, file)}"`,
       );
     }
-    seen.set(externalId, file);
+    seen.set(normalizedId, file);
 
     const { frontMatter, body } = splitFrontMatter(await readFile(file, "utf8"));
     documents.push({

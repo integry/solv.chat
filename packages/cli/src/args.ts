@@ -72,6 +72,12 @@ function requireOption(value: string | undefined, flag: string): string {
   return value.trim();
 }
 
+function rejectExtraPositionals(positionals: string[]): void {
+  if (positionals.length > 1) {
+    throw new CliError(`Unexpected positional argument: ${positionals[1]}`);
+  }
+}
+
 function parsePushArgs(args: string[], env: Record<string, string | undefined>): ParsedCommand {
   let parsed: ReturnType<typeof parseArgs>;
   try {
@@ -97,6 +103,8 @@ function parsePushArgs(args: string[], env: Record<string, string | undefined>):
   if (readBoolean(parsed.values, "help")) {
     return { kind: "help", topic: "push" };
   }
+
+  rejectExtraPositionals(parsed.positionals);
 
   const endpoint = requireOption(readString(parsed.values, "endpoint"), "--endpoint");
   const assistant = requireOption(readString(parsed.values, "assistant"), "--assistant");
@@ -147,6 +155,8 @@ function parseApplyArgs(args: string[], env: Record<string, string | undefined>)
   if (readBoolean(parsed.values, "help")) {
     return { kind: "help", topic: "apply" };
   }
+
+  rejectExtraPositionals(parsed.positionals);
 
   const endpoint = requireOption(readString(parsed.values, "endpoint"), "--endpoint");
   const assistant = requireOption(readString(parsed.values, "assistant"), "--assistant");

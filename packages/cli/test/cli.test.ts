@@ -114,4 +114,65 @@ describe("solv CLI", () => {
       expect(output).not.toContain(secretKey);
     },
   );
+
+  it("rejects extra positional arguments on push --prune without making requests", async () => {
+    const errors: string[] = [];
+    let fetched = false;
+
+    const code = await runCli(
+      [
+        "push",
+        "docs-a",
+        "docs-b",
+        "--prune",
+        "--endpoint",
+        "https://chat.example.com",
+        "--assistant",
+        "ast_123",
+        "--base-url",
+        "https://docs.example.com",
+      ],
+      {
+        env: { SOLV_INGEST_KEY: "ing_secret" },
+        errorLog: (line) => errors.push(line),
+        fetchImpl: async () => {
+          fetched = true;
+          return Response.json({});
+        },
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(fetched).toBe(false);
+    expect(errors.join("\n")).toContain("docs-b");
+  });
+
+  it("rejects extra positional arguments on apply without making requests", async () => {
+    const errors: string[] = [];
+    let fetched = false;
+
+    const code = await runCli(
+      [
+        "apply",
+        "first.config.json",
+        "second.config.json",
+        "--endpoint",
+        "https://chat.example.com",
+        "--assistant",
+        "ast_123",
+      ],
+      {
+        env: { SOLV_ADMIN_TOKEN: "tok_secret" },
+        errorLog: (line) => errors.push(line),
+        fetchImpl: async () => {
+          fetched = true;
+          return Response.json({});
+        },
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(fetched).toBe(false);
+    expect(errors.join("\n")).toContain("second.config.json");
+  });
 });

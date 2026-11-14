@@ -300,4 +300,32 @@ describe("solv push", () => {
 
     expect(requests).toHaveLength(0);
   });
+
+  it("rejects generated document IDs that collide after whitespace normalization", async () => {
+    await writeFile(join(root, "guide.md"), "# Guide\n\nFirst version.\n", "utf8");
+    await writeFile(join(root, "guide .md"), "# Guide Space\n\nSecond version.\n", "utf8");
+
+    const { fetchImpl, requests } = createMockFetch();
+
+    await expect(
+      push(
+        {
+          dir: root,
+          endpoint: "https://chat.example.com",
+          assistant: "ast_123",
+          baseUrl: "https://docs.example.com",
+          ingestKey: "ing_secret",
+        },
+        { fetchImpl, log: () => {} },
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof CliError &&
+        err.message.includes('"guide"') &&
+        err.message.includes("guide.md") &&
+        err.message.includes("guide .md"),
+    );
+
+    expect(requests).toHaveLength(0);
+  });
 });
