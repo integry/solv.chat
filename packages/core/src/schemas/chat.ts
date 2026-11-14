@@ -13,6 +13,7 @@ import { isPlainObject, parseUrl, readTrimmedString } from "./shared.js";
  */
 export const CHAT_PROTOCOL_VERSION = 1;
 export const SUPPORTED_CHAT_PROTOCOLS: readonly number[] = [1];
+export const MAX_CHAT_MESSAGE_LENGTH = 4000;
 
 export interface ChatRequest {
   protocol: number;
@@ -66,8 +67,10 @@ export function parseChatRequest(value: unknown): Result<ChatRequest> {
   const visitorId = readTrimmedString(value.visitorId, 1, 128);
   if (visitorId === null) errors.add("visitorId", "must be 1 to 128 characters");
 
-  const message = readTrimmedString(value.message, 1, 4000);
-  if (message === null) errors.add("message", "must be 1 to 4000 characters");
+  const message = readTrimmedString(value.message, 1, MAX_CHAT_MESSAGE_LENGTH);
+  if (message === null) {
+    errors.add("message", `must be 1 to ${MAX_CHAT_MESSAGE_LENGTH} characters`);
+  }
 
   let conversationId: string | undefined;
   if (value.conversationId !== undefined) {

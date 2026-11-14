@@ -10,6 +10,17 @@ import { runIngestBatch } from "./ingest/consumer.js";
 import { ingestRoutes } from "./ingest/router.js";
 import { openAIEmbedder, vectorizeRetriever } from "./providers/retrieval.js";
 import type { Seams } from "./seams/types.js";
+import { WIDGET_BUNDLE } from "./widgetBundle.js";
+
+function widgetAsset(): Response {
+  return new Response(WIDGET_BUNDLE, {
+    status: 200,
+    headers: {
+      "content-type": "application/javascript; charset=utf-8",
+      "cache-control": "public, max-age=86400",
+    },
+  });
+}
 
 export interface Env {
   DB: D1Database;
@@ -47,6 +58,13 @@ export function createApp(seams: Seams, options?: AppOptions): App {
       const publicConfigMatch = /^\/v1\/assistants\/([^/]+)$/.exec(url.pathname);
       if (publicConfigMatch?.[1]) {
         return publicConfigRoute(request, env, decodeURIComponent(publicConfigMatch[1]));
+      }
+      if (request.method === "GET" && url.pathname === "/widget.js") {
+        // Long cache: the owner embeds a stable URL, so a long max-age keeps
+        // the script tag from costing a round trip on every page view. Forward
+        // compatibility is handled by the protocol version rather than by
+        // making owners bust a cache.
+        return widgetAsset();
       }
       const ingestMatch = /^\/v1\/ingest\/([^/]+)\/documents$/.exec(url.pathname);
       if (ingestMatch?.[1]) {

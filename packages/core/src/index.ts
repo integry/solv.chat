@@ -5,6 +5,7 @@ export {
   CHAT_PROTOCOL_VERSION,
   type ChatEvent,
   type ChatRequest,
+  MAX_CHAT_MESSAGE_LENGTH,
   parseChatEventLine,
   parseChatRequest,
   SUPPORTED_CHAT_PROTOCOLS,
