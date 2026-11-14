@@ -89,6 +89,7 @@ export async function chatRoute(
   request: Request,
   env: ChatEnv,
   seams: Seams,
+  ctx: Pick<ExecutionContext, "waitUntil">,
   overrides?: ChatRouteOverrides,
 ): Promise<Response> {
   if (request.method === "OPTIONS") {
@@ -179,39 +180,55 @@ export async function chatRoute(
     overrides?.provider ??
     (await llmProviderFor({ orgId: assistant.orgId, provider: providerKind, tier }, seams.keys));
 
+  let cancelled = false;
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        for await (const event of answerMessage(
-          {
-            tenant,
-            embedder,
-            retriever,
-            provider,
-            model,
-            usage: seams.usage,
-          },
-          {
-            orgId: assistant.orgId,
-            assistantId: assistant.id,
-            visitorId: parsed.value.visitorId,
-            message: parsed.value.message,
-            behaviour: version.config.behaviour,
-            conversationId: parsed.value.conversationId,
-            pageUrl: parsed.value.pageUrl,
-          },
-        )) {
-          controller.enqueue(encoder.encode(serializeChatEvent(event)));
+    start(controller) {
+      const pipeline = (async () => {
+        try {
+          for await (const event of answerMessage(
+            {
+              tenant,
+              embedder,
+              retriever,
+              provider,
+              model,
+              usage: seams.usage,
+            },
+            {
+              orgId: assistant.orgId,
+              assistantId: assistant.id,
+              visitorId: parsed.value.visitorId,
+              message: parsed.value.message,
+              behaviour: version.config.behaviour,
+              conversationId: parsed.value.conversationId,
+              pageUrl: parsed.value.pageUrl,
+            },
+          )) {
+            if (!cancelled) {
+              controller.enqueue(encoder.encode(serializeChatEvent(event)));
+            }
+          }
+        } catch (err) {
+          if (!cancelled) {
+            const message =
+              err instanceof ProviderError
+                ? "The assistant could not complete this response."
+                : "Something went wrong. Please try again.";
+            controller.enqueue(encoder.encode(serializeChatEvent({ type: "error", message })));
+          }
+        } finally {
+          if (!cancelled) {
+            controller.close();
+          }
         }
-      } catch (err) {
-        const message =
-          err instanceof ProviderError
-            ? "The assistant could not complete this response."
-            : "Something went wrong. Please try again.";
-        controller.enqueue(encoder.encode(serializeChatEvent({ type: "error", message })));
-      } finally {
-        controller.close();
-      }
+      })();
+
+      // Keep the answer pipeline alive if the client disconnects mid-stream so
+      // assistant message persistence and usage accounting still complete.
+      ctx.waitUntil(pipeline);
+    },
+    cancel() {
+      cancelled = true;
     },
   });
 

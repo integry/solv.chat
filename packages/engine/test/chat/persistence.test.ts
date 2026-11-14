@@ -233,4 +233,86 @@ describe("chat/persistence", () => {
     const fifthReq = seenRequests[4];
     expect(fifthReq?.messages).toHaveLength(MAX_TURNS + 1);
   });
+
+  it("persists assistant message and usage when the client cancels after the first token", async () => {
+    let releaseNextChunk!: () => void;
+    const waitForNextChunk = new Promise<void>((resolve) => {
+      releaseNextChunk = resolve;
+    });
+
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.balanced.id,
+      async *stream() {
+        yield { kind: "text", text: "First " };
+        await waitForNextChunk;
+        yield { kind: "text", text: "Second." };
+        yield { kind: "usage", tokensIn: 900, tokensOut: 150 };
+      },
+    };
+
+    const app = createApp(
+      fakeSeams({
+        usage: usageDaily(env.DB),
+      }),
+      {
+        chat: {
+          embedder,
+          retriever,
+          provider,
+          model: ANTHROPIC_MODELS.balanced,
+        },
+      },
+    );
+
+    const ctx = createExecutionContext();
+    const res = await app.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://site.example" },
+        body: JSON.stringify({
+          protocol: 1,
+          assistant: "pk_pers_1",
+          visitorId: "vis_1",
+          message: "How does billing work?",
+        }),
+      }),
+      env,
+      ctx,
+    );
+
+    if (!res.body) throw new Error("expected response body");
+    const reader = res.body.getReader();
+    const firstChunk = await reader.read();
+    expect(firstChunk.done).toBe(false);
+    const firstText = new TextDecoder().decode(firstChunk.value);
+    expect(firstText).toContain("First ");
+
+    await reader.cancel();
+    releaseNextChunk();
+    await waitOnExecutionContext(ctx);
+
+    const convs = await tenant.conversations.list("ast_1");
+    expect(convs).toHaveLength(1);
+    const convId = convs[0]?.id;
+    if (!convId) throw new Error("expected conversation");
+
+    const msgs = await tenant.messages.list(convId);
+    expect(msgs).toHaveLength(2);
+    expect(msgs[1]?.role).toBe("assistant");
+    expect(msgs[1]?.content).toBe("First Second.");
+    expect(msgs[1]?.tokensIn).toBe(900);
+    expect(msgs[1]?.tokensOut).toBe(150);
+
+    const usageRow = await env.DB.prepare(
+      "SELECT messages, tokens_in, tokens_out, cost_micros FROM usage_daily WHERE org_id = ?1 AND assistant_id = ?2",
+    )
+      .bind(TEST_ORG_ID, "ast_1")
+      .first<{ messages: number; tokens_in: number; tokens_out: number; cost_micros: number }>();
+    expect(usageRow).not.toBeNull();
+    expect(usageRow?.messages).toBe(1);
+    expect(usageRow?.tokens_in).toBe(900);
+    expect(usageRow?.tokens_out).toBe(150);
+    expect(usageRow?.cost_micros).toBeGreaterThan(0);
+  });
 });

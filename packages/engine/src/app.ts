@@ -50,7 +50,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         return Response.json({ ok: true });
       }
       if (url.pathname === "/v1/chat") {
-        return chatRoute(request, env, seams, options?.chat);
+        return chatRoute(request, env, seams, ctx, options?.chat);
       }
       if (url.pathname === "/v1/feedback") {
         return feedbackRoute(request, env, seams);
