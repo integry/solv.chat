@@ -98,6 +98,11 @@ Ingest writes the document row, enqueues it, and a Queue consumer chunks, embeds
 and upserts vectors. There is no crawler in v1: content is pushed (CLI, GitHub
 Action), imported once from a sitemap, or written by hand as an entry.
 
+D1 is the only source of truth for live chunks; readers resolve retrieved vector
+ids through D1, so leftover vectors and R2 objects can accumulate after failures.
+They cost storage only and never affect an answer. A later task adds a reindex
+command that rebuilds an assistant's index from D1.
+
 ## Admin API
 
 `/api/admin/*`, JSON, always behind the auth seam. Every request that changes

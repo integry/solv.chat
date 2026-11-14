@@ -1,5 +1,8 @@
 import { adminRoutes } from "./admin/router.js";
 import { forPrincipal } from "./db/tenant.js";
+import { runIngestBatch } from "./ingest/consumer.js";
+import { ingestRoutes } from "./ingest/router.js";
+import { openAIEmbedder, vectorizeRetriever } from "./providers/retrieval.js";
 import type { Seams } from "./seams/types.js";
 
 export interface Env {
@@ -24,6 +27,16 @@ export function createApp(seams: Seams): App {
         // than one that fails, because deploys look healthy.
         await env.DB.prepare("SELECT 1").first();
         return Response.json({ ok: true });
+      }
+      const ingestMatch = /^\/v1\/ingest\/([^/]+)\/documents$/.exec(url.pathname);
+      if (ingestMatch?.[1]) {
+        return ingestRoutes(request, decodeURIComponent(ingestMatch[1]), {
+          db: env.DB,
+          docs: env.DOCS,
+          queue: env.INGEST_QUEUE,
+          retriever: vectorizeRetriever(env.VECTORS),
+          limits: seams.limits,
+        });
       }
       if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
         if (request.method !== "GET" && request.method !== "HEAD") {
@@ -50,11 +63,35 @@ export function createApp(seams: Seams): App {
       return Response.json({ error: "Not found." }, { status: 404 });
     },
     async queue(batch, env, ctx) {
-      // The ingest task fills this in. Explicitly retry every message so
-      // nothing is acknowledged and discarded while the consumer is unbuilt.
-      void env;
       void ctx;
-      batch.retryAll();
+      const byOrg = new Map<string, Message<unknown>[]>();
+      for (const message of batch.messages) {
+        const body = message.body as { orgId?: unknown } | null;
+        if (typeof body?.orgId !== "string" || body.orgId === "") {
+          message.ack();
+          continue;
+        }
+        const list = byOrg.get(body.orgId);
+        if (list) {
+          list.push(message);
+        } else {
+          byOrg.set(body.orgId, [message]);
+        }
+      }
+
+      const retriever = vectorizeRetriever(env.VECTORS);
+      for (const [orgId, messages] of byOrg) {
+        const apiKey = await seams.keys.embeddingKey(orgId);
+        await runIngestBatch(
+          { messages },
+          {
+            db: env.DB,
+            docs: env.DOCS,
+            embedder: openAIEmbedder({ apiKey }),
+            retriever,
+          },
+        );
+      }
     },
   };
 }

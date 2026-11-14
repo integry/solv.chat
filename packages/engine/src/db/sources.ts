@@ -67,6 +67,37 @@ export function sourcesFor(db: D1Database, orgId: string) {
       return row ? map(row) : null;
     },
 
+    async getDefaultPush(assistantId: string): Promise<SourceRow | null> {
+      const row = await prepare(
+        db,
+        `SELECT ${COLUMNS} FROM sources WHERE org_id = ?1 AND assistant_id = ?2 AND kind = 'push' AND is_default = 1`,
+      )
+        .bind(orgId, assistantId)
+        .first<Row>();
+      return row ? map(row) : null;
+    },
+
+    async getOrCreateDefaultPush(input: {
+      id: string;
+      assistantId: string;
+      createdAt: number;
+    }): Promise<SourceRow> {
+      await prepareInsert(
+        db,
+        `INSERT INTO sources (id, org_id, assistant_id, kind, label, settings, is_default, created_at)
+         VALUES (?2, ?1, ?3, 'push', 'Push', '{}', 1, ?4)
+         ON CONFLICT(org_id, assistant_id) WHERE kind = 'push' AND is_default = 1 DO NOTHING`,
+      )
+        .bind(orgId, input.id, input.assistantId, input.createdAt)
+        .run();
+
+      const resolved = await this.getDefaultPush(input.assistantId);
+      if (!resolved) {
+        throw new Error(`failed to resolve default push source for ${input.assistantId}`);
+      }
+      return resolved;
+    },
+
     async create(input: CreateSourceInput): Promise<SourceRow> {
       await prepareInsert(
         db,
