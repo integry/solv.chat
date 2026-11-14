@@ -374,7 +374,14 @@ describe("admin versions API", () => {
         body: JSON.stringify({ behaviour: { greeting: "Stale save" } }),
       }),
       new URL(`https://example.com/api/admin/assistants/${assistantId}/draft`),
-      racingTenant,
+      {
+        tenant: racingTenant,
+        orgId: TEST_ORG_ID,
+        docs: env.DOCS,
+        queue: env.INGEST_QUEUE,
+        retriever: { async remove() {} },
+        publicBaseUrl: "https://example.com",
+      },
     );
     expect(res.status).toBe(409);
 
@@ -413,7 +420,14 @@ describe("admin versions API", () => {
         method: "POST",
       }),
       new URL(`https://example.com/api/admin/assistants/${assistantId}/publish`),
-      racingTenant,
+      {
+        tenant: racingTenant,
+        orgId: TEST_ORG_ID,
+        docs: env.DOCS,
+        queue: env.INGEST_QUEUE,
+        retriever: { async remove() {} },
+        publicBaseUrl: "https://example.com",
+      },
     );
     expect(secondRes.status).toBe(409);
 

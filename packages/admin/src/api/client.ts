@@ -117,6 +117,10 @@ export function patchJson<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
+export function deleteJson<T>(path: string): Promise<T> {
+  return apiFetch<T>(path, { method: "DELETE" });
+}
+
 /**
  * Signs in with the admin password. Does not trigger the global 401 redirect
  * on failure so the login screen can show the plain error message directly.

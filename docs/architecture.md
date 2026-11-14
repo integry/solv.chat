@@ -103,6 +103,13 @@ Ingest writes the document row, enqueues it, and a Queue consumer chunks, embeds
 and upserts vectors. There is no crawler in v1: content is pushed (CLI, GitHub
 Action), imported once from a sitemap, or written by hand as an entry.
 
+Sitemap import validates every URL and redirect hop as `https:` and checks
+the hostname via DNS-over-HTTPS before fetching, refusing private, loopback, or
+link-local addresses. Because Workers `fetch` resolves the hostname separately
+from that pre-check, a host that changes its DNS answer between the check and
+the fetch is not caught; that is an accepted limitation for an action only the
+signed-in owner can trigger.
+
 D1 is the only source of truth for live chunks; readers resolve retrieved vector
 ids through D1, so leftover vectors and R2 objects can accumulate after failures.
 They cost storage only and never affect an answer. A later task adds a reindex

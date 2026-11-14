@@ -1,4 +1,5 @@
 import { Errors, fail, ok, type Result } from "../result.js";
+import { MAX_DOCUMENT_MARKDOWN_BYTES } from "./document.js";
 import { isPlainObject, parseUrl, readTrimmedString } from "./shared.js";
 
 export type SourceKind = "push" | "sitemap" | "entry";
@@ -7,6 +8,47 @@ export type SourceInput =
   | { kind: "push"; label: string; settings: Record<string, never> }
   | { kind: "entry"; label: string; settings: Record<string, never> }
   | { kind: "sitemap"; label: string; settings: { url: string } };
+
+export interface EntryInput {
+  question: string;
+  answer: string;
+}
+
+const textEncoder = new TextEncoder();
+
+/** Formats a hand-written entry into the Markdown document stored and ingested. */
+export function formatEntryMarkdown(question: string, answer: string): string {
+  return `# ${question}\n\n${answer}`;
+}
+
+/** Validates a hand-written entry (question and answer). */
+export function parseEntryInput(value: unknown): Result<EntryInput> {
+  if (!isPlainObject(value)) return fail("body: must be a JSON object");
+
+  const errors = new Errors();
+  const question = readTrimmedString(value.question, 1, 300);
+  if (question === null) errors.add("question", "must be 1 to 300 characters");
+
+  const answer = readTrimmedString(value.answer, 1, MAX_DOCUMENT_MARKDOWN_BYTES);
+  if (answer === null) {
+    errors.add("answer", "must not be empty");
+  } else {
+    const headingBytes =
+      question !== null ? textEncoder.encode(formatEntryMarkdown(question, "")).byteLength : 0;
+    const maxAnswerBytes = MAX_DOCUMENT_MARKDOWN_BYTES - headingBytes;
+    if (textEncoder.encode(answer).byteLength > maxAnswerBytes) {
+      errors.add(
+        "answer",
+        question !== null
+          ? `must be at most ${maxAnswerBytes} bytes with this question (total ${MAX_DOCUMENT_MARKDOWN_BYTES} bytes)`
+          : `must be at most ${MAX_DOCUMENT_MARKDOWN_BYTES} bytes`,
+      );
+    }
+  }
+
+  if (errors.failed || question === null || answer === null) return fail(...errors.list);
+  return ok({ question, answer });
+}
 
 /** Validates source creation/update input, shaping `settings` by `kind`. */
 export function parseSourceInput(value: unknown): Result<SourceInput> {

@@ -24,7 +24,14 @@ export {
   type FeedbackVote,
   parseFeedbackRequest,
 } from "./schemas/feedback.js";
-export { parseSourceInput, type SourceInput, type SourceKind } from "./schemas/source.js";
+export {
+  type EntryInput,
+  formatEntryMarkdown,
+  parseEntryInput,
+  parseSourceInput,
+  type SourceInput,
+  type SourceKind,
+} from "./schemas/source.js";
 export {
   type BehaviourConfig,
   defaultVersionConfig,
