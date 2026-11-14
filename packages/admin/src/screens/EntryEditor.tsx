@@ -5,6 +5,7 @@ export interface EntrySaveSession {
   assistantId: string;
   sourceId?: string;
   documentId?: string;
+  fromMessageId?: string;
 }
 
 export interface EntryEditorProps {
@@ -42,6 +43,7 @@ export function EntryEditor({
     void assistantId;
     void sourceId;
     void documentId;
+    void fromMessageId;
     sessionRef.current++;
     setQuestion(initialQuestion);
     setAnswer(initialAnswer);
@@ -49,7 +51,7 @@ export function EntryEditor({
     setFieldErrors({});
     setFormError(null);
     setStatusMessage(null);
-  }, [assistantId, sourceId, documentId, initialQuestion, initialAnswer]);
+  }, [assistantId, sourceId, documentId, fromMessageId, initialQuestion, initialAnswer]);
 
   const isEditing = Boolean(sourceId && documentId);
 
@@ -61,6 +63,7 @@ export function EntryEditor({
       assistantId,
       ...(sourceId !== undefined ? { sourceId } : {}),
       ...(documentId !== undefined ? { documentId } : {}),
+      ...(fromMessageId !== undefined ? { fromMessageId } : {}),
     };
     setSaving(true);
     setFieldErrors({});

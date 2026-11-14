@@ -220,4 +220,79 @@ describe("admin gaps API", () => {
     expect(body.gaps[0]?.handled).toBe(true);
     expect(body.gaps[0]?.documentId).toBe(documentId);
   });
+
+  it("keeps handled status consistent across Gaps and Conversations without inflating ask counts", async () => {
+    const astA = await seedAssistant(ORG_A);
+    const turn = await seedTurn({
+      orgId: ORG_A,
+      assistantId: astA,
+      question: "Do you support SAML?",
+      answered: false,
+      createdAt: 1000,
+    });
+
+    const app = appForOrg(ORG_A);
+
+    // 1. Answer from Gaps (user message ID).
+    const writeFromGap = await call(app, "POST", `/api/admin/assistants/${astA}/answers`, {
+      question: "Do you support SAML?",
+      answer: "Yes, on Business plans.",
+      fromMessageId: turn.questionId,
+    });
+    expect(writeFromGap.status).toBe(201);
+    const { documentId } = (await writeFromGap.json()) as { documentId: string };
+
+    // 2. Conversation detail must show the assistant turn as handled with the same documentId.
+    const convRes = await call(app, "GET", `/api/admin/conversations/${turn.conversationId}`);
+    expect(convRes.status).toBe(200);
+    const convBody = (await convRes.json()) as {
+      turns: Array<{ id: string; role: string; answerDocumentId: string | null }>;
+    };
+    const assistantTurn = convBody.turns.find((t) => t.id === turn.assistantMessageId);
+    expect(assistantTurn?.answerDocumentId).toBe(documentId);
+
+    // 3. Even if an answer is submitted with the assistant message ID, it normalizes to the
+    // canonical user message ID and does not inflate the gap's "Asked" count.
+    const writeFromAssistant = await call(app, "POST", `/api/admin/assistants/${astA}/answers`, {
+      question: "Do you support SAML?",
+      answer: "Yes, on Business and Enterprise plans.",
+      fromMessageId: turn.assistantMessageId,
+    });
+    expect(writeFromAssistant.status).toBe(201);
+    const { documentId: updatedDocId } = (await writeFromAssistant.json()) as {
+      documentId: string;
+    };
+
+    const gapsRes = await call(app, "GET", `/api/admin/assistants/${astA}/gaps`);
+    expect(gapsRes.status).toBe(200);
+    const gapsBody = (await gapsRes.json()) as {
+      gaps: Array<{ times: number; handled: boolean; documentId: string | null }>;
+    };
+    expect(gapsBody.gaps).toHaveLength(1);
+    expect(gapsBody.gaps[0]).toMatchObject({
+      times: 1,
+      handled: true,
+      documentId: updatedDocId,
+    });
+
+    // 4. Even if both user and assistant link rows exist in gap_answers, listGaps counts the exchange once.
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO gap_answers (org_id, message_id, document_id, created_at)
+       VALUES (?1, ?2, ?3, ?4)`,
+    )
+      .bind(ORG_A, turn.assistantMessageId, documentId, 2000)
+      .run();
+
+    const dedupedGapsRes = await call(app, "GET", `/api/admin/assistants/${astA}/gaps`);
+    expect(dedupedGapsRes.status).toBe(200);
+    const dedupedBody = (await dedupedGapsRes.json()) as {
+      gaps: Array<{ times: number; handled: boolean; documentId: string | null }>;
+    };
+    expect(dedupedBody.gaps).toHaveLength(1);
+    expect(dedupedBody.gaps[0]).toMatchObject({
+      times: 1,
+      handled: true,
+      documentId: updatedDocId,
+    });
+  });
 });

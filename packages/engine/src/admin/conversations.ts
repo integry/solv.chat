@@ -83,16 +83,28 @@ export async function getConversation(
     }
   }
 
-  const turns: ConversationTurn[] = messages.map((msg) => ({
-    id: msg.id,
-    role: msg.role,
-    content: msg.content,
-    citations: msg.citations,
-    answered: msg.answered,
-    createdAt: msg.createdAt,
-    feedback: feedbackByMessage.get(msg.id) ?? [],
-    answerDocumentId: gapAnswers.get(msg.id) ?? null,
-  }));
+  let lastUserMessageId: string | null = null;
+  const turns: ConversationTurn[] = messages.map((msg) => {
+    if (msg.role === "user") {
+      lastUserMessageId = msg.id;
+    }
+    const answerDocumentId =
+      msg.role === "assistant"
+        ? ((lastUserMessageId ? gapAnswers.get(lastUserMessageId) : undefined) ??
+          gapAnswers.get(msg.id) ??
+          null)
+        : (gapAnswers.get(msg.id) ?? null);
+    return {
+      id: msg.id,
+      role: msg.role,
+      content: msg.content,
+      citations: msg.citations,
+      answered: msg.answered,
+      createdAt: msg.createdAt,
+      feedback: feedbackByMessage.get(msg.id) ?? [],
+      answerDocumentId,
+    };
+  });
 
   return { conversation, turns };
 }

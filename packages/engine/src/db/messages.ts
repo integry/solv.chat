@@ -179,7 +179,7 @@ export function messagesFor(db: D1Database, orgId: string) {
         `SELECT q.id AS question_id,
                 q.content AS question_content,
                 q.created_at AS asked_at,
-                ga.document_id AS answer_document_id
+                COALESCE(ga_q.document_id, ga_a.document_id) AS answer_document_id
            FROM messages a
            JOIN conversations c ON c.id = a.conversation_id AND c.org_id = a.org_id
            JOIN messages q ON q.conversation_id = a.conversation_id
@@ -195,8 +195,10 @@ export function messagesFor(db: D1Database, orgId: string) {
                              ORDER BY q2.created_at DESC, q2.id DESC
                              LIMIT 1
                           )
-           LEFT JOIN gap_answers ga ON ga.org_id = a.org_id
-                                   AND (ga.message_id = q.id OR ga.message_id = a.id)
+           LEFT JOIN gap_answers ga_q ON ga_q.org_id = a.org_id
+                                     AND ga_q.message_id = q.id
+           LEFT JOIN gap_answers ga_a ON ga_a.org_id = a.org_id
+                                     AND ga_a.message_id = a.id
           WHERE a.org_id = ?1
             AND c.assistant_id = ?2
             AND a.role = 'assistant'

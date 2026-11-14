@@ -28,6 +28,11 @@ function installFakeServer(options?: {
   conversations?: ConversationSummary[];
   conversationDetails?: Record<string, ConversationDetail>;
   gaps?: GapSummary[];
+  onAnswerPost?: (body: {
+    question: string;
+    answer: string;
+    fromMessageId: string;
+  }) => Promise<Response> | Response;
 }) {
   const assistant = makeAssistant(options?.allowedOrigins ?? []);
   const gaps: GapSummary[] = options?.gaps
@@ -137,21 +142,26 @@ function installFakeServer(options?: {
         fromMessageId: string;
       };
       answerPosts.push(body);
-      for (const gap of gaps) {
-        if (gap.exampleMessageId === body.fromMessageId) {
-          gap.handled = true;
-          gap.documentId = "doc_saved_1";
+      const response = options?.onAnswerPost
+        ? await options.onAnswerPost(body)
+        : Response.json(
+            {
+              documentId: "doc_saved_1",
+              sourceId: "src_entry_1",
+              url: "https://example.com/admin/sources#entry:1",
+              counts: { written: 1, unchanged: 0, deleted: 0 },
+            },
+            { status: 201 },
+          );
+      if (response.ok) {
+        for (const gap of gaps) {
+          if (gap.exampleMessageId === body.fromMessageId) {
+            gap.handled = true;
+            gap.documentId = "doc_saved_1";
+          }
         }
       }
-      return Response.json(
-        {
-          documentId: "doc_saved_1",
-          sourceId: "src_entry_1",
-          url: "https://example.com/admin/sources#entry:1",
-          counts: { written: 1, unchanged: 0, deleted: 0 },
-        },
-        { status: 201 },
-      );
+      return response;
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/install` && method === "GET") {
@@ -311,8 +321,235 @@ describe("admin phase 1 screens", () => {
     expect(server.answerPosts[0]).toEqual({
       question: "Do you have an SLA?",
       answer: "99.9% uptime SLA on Business plans.",
-      fromMessageId: "msg_a_sla",
+      fromMessageId: "msg_q_sla",
     });
+  });
+
+  it("preserves a newer gap draft when an earlier gap save completes", async () => {
+    let resolveFirstSave!: (res: Response) => void;
+    const firstSavePromise = new Promise<Response>((resolve) => {
+      resolveFirstSave = resolve;
+    });
+
+    const gaps: GapSummary[] = [
+      {
+        question: "do you ship to spain?",
+        displayQuestion: "Do you ship to Spain?",
+        times: 3,
+        lastAsked: 1_700_000_500_000,
+        exampleMessageId: "msg_gap_a",
+        handled: false,
+        documentId: null,
+      },
+      {
+        question: "do you support sso?",
+        displayQuestion: "Do you support SSO?",
+        times: 2,
+        lastAsked: 1_700_000_400_000,
+        exampleMessageId: "msg_gap_b",
+        handled: false,
+        documentId: null,
+      },
+    ];
+
+    const server = installFakeServer({
+      gaps,
+      onAnswerPost: async (body) => {
+        if (body.fromMessageId === "msg_gap_a") {
+          return firstSavePromise;
+        }
+        return Response.json(
+          {
+            documentId: "doc_saved_b",
+            sourceId: "src_entry_1",
+            url: "https://example.com/admin/sources#entry:2",
+            counts: { written: 1, unchanged: 0, deleted: 0 },
+          },
+          { status: 201 },
+        );
+      },
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Gaps" }));
+    expect(await screen.findByText("Do you ship to Spain?")).toBeTruthy();
+
+    const [writeA, writeB] = screen.getAllByRole("button", { name: "Write the right answer" });
+    expect(writeA).toBeDefined();
+    expect(writeB).toBeDefined();
+    if (!writeA || !writeB) return;
+
+    fireEvent.click(writeA);
+    fireEvent.change(await screen.findByLabelText("Answer"), {
+      target: { value: "Yes, we ship to Spain." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
+    await waitFor(() => expect(server.answerPosts).toHaveLength(1));
+
+    // While A's save is still pending, switch to gap B and type a draft.
+    fireEvent.click(writeB);
+    const questionInput = (await screen.findByLabelText("Question")) as HTMLInputElement;
+    expect(questionInput.value).toBe("Do you support SSO?");
+    const answerInput = screen.getByLabelText("Answer") as HTMLTextAreaElement;
+    fireEvent.change(answerInput, {
+      target: { value: "Yes, SAML SSO is on Business plans." },
+    });
+
+    // Complete A's save.
+    resolveFirstSave(
+      Response.json(
+        {
+          documentId: "doc_saved_a",
+          sourceId: "src_entry_1",
+          url: "https://example.com/admin/sources#entry:1",
+          counts: { written: 1, unchanged: 0, deleted: 0 },
+        },
+        { status: 201 },
+      ),
+    );
+
+    // Gap A is marked handled on reload, while B's editor and draft remain intact.
+    expect(await screen.findByText("Handled")).toBeTruthy();
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe(
+      "Do you support SSO?",
+    );
+    expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+      "Yes, SAML SSO is on Business plans.",
+    );
+  });
+
+  it("preserves a newer conversation turn draft when an earlier turn save completes", async () => {
+    let resolveFirstSave!: (res: Response) => void;
+    const firstSavePromise = new Promise<Response>((resolve) => {
+      resolveFirstSave = resolve;
+    });
+
+    const server = installFakeServer({
+      conversations: [
+        {
+          id: "cnv_two",
+          assistantId: "ast_1",
+          visitorId: "vis_1",
+          startedAt: 1_700_000_100_000,
+          pageUrl: "https://docs.example.com",
+          firstQuestion: "Question one?",
+          turnCount: 4,
+          hasUnanswered: true,
+        },
+      ],
+      conversationDetails: {
+        cnv_two: {
+          conversation: {
+            id: "cnv_two",
+            assistantId: "ast_1",
+            visitorId: "vis_1",
+            startedAt: 1_700_000_100_000,
+            pageUrl: "https://docs.example.com",
+          },
+          turns: [
+            {
+              id: "msg_q_1",
+              role: "user",
+              content: "Question one?",
+              citations: [],
+              answered: true,
+              createdAt: 1_700_000_101_000,
+              feedback: [],
+              answerDocumentId: null,
+            },
+            {
+              id: "msg_a_1",
+              role: "assistant",
+              content: "I could not find an answer.",
+              citations: [],
+              answered: false,
+              createdAt: 1_700_000_102_000,
+              feedback: [],
+              answerDocumentId: null,
+            },
+            {
+              id: "msg_q_2",
+              role: "user",
+              content: "Question two?",
+              citations: [],
+              answered: true,
+              createdAt: 1_700_000_103_000,
+              feedback: [],
+              answerDocumentId: null,
+            },
+            {
+              id: "msg_a_2",
+              role: "assistant",
+              content: "I could not find an answer.",
+              citations: [],
+              answered: false,
+              createdAt: 1_700_000_104_000,
+              feedback: [],
+              answerDocumentId: null,
+            },
+          ],
+        },
+      },
+      onAnswerPost: async (body) => {
+        if (body.fromMessageId === "msg_q_1") {
+          return firstSavePromise;
+        }
+        return Response.json(
+          {
+            documentId: "doc_saved_2",
+            sourceId: "src_entry_1",
+            url: "https://example.com/admin/sources#entry:2",
+            counts: { written: 1, unchanged: 0, deleted: 0 },
+          },
+          { status: 201 },
+        );
+      },
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+
+    const [writeFirst, writeSecond] = await screen.findAllByRole("button", {
+      name: "Write the right answer",
+    });
+    expect(writeFirst).toBeDefined();
+    expect(writeSecond).toBeDefined();
+    if (!writeFirst || !writeSecond) return;
+
+    fireEvent.click(writeFirst);
+    fireEvent.change(await screen.findByLabelText("Answer"), {
+      target: { value: "Answer one." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
+    await waitFor(() => expect(server.answerPosts).toHaveLength(1));
+
+    // Switch to turn 2 while turn 1's save is in flight and type a draft.
+    fireEvent.click(writeSecond);
+    const questionInput = (await screen.findByLabelText("Question")) as HTMLInputElement;
+    expect(questionInput.value).toBe("Question two?");
+    fireEvent.change(screen.getByLabelText("Answer"), {
+      target: { value: "Draft answer two." },
+    });
+
+    resolveFirstSave(
+      Response.json(
+        {
+          documentId: "doc_saved_1",
+          sourceId: "src_entry_1",
+          url: "https://example.com/admin/sources#entry:1",
+          counts: { written: 1, unchanged: 0, deleted: 0 },
+        },
+        { status: 201 },
+      ),
+    );
+
+    await waitFor(() =>
+      expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+        "Draft answer two.",
+      ),
+    );
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Question two?");
   });
 
   it("renders Install with the empty-origins warning and copies the snippet", async () => {

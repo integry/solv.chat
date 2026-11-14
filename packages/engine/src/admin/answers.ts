@@ -37,13 +37,24 @@ export async function writeTheRightAnswer(
     throw new NotFound("message");
   }
 
+  let canonicalMessageId = args.fromMessageId;
+  if (message.role === "assistant") {
+    const turns = await deps.tenant.messages.list(message.conversationId);
+    const precedingUser = turns
+      .filter((t) => t.role === "user" && t.createdAt <= message.createdAt)
+      .sort((a, b) => b.createdAt - a.createdAt || (b.id > a.id ? 1 : b.id < a.id ? -1 : 0))[0];
+    if (precedingUser) {
+      canonicalMessageId = precedingUser.id;
+    }
+  }
+
   const result = await saveEntry(deps, principal, {
     assistantId: args.assistantId,
     question: args.question,
     answer: args.answer,
   });
 
-  await deps.tenant.messages.linkGapAnswer(args.fromMessageId, result.documentId, Date.now());
+  await deps.tenant.messages.linkGapAnswer(canonicalMessageId, result.documentId, Date.now());
 
   return result;
 }

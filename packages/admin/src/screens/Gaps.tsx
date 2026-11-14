@@ -34,8 +34,11 @@ export function Gaps({ assistantId }: GapsProps) {
           assistantId={assistantId}
           fromMessageId={editingGap.exampleMessageId}
           initialQuestion={editingGap.displayQuestion || editingGap.question}
-          onSaved={() => {
-            setEditingGap(null);
+          onSaved={(_result, session) => {
+            if (session.assistantId !== assistantId) return;
+            setEditingGap((current) =>
+              current?.exampleMessageId === session.fromMessageId ? null : current,
+            );
             gapsRes.reload();
           }}
           onCancel={() => setEditingGap(null)}
