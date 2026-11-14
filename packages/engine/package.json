@@ -21,7 +21,8 @@
     "pretest": "node scripts/sync-widget.mjs && node scripts/sync-admin.mjs",
     "test": "vitest run",
     "prebuild": "node scripts/sync-widget.mjs --rebuild && node scripts/sync-admin.mjs --rebuild",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "migrations:apply": "wrangler d1 migrations apply solvchat --remote"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.21",
