@@ -1,7 +1,7 @@
 import { newId, parseVersionConfig } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import type { VersionRow } from "../db/versions.js";
-import { BadRequest, NotFound } from "./errors.js";
+import { BadRequest, Conflict, NotFound } from "./errors.js";
 
 /** Lists version history for an assistant, newest first. */
 export async function listVersions(tenant: Tenant, assistantId: string): Promise<VersionRow[]> {
@@ -17,24 +17,39 @@ export async function getDraft(tenant: Tenant, assistantId: string): Promise<Ver
   return draft;
 }
 
+const MAX_DRAFT_UPDATE_ATTEMPTS = 5;
+
 /** Validates and updates the assistant's draft configuration, preserving omitted sections. */
 export async function updateDraft(
   tenant: Tenant,
   assistantId: string,
   body: unknown,
 ): Promise<VersionRow> {
-  const existing = await tenant.versions.draft(assistantId);
-  if (existing === null) throw new NotFound("assistant");
+  let expectedId: string | null = null;
 
-  const parsed = parseVersionConfig(body, existing.config);
-  if (!parsed.ok) throw new BadRequest(parsed.errors);
+  for (let attempt = 0; attempt < MAX_DRAFT_UPDATE_ATTEMPTS; attempt++) {
+    const existing = await tenant.versions.draft(assistantId);
+    if (existing === null) throw new NotFound("assistant");
 
-  const updated = await tenant.versions.updateDraft(assistantId, parsed.value);
-  if (!updated) throw new NotFound("assistant");
+    if (expectedId !== null && existing.id !== expectedId) {
+      // Fence against the original draft being promoted between read and write.
+      throw new Conflict("The draft changed because it was published. Please try again.");
+    }
+    expectedId = existing.id;
 
-  const draft = await tenant.versions.draft(assistantId);
-  if (draft === null) throw new NotFound("assistant");
-  return draft;
+    const parsed = parseVersionConfig(body, existing.config);
+    if (!parsed.ok) throw new BadRequest(parsed.errors);
+
+    const updated = await tenant.versions.updateDraft(assistantId, parsed.value, {
+      id: existing.id,
+      config: existing.config,
+    });
+    if (updated) {
+      return { ...existing, config: parsed.value };
+    }
+  }
+
+  throw new Conflict("The draft changed while you were saving. Please try again.");
 }
 
 /**
@@ -52,7 +67,11 @@ export async function publishDraft(tenant: Tenant, assistantId: string): Promise
 
   const now = Date.now();
   const published = await tenant.versions.publishDraft(assistantId, draft.id, newId("ver"), now);
-  if (published === null) throw new NotFound("assistant");
+  if (published === null) {
+    const assistant = await tenant.assistants.get(assistantId);
+    if (assistant === null) throw new NotFound("assistant");
+    throw new Conflict("This draft was already published. Please try again.");
+  }
   return published;
 }
 

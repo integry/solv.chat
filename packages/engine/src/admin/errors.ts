@@ -14,6 +14,9 @@ export class BadRequest extends Error {
   }
 }
 
+/** Thrown when a concurrent change prevents completing an update; mapped to 409. */
+export class Conflict extends Error {}
+
 /** Parses a JSON request body, throwing `BadRequest` on malformed JSON. */
 export async function readJsonBody(request: Request): Promise<unknown> {
   try {

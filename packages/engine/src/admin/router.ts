@@ -6,7 +6,7 @@ import {
   rotateIngestKey,
   updateAssistant,
 } from "./assistants.js";
-import { BadRequest, NotFound, readJsonBody } from "./errors.js";
+import { BadRequest, Conflict, NotFound, readJsonBody } from "./errors.js";
 import { getDraft, listVersions, publishDraft, rollbackTo, updateDraft } from "./versions.js";
 
 async function assistantRoutes(
@@ -88,6 +88,9 @@ export async function adminRoutes(request: Request, url: URL, tenant: Tenant): P
     if (error instanceof NotFound) return Response.json({ error: "Not found." }, { status: 404 });
     if (error instanceof BadRequest) {
       return Response.json({ error: "That is not valid.", fields: error.errors }, { status: 400 });
+    }
+    if (error instanceof Conflict) {
+      return Response.json({ error: error.message || "Please try again." }, { status: 409 });
     }
     throw error;
   }

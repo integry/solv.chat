@@ -1,5 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Conflict } from "../../src/admin/errors.js";
+import { adminRoutes } from "../../src/admin/router.js";
 import { publishDraft, updateDraft } from "../../src/admin/versions.js";
 import type { AssistantRow } from "../../src/db/assistants.js";
 import { forPrincipal } from "../../src/db/tenant.js";
@@ -302,5 +304,126 @@ describe("admin versions API", () => {
     expect(publishedRow?.id).toBe(published.id);
     expect(JSON.parse(publishedRow?.config ?? "{}")).toEqual(published.config);
     expect(JSON.parse(freshDraftRow?.config ?? "{}")).toEqual(published.config);
+  });
+
+  it("overlapping partial saves to different sections preserve both changes", async () => {
+    const tenant = forPrincipal(env.DB, {
+      orgId: TEST_ORG_ID,
+      userId: "owner",
+      role: "owner",
+    });
+
+    let triggered = false;
+    const racingTenant = {
+      ...tenant,
+      versions: {
+        ...tenant.versions,
+        async draft(id: string) {
+          const read = await tenant.versions.draft(id);
+          if (!triggered) {
+            triggered = true;
+            await updateDraft(tenant, id, {
+              limits: { dailyCostCapMicros: 500 },
+            });
+          }
+          return read;
+        },
+      },
+    };
+
+    const result = await updateDraft(racingTenant, assistantId, {
+      behaviour: { greeting: "Concurrent greeting" },
+    });
+    expect(result.config.limits.dailyCostCapMicros).toBe(500);
+    expect(result.config.behaviour.greeting).toBe("Concurrent greeting");
+
+    const rows = await tableVersions(assistantId);
+    expect(rows).toHaveLength(1);
+    const savedConfig = JSON.parse(rows[0]?.config ?? "{}");
+    expect(savedConfig.limits.dailyCostCapMicros).toBe(500);
+    expect(savedConfig.behaviour.greeting).toBe("Concurrent greeting");
+  });
+
+  it("rejects draft save with 409 when the draft is published between read and write", async () => {
+    const tenant = forPrincipal(env.DB, {
+      orgId: TEST_ORG_ID,
+      userId: "owner",
+      role: "owner",
+    });
+
+    let promoted = false;
+    const racingTenant = {
+      ...tenant,
+      versions: {
+        ...tenant.versions,
+        async draft(id: string) {
+          const read = await tenant.versions.draft(id);
+          if (!promoted) {
+            promoted = true;
+            await publishDraft(tenant, id);
+          }
+          return read;
+        },
+      },
+    };
+
+    const res = await adminRoutes(
+      new Request(`https://example.com/api/admin/assistants/${assistantId}/draft`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ behaviour: { greeting: "Stale save" } }),
+      }),
+      new URL(`https://example.com/api/admin/assistants/${assistantId}/draft`),
+      racingTenant,
+    );
+    expect(res.status).toBe(409);
+
+    const rows = await tableVersions(assistantId);
+    expect(rows).toHaveLength(2);
+    const freshDraft = rows.find((r) => r.state === "draft");
+    expect(JSON.parse(freshDraft?.config ?? "{}").behaviour.greeting).not.toBe("Stale save");
+  });
+
+  it("overlapping publishes return a handled conflict and preserve version invariants", async () => {
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Ready to publish" },
+    });
+
+    const tenant = forPrincipal(env.DB, {
+      orgId: TEST_ORG_ID,
+      userId: "owner",
+      role: "owner",
+    });
+
+    let firstPublished: VersionRow | undefined;
+    const racingTenant = {
+      ...tenant,
+      versions: {
+        ...tenant.versions,
+        async draft(id: string) {
+          const read = await tenant.versions.draft(id);
+          firstPublished = await publishDraft(tenant, id);
+          return read;
+        },
+      },
+    };
+
+    const secondRes = await adminRoutes(
+      new Request(`https://example.com/api/admin/assistants/${assistantId}/publish`, {
+        method: "POST",
+      }),
+      new URL(`https://example.com/api/admin/assistants/${assistantId}/publish`),
+      racingTenant,
+    );
+    expect(secondRes.status).toBe(409);
+
+    const rows = await tableVersions(assistantId);
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.state === "published")).toHaveLength(1);
+    expect(rows.filter((r) => r.state === "draft")).toHaveLength(1);
+    expect(rows.filter((r) => r.state === "archived")).toHaveLength(0);
+    expect(rows.find((r) => r.state === "published")?.id).toBe(firstPublished?.id);
+
+    await expect(publishDraft(racingTenant, assistantId)).rejects.toBeInstanceOf(Conflict);
   });
 });
