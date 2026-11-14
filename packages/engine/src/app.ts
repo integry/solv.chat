@@ -1,5 +1,7 @@
+import { adminAsset } from "./admin/assets.js";
 import { adminRoutes } from "./admin/router.js";
 import {
+  adminChatRoute,
   type ChatRouteOverrides,
   chatRoute,
   feedbackRoute,
@@ -102,7 +104,16 @@ export function createApp(seams: Seams, options?: AppOptions): App {
       if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
         const principal = await seams.auth.authenticate(request);
         if (principal === null) return Response.json({ error: "Sign in first." }, { status: 401 });
+        if (url.pathname === "/api/admin/chat") {
+          return adminChatRoute(request, env, seams, ctx, principal, options?.chat);
+        }
         return adminRoutes(request, url, forPrincipal(env.DB, principal));
+      }
+      if (
+        (request.method === "GET" || request.method === "HEAD") &&
+        (url.pathname === "/admin" || url.pathname.startsWith("/admin/"))
+      ) {
+        return adminAsset(url);
       }
       void ctx; // Later tasks add their routes above this line.
       return Response.json({ error: "Not found." }, { status: 404 });
