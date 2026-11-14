@@ -1,6 +1,12 @@
 import { CHAT_PROTOCOL_VERSION, MAX_CHAT_MESSAGE_LENGTH, parseChatEventLine } from "@solvchat/core";
 import { readEventLines } from "./sse.js";
-import { loadConversation, type SavedTurn, saveConversation, visitorId } from "./storage.js";
+import {
+  claimConversation,
+  loadConversation,
+  type SavedTurn,
+  saveConversation,
+  visitorId,
+} from "./storage.js";
 import { styles } from "./styles.js";
 
 interface WidgetPublicConfig {
@@ -73,6 +79,8 @@ function parsePublicConfig(raw: unknown): Partial<WidgetPublicConfig> {
  */
 export class SolvChat extends HTMLElement {
   #root = this.attachShadow({ mode: "open" });
+  #owner = Symbol();
+  #claimedAssistant: string | null = null;
   #initialized = false;
   #open = false;
   #sending = false;
@@ -95,8 +103,13 @@ export class SolvChat extends HTMLElement {
       this.#root.adoptedStyleSheets = [styles];
       this.#renderShell();
       this.#initialized = true;
+    }
 
-      const saved = loadConversation(this.#assistant());
+    const assistant = this.#assistant();
+    if (this.#claimedAssistant === null && assistant) {
+      this.#claimedAssistant = assistant;
+      claimConversation(assistant, this.#owner);
+      const saved = loadConversation(assistant);
       if (saved !== null) {
         this.#restore(saved);
       }
@@ -367,11 +380,15 @@ export class SolvChat extends HTMLElement {
   }
 
   #persist(): void {
-    saveConversation(this.#assistant(), {
-      conversationId: this.#conversationId,
-      open: this.#open,
-      turns: this.#turns,
-    });
+    saveConversation(
+      this.#assistant(),
+      {
+        conversationId: this.#conversationId,
+        open: this.#open,
+        turns: this.#turns,
+      },
+      this.#owner,
+    );
   }
 
   #appendBubble(role: "user" | "assistant"): { bubble: HTMLDivElement; textEl: HTMLDivElement } {

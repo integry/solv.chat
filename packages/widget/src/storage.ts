@@ -23,6 +23,7 @@ const OPEN_PREFIX = "solv-chat-open:";
 const MAX_SAVED_TURNS = 20;
 
 let fallbackVisitorId: string | null = null;
+const activeOwners = new Map<string, symbol>();
 
 /**
  * A random id in localStorage, not a cookie. The specification is explicit:
@@ -73,11 +74,21 @@ export function loadConversation(assistant: string): SavedConversation | null {
 }
 
 /**
- * Saves the open conversation for an assistant, capped to the most recent turns
- * so sessionStorage quota is never exhausted by a long session.
+ * Marks `owner` as the active widget instance for `assistant`, fencing out any
+ * superseded instance that still has an in-flight stream or request.
  */
-export function saveConversation(assistant: string, saved: SavedConversation): void {
+export function claimConversation(assistant: string, owner: symbol): void {
   if (!assistant) return;
+  activeOwners.set(assistant, owner);
+}
+
+/**
+ * Saves the open conversation for an assistant when `owner` is still the
+ * active instance, capped to the most recent turns so sessionStorage quota
+ * is never exhausted by a long session.
+ */
+export function saveConversation(assistant: string, saved: SavedConversation, owner: symbol): void {
+  if (!assistant || activeOwners.get(assistant) !== owner) return;
   try {
     sessionStorage.setItem(
       `${OPEN_PREFIX}${assistant}`,

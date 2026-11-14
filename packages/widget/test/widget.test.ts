@@ -906,4 +906,185 @@ describe("<solv-chat>", () => {
     );
     expect(bubble?.querySelector(".solv-feedback")).toBeNull();
   });
+
+  it("prevents a replaced streaming widget from overwriting its successor's transcript and conversationId", async () => {
+    const encoder = new TextEncoder();
+    let streamControllerA: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const sentBodies: Array<{ message: string; conversationId?: string }> = [];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        const body = JSON.parse(String(init?.body)) as { message: string; conversationId?: string };
+        sentBodies.push(body);
+        if (sentBodies.length === 1) {
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              streamControllerA = controller;
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        return new Response(
+          sseStream([
+            'event: token\ndata: {"text":"Follow-up answer"}\n\n',
+            'event: done\ndata: {"messageId":"msg_b","conversationId":"conv_b"}\n\n',
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const widgetA = mountWidget("pk_replace_stream");
+    await flushAsync();
+    const rootA = shadow(widgetA);
+
+    mustQuery<HTMLButtonElement>(rootA, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(rootA, "#solv-input").value = "First question";
+    mustQuery<HTMLFormElement>(rootA, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    expect(streamControllerA).toBeDefined();
+    streamControllerA?.enqueue(encoder.encode('event: token\ndata: {"text":"Partial "}\n\n'));
+    await flushAsync();
+
+    // Replace widget A mid-stream with widget B for the same assistant key.
+    widgetA.remove();
+    const widgetB = mountWidget("pk_replace_stream");
+    await flushAsync();
+    const rootB = shadow(widgetB);
+
+    // Send a follow-up through B and let B complete.
+    mustQuery<HTMLTextAreaElement>(rootB, "#solv-input").value = "Follow up";
+    mustQuery<HTMLFormElement>(rootB, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    // Finish A's old stream (token, citation, done, and stream close -> finally).
+    streamControllerA?.enqueue(encoder.encode('event: token\ndata: {"text":"stale tail"}\n\n'));
+    streamControllerA?.enqueue(
+      encoder.encode(
+        'event: citation\ndata: {"url":"https://stale.example.com/old","title":"Stale"}\n\n',
+      ),
+    );
+    streamControllerA?.enqueue(
+      encoder.encode('event: done\ndata: {"messageId":"msg_a","conversationId":"conv_a"}\n\n'),
+    );
+    streamControllerA?.close();
+    await flushAsync();
+
+    const rawSaved = sessionStorage.getItem("solv-chat-open:pk_replace_stream");
+    expect(rawSaved).not.toBeNull();
+    const saved = JSON.parse(String(rawSaved)) as {
+      conversationId: string | null;
+      open: boolean;
+      turns: Array<{ role: string; text: string; messageId?: string; error?: string }>;
+    };
+    expect(saved.conversationId).toBe("conv_b");
+    expect(saved.open).toBe(true);
+    expect(saved.turns).toEqual([
+      { role: "user", text: "First question" },
+      {
+        role: "assistant",
+        text: "Partial ",
+        error: "Response interrupted. Please try again.",
+      },
+      { role: "user", text: "Follow up" },
+      { role: "assistant", text: "Follow-up answer", messageId: "msg_b" },
+    ]);
+
+    // Reloading restores B's conversation and continues with conv_b.
+    widgetB.remove();
+    const widgetC = mountWidget("pk_replace_stream");
+    await flushAsync();
+    const rootC = shadow(widgetC);
+    mustQuery<HTMLTextAreaElement>(rootC, "#solv-input").value = "Third question";
+    mustQuery<HTMLFormElement>(rootC, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    expect(sentBodies[2]?.conversationId).toBe("conv_b");
+  });
+
+  it("prevents a replaced widget's in-flight feedback completion from overwriting its successor's state", async () => {
+    let resolveFeedbackA: ((res: Response) => void) | undefined;
+    let chatCall = 0;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        chatCall += 1;
+        if (chatCall === 1) {
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"Answer A"}\n\n',
+              'event: done\ndata: {"messageId":"msg_a","conversationId":"conv_a"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response(
+          sseStream([
+            'event: token\ndata: {"text":"Answer B"}\n\n',
+            'event: done\ndata: {"messageId":"msg_b","conversationId":"conv_b"}\n\n',
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (url.endsWith("/v1/feedback")) {
+        return new Promise<Response>((resolve) => {
+          resolveFeedbackA = resolve;
+        });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const widgetA = mountWidget("pk_replace_fb");
+    await flushAsync();
+    const rootA = shadow(widgetA);
+
+    mustQuery<HTMLButtonElement>(rootA, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(rootA, "#solv-input").value = "Question A";
+    mustQuery<HTMLFormElement>(rootA, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    // Start feedback submission on A, leaving it in flight.
+    mustQuery<HTMLButtonElement>(rootA, 'button[aria-label="Helpful"]').click();
+    expect(resolveFeedbackA).toBeDefined();
+
+    // Replace A with B and send a follow-up on B.
+    widgetA.remove();
+    const widgetB = mountWidget("pk_replace_fb");
+    await flushAsync();
+    const rootB = shadow(widgetB);
+
+    mustQuery<HTMLTextAreaElement>(rootB, "#solv-input").value = "Question B";
+    mustQuery<HTMLFormElement>(rootB, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    // Complete A's pending feedback request after B has updated sessionStorage.
+    resolveFeedbackA?.(Response.json({ ok: true }));
+    await flushAsync();
+
+    const rawSaved = sessionStorage.getItem("solv-chat-open:pk_replace_fb");
+    expect(rawSaved).not.toBeNull();
+    const saved = JSON.parse(String(rawSaved)) as {
+      conversationId: string | null;
+      turns: Array<{
+        role: string;
+        text: string;
+        messageId?: string;
+        feedback?: string;
+      }>;
+    };
+    expect(saved.conversationId).toBe("conv_b");
+    expect(saved.turns).toEqual([
+      { role: "user", text: "Question A" },
+      { role: "assistant", text: "Answer A", messageId: "msg_a" },
+      { role: "user", text: "Question B" },
+      { role: "assistant", text: "Answer B", messageId: "msg_b" },
+    ]);
+  });
 });
