@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   chunkMarkdown,
+  exceedsChunkBudget,
   MAX_CHARS,
   MAX_CHUNKS,
   MAX_HEADING_CHARS,
   OVERLAP_CHARS,
 } from "../../src/ingest/chunk.js";
+import { deepLeafDocument } from "../helpers/documents.js";
 
 describe("chunkMarkdown", () => {
   it("tracks heading paths and truncates when a shallower heading follows a deeper one", () => {
@@ -216,17 +218,18 @@ describe("chunkMarkdown", () => {
     expect(chunkMarkdown(markdown)).toEqual(chunks);
   });
 
-  it("keeps the first MAX_CHUNKS chunks when packing cannot get under the cap", () => {
-    const deep = [1, 2, 3, 4, 5].map((level) => `${"#".repeat(level)} ${"h".repeat(190)}${level}`);
-    let markdown = `${deep.join("\n\n")}\n\n`;
-    let i = 0;
-    while (markdown.length < 1024 * 1024 - 100) {
-      markdown += `###### Leaf ${i}\n\nw${i}\n\n`;
-      i++;
-    }
+  it("returns every chunk, never a truncated prefix, when packing cannot get under the cap", () => {
+    const markdown = deepLeafDocument();
     const chunks = chunkMarkdown(markdown);
-    expect(chunks).toHaveLength(MAX_CHUNKS);
-    expect(chunks[0]?.text).toContain("w0");
-    expect(chunks[MAX_CHUNKS - 1]?.ordinal).toBe(MAX_CHUNKS - 1);
+    expect(chunks.length).toBeGreaterThan(MAX_CHUNKS);
+    expect(exceedsChunkBudget(chunks)).toBe(true);
+    // The last leaf is still there: nothing was dropped to fit the cap.
+    const leaves = (markdown.match(/^###### Leaf \d+$/gm) ?? []).length;
+    expect(chunks.map((c) => c.text).join("\n\n")).toContain(`w${leaves - 1}`);
+    expect(chunks.map((c) => c.ordinal)).toEqual(chunks.map((_, n) => n));
+  });
+
+  it("reports a normal document as within the chunk budget", () => {
+    expect(exceedsChunkBudget(chunkMarkdown("# A\n\nBody."))).toBe(false);
   });
 });

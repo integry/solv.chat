@@ -13,6 +13,7 @@ import {
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { acceptQueuedOrg, createTestApp, TEST_ORG_ID } from "../helpers/app.js";
+import { deepLeafDocument } from "../helpers/documents.js";
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 
@@ -160,6 +161,45 @@ describe("ingest documents", () => {
     expect(editBody).toEqual({ written: 1, unchanged: 0, deleted: 0 });
     expect(docs.puts).toBe(3);
     expect(queue.sent).toHaveLength(3);
+  });
+
+  it("refuses a document with more sections than one commit holds, writing nothing from the batch", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const docs = countingDocs(env.DOCS);
+    const queue = countingQueue();
+
+    const result = pushDocuments({ tenant, docs, queue }, scope, {
+      documents: [
+        {
+          externalId: "fine",
+          url: "https://example.com/fine",
+          title: "Fine",
+          markdown: "# A\n\nB",
+        },
+        {
+          externalId: "huge",
+          url: "https://example.com/huge",
+          title: "Huge",
+          markdown: deepLeafDocument(),
+        },
+      ],
+    });
+    await expect(result).rejects.toMatchObject({
+      errors: [
+        expect.stringMatching(/^markdown: "huge" splits into \d+ sections, more than the 1500/),
+      ],
+    });
+    expect(docs.puts).toBe(0);
+    expect(queue.sent).toHaveLength(0);
+    const stored = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM documents d JOIN sources s ON s.id = d.source_id
+       WHERE s.assistant_id = ?1`,
+    )
+      .bind(assistantId)
+      .first<{ n: number }>();
+    expect(stored?.n).toBe(0);
   });
 
   it("treats a title/body split that concatenates to the same text as a change", async () => {

@@ -11,7 +11,8 @@ export const MAX_HEADING_CHARS = 200;
 // Every chunk is one statement in the single D1 batch that commits a
 // document, and that batch must stay under 2,000 statements (see
 // `replaceChunks`). A normal 1 MiB document yields about 900 chunks; only one
-// made of thousands of tiny sections reaches this, and it is packed first.
+// made of thousands of tiny sections reaches this, and it is packed first;
+// one still over the cap after packing is refused, never cut.
 export const MAX_CHUNKS = 1500;
 
 export interface Chunk {
@@ -327,9 +328,9 @@ function renderUnder(base: string[], chunk: Chunk): string {
  * keeping the headings they share as the path and writing the rest into the
  * text. Deterministic, so the same document always packs the same way. A
  * document still over the cap after packing (only possible with very deep,
- * repeated heading paths) keeps its first `MAX_CHUNKS` chunks; failing the
- * whole document would retry it into the dead-letter queue with nothing
- * indexed at all.
+ * repeated heading paths) is returned whole, never cut: `pushDocuments`
+ * refuses it with a message naming the document, and the consumer will not
+ * mark it indexed (see `exceedsChunkBudget`).
  */
 function limitChunkCount(chunks: Chunk[]): Chunk[] {
   const groups: Chunk[][] = [];
@@ -363,12 +364,15 @@ function limitChunkCount(chunks: Chunk[]): Chunk[] {
     };
   });
 
-  if (packed.length > MAX_CHUNKS) {
-    console.warn("chunkMarkdown: document truncated to the chunk cap", {
-      chunks: packed.length,
-      kept: MAX_CHUNKS,
-    });
-    return packed.slice(0, MAX_CHUNKS);
-  }
   return packed;
+}
+
+/**
+ * True when a document's chunks cannot be committed in one D1 batch. Such a
+ * document is rejected rather than indexed in part: a partial index stored
+ * under the document's full content hash would look complete, and the
+ * missing sections could never be found or re-indexed.
+ */
+export function exceedsChunkBudget(chunks: readonly Chunk[]): boolean {
+  return chunks.length > MAX_CHUNKS;
 }

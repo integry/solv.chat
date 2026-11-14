@@ -3,6 +3,7 @@ import { defaultVersionConfig } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/app.js";
 import { forPrincipal } from "../../src/db/tenant.js";
+import { basicLimits } from "../../src/seams/open/basicLimits.js";
 import { createTestApp, fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
 
 describe("chat/publicConfig", () => {
@@ -208,8 +209,10 @@ describe("chat/publicConfig", () => {
     await tenant.versions.publishDraft("ast_1", draft.id, "ver_2", 2000);
     await env.DB.prepare("DELETE FROM rate_counters").run();
 
-    // createTestApp uses basicLimits, the open implementation.
-    const app = createTestApp();
+    // The open implementation, injected explicitly: the default test seams
+    // allow everything and would pass whatever the counters did.
+    const limits = basicLimits(env.DB);
+    const app = createTestApp({ limits });
     const ip = "203.0.113.77";
     for (let i = 0; i < 25; i++) {
       const ctx = createExecutionContext();
@@ -230,5 +233,16 @@ describe("chat/publicConfig", () => {
       .bind(TEST_ORG_ID, ip)
       .first<{ hits: number }>();
     expect(chatHits?.hits).toBe(0);
+
+    // The page loads did count, against their own budget.
+    const configHits = await env.DB.prepare(
+      "SELECT COALESCE(SUM(hits), 0) AS hits FROM rate_counters WHERE org_id = ?1 AND ip = ?2",
+    )
+      .bind(TEST_ORG_ID, `config:${ip}`)
+      .first<{ hits: number }>();
+    expect(configHits?.hits).toBe(25);
+
+    // 25 page loads exceed the 20-question budget, yet a question still passes.
+    expect(await limits.check(TEST_ORG_ID, "ast_1", { kind: "chat", ip })).toEqual({ ok: true });
   });
 });

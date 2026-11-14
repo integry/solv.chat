@@ -5,7 +5,9 @@ import { createApp } from "../../src/app.js";
 import { answerMessage } from "../../src/chat/answer.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { ANTHROPIC_MODELS, costMicros, OPENAI_MODELS } from "../../src/models.js";
+import { anthropicProvider } from "../../src/providers/anthropic.js";
 import { ProviderError } from "../../src/providers/error.js";
+import { openaiProvider } from "../../src/providers/openai.js";
 import { embeddingCostMicros } from "../../src/providers/retrieval.js";
 import type { LlmProvider, LlmRequest } from "../../src/providers/types.js";
 import type { UsageEvent } from "../../src/seams/types.js";
@@ -32,6 +34,24 @@ function parseSseBody(text: string) {
           .trim() ?? "";
       return parseChatEventLine(name, data);
     });
+}
+
+/** An SSE response delivering `events`, then ending or failing with `error`. */
+function eventStreamResponse(events: string[], error?: Error): Response {
+  const encoder = new TextEncoder();
+  let sent = false;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!sent) {
+        sent = true;
+        controller.enqueue(encoder.encode(events.join("")));
+        return;
+      }
+      if (error) return Promise.reject(error);
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
 // What `fakeEmbedder` reports for "How do I reset my password?".
@@ -435,6 +455,7 @@ describe("chat/answer", () => {
         chat: { retriever },
       },
     );
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const ctx = createExecutionContext();
     const res = await app.fetch(
@@ -460,6 +481,12 @@ describe("chat/answer", () => {
 
     const events = parseSseBody(await res.text());
     expect(events).toEqual([{ type: "error", message: "Something went wrong. Please try again." }]);
+    // S33: the visitor sees a generic line; the operator's log names the cause.
+    expect(logged).toHaveBeenCalledWith("chat: answer pipeline failed", {
+      name: "Error",
+      message: "Missing required secret: SOLV_OPENAI_KEY",
+    });
+    logged.mockRestore();
   });
 
   it("returns a sanitized SSE error event with CORS headers when modelKey initialization fails", async () => {
@@ -960,6 +987,81 @@ describe("chat/answer", () => {
           costMicros: costMicros(ANTHROPIC_MODELS.fast, 90, 12),
         }),
       );
+    });
+
+    // F21: the real adapters, not a scripted provider, so the regression covers
+    // the parsing that holds the counts until the stream ends.
+    it.each([
+      {
+        name: "anthropic",
+        provider: () =>
+          anthropicProvider({
+            apiKey: "test-key",
+            model: ANTHROPIC_MODELS.fast.id,
+            fetchImpl: async () =>
+              eventStreamResponse([
+                'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":140}}}\n\n',
+                'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Partial"}}\n\n',
+                'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":22}}\n\n',
+              ]),
+          }),
+        model: ANTHROPIC_MODELS.fast,
+        tokensIn: 140,
+        tokensOut: 22,
+      },
+      {
+        name: "openai",
+        provider: () =>
+          openaiProvider({
+            apiKey: "test-key",
+            model: OPENAI_MODELS.fast.id,
+            fetchImpl: async () =>
+              eventStreamResponse(
+                [
+                  'data: {"choices":[{"delta":{"content":"Partial"},"finish_reason":null}]}\n\n',
+                  'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+                  'data: {"choices":[],"usage":{"prompt_tokens":130,"completion_tokens":18}}\n\n',
+                ],
+                new Error("connection dropped"),
+              ),
+          }),
+        model: OPENAI_MODELS.fast,
+        tokensIn: 130,
+        tokensOut: 18,
+      },
+    ])("records usage reported before a $name stream failed, once", async (c) => {
+      const usage = vi.fn(async (_event: UsageEvent) => {});
+      const events = await drain(
+        answerMessage(
+          {
+            tenant,
+            embedder,
+            retriever,
+            provider: c.provider(),
+            model: c.model,
+            usage: { record: usage },
+          },
+          {
+            orgId: TEST_ORG_ID,
+            assistantId: "ast_1",
+            visitorId: "vis_1",
+            message: "How do I reset my password?",
+            behaviour,
+          },
+        ),
+      );
+
+      expect(events.map((e) => (e as { type: string }).type)).toEqual(["token", "error"]);
+      const modelEvents = usage.mock.calls
+        .map(([event]) => event)
+        .filter((event) => event.messages === 1);
+      expect(modelEvents).toEqual([
+        expect.objectContaining({
+          tokensIn: c.tokensIn,
+          tokensOut: c.tokensOut,
+          costMicros: costMicros(c.model, c.tokensIn, c.tokensOut),
+        }),
+      ]);
     });
 
     it("counts a fallback answer the visitor already saw when the reply write rejects", async () => {

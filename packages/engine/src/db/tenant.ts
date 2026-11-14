@@ -62,7 +62,13 @@ export const forQueuedIngest = (db: D1Database, resolvedOrgId: string): Tenant =
   build(db, resolvedOrgId);
 
 function build(db: D1Database, orgId: string): Tenant {
-  // Nothing exported takes an orgId argument, which could be the wrong one.
+  // Handlers reach tables only through a `Tenant`, and the builders above take
+  // an org from the auth seam (a principal, an ingest or public scope, or the
+  // org `resolveOrg` returned), never from a request. This is a convention,
+  // not a type guarantee: the per-table accessors (`versionsFor` and the
+  // rest), `db/public.ts`, `usageFor` and `publishedCapMicros` are exported
+  // and take an `orgId`, and `chat/route.ts` holds the raw `D1Database` for
+  // `db/public.ts`. Callers of those must pass a seam-derived org.
   return {
     assistants: assistantsFor(db, orgId),
     versions: versionsFor(db, orgId),

@@ -2,7 +2,7 @@ import { newId } from "@solvchat/core";
 import { forQueuedIngest } from "../db/tenant.js";
 import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
 import type { UsageSink } from "../seams/types.js";
-import { chunkMarkdown } from "./chunk.js";
+import { chunkMarkdown, exceedsChunkBudget } from "./chunk.js";
 import type { IngestQueueMessage } from "./documents.js";
 
 export interface IngestConsumerDeps {
@@ -99,7 +99,21 @@ async function processIngestMessage(
   }
 
   const markdown = await object.text();
-  const chunks = chunkMarkdown(markdown).map((chunk) => ({
+  const parts = chunkMarkdown(markdown);
+  if (exceedsChunkBudget(parts)) {
+    // `pushDocuments` refuses such a document, so only a body stored before
+    // that check (or a chunker change) reaches here. Nothing is committed and
+    // the hash is not marked indexed, so the document never looks complete;
+    // retrying would give the same answer, so the message is not retried.
+    console.error("ingest consumer: document has too many sections to index", {
+      documentId: document.id,
+      externalId: document.externalId,
+      chunks: parts.length,
+    });
+    message.ack();
+    return;
+  }
+  const chunks = parts.map((chunk) => ({
     id: newId("chk"),
     ordinal: chunk.ordinal,
     text: chunk.text,

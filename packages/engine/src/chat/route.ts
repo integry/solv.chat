@@ -213,6 +213,16 @@ function streamAnswerResponse(params: StreamAnswerParams): Response {
             }
           }
         } catch (err) {
+          if (!(err instanceof ProviderError)) {
+            // The visitor only sees "Something went wrong", so this line is how
+            // a self-hoster finds a missing secret or a failing D1 call. Name
+            // and message only: `secretKeys` errors name the variable, never
+            // its value, and no request body is included.
+            console.error("chat: answer pipeline failed", {
+              name: err instanceof Error ? err.name : typeof err,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
           if (!cancelled) {
             const message =
               err instanceof ProviderError

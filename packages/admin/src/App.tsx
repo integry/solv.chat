@@ -130,5 +130,16 @@ export function App() {
     return <Login onSignedIn={session.refresh} />;
   }
 
+  if (session.state === "unavailable") {
+    return (
+      <div className="loading-screen" role="alert">
+        <p>Could not reach the server.</p>
+        <button type="button" onClick={session.refresh}>
+          Try again
+        </button>
+      </div>
+    );
+  }
+
   return <AdminShell onSignOut={session.signOut} />;
 }

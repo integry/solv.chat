@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { getJson, logoutRequest, subscribeUnauthorized } from "../api/client.js";
+import { ApiError, getJson, logoutRequest, subscribeUnauthorized } from "../api/client.js";
 import type { Assistant } from "../api/types.js";
 
-export type SessionState = "loading" | "signed-in" | "signed-out";
+export type SessionState = "loading" | "signed-in" | "signed-out" | "unavailable";
 
 export interface UseSessionResult {
   state: SessionState;
@@ -12,7 +12,9 @@ export interface UseSessionResult {
 
 /**
  * Tracks whether the owner holds a valid session cookie. Any 401 from any
- * authenticated API call flips the state back to `"signed-out"`.
+ * authenticated API call flips the state back to `"signed-out"`. Any other
+ * failure of the first request (a 500, a network error) is `"unavailable"`:
+ * the session may be fine, so the owner is offered a retry, not the login.
  */
 export function useSession(): UseSessionResult {
   const [state, setState] = useState<SessionState>("loading");
@@ -35,9 +37,9 @@ export function useSession(): UseSessionResult {
           setState("signed-in");
         }
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (!controller.signal.aborted) {
-          setState("signed-out");
+          setState(err instanceof ApiError && err.status === 401 ? "signed-out" : "unavailable");
         }
       });
 

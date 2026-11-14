@@ -71,6 +71,7 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
       let tokensIn: number | undefined;
       let tokensOut: number | undefined;
       let sawTerminal = false;
+      let failure: ProviderError | undefined;
 
       try {
         for await (const event of readEventStream(response.body)) {
@@ -104,18 +105,27 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
           }
         }
       } catch (err) {
-        throw toProviderError(err, "openai stream failed");
+        failure = toProviderError(err, "openai stream failed");
       }
 
-      if (!sawTerminal) {
-        throw new ProviderError("openai stream ended early", true);
+      // A stream stopping without its terminal event truncated the answer;
+      // throwing lets the chat endpoint say so instead of presenting half an
+      // answer as complete.
+      if (failure === undefined && !sawTerminal) {
+        failure = new ProviderError("openai stream ended early", true);
+      }
+      if (failure === undefined && (tokensIn === undefined || tokensOut === undefined)) {
+        failure = new ProviderError("openai stream ended without usage", true);
       }
 
-      if (tokensIn === undefined || tokensOut === undefined) {
-        throw new ProviderError("openai stream ended without usage", true);
+      // Counts the provider has already reported are billed whether or not the
+      // stream completes, so they are handed to the caller before any failure
+      // propagates. Exactly one usage chunk per stream; a count never reported
+      // is 0, the only figure that is not a guess.
+      if (tokensIn !== undefined || tokensOut !== undefined) {
+        yield { kind: "usage", tokensIn: tokensIn ?? 0, tokensOut: tokensOut ?? 0 };
       }
-
-      yield { kind: "usage", tokensIn, tokensOut };
+      if (failure !== undefined) throw failure;
     },
   };
 }

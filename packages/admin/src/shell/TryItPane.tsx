@@ -6,6 +6,7 @@ import {
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { streamDraftChat } from "../api/chat.js";
 import type { Assistant } from "../api/types.js";
+import { isSafeHttpUrl } from "../safeUrl.js";
 
 interface Citation {
   id: string;
@@ -257,15 +258,17 @@ export function TryItPane({ assistant }: TryItPaneProps) {
                   {turn.error}
                 </p>
               )}
-              {turn.citations && turn.citations.length > 0 && (
+              {turn.citations?.some((c) => isSafeHttpUrl(c.url)) && (
                 <ul className="turn-citations">
-                  {turn.citations.map((c) => (
-                    <li key={c.id}>
-                      <a href={c.url} target="_blank" rel="noreferrer">
-                        {c.title || c.url}
-                      </a>
-                    </li>
-                  ))}
+                  {turn.citations
+                    .filter((c) => isSafeHttpUrl(c.url))
+                    .map((c) => (
+                      <li key={c.id}>
+                        <a href={c.url} target="_blank" rel="noreferrer">
+                          {c.title || c.url}
+                        </a>
+                      </li>
+                    ))}
                 </ul>
               )}
             </div>

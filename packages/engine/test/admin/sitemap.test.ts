@@ -578,7 +578,7 @@ describe("htmlToTitleAndMarkdown", () => {
     expect(htmlToTitleAndMarkdown(html, "https://example.com/billing")).toEqual({
       title: "Billing & plans",
       markdown:
-        "Billing & plans\n\n# Billing help\n\nPay by card.\n\n- Monthly\n- Yearly saves\n\nLine one\nLine two\n\n## Refunds\n\nWithin 30 days <always>",
+        "# Billing help\n\nPay by card.\n\n- Monthly\n- Yearly saves\n\nLine one\nLine two\n\n## Refunds\n\nWithin 30 days <always>",
     });
   });
 

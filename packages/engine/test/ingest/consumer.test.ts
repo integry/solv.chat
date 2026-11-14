@@ -20,6 +20,7 @@ import type { UsageEvent } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { acceptQueuedOrg, TEST_ORG_ID } from "../helpers/app.js";
+import { deepLeafDocument } from "../helpers/documents.js";
 
 async function seedOrgAndAssistant(orgId = TEST_ORG_ID) {
   const assistantId = newId("ast");
@@ -120,6 +121,40 @@ describe("ingest consumer", () => {
     expect(vectors.every((v) => v.orgId === TEST_ORG_ID && v.assistantId === assistantId)).toBe(
       true,
     );
+  });
+
+  it("does not index part of a stored body that has too many sections, nor mark it indexed", async () => {
+    const { sourceId } = await seedOrgAndAssistant();
+    const { documentId, hash, tenant } = await seedDocument(sourceId, "Huge", deepLeafDocument());
+    let embedCalls = 0;
+    const inner = fakeEmbedder();
+    const embedder: Embedder = {
+      ...inner,
+      async embed(inputs, onUsage) {
+        embedCalls++;
+        return inner.embed(inputs, onUsage);
+      },
+    };
+    const retriever = memoryRetriever();
+    const msg = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await runIngestBatch(
+      { messages: [msg] },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever },
+    );
+
+    expect(msg.acked).toBe(true);
+    expect(msg.retried).toBe(false);
+    expect(embedCalls).toBe(0);
+    expect(retriever.all()).toHaveLength(0);
+    expect(await tenant.documents.listChunks(documentId)).toEqual([]);
+    expect((await tenant.documents.get(documentId))?.indexedHash).toBeNull();
+    expect(errors).toHaveBeenCalledWith(
+      "ingest consumer: document has too many sections to index",
+      expect.objectContaining({ documentId, externalId: "doc-1" }),
+    );
+    errors.mockRestore();
   });
 
   it("embeds each chunk with its heading path, so an entry's question is searchable", async () => {

@@ -12,6 +12,7 @@ import type { SourceRow } from "../db/sources.js";
 import type { IngestScope, Tenant } from "../db/tenant.js";
 import type { Retriever } from "../providers/retrieval.js";
 import { sha256Hex } from "../util/crypto.js";
+import { chunkMarkdown, exceedsChunkBudget, MAX_CHUNKS } from "./chunk.js";
 
 export const MAX_BATCH_DOCUMENTS = 100;
 
@@ -185,6 +186,15 @@ export async function pushDocuments(
     const parsed = parseDocumentInput(raw);
     if (!parsed.ok) {
       throw new BadRequest(parsed.errors);
+    }
+    // Refused here, while the caller can still act on it: the consumer cannot
+    // commit more chunks than one D1 batch holds, and indexing only the first
+    // part would mark the whole document as indexed.
+    const parts = chunkMarkdown(parsed.value.markdown);
+    if (exceedsChunkBudget(parts)) {
+      throw new BadRequest([
+        `markdown: "${parsed.value.externalId}" splits into ${parts.length} sections, more than the ${MAX_CHUNKS} one document can hold. Split it into smaller documents.`,
+      ]);
     }
     return parsed.value;
   });

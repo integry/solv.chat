@@ -32,6 +32,36 @@ async function collect(iter: AsyncIterable<LlmChunk>): Promise<LlmChunk[]> {
   return out;
 }
 
+/** Collects chunks until the stream throws, keeping both. */
+async function collectUntilThrow(
+  iter: AsyncIterable<LlmChunk>,
+): Promise<{ chunks: LlmChunk[]; error: unknown }> {
+  const chunks: LlmChunk[] = [];
+  try {
+    for await (const chunk of iter) chunks.push(chunk);
+  } catch (error) {
+    return { chunks, error };
+  }
+  return { chunks, error: undefined };
+}
+
+/** A response that delivers `events`, then fails the next read. */
+function failingAfter(events: string[]): Response {
+  const encoder = new TextEncoder();
+  let sent = false;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!sent) {
+        sent = true;
+        controller.enqueue(encoder.encode(events.join("")));
+        return;
+      }
+      return Promise.reject(new Error("stream connection dropped"));
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
 describe("anthropicProvider", () => {
   it("streams text chunks in order, emits final usage, and sends key only in header", async () => {
     const fakeKey = "sk-ant-test-secret-do-not-leak";
@@ -260,6 +290,66 @@ describe("anthropicProvider", () => {
     await expect(collect(provider.stream(SAMPLE_REQUEST))).rejects.toMatchObject({
       name: "ProviderError",
       retryable: true,
+    });
+  });
+  describe("usage already reported when the stream then fails", () => {
+    const START =
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":14}}}\n\n';
+    const TEXT =
+      'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}\n\n';
+    const DELTA =
+      'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":7}}\n\n';
+
+    const cases: Array<[string, () => Response, { tokensIn: number; tokensOut: number }]> = [
+      [
+        "ends before message_stop",
+        () => sseResponse([START, TEXT, DELTA].join("")),
+        { tokensIn: 14, tokensOut: 7 },
+      ],
+      [
+        "read fails after message_delta",
+        () => failingAfter([START, TEXT, DELTA]),
+        { tokensIn: 14, tokensOut: 7 },
+      ],
+      [
+        "read fails before message_delta",
+        () => failingAfter([START, TEXT]),
+        { tokensIn: 14, tokensOut: 0 },
+      ],
+      [
+        "error event after message_delta",
+        () =>
+          sseResponse(
+            [
+              START,
+              DELTA,
+              'event: error\ndata: {"type":"error","error":{"type":"overloaded_error"}}\n\n',
+            ].join(""),
+          ),
+        { tokensIn: 14, tokensOut: 7 },
+      ],
+    ];
+
+    it.each(cases)("%s: yields one usage chunk, then throws", async (_name, respond, usage) => {
+      const provider = anthropicProvider({
+        apiKey: "test-key",
+        model: "claude-haiku-5-5",
+        fetchImpl: async () => respond(),
+      });
+      const { chunks, error } = await collectUntilThrow(provider.stream(SAMPLE_REQUEST));
+      expect(error).toBeInstanceOf(ProviderError);
+      expect(chunks.filter((c) => c.kind === "usage")).toEqual([{ kind: "usage", ...usage }]);
+    });
+
+    it("yields no usage chunk when nothing was reported", async () => {
+      const provider = anthropicProvider({
+        apiKey: "test-key",
+        model: "claude-haiku-5-5",
+        fetchImpl: async () => failingAfter([TEXT]),
+      });
+      const { chunks, error } = await collectUntilThrow(provider.stream(SAMPLE_REQUEST));
+      expect(error).toBeInstanceOf(ProviderError);
+      expect(chunks).toEqual([{ kind: "text", text: "Hi" }]);
     });
   });
 });

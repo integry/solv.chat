@@ -1,21 +1,13 @@
 import { useState } from "react";
 import type { ConversationDetail } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { isSafeHttpUrl } from "../safeUrl.js";
 import { EntryEditor } from "./EntryEditor.js";
 
 export interface ConversationProps {
   assistantId: string;
   conversationId: string;
   onBack: () => void;
-}
-
-function isSafeHttpUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
 }
 
 export function Conversation({ assistantId, conversationId, onBack }: ConversationProps) {

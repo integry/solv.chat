@@ -524,6 +524,67 @@ describe("admin app", () => {
     expect(screen.getByText("Draft reply to: How do I install?")).toBeTruthy();
   });
 
+  it.each([
+    ["a 500", () => Response.json({ error: "Database unavailable." }, { status: 500 })],
+    [
+      "a network error",
+      () => {
+        throw new TypeError("Failed to fetch");
+      },
+    ],
+  ])(
+    "S36: offers a retry, not the login screen, when the first request fails with %s",
+    async (_name, fail) => {
+      installFakeServer({ signedIn: true });
+      const server = globalThis.fetch;
+      let failNext = true;
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (failNext) {
+          failNext = false;
+          return fail();
+        }
+        return server(input, init);
+      });
+      render(<App />);
+
+      expect(await screen.findByText("Could not reach the server.")).toBeTruthy();
+      expect(screen.queryByLabelText("Password")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      expect(await screen.findByRole("navigation", { name: "Primary" })).toBeTruthy();
+    },
+  );
+
+  it("S36: still shows the login screen when the first request gets a 401", async () => {
+    installFakeServer({ signedIn: false });
+    render(<App />);
+    expect(await screen.findByLabelText("Password")).toBeTruthy();
+    expect(screen.queryByText("Could not reach the server.")).toBeNull();
+  });
+
+  it("S34: links only http(s) citations in Try it", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+    server.setNextChatResponse(() =>
+      sseResponse([
+        { event: "token", data: { text: "See the guide." } },
+        { event: "citation", data: { url: "javascript:alert(1)", title: "Bad link" } },
+        { event: "citation", data: { url: "https://docs.example.com/guide", title: "Guide" } },
+        { event: "done", data: { messageId: "msg_1", conversationId: "cnv_1" } },
+      ]),
+    );
+
+    const input = await screen.findByLabelText("Ask a question");
+    fireEvent.change(input, { target: { value: "Where is the guide?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    const good = await screen.findByRole("link", { name: "Guide" });
+    expect(good.getAttribute("href")).toBe("https://docs.example.com/guide");
+    expect(screen.queryByRole("link", { name: "Bad link" })).toBeNull();
+    expect(screen.queryByText("Bad link")).toBeNull();
+  });
+
   it("exposes accessible navigation without phase 2 items or model/key settings", async () => {
     installFakeServer({ signedIn: true });
     render(<App />);

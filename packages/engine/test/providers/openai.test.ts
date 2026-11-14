@@ -32,6 +32,36 @@ async function collect(iter: AsyncIterable<LlmChunk>): Promise<LlmChunk[]> {
   return out;
 }
 
+/** Collects chunks until the stream throws, keeping both. */
+async function collectUntilThrow(
+  iter: AsyncIterable<LlmChunk>,
+): Promise<{ chunks: LlmChunk[]; error: unknown }> {
+  const chunks: LlmChunk[] = [];
+  try {
+    for await (const chunk of iter) chunks.push(chunk);
+  } catch (error) {
+    return { chunks, error };
+  }
+  return { chunks, error: undefined };
+}
+
+/** A response that delivers `events`, then fails the next read. */
+function failingAfter(events: string[]): Response {
+  const encoder = new TextEncoder();
+  let sent = false;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!sent) {
+        sent = true;
+        controller.enqueue(encoder.encode(events.join("")));
+        return;
+      }
+      return Promise.reject(new Error("stream connection dropped"));
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
 describe("openaiProvider", () => {
   it("streams text chunks in order, emits final usage, and sends key only in header", async () => {
     const fakeKey = "sk-openai-test-secret-do-not-leak";
@@ -258,6 +288,44 @@ describe("openaiProvider", () => {
     await expect(collect(provider.stream(SAMPLE_REQUEST))).rejects.toMatchObject({
       name: "ProviderError",
       retryable: true,
+    });
+  });
+  describe("usage already reported when the stream then fails", () => {
+    const TEXT = 'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}\n\n';
+    const STOP = 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n';
+    const USAGE = 'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":5}}\n\n';
+
+    const cases: Array<[string, () => Response]> = [
+      ["read fails after the usage payload", () => failingAfter([TEXT, STOP, USAGE])],
+      ["usage arrives but no finish_reason", () => sseResponse([TEXT, USAGE].join(""))],
+      [
+        "error payload after usage",
+        () => sseResponse([TEXT, USAGE, 'data: {"error":{"type":"server_error"}}\n\n'].join("")),
+      ],
+    ];
+
+    it.each(cases)("%s: yields one usage chunk, then throws", async (_name, respond) => {
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-5-mini",
+        fetchImpl: async () => respond(),
+      });
+      const { chunks, error } = await collectUntilThrow(provider.stream(SAMPLE_REQUEST));
+      expect(error).toBeInstanceOf(ProviderError);
+      expect(chunks.filter((c) => c.kind === "usage")).toEqual([
+        { kind: "usage", tokensIn: 11, tokensOut: 5 },
+      ]);
+    });
+
+    it("yields no usage chunk when nothing was reported", async () => {
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-5-mini",
+        fetchImpl: async () => failingAfter([TEXT, STOP]),
+      });
+      const { chunks, error } = await collectUntilThrow(provider.stream(SAMPLE_REQUEST));
+      expect(error).toBeInstanceOf(ProviderError);
+      expect(chunks).toEqual([{ kind: "text", text: "Hi" }]);
     });
   });
 });

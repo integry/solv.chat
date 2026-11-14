@@ -51,7 +51,10 @@ from the auth seam and pass it down.
 - `assistant_versions` — id, assistant_id, state (`draft` | `published` | `archived`),
   config JSON (behaviour, widget, tool allowlist), created_at, published_at.
   Exactly one draft and at most one published version per assistant. Publishing
-  copies the draft; rollback republishes an archived version.
+  promotes the draft row itself to `published` (it keeps its id, so a "Try it"
+  conversation started against the draft still resolves), archives the previous
+  published version, and inserts a fresh draft with the same config; rollback
+  republishes an archived version.
 - `sources` — id, assistant_id, kind (`push` | `sitemap` | `entry`), label, settings.
 - `documents` — id, source_id, external_id, url, title, content_hash, updated_at.
 - `chunks` — id, document_id, ordinal, text, heading_path. Vectors live in Vectorize

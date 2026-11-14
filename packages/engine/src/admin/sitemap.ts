@@ -193,7 +193,9 @@ export function htmlToTitleAndMarkdown(
   const title = (rawTitle || new URL(fallbackUrl).pathname || fallbackUrl).slice(0, 300);
 
   let text = html;
-  for (const name of ["script", "style", "noscript"]) {
+  // `title` is the document's title already; left in, its text would also
+  // open the body.
+  for (const name of ["script", "style", "noscript", "title"]) {
     text = replaceElements(text, name, () => "\n");
   }
   for (let level = 1; level <= 6; level++) {
