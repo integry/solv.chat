@@ -266,7 +266,7 @@ function installFakeServer(options: FakeServerOptions = {}) {
       return Response.json({ version: restored });
     }
 
-    if (path === "/v1/chat" && method === "POST") {
+    if (path === "/api/admin/chat" && method === "POST") {
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       chatBodies.push(body);
       return sseResponse([
@@ -357,7 +357,9 @@ describe("admin app", () => {
     render(<App />);
 
     const select = (await screen.findByLabelText("Assistant")) as HTMLSelectElement;
-    expect(select.value).toBe("ast_1");
+    await waitFor(() => {
+      expect(select.value).toBe("ast_1");
+    });
 
     fireEvent.change(select, { target: { value: "ast_2" } });
     expect(select.value).toBe("ast_2");
@@ -618,5 +620,108 @@ describe("admin app", () => {
     // Retry succeeds and returns to the login screen.
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     expect(await screen.findByLabelText("Password")).toBeTruthy();
+  });
+
+  it("F4: blocks Publish on Widget while a Behaviour draft save is in flight across navigation", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
+    fireEvent.change(greeting, { target: { value: "In-flight behaviour" } });
+
+    const saveDeferred = server.holdNextDraftSave();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // Navigate to Widget while Behaviour's save is still outstanding.
+    fireEvent.click(screen.getByRole("link", { name: "Widget" }));
+    await screen.findByLabelText("Title");
+
+    const widgetPublishBtn = screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement;
+    expect(widgetPublishBtn.disabled).toBe(true);
+    fireEvent.click(widgetPublishBtn);
+    expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/publish"))).toBe(
+      false,
+    );
+
+    // Also verify History Restore is disabled while save is in flight.
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    const restoreButtons = await screen.findAllByRole("button", { name: "Restore" });
+    expect((restoreButtons[0] as HTMLButtonElement).disabled).toBe(true);
+
+    // Once the save completes, Publish and Restore become enabled.
+    saveDeferred.resolve();
+    await waitFor(() => {
+      expect(widgetPublishBtn.disabled).toBe(false);
+      expect((restoreButtons[0] as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    fireEvent.click(widgetPublishBtn);
+    expect(await screen.findByText(/^Published \(/)).toBeTruthy();
+    expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/publish"))).toBe(true);
+  });
+
+  it("F4: coordinates mutations per-assistant without blocking other assistants and refreshes on return", async () => {
+    const first = makeAssistant("ast_1", "First Bot");
+    const second = makeAssistant("ast_2", "Second Bot");
+    const server = installFakeServer({ signedIn: true, assistants: [first, second] });
+
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
+    fireEvent.change(greeting, { target: { value: "Ast1 updated" } });
+
+    const saveDeferred = server.holdNextDraftSave();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // Switch to ast_2: its Publish button should not be blocked by ast_1's save.
+    const select = screen.getByLabelText("Assistant") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "ast_2" } });
+    await waitFor(() => {
+      expect((screen.getByLabelText("First thing it says") as HTMLInputElement).value).not.toBe(
+        "Ast1 updated",
+      );
+    });
+    expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+
+    // Switch back to ast_1 while save is still in flight: Publish is still disabled.
+    fireEvent.change(select, { target: { value: "ast_1" } });
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+    });
+
+    saveDeferred.resolve();
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      );
+      expect((screen.getByLabelText("First thing it says") as HTMLInputElement).value).toBe(
+        "Ast1 updated",
+      );
+    });
+  });
+
+  it("F5: returns the owner to login when Try it receives 401 on an expired session", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    const input = await screen.findByLabelText("Ask a question");
+    server.triggerNext401();
+
+    fireEvent.change(input, { target: { value: "Test expired session" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByLabelText("Password")).toBeTruthy();
+    expect(server.calls.some((c) => c.method === "POST" && c.path === "/api/admin/chat")).toBe(
+      true,
+    );
+    expect(server.calls.some((c) => c.path === "/v1/chat")).toBe(false);
+    expect(server.chatBodies).toHaveLength(0);
   });
 });

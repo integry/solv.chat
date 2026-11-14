@@ -814,4 +814,120 @@ describe("chat/answer", () => {
     expect(events2.map((e) => e.type)).toEqual(["token", "error"]);
     expect(usageWithoutTokens).not.toHaveBeenCalled();
   });
+
+  it("F5: /api/admin/chat serves draft for authenticated owner and returns 401 on expired session even when Worker origin is allowed", async () => {
+    await tenant.assistants.update("ast_1", {
+      name: "Docs Bot",
+      allowedOrigins: ["https://site.example", "https://engine.example"],
+    });
+    const draftConfig = defaultVersionConfig();
+    draftConfig.behaviour.persona = "Admin preview draft persona";
+    await tenant.versions.updateDraft("ast_1", draftConfig);
+
+    const seenSystems: string[] = [];
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.balanced.id,
+      async *stream(req: LlmRequest) {
+        seenSystems.push(req.system);
+        yield { kind: "text", text: "ok" };
+        yield { kind: "usage", tokensIn: 10, tokensOut: 2 };
+      },
+    };
+
+    const body = JSON.stringify({
+      protocol: 1,
+      assistant: "pk_ans_1",
+      visitorId: "admin-preview",
+      message: "How do I reset my password?",
+      target: "draft",
+    });
+
+    // 1. Authenticated same-org owner -> 200 SSE using draft
+    const appWithAuth = createApp(fakeSeams(), { chat: { embedder, retriever, provider } });
+    const ctx1 = createExecutionContext();
+    const res1 = await appWithAuth.fetch(
+      new Request("https://engine.example/api/admin/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://engine.example" },
+        body,
+      }),
+      env,
+      ctx1,
+    );
+    expect(res1.status).toBe(200);
+    await res1.text();
+    await waitOnExecutionContext(ctx1);
+    expect(seenSystems).toHaveLength(1);
+    expect(seenSystems[0]).toContain("Admin preview draft persona");
+
+    // 2. Expired session with Worker origin in allowedOrigins -> 401, never falls back to published
+    const appNoAuth = createApp(
+      fakeSeams({
+        auth: {
+          authenticate: async () => null,
+          login: async () => Response.json({ ok: true }),
+          logout: async () => Response.json({ ok: true }),
+        },
+      }),
+      { chat: { embedder, retriever, provider } },
+    );
+    const ctx2 = createExecutionContext();
+    const res2 = await appNoAuth.fetch(
+      new Request("https://engine.example/api/admin/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://engine.example" },
+        body,
+      }),
+      env,
+      ctx2,
+    );
+    expect(res2.status).toBe(401);
+    expect(await res2.json()).toEqual({ error: "Sign in first." });
+    expect(seenSystems).toHaveLength(1);
+
+    // 3. Cross-org session -> refused without calling LLM
+    const appOtherOrg = createApp(
+      fakeSeams({
+        auth: {
+          authenticate: async () => ({
+            orgId: "org_other00000000000000",
+            userId: "u2",
+            role: "owner",
+          }),
+          login: async () => Response.json({ ok: true }),
+          logout: async () => Response.json({ ok: true }),
+        },
+      }),
+      { chat: { embedder, retriever, provider } },
+    );
+    const ctx3 = createExecutionContext();
+    const res3 = await appOtherOrg.fetch(
+      new Request("https://engine.example/api/admin/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://engine.example" },
+        body,
+      }),
+      env,
+      ctx3,
+    );
+    await waitOnExecutionContext(ctx3);
+    expect(parseSseBody(await res3.text())).toEqual([
+      { type: "error", message: "This assistant is not available." },
+    ]);
+    expect(seenSystems).toHaveLength(1);
+
+    // 4. Non-Worker origin -> 403
+    const ctx4 = createExecutionContext();
+    const res4 = await appWithAuth.fetch(
+      new Request("https://engine.example/api/admin/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://site.example" },
+        body,
+      }),
+      env,
+      ctx4,
+    );
+    expect(res4.status).toBe(403);
+  });
 });

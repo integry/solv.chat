@@ -1,5 +1,7 @@
 import {
+  type BehaviourConfig,
   type ChatEvent,
+  type ChatHistoryTurn,
   newId,
   parseChatRequest,
   parseFeedbackRequest,
@@ -17,7 +19,7 @@ import {
   vectorizeRetriever,
 } from "../providers/retrieval.js";
 import type { LlmProvider } from "../providers/types.js";
-import type { Seams } from "../seams/types.js";
+import type { Principal, Seams } from "../seams/types.js";
 import { answerMessage } from "./answer.js";
 import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
 
@@ -114,6 +116,163 @@ function readAssistantKey(body: unknown): string | null {
   return trimmed;
 }
 
+interface StreamAnswerParams {
+  env: ChatEnv;
+  seams: Seams;
+  ctx: Pick<ExecutionContext, "waitUntil">;
+  overrides: ChatRouteOverrides | undefined;
+  tenant: ReturnType<typeof forPublicScope>;
+  orgId: string;
+  assistantId: string;
+  visitorId: string;
+  message: string;
+  behaviour: BehaviourConfig;
+  conversationId: string | undefined;
+  pageUrl: string | undefined;
+  preview: boolean;
+  history: ChatHistoryTurn[] | undefined;
+  origin: string | null;
+}
+
+function streamAnswerResponse(params: StreamAnswerParams): Response {
+  const { env, seams, ctx, overrides } = params;
+  const providerKind = overrides?.providerKind ?? resolveProvider(env.SOLV_LLM_PROVIDER);
+  const tier = overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER);
+  const model =
+    overrides?.model ??
+    (providerKind === "anthropic" ? ANTHROPIC_MODELS[tier] : OPENAI_MODELS[tier]);
+
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const pipeline = (async () => {
+        try {
+          const embedder =
+            overrides?.embedder ??
+            openAIEmbedder({ apiKey: await seams.keys.embeddingKey(params.orgId) });
+          const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
+          const provider =
+            overrides?.provider ??
+            (await llmProviderFor(
+              { orgId: params.orgId, provider: providerKind, tier },
+              seams.keys,
+            ));
+
+          for await (const event of answerMessage(
+            {
+              tenant: params.tenant,
+              embedder,
+              retriever,
+              provider,
+              model,
+              usage: seams.usage,
+            },
+            {
+              orgId: params.orgId,
+              assistantId: params.assistantId,
+              visitorId: params.visitorId,
+              message: params.message,
+              behaviour: params.behaviour,
+              conversationId: params.conversationId,
+              pageUrl: params.pageUrl,
+              preview: params.preview,
+              history: params.history,
+            },
+          )) {
+            if (!cancelled) {
+              controller.enqueue(encoder.encode(serializeChatEvent(event)));
+            }
+          }
+        } catch (err) {
+          if (!cancelled) {
+            const message =
+              err instanceof ProviderError
+                ? "The assistant could not complete this response."
+                : "Something went wrong. Please try again.";
+            controller.enqueue(encoder.encode(serializeChatEvent({ type: "error", message })));
+          }
+        } finally {
+          if (!cancelled) {
+            controller.close();
+          }
+        }
+      })();
+
+      // Keep the answer pipeline alive if the client disconnects mid-stream so
+      // assistant message persistence and usage accounting still complete.
+      ctx.waitUntil(pipeline);
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: sseHeaders(params.origin),
+  });
+}
+
+/** Handles authenticated `POST /api/admin/chat` draft previews. */
+export async function adminChatRoute(
+  request: Request,
+  env: ChatEnv,
+  seams: Seams,
+  ctx: Pick<ExecutionContext, "waitUntil">,
+  principal: Principal,
+  overrides?: ChatRouteOverrides,
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return Response.json({ error: "Not found." }, { status: 404 });
+  }
+
+  const body = await request.json().catch(() => null);
+  const parsed = parseChatRequest(body);
+  if (!parsed.ok) {
+    return eventStreamOf({
+      type: "error",
+      message: parsed.errors[0] ?? "Invalid chat request.",
+    });
+  }
+
+  const assistant = await assistantByPublicKey(env.DB, parsed.value.assistant);
+  if (assistant === null || assistant.orgId !== principal.orgId) {
+    return eventStreamOf({ type: "error", message: "This assistant is not available." });
+  }
+
+  const failure = await checkLimits(seams.limits, assistant, request);
+  if (failure !== null) {
+    return eventStreamOf({ type: "error", message: failure.message });
+  }
+
+  const tenant = forPublicScope(env.DB, {
+    orgId: assistant.orgId,
+    assistantId: assistant.id,
+  });
+  const version = await tenant.versions.draft(assistant.id);
+  if (version === null) {
+    return eventStreamOf({ type: "error", message: "This assistant is not available." });
+  }
+
+  return streamAnswerResponse({
+    env,
+    seams,
+    ctx,
+    overrides,
+    tenant,
+    orgId: assistant.orgId,
+    assistantId: assistant.id,
+    visitorId: parsed.value.visitorId,
+    message: parsed.value.message,
+    behaviour: version.config.behaviour,
+    conversationId: parsed.value.conversationId,
+    pageUrl: parsed.value.pageUrl,
+    preview: true,
+    history: parsed.value.history,
+    origin: null,
+  });
+}
+
 /** Handles `POST /v1/chat` and its `OPTIONS` preflight. */
 export async function chatRoute(
   request: Request,
@@ -196,80 +355,22 @@ export async function chatRoute(
     return eventStreamOf({ type: "error", message: "This assistant is not available." }, origin);
   }
 
-  const providerKind = overrides?.providerKind ?? resolveProvider(env.SOLV_LLM_PROVIDER);
-  const tier = overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER);
-  const model =
-    overrides?.model ??
-    (providerKind === "anthropic" ? ANTHROPIC_MODELS[tier] : OPENAI_MODELS[tier]);
-
-  let cancelled = false;
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const pipeline = (async () => {
-        try {
-          const embedder =
-            overrides?.embedder ??
-            openAIEmbedder({ apiKey: await seams.keys.embeddingKey(assistant.orgId) });
-          const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
-          const provider =
-            overrides?.provider ??
-            (await llmProviderFor(
-              { orgId: assistant.orgId, provider: providerKind, tier },
-              seams.keys,
-            ));
-
-          for await (const event of answerMessage(
-            {
-              tenant,
-              embedder,
-              retriever,
-              provider,
-              model,
-              usage: seams.usage,
-            },
-            {
-              orgId: assistant.orgId,
-              assistantId: assistant.id,
-              visitorId: parsed.value.visitorId,
-              message: parsed.value.message,
-              behaviour: version.config.behaviour,
-              conversationId: parsed.value.conversationId,
-              pageUrl: parsed.value.pageUrl,
-              preview: useDraft,
-              history: useDraft ? parsed.value.history : undefined,
-            },
-          )) {
-            if (!cancelled) {
-              controller.enqueue(encoder.encode(serializeChatEvent(event)));
-            }
-          }
-        } catch (err) {
-          if (!cancelled) {
-            const message =
-              err instanceof ProviderError
-                ? "The assistant could not complete this response."
-                : "Something went wrong. Please try again.";
-            controller.enqueue(encoder.encode(serializeChatEvent({ type: "error", message })));
-          }
-        } finally {
-          if (!cancelled) {
-            controller.close();
-          }
-        }
-      })();
-
-      // Keep the answer pipeline alive if the client disconnects mid-stream so
-      // assistant message persistence and usage accounting still complete.
-      ctx.waitUntil(pipeline);
-    },
-    cancel() {
-      cancelled = true;
-    },
-  });
-
-  return new Response(stream, {
-    status: 200,
-    headers: sseHeaders(origin),
+  return streamAnswerResponse({
+    env,
+    seams,
+    ctx,
+    overrides,
+    tenant,
+    orgId: assistant.orgId,
+    assistantId: assistant.id,
+    visitorId: parsed.value.visitorId,
+    message: parsed.value.message,
+    behaviour: version.config.behaviour,
+    conversationId: parsed.value.conversationId,
+    pageUrl: parsed.value.pageUrl,
+    preview: useDraft,
+    history: useDraft ? parsed.value.history : undefined,
+    origin,
   });
 }
 

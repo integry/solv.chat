@@ -5,6 +5,7 @@ import {
   type ChatRequest,
   parseChatEventLine,
 } from "@solvchat/core";
+import { notifyUnauthorized } from "./client.js";
 
 interface RawEventLine {
   name: string;
@@ -78,8 +79,9 @@ export interface DraftChatParams {
 }
 
 /**
- * Calls the public `POST /v1/chat` endpoint with `target: "draft"` and the
- * shared `CHAT_PROTOCOL_VERSION`, yielding parsed chat events.
+ * Calls the authenticated `POST /api/admin/chat` preview endpoint with
+ * `target: "draft"` and the shared `CHAT_PROTOCOL_VERSION`, yielding parsed
+ * chat events. A 401 response clears the active session.
  */
 export async function* streamDraftChat(params: DraftChatParams): AsyncIterable<ChatEvent> {
   const body: ChatRequest = {
@@ -92,13 +94,19 @@ export async function* streamDraftChat(params: DraftChatParams): AsyncIterable<C
     ...(params.conversationId ? { conversationId: params.conversationId } : {}),
   };
 
-  const response = await fetch("/v1/chat", {
+  const response = await fetch("/api/admin/chat", {
     method: "POST",
     headers: { "content-type": "application/json" },
     credentials: "same-origin",
     body: JSON.stringify(body),
     ...(params.signal ? { signal: params.signal } : {}),
   });
+
+  if (response.status === 401) {
+    notifyUnauthorized();
+    yield { type: "error", message: "Sign in first." };
+    return;
+  }
 
   if (!response.ok) {
     yield { type: "error", message: `Chat request failed (${response.status}).` };

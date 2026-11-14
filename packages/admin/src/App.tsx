@@ -10,6 +10,7 @@ import { Widget } from "./screens/Widget.js";
 import { AssistantSwitcher } from "./shell/AssistantSwitcher.js";
 import { Navigation } from "./shell/Navigation.js";
 import { TryItPane } from "./shell/TryItPane.js";
+import { AssistantMutationsProvider } from "./shell/useAssistantMutations.js";
 import { useSession } from "./shell/useSession.js";
 
 function renderScreen(screen: ScreenId, assistantId: string) {
@@ -83,21 +84,23 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
       <div className="shell-body">
         <Navigation current={screen} onNavigate={navigate} />
 
-        <main className="shell-main">
-          {assistantsRes.status === "loading" && assistants.length === 0 ? (
-            <p className="muted">Loading assistants…</p>
-          ) : assistantsRes.status === "error" ? (
-            <p className="error-text" role="alert">
-              {assistantsRes.error}
-            </p>
-          ) : selectedAssistant === null ? (
-            <div className="screen">
-              <p className="muted">Create an assistant to begin.</p>
-            </div>
-          ) : (
-            renderScreen(screen, selectedAssistant.id)
-          )}
-        </main>
+        <AssistantMutationsProvider>
+          <main className="shell-main">
+            {assistantsRes.status === "loading" && assistants.length === 0 ? (
+              <p className="muted">Loading assistants…</p>
+            ) : assistantsRes.status === "error" ? (
+              <p className="error-text" role="alert">
+                {assistantsRes.error}
+              </p>
+            ) : selectedAssistant === null ? (
+              <div className="screen">
+                <p className="muted">Create an assistant to begin.</p>
+              </div>
+            ) : (
+              renderScreen(screen, selectedAssistant.id)
+            )}
+          </main>
+        </AssistantMutationsProvider>
 
         {/* Mounted once outside <main> so moving between screens keeps the transcript. */}
         {selectedAssistant !== null && <TryItPane assistant={selectedAssistant} />}

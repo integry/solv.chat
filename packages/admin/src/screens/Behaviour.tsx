@@ -3,6 +3,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, postJson, putJson } from "../api/client.js";
 import type { VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { useAssistantMutation } from "../shell/useAssistantMutations.js";
 import { History } from "./History.js";
 
 export interface BehaviourProps {
@@ -44,22 +45,42 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const [questionsText, setQuestionsText] = useState("");
   const [initializedFor, setInitializedFor] = useState<string | null>(null);
 
-  const [saving, setSaving] = useState(false);
-  const [publishing, setPublishing] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
+  const mutation = useAssistantMutation(assistantId);
+  const { saving, publishing, busy } = mutation;
+
   const latestRef = useRef({ greeting, persona, fallbackText, questionsText });
   latestRef.current = { greeting, persona, fallbackText, questionsText };
-  const inFlightRef = useRef(false);
+  const lastTickRef = useRef(mutation.tick);
+  const ignoreNextTickRef = useRef(false);
+  const syncOnLoadRef = useRef(false);
+  const prevSavedBehaviourRef = useRef<BehaviourConfig | undefined>(undefined);
+
+  useEffect(() => {
+    if (mutation.tick === lastTickRef.current) return;
+    lastTickRef.current = mutation.tick;
+    if (ignoreNextTickRef.current) {
+      ignoreNextTickRef.current = false;
+      return;
+    }
+    syncOnLoadRef.current = true;
+    draft.reload();
+    setHistoryTick((n) => n + 1);
+  }, [mutation.tick, draft.reload]);
 
   useEffect(() => {
     if (!savedBehaviour) return;
     const key = `${assistantId}:${draft.value?.draft.id ?? ""}`;
-    if (initializedFor !== key) {
+    const shouldSyncReload =
+      syncOnLoadRef.current && savedBehaviour !== prevSavedBehaviourRef.current;
+    if (initializedFor !== key || shouldSyncReload) {
+      syncOnLoadRef.current = false;
+      prevSavedBehaviourRef.current = savedBehaviour;
       setGreeting(savedBehaviour.greeting);
       setPersona(savedBehaviour.persona);
       setFallbackText(savedBehaviour.fallbackText);
@@ -92,9 +113,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
 
   async function handleSave(event: FormEvent) {
     event.preventDefault();
-    if (inFlightRef.current || saving || publishing) return;
-    inFlightRef.current = true;
-    setSaving(true);
+    if (busy) return;
     setFieldErrors({});
     setFormError(null);
     setStatusMessage(null);
@@ -102,24 +121,27 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     const submitted = { greeting, persona, fallbackText, questionsText };
 
     try {
-      const res = await putJson<{ draft: VersionRow }>(
-        `/api/admin/assistants/${assistantId}/draft`,
-        { behaviour: current },
-      );
-      draft.setValue(res);
-      if (latestRef.current.greeting === submitted.greeting) {
-        setGreeting(res.draft.config.behaviour.greeting);
-      }
-      if (latestRef.current.persona === submitted.persona) {
-        setPersona(res.draft.config.behaviour.persona);
-      }
-      if (latestRef.current.fallbackText === submitted.fallbackText) {
-        setFallbackText(res.draft.config.behaviour.fallbackText);
-      }
-      if (latestRef.current.questionsText === submitted.questionsText) {
-        setQuestionsText(res.draft.config.behaviour.suggestedQuestions.join("\n"));
-      }
-      setStatusMessage("Draft saved.");
+      await mutation.run("saving", async () => {
+        const res = await putJson<{ draft: VersionRow }>(
+          `/api/admin/assistants/${assistantId}/draft`,
+          { behaviour: current },
+        );
+        ignoreNextTickRef.current = true;
+        draft.setValue(res);
+        if (latestRef.current.greeting === submitted.greeting) {
+          setGreeting(res.draft.config.behaviour.greeting);
+        }
+        if (latestRef.current.persona === submitted.persona) {
+          setPersona(res.draft.config.behaviour.persona);
+        }
+        if (latestRef.current.fallbackText === submitted.fallbackText) {
+          setFallbackText(res.draft.config.behaviour.fallbackText);
+        }
+        if (latestRef.current.questionsText === submitted.questionsText) {
+          setQuestionsText(res.draft.config.behaviour.suggestedQuestions.join("\n"));
+        }
+        setStatusMessage("Draft saved.");
+      });
     } catch (err) {
       if (err instanceof ApiError) {
         setFieldErrors(err.fields);
@@ -129,32 +151,27 @@ export function Behaviour({ assistantId }: BehaviourProps) {
       } else {
         setFormError("Could not save draft.");
       }
-    } finally {
-      inFlightRef.current = false;
-      setSaving(false);
     }
   }
 
   async function handlePublish() {
-    if (inFlightRef.current || saving || publishing) return;
-    inFlightRef.current = true;
-    setPublishing(true);
+    if (busy) return;
     setFormError(null);
     setStatusMessage(null);
     try {
-      const res = await postJson<{ version: VersionRow }>(
-        `/api/admin/assistants/${assistantId}/publish`,
-      );
-      setStatusMessage(
-        `Published (${new Date(res.version.publishedAt ?? Date.now()).toLocaleString()}).`,
-      );
-      setHistoryTick((n) => n + 1);
-      draft.reload();
+      await mutation.run("publishing", async () => {
+        const res = await postJson<{ version: VersionRow }>(
+          `/api/admin/assistants/${assistantId}/publish`,
+        );
+        ignoreNextTickRef.current = true;
+        setStatusMessage(
+          `Published (${new Date(res.version.publishedAt ?? Date.now()).toLocaleString()}).`,
+        );
+        setHistoryTick((n) => n + 1);
+        draft.reload();
+      });
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : "Could not publish.");
-    } finally {
-      inFlightRef.current = false;
-      setPublishing(false);
     }
   }
 
@@ -179,7 +196,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={saving || publishing}
+            disabled={busy}
             onClick={handlePublish}
           >
             {publishing ? "Publishing…" : "Publish"}
@@ -267,11 +284,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         </div>
 
         <div className="actions">
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={!unsaved || saving || publishing}
-          >
+          <button type="submit" className="btn btn-primary" disabled={!unsaved || busy}>
             {saving ? "Saving…" : "Save"}
           </button>
         </div>

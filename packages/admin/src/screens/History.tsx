@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ApiError, postJson } from "../api/client.js";
 import type { VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { useAssistantMutation } from "../shell/useAssistantMutations.js";
 
 export interface HistoryProps {
   assistantId: string;
@@ -22,6 +23,7 @@ export function History({ assistantId, refreshKey = 0, onRestored }: HistoryProp
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const mutation = useAssistantMutation(assistantId);
 
   useEffect(() => {
     if (refreshKey > 0) {
@@ -30,16 +32,19 @@ export function History({ assistantId, refreshKey = 0, onRestored }: HistoryProp
   }, [refreshKey, reload]);
 
   async function handleRollback(versionId: string) {
+    if (mutation.busy || restoringId !== null) return;
     setRestoringId(versionId);
     setActionError(null);
     setActionNotice(null);
     try {
-      await postJson<{ version: VersionRow }>(
-        `/api/admin/assistants/${assistantId}/versions/${versionId}/rollback`,
-      );
-      setActionNotice("Restored earlier version.");
-      reload();
-      onRestored?.();
+      await mutation.run("restoring", async () => {
+        await postJson<{ version: VersionRow }>(
+          `/api/admin/assistants/${assistantId}/versions/${versionId}/rollback`,
+        );
+        setActionNotice("Restored earlier version.");
+        reload();
+        onRestored?.();
+      });
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "Could not restore version.");
     } finally {
@@ -85,7 +90,7 @@ export function History({ assistantId, refreshKey = 0, onRestored }: HistoryProp
                   <button
                     type="button"
                     className="btn btn-secondary btn-sm"
-                    disabled={restoringId !== null}
+                    disabled={restoringId !== null || mutation.busy}
                     onClick={() => handleRollback(version.id)}
                   >
                     {restoringId === version.id ? "Restoring…" : "Restore"}

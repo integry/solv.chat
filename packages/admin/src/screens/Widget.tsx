@@ -3,6 +3,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, patchJson, postJson, putJson } from "../api/client.js";
 import type { Assistant, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { useAssistantMutation } from "../shell/useAssistantMutations.js";
 import { History } from "./History.js";
 
 export interface WidgetProps {
@@ -48,22 +49,46 @@ export function Widget({ assistantId }: WidgetProps) {
   const [initWidgetKey, setInitWidgetKey] = useState<string | null>(null);
   const [initOriginsKey, setInitOriginsKey] = useState<string | null>(null);
 
-  const [saving, setSaving] = useState(false);
-  const [publishing, setPublishing] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
+  const mutation = useAssistantMutation(assistantId);
+  const { saving, publishing, busy } = mutation;
+
   const latestRef = useRef({ title, accentColor, position, originsText });
   latestRef.current = { title, accentColor, position, originsText };
-  const inFlightRef = useRef(false);
+  const lastTickRef = useRef(mutation.tick);
+  const ignoreNextTickRef = useRef(false);
+  const syncWidgetOnLoadRef = useRef(false);
+  const syncOriginsOnLoadRef = useRef(false);
+  const prevSavedWidgetRef = useRef<WidgetConfig | undefined>(undefined);
+  const prevSavedAssistantRef = useRef<Assistant | undefined>(undefined);
+
+  useEffect(() => {
+    if (mutation.tick === lastTickRef.current) return;
+    lastTickRef.current = mutation.tick;
+    if (ignoreNextTickRef.current) {
+      ignoreNextTickRef.current = false;
+      return;
+    }
+    syncWidgetOnLoadRef.current = true;
+    syncOriginsOnLoadRef.current = true;
+    assistantRes.reload();
+    draftRes.reload();
+    setHistoryTick((n) => n + 1);
+  }, [mutation.tick, assistantRes.reload, draftRes.reload]);
 
   useEffect(() => {
     if (!savedWidget) return;
     const key = `${assistantId}:${draftRes.value?.draft.id ?? ""}`;
-    if (initWidgetKey !== key) {
+    const shouldSyncReload =
+      syncWidgetOnLoadRef.current && savedWidget !== prevSavedWidgetRef.current;
+    if (initWidgetKey !== key || shouldSyncReload) {
+      syncWidgetOnLoadRef.current = false;
+      prevSavedWidgetRef.current = savedWidget;
       setTitle(savedWidget.title);
       setAccentColor(savedWidget.accentColor);
       setPosition(savedWidget.position);
@@ -74,7 +99,11 @@ export function Widget({ assistantId }: WidgetProps) {
   useEffect(() => {
     if (!savedAssistant) return;
     const key = `${assistantId}:${savedAssistant.id}`;
-    if (initOriginsKey !== key) {
+    const shouldSyncReload =
+      syncOriginsOnLoadRef.current && savedAssistant !== prevSavedAssistantRef.current;
+    if (initOriginsKey !== key || shouldSyncReload) {
+      syncOriginsOnLoadRef.current = false;
+      prevSavedAssistantRef.current = savedAssistant;
       setOriginsText(savedAssistant.allowedOrigins.join("\n"));
       setInitOriginsKey(key);
     }
@@ -113,10 +142,8 @@ export function Widget({ assistantId }: WidgetProps) {
 
   async function handleSave(event: FormEvent) {
     event.preventDefault();
-    if (!savedAssistant || inFlightRef.current || saving || publishing) return;
+    if (!savedAssistant || busy) return;
 
-    inFlightRef.current = true;
-    setSaving(true);
     setFieldErrors({});
     setFormError(null);
     setStatusMessage(null);
@@ -126,7 +153,7 @@ export function Widget({ assistantId }: WidgetProps) {
     const nextFieldErrors: Record<string, string> = {};
     let generalError: string | null = null;
 
-    try {
+    await mutation.run("saving", async () => {
       if (originsChanged) {
         try {
           const res = await patchJson<{ assistant: Assistant }>(
@@ -173,38 +200,34 @@ export function Widget({ assistantId }: WidgetProps) {
         }
       }
 
+      ignoreNextTickRef.current = true;
       if (Object.keys(nextFieldErrors).length > 0 || generalError !== null) {
         setFieldErrors(nextFieldErrors);
         setFormError(generalError);
       } else {
         setStatusMessage("Draft saved.");
       }
-    } finally {
-      inFlightRef.current = false;
-      setSaving(false);
-    }
+    });
   }
 
   async function handlePublish() {
-    if (inFlightRef.current || saving || publishing) return;
-    inFlightRef.current = true;
-    setPublishing(true);
+    if (busy) return;
     setFormError(null);
     setStatusMessage(null);
     try {
-      const res = await postJson<{ version: VersionRow }>(
-        `/api/admin/assistants/${assistantId}/publish`,
-      );
-      setStatusMessage(
-        `Published (${new Date(res.version.publishedAt ?? Date.now()).toLocaleString()}).`,
-      );
-      setHistoryTick((n) => n + 1);
-      draftRes.reload();
+      await mutation.run("publishing", async () => {
+        const res = await postJson<{ version: VersionRow }>(
+          `/api/admin/assistants/${assistantId}/publish`,
+        );
+        ignoreNextTickRef.current = true;
+        setStatusMessage(
+          `Published (${new Date(res.version.publishedAt ?? Date.now()).toLocaleString()}).`,
+        );
+        setHistoryTick((n) => n + 1);
+        draftRes.reload();
+      });
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : "Could not publish.");
-    } finally {
-      inFlightRef.current = false;
-      setPublishing(false);
     }
   }
 
@@ -229,7 +252,7 @@ export function Widget({ assistantId }: WidgetProps) {
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={saving || publishing}
+            disabled={busy}
             onClick={handlePublish}
           >
             {publishing ? "Publishing…" : "Publish"}
@@ -331,11 +354,7 @@ export function Widget({ assistantId }: WidgetProps) {
         </div>
 
         <div className="actions">
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={!unsaved || saving || publishing}
-          >
+          <button type="submit" className="btn btn-primary" disabled={!unsaved || busy}>
             {saving ? "Saving…" : "Save"}
           </button>
         </div>

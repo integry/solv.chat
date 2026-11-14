@@ -10,7 +10,8 @@ export function subscribeUnauthorized(listener: UnauthorizedListener): () => voi
   };
 }
 
-function notifyUnauthorized(): void {
+/** Notifies all unauthorized listeners (e.g. when an authenticated stream returns 401). */
+export function notifyUnauthorized(): void {
   for (const listener of unauthorizedListeners) {
     listener();
   }
