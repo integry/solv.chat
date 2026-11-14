@@ -1,0 +1,33 @@
+name: Push content to solv.chat
+description: Sends a folder of Markdown files to a solv.chat assistant.
+inputs:
+  endpoint:
+    description: The Worker's base URL, for example https://chat.example.com
+    required: true
+  assistant:
+    description: The assistant id (ast_...)
+    required: true
+  base-url:
+    description: The site URL that document paths are joined to
+    required: true
+  content:
+    description: Folder of Markdown files
+    required: true
+  prune:
+    description: Delete documents that are no longer in the folder
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "24"
+    # The ingest key comes from the environment, not an input: an input would
+    # appear in the workflow run's inputs view, and this value is a credential.
+    - shell: bash
+      run: |
+        npx --yes @solvchat/cli push "${{ inputs.content }}" \
+          --endpoint "${{ inputs.endpoint }}" \
+          --assistant "${{ inputs.assistant }}" \
+          --base-url "${{ inputs.base-url }}" \
+          ${{ inputs.prune == 'true' && '--prune' || '' }}

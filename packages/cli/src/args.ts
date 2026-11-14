@@ -1,0 +1,185 @@
+import { parseArgs } from "node:util";
+import type { ApplyOptions } from "./apply.js";
+import { CliError } from "./http.js";
+import type { PushOptions } from "./push.js";
+
+export type ParsedCommand =
+  | { kind: "help"; topic: "root" | "push" | "apply" }
+  | { kind: "push"; options: PushOptions }
+  | { kind: "apply"; options: ApplyOptions };
+
+export const ROOT_HELP = `Usage: solv <command> [options]
+
+Commands:
+  push   Push a folder of Markdown files or a JSON batch to an assistant
+  apply  Apply solv.config.json to an assistant's draft configuration
+
+Environment variables:
+  SOLV_INGEST_KEY   Bearer key for solv push
+  SOLV_ADMIN_TOKEN  Bearer token for solv apply
+  SOLV_SESSION      Session cookie value for solv apply
+
+Run 'solv <command> --help' for command-specific options.`;
+
+export const PUSH_HELP = `Usage: solv push [dir] [options]
+
+Options:
+  --endpoint <url>    Worker base URL (required)
+  --assistant <id>    Assistant ID, e.g. ast_... (required)
+  --base-url <url>    Site URL that document paths are joined to
+  --json <file>       Push a prepared JSON batch instead of a Markdown folder
+  --source-id <id>    Target source ID (optional)
+  --prune             Delete documents not in the pushed set
+  --dry-run           Print what would be pushed without sending requests
+  -h, --help          Show this help message
+
+Environment variables:
+  SOLV_INGEST_KEY     Bearer key used to authenticate ingest requests`;
+
+export const APPLY_HELP = `Usage: solv apply [file] [options]
+
+Arguments:
+  file                Config file path (default: solv.config.json)
+
+Options:
+  --endpoint <url>    Worker base URL (required)
+  --assistant <id>    Assistant ID, e.g. ast_... (required)
+  -h, --help          Show this help message
+
+Environment variables:
+  SOLV_ADMIN_TOKEN    Bearer token used to authenticate admin requests
+  SOLV_SESSION        Session cookie value used to authenticate admin requests`;
+
+function readString(
+  values: Record<string, string | boolean | (string | boolean)[] | undefined>,
+  name: string,
+): string | undefined {
+  const val = values[name];
+  return typeof val === "string" ? val : undefined;
+}
+
+function readBoolean(
+  values: Record<string, string | boolean | (string | boolean)[] | undefined>,
+  name: string,
+): boolean {
+  return values[name] === true;
+}
+
+function requireOption(value: string | undefined, flag: string): string {
+  if (!value || value.trim().length === 0) {
+    throw new CliError(`Missing required option ${flag}`);
+  }
+  return value.trim();
+}
+
+function parsePushArgs(args: string[], env: Record<string, string | undefined>): ParsedCommand {
+  let parsed: ReturnType<typeof parseArgs>;
+  try {
+    parsed = parseArgs({
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: {
+        endpoint: { type: "string" },
+        assistant: { type: "string" },
+        "base-url": { type: "string" },
+        json: { type: "string" },
+        "source-id": { type: "string" },
+        prune: { type: "boolean", default: false },
+        "dry-run": { type: "boolean", default: false },
+        help: { type: "boolean", short: "h", default: false },
+      },
+    });
+  } catch (err) {
+    throw new CliError(err instanceof Error ? err.message : String(err));
+  }
+
+  if (readBoolean(parsed.values, "help")) {
+    return { kind: "help", topic: "push" };
+  }
+
+  const endpoint = requireOption(readString(parsed.values, "endpoint"), "--endpoint");
+  const assistant = requireOption(readString(parsed.values, "assistant"), "--assistant");
+  const json = readString(parsed.values, "json");
+  const baseUrl = readString(parsed.values, "base-url");
+  const sourceId = readString(parsed.values, "source-id");
+  const dir = parsed.positionals[0];
+
+  if (json !== undefined && dir !== undefined) {
+    throw new CliError("Specify either a content directory or --json, not both");
+  }
+  if (json === undefined && dir === undefined) {
+    throw new CliError("Provide a content directory or --json <file>");
+  }
+
+  const options: PushOptions = {
+    endpoint,
+    assistant,
+    prune: readBoolean(parsed.values, "prune"),
+    dryRun: readBoolean(parsed.values, "dry-run"),
+  };
+  if (dir !== undefined) options.dir = dir;
+  if (json !== undefined) options.json = json;
+  if (baseUrl !== undefined) options.baseUrl = baseUrl;
+  if (sourceId !== undefined) options.sourceId = sourceId;
+  if (env.SOLV_INGEST_KEY !== undefined) options.ingestKey = env.SOLV_INGEST_KEY;
+
+  return { kind: "push", options };
+}
+
+function parseApplyArgs(args: string[], env: Record<string, string | undefined>): ParsedCommand {
+  let parsed: ReturnType<typeof parseArgs>;
+  try {
+    parsed = parseArgs({
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: {
+        endpoint: { type: "string" },
+        assistant: { type: "string" },
+        help: { type: "boolean", short: "h", default: false },
+      },
+    });
+  } catch (err) {
+    throw new CliError(err instanceof Error ? err.message : String(err));
+  }
+
+  if (readBoolean(parsed.values, "help")) {
+    return { kind: "help", topic: "apply" };
+  }
+
+  const endpoint = requireOption(readString(parsed.values, "endpoint"), "--endpoint");
+  const assistant = requireOption(readString(parsed.values, "assistant"), "--assistant");
+  const file = parsed.positionals[0] ?? "solv.config.json";
+
+  const options: ApplyOptions = {
+    file,
+    endpoint,
+    assistant,
+  };
+  if (env.SOLV_ADMIN_TOKEN !== undefined) options.adminToken = env.SOLV_ADMIN_TOKEN;
+  if (env.SOLV_SESSION !== undefined) options.session = env.SOLV_SESSION;
+
+  return { kind: "apply", options };
+}
+
+/**
+ * Parses CLI arguments using `node:util` `parseArgs` and reads credentials from
+ * environment variables without exposing them as flags.
+ */
+export function parseCliArgs(
+  argv: string[],
+  env: Record<string, string | undefined> = process.env,
+): ParsedCommand {
+  const [command, ...rest] = argv;
+  if (!command || command === "--help" || command === "-h") {
+    return { kind: "help", topic: "root" };
+  }
+  if (command === "push") {
+    return parsePushArgs(rest, env);
+  }
+  if (command === "apply") {
+    return parseApplyArgs(rest, env);
+  }
+  throw new CliError(`Unknown command: ${command}. Run 'solv --help' for usage.`);
+}
