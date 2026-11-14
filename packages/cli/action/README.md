@@ -1,24 +1,29 @@
 # solv.chat GitHub Action
 
-Pushes a folder of Markdown files to a solv.chat assistant using `@solvchat/cli`.
+Pushes a folder of Markdown files and/or applies `solv.config.json` to an assistant's draft using `@solvchat/cli`.
 
 ## Inputs
 
-| Input       | Required | Default   | Description                                                 |
-| ----------- | -------- | --------- | ----------------------------------------------------------- |
-| `endpoint`  | Yes      | —         | The Worker's base URL (e.g. `https://chat.example.com`)     |
-| `assistant` | Yes      | —         | The assistant ID (`ast_...`)                                |
-| `base-url`  | Yes      | —         | The site URL that document paths are joined to              |
-| `content`   | Yes      | —         | Folder of Markdown files to push                            |
-| `prune`     | No       | `"false"` | Set to `"true"` to delete documents removed from the folder |
+| Input       | Required | Default   | Description                                                                     |
+| ----------- | -------- | --------- | ------------------------------------------------------------------------------- |
+| `endpoint`  | Yes      | —         | The Worker's base URL (e.g. `https://chat.example.com`)                         |
+| `assistant` | Yes      | —         | The assistant ID (`ast_...`)                                                    |
+| `base-url`  | No       | —         | The site URL that document paths are joined to (required when `content` is set) |
+| `content`   | No       | —         | Folder of Markdown files to push                                                |
+| `prune`     | No       | `"false"` | Set to `"true"` to delete documents removed from the folder                     |
+| `config`    | No       | —         | Path to `solv.config.json` to apply to the assistant's draft                    |
+
+Provide at least one of `content` or `config`.
 
 ## Environment
 
-Pass `SOLV_INGEST_KEY` via `env:` from a GitHub secret. It is intentionally not an action input so it never appears in workflow run inputs.
+Pass `SOLV_INGEST_KEY` via `env:` from a GitHub secret. One key authenticates both `push` and `apply`. It is intentionally not an action input so it never appears in workflow run inputs.
+
+`solv apply` updates the assistant's draft only; publishing always happens in the admin. Because an ingest key can change draft behaviour as well as content, treat `SOLV_INGEST_KEY` as a secret.
 
 ## Usage
 
-The action installs dependencies and builds `@solvchat/cli` from its own checkout before pushing your content folder:
+The action installs dependencies and builds `@solvchat/cli` from its own checkout before running `solv push` and/or `solv apply`:
 
 ```yaml
 - uses: actions/checkout@v4
@@ -31,4 +36,5 @@ The action installs dependencies and builds `@solvchat/cli` from its own checkou
     base-url: https://docs.example.com
     content: docs
     prune: "true"
+    config: solv.config.json
 ```

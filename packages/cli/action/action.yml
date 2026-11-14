@@ -1,5 +1,5 @@
-name: Push content to solv.chat
-description: Sends a folder of Markdown files to a solv.chat assistant.
+name: Sync solv.chat content and draft config
+description: Pushes Markdown content and/or applies solv.config.json to a solv.chat assistant's draft.
 inputs:
   endpoint:
     description: The Worker's base URL, for example https://chat.example.com
@@ -8,14 +8,17 @@ inputs:
     description: The assistant id (ast_...)
     required: true
   base-url:
-    description: The site URL that document paths are joined to
-    required: true
+    description: The site URL that document paths are joined to (required when content is set)
+    required: false
   content:
-    description: Folder of Markdown files
-    required: true
+    description: Folder of Markdown files to push
+    required: false
   prune:
     description: Delete documents that are no longer in the folder
     default: "false"
+  config:
+    description: Path to solv.config.json to apply to the assistant's draft
+    required: false
 runs:
   using: composite
   steps:
@@ -28,6 +31,7 @@ runs:
       env:
         ACTION_PATH: ${{ github.action_path }}
         INPUT_CONTENT: ${{ inputs.content }}
+        INPUT_CONFIG: ${{ inputs.config }}
         INPUT_ENDPOINT: ${{ inputs.endpoint }}
         INPUT_ASSISTANT: ${{ inputs.assistant }}
         INPUT_BASE_URL: ${{ inputs.base-url }}
@@ -38,13 +42,29 @@ runs:
           npm ci --prefix "$action_repo" --no-audit --no-fund
           npm run build --prefix "$action_repo" -w @solvchat/cli
         fi
-        args=(
-          "$INPUT_CONTENT"
-          --endpoint "$INPUT_ENDPOINT"
-          --assistant "$INPUT_ASSISTANT"
-          --base-url "$INPUT_BASE_URL"
-        )
-        if [ "$INPUT_PRUNE" = "true" ]; then
-          args+=(--prune)
+        if [ -z "$INPUT_CONTENT" ] && [ -z "$INPUT_CONFIG" ]; then
+          echo "Provide at least one of 'content' or 'config'." >&2
+          exit 1
         fi
-        node "$action_repo/packages/cli/bin/solv.js" push "${args[@]}"
+        if [ -n "$INPUT_CONTENT" ]; then
+          if [ -z "$INPUT_BASE_URL" ]; then
+            echo "'base-url' is required when 'content' is set." >&2
+            exit 1
+          fi
+          args=(
+            "$INPUT_CONTENT"
+            --endpoint "$INPUT_ENDPOINT"
+            --assistant "$INPUT_ASSISTANT"
+            --base-url "$INPUT_BASE_URL"
+          )
+          if [ "$INPUT_PRUNE" = "true" ]; then
+            args+=(--prune)
+          fi
+          node "$action_repo/packages/cli/bin/solv.js" push "${args[@]}"
+        fi
+        if [ -n "$INPUT_CONFIG" ]; then
+          node "$action_repo/packages/cli/bin/solv.js" apply \
+            "$INPUT_CONFIG" \
+            --endpoint "$INPUT_ENDPOINT" \
+            --assistant "$INPUT_ASSISTANT"
+        fi

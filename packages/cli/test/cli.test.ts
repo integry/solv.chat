@@ -27,8 +27,8 @@ describe("solv CLI", () => {
     expect(help).toContain("push");
     expect(help).toContain("apply");
     expect(help).toContain("SOLV_INGEST_KEY");
-    expect(help).toContain("SOLV_ADMIN_TOKEN");
-    expect(help).toContain("SOLV_SESSION");
+    expect(help).not.toContain("SOLV_ADMIN_TOKEN");
+    expect(help).not.toContain("SOLV_SESSION");
     expect(help).not.toContain("super-secret-value");
     expect(help).not.toMatch(/\btest\b/);
   });
@@ -162,7 +162,7 @@ describe("solv CLI", () => {
         "ast_123",
       ],
       {
-        env: { SOLV_ADMIN_TOKEN: "tok_secret" },
+        env: { SOLV_INGEST_KEY: "ik_secret" },
         errorLog: (line) => errors.push(line),
         fetchImpl: async () => {
           fetched = true;
@@ -252,49 +252,52 @@ describe("solv CLI", () => {
     expect(output).not.toContain("ing_second_half");
   });
 
-  it.each([
-    {
-      label: "SOLV_ADMIN_TOKEN",
-      env: { SOLV_ADMIN_TOKEN: "tok_first_half\ntok_second_half" },
-      leaks: ["tok_first_half", "tok_second_half"],
-    },
-    {
-      label: "SOLV_SESSION",
-      env: { SOLV_SESSION: "sess_first_half\nsess_second_half" },
-      leaks: ["sess_first_half", "sess_second_half"],
-    },
-    {
-      label: "SOLV_SESSION",
-      env: { SOLV_SESSION: "solv_session=cookie_first_half\ncookie_second_half" },
-      leaks: ["cookie_first_half", "cookie_second_half"],
-    },
-  ])(
-    "rejects $label with an embedded newline on apply without calling fetch or leaking it",
-    async ({ label, env, leaks }) => {
-      const configPath = join(root, "solv.config.json");
-      await writeFile(configPath, JSON.stringify({ behaviour: { greeting: "Hi" } }), "utf8");
-      const errors: string[] = [];
-      let fetched = false;
+  it("rejects SOLV_INGEST_KEY with an embedded newline on apply without calling fetch or leaking it", async () => {
+    const configPath = join(root, "solv.config.json");
+    await writeFile(configPath, JSON.stringify({ behaviour: { greeting: "Hi" } }), "utf8");
+    const errors: string[] = [];
+    let fetched = false;
 
-      const code = await runCli(
-        ["apply", configPath, "--endpoint", "https://chat.example.com", "--assistant", "ast_123"],
-        {
-          env,
-          errorLog: (line) => errors.push(line),
-          fetchImpl: async () => {
-            fetched = true;
-            return Response.json({});
-          },
+    const code = await runCli(
+      ["apply", configPath, "--endpoint", "https://chat.example.com", "--assistant", "ast_123"],
+      {
+        env: { SOLV_INGEST_KEY: "ik_first_half\nik_second_half" },
+        errorLog: (line) => errors.push(line),
+        fetchImpl: async () => {
+          fetched = true;
+          return Response.json({});
         },
-      );
+      },
+    );
 
-      expect(code).toBe(1);
-      expect(fetched).toBe(false);
-      const output = errors.join("\n");
-      expect(output).toContain(label);
-      for (const secretPart of leaks) {
-        expect(output).not.toContain(secretPart);
-      }
-    },
-  );
+    expect(code).toBe(1);
+    expect(fetched).toBe(false);
+    const output = errors.join("\n");
+    expect(output).toContain("SOLV_INGEST_KEY");
+    expect(output).not.toContain("ik_first_half");
+    expect(output).not.toContain("ik_second_half");
+  });
+
+  it("fails with a message naming SOLV_INGEST_KEY when missing on apply", async () => {
+    const configPath = join(root, "solv.config.json");
+    await writeFile(configPath, JSON.stringify({ behaviour: { greeting: "Hi" } }), "utf8");
+    const errors: string[] = [];
+    let fetched = false;
+
+    const code = await runCli(
+      ["apply", configPath, "--endpoint", "https://chat.example.com", "--assistant", "ast_123"],
+      {
+        env: {},
+        errorLog: (line) => errors.push(line),
+        fetchImpl: async () => {
+          fetched = true;
+          return Response.json({});
+        },
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(fetched).toBe(false);
+    expect(errors.join("\n")).toContain("SOLV_INGEST_KEY");
+  });
 });

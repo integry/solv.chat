@@ -15,9 +15,7 @@ Commands:
   apply  Apply solv.config.json to an assistant's draft configuration
 
 Environment variables:
-  SOLV_INGEST_KEY   Bearer key for solv push
-  SOLV_ADMIN_TOKEN  Bearer token for solv apply
-  SOLV_SESSION      Session cookie value for solv apply
+  SOLV_INGEST_KEY   Bearer key for solv push and solv apply
 
 Run 'solv <command> --help' for command-specific options.`;
 
@@ -47,8 +45,7 @@ Options:
   -h, --help          Show this help message
 
 Environment variables:
-  SOLV_ADMIN_TOKEN    Bearer token used to authenticate admin requests
-  SOLV_SESSION        Session cookie value used to authenticate admin requests`;
+  SOLV_INGEST_KEY     Bearer key used to authenticate ingest requests`;
 
 function readString(
   values: Record<string, string | boolean | (string | boolean)[] | undefined>,
@@ -167,8 +164,7 @@ function parseApplyArgs(args: string[], env: Record<string, string | undefined>)
     endpoint,
     assistant,
   };
-  if (env.SOLV_ADMIN_TOKEN !== undefined) options.adminToken = env.SOLV_ADMIN_TOKEN;
-  if (env.SOLV_SESSION !== undefined) options.session = env.SOLV_SESSION;
+  if (env.SOLV_INGEST_KEY !== undefined) options.ingestKey = env.SOLV_INGEST_KEY;
 
   return { kind: "apply", options };
 }

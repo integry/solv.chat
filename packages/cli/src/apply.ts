@@ -7,12 +7,10 @@ export interface ApplyOptions {
   file: string;
   endpoint: string;
   assistant: string;
-  adminToken?: string;
-  session?: string;
+  ingestKey?: string;
 }
 
-interface DraftResponse {
-  draft?: { config?: VersionConfig };
+interface ConfigResponse {
   config?: VersionConfig;
 }
 
@@ -56,26 +54,9 @@ export function diffConfig(before: VersionConfig | undefined, after: VersionConf
   return lines.length > 0 ? lines.join("\n") : "No changes.";
 }
 
-function buildAuthHeaders(options: ApplyOptions): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (options.adminToken) {
-    const authHeader = `Bearer ${options.adminToken}`;
-    assertValidHeaderValue("Authorization", authHeader, "SOLV_ADMIN_TOKEN");
-    headers.Authorization = authHeader;
-  }
-  if (options.session) {
-    const cookieHeader = options.session.includes("=")
-      ? options.session
-      : `solv_session=${options.session}`;
-    assertValidHeaderValue("Cookie", cookieHeader, "SOLV_SESSION");
-    headers.Cookie = cookieHeader;
-  }
-  return headers;
-}
-
 /**
  * Parses `solv.config.json` with `@solvchat/core`, prints a diff against the
- * current draft, and writes the new draft through the admin API.
+ * current draft, and writes the new draft through the ingest API.
  */
 export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void> {
   const rawText = await readFile(options.file, "utf8");
@@ -96,22 +77,24 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
     throw new CliError(parsed.errors.join("; "));
   }
 
-  if (!options.adminToken && !options.session) {
-    throw new CliError("Missing SOLV_ADMIN_TOKEN or SOLV_SESSION environment variable");
+  if (!options.ingestKey) {
+    throw new CliError("Missing SOLV_INGEST_KEY environment variable");
   }
 
   const endpoint = normalizeEndpoint(options.endpoint);
-  const draftUrl = `${endpoint}/api/admin/assistants/${encodeURIComponent(options.assistant)}/draft`;
-  const authHeaders = buildAuthHeaders(options);
+  const configUrl = `${endpoint}/v1/ingest/${encodeURIComponent(options.assistant)}/config`;
+  const authHeader = `Bearer ${options.ingestKey}`;
+  assertValidHeaderValue("Authorization", authHeader, "SOLV_INGEST_KEY");
+  const authHeaders = { Authorization: authHeader };
 
-  const current = await requestJson<DraftResponse>(
+  const current = await requestJson<ConfigResponse>(
     deps.fetchImpl,
-    draftUrl,
+    configUrl,
     { method: "GET", headers: authHeaders },
-    "SOLV_ADMIN_TOKEN or SOLV_SESSION",
+    "SOLV_INGEST_KEY",
   );
 
-  const currentConfig = current.draft?.config ?? current.config;
+  const currentConfig = current.config;
   const merged = parseVersionConfig(rawJson, currentConfig);
   if (!merged.ok) {
     for (const error of merged.errors) {
@@ -122,20 +105,19 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
 
   deps.log(diffConfig(currentConfig, merged.value));
 
-  await requestJson<DraftResponse>(
+  await requestJson<ConfigResponse>(
     deps.fetchImpl,
-    draftUrl,
+    configUrl,
     {
       method: "PUT",
       headers: {
         ...authHeaders,
         "Content-Type": "application/json",
-        Origin: new URL(endpoint).origin,
       },
       body: JSON.stringify(rawJson),
     },
-    "SOLV_ADMIN_TOKEN or SOLV_SESSION",
+    "SOLV_INGEST_KEY",
   );
 
-  deps.log(`Applied ${options.file} to draft`);
+  deps.log(`Draft updated from ${options.file}. Publish in the admin when ready.`);
 }

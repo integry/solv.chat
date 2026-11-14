@@ -46,9 +46,9 @@ describe("solv apply", () => {
         ...(typeof init?.body === "string" ? { body: init.body } : {}),
       });
       if (method === "GET") {
-        return Response.json({ draft: { config: current } });
+        return Response.json({ config: current });
       }
-      return Response.json({ draft: { config: JSON.parse(String(init?.body)) } });
+      return Response.json({ config: JSON.parse(String(init?.body)) });
     };
 
     const logs: string[] = [];
@@ -57,22 +57,28 @@ describe("solv apply", () => {
         file: configPath,
         endpoint: "https://chat.example.com",
         assistant: "ast_123",
-        session: "sess_secret_cookie",
+        ingestKey: "ik_secret_key",
       },
       { fetchImpl, log: (line) => logs.push(line) },
     );
 
     expect(calls).toHaveLength(2);
+    expect(calls[0]?.url).toBe("https://chat.example.com/v1/ingest/ast_123/config");
     expect(calls[0]?.method).toBe("GET");
-    expect(calls[0]?.headers.Cookie).toBe("solv_session=sess_secret_cookie");
+    expect(calls[0]?.headers.Authorization).toBe("Bearer ik_secret_key");
+    expect(calls[0]?.headers.Cookie).toBeUndefined();
+    expect(calls[1]?.url).toBe("https://chat.example.com/v1/ingest/ast_123/config");
     expect(calls[1]?.method).toBe("PUT");
-    expect(calls[1]?.headers.Origin).toBe("https://chat.example.com");
+    expect(calls[1]?.headers.Authorization).toBe("Bearer ik_secret_key");
+    expect(calls[1]?.headers.Origin).toBeUndefined();
 
     const diffOutput = logs.join("\n");
     expect(diffOutput).toContain('- behaviour.greeting: "Hello. Ask me anything about this site."');
     expect(diffOutput).toContain('+ behaviour.greeting: "Welcome to Acme!"');
     expect(diffOutput).toContain('- widget.accentColor: "#2563eb"');
     expect(diffOutput).toContain('+ widget.accentColor: "#111111"');
+    expect(logs.at(-1)).toMatch(/draft/i);
+    expect(logs.at(-1)).toMatch(/admin/i);
   });
 
   it("sends the original partial config and diffs against customized draft settings", async () => {
@@ -98,10 +104,10 @@ describe("solv apply", () => {
     const putBodies: unknown[] = [];
     const fetchImpl: typeof fetch = async (_input, init) => {
       if ((init?.method ?? "GET") === "GET") {
-        return Response.json({ draft: { config: customizedDraft } });
+        return Response.json({ config: customizedDraft });
       }
       putBodies.push(JSON.parse(String(init?.body)));
-      return Response.json({ draft: { config: customizedDraft } });
+      return Response.json({ config: customizedDraft });
     };
 
     const logs: string[] = [];
@@ -110,7 +116,7 @@ describe("solv apply", () => {
         file: configPath,
         endpoint: "https://chat.example.com",
         assistant: "ast_123",
-        adminToken: "tok_secret",
+        ingestKey: "ik_secret",
       },
       { fetchImpl, log: (line) => logs.push(line) },
     );
@@ -148,7 +154,7 @@ describe("solv apply", () => {
           file: configPath,
           endpoint: "https://chat.example.com",
           assistant: "ast_123",
-          adminToken: "tok_secret",
+          ingestKey: "ik_secret",
         },
         { fetchImpl, log: (line) => logs.push(line) },
       ),
