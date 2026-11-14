@@ -54,9 +54,9 @@ export async function contentHash(title: string, markdown: string): Promise<stri
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Returns the R2 object key for a document's Markdown body. */
-export function documentObjectKey(orgId: string, documentId: string): string {
-  return `org/${orgId}/doc/${documentId}.md`;
+/** Returns the R2 object key for a specific revision of a document's Markdown body. */
+export function documentObjectKey(orgId: string, documentId: string, revision = 1): string {
+  return `org/${orgId}/doc/${documentId}/v${revision}.md`;
 }
 
 async function findExistingSource(
@@ -174,19 +174,25 @@ export async function pushDocuments(
     });
     // Store the body before enqueuing so an immediate consumer never misses it,
     // and only mark each obligation complete after it succeeds so retries resume.
-    if (saved.storedRevision < saved.revision) {
-      await deps.docs.put(documentObjectKey(scope.orgId, saved.id), document.markdown);
-      await deps.tenant.documents.markBodyStored(saved.id, saved.revision);
+    let current = saved.storedRevision >= saved.revision;
+    if (!current) {
+      await deps.docs.put(
+        documentObjectKey(scope.orgId, saved.id, saved.revision),
+        document.markdown,
+      );
+      current = await deps.tenant.documents.markBodyStored(saved.id, saved.revision);
     }
-    if (saved.enqueuedRevision < saved.revision) {
+    if (current && saved.enqueuedRevision < saved.revision) {
       await deps.queue.send({
         documentId: saved.id,
         orgId: scope.orgId,
         revision: saved.revision,
       });
-      await deps.tenant.documents.markEnqueued(saved.id, saved.revision);
+      current = await deps.tenant.documents.markEnqueued(saved.id, saved.revision);
     }
-    existing.set(document.externalId, { contentHash: hash, complete: true });
+    if (current) {
+      existing.set(document.externalId, { contentHash: hash, complete: true });
+    }
     written++;
   }
 
@@ -243,17 +249,30 @@ export async function deleteDocuments(
 
   let deleted = 0;
   for (const doc of toDelete) {
+    // Atomically mark deleting before snapshotting cleanup IDs so no new
+    // pending saves or chunk commits can be admitted for this document.
+    const marked = await deps.tenant.documents.markDeleting(doc.id);
+    if (marked === null) {
+      continue;
+    }
+
     const [chunks, staleIds, pendingIds] = await Promise.all([
-      deps.tenant.documents.listChunks(doc.id),
-      deps.tenant.documents.listStaleVectors(doc.id),
-      deps.tenant.documents.listAllPendingVectors(doc.id),
+      deps.tenant.documents.listChunks(marked.id),
+      deps.tenant.documents.listStaleVectors(marked.id),
+      deps.tenant.documents.listAllPendingVectors(marked.id),
     ]);
     const vectorIds = [...new Set([...chunks.map((c) => c.id), ...staleIds, ...pendingIds])];
     if (vectorIds.length > 0) {
       await deps.retriever.remove(vectorIds);
     }
-    await deps.docs.delete(documentObjectKey(scope.orgId, doc.id));
-    if (await deps.tenant.documents.remove(doc.id)) {
+    await Promise.all([
+      deps.tenant.documents.clearStaleVectors(marked.id, staleIds),
+      deps.tenant.documents.clearAllPendingVectors(marked.id),
+    ]);
+    for (let rev = 1; rev <= marked.revision; rev++) {
+      await deps.docs.delete(documentObjectKey(scope.orgId, marked.id, rev));
+    }
+    if (await deps.tenant.documents.remove(marked.id)) {
       deleted++;
     }
   }

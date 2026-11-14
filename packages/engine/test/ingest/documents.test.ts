@@ -191,7 +191,9 @@ describe("ingest documents", () => {
     expect(keepDoc).not.toBeNull();
     expect(dropDoc).toBeNull();
     if (!keepDoc) throw new Error("expected keepDoc to exist");
-    expect(await env.DOCS.head(documentObjectKey(TEST_ORG_ID, keepDoc.id))).not.toBeNull();
+    expect(
+      await env.DOCS.head(documentObjectKey(TEST_ORG_ID, keepDoc.id, keepDoc.revision)),
+    ).not.toBeNull();
 
     const remainingVectors = retriever.all();
     expect(remainingVectors).toHaveLength(1);
@@ -409,5 +411,99 @@ describe("ingest documents", () => {
     expect(await tenant.documents.getByExternalId(defaultSourceId, "doc-a")).not.toBeNull();
     expect(await tenant.documents.getByExternalId(defaultSourceId, "doc-b")).toBeNull();
     expect(await tenant.documents.getByExternalId(explicit.id, "doc-c")).not.toBeNull();
+  });
+
+  it("prevents concurrent pushes for the same externalId from overwriting a newer revision's R2 body (F5)", async () => {
+    const { id: assistantId } = await createAssistantWithKey();
+    const scope = { orgId: TEST_ORG_ID, assistantId };
+    const tenant = forIngestScope(env.DB, scope);
+    const queue = countingQueue();
+    const retriever = memoryRetriever();
+
+    let putAEntered!: () => void;
+    const putAStarted = new Promise<void>((resolve) => {
+      putAEntered = resolve;
+    });
+    let releasePutA!: () => void;
+    const putAGate = new Promise<void>((resolve) => {
+      releasePutA = resolve;
+    });
+
+    const blockingDocsA = {
+      async put(key: string, value: string) {
+        putAEntered();
+        await putAGate;
+        return env.DOCS.put(key, value);
+      },
+      async delete(key: string) {
+        return env.DOCS.delete(key);
+      },
+    };
+
+    const pushA = pushDocuments({ tenant, docs: blockingDocsA, queue }, scope, {
+      documents: [
+        {
+          externalId: "race",
+          url: "https://example.com/race",
+          title: "Race",
+          markdown: "# Rev 1\n\nBody A.",
+        },
+      ],
+    });
+
+    await putAStarted;
+
+    // Push B updates the same externalId to revision 2 while Push A is paused at docs.put.
+    const pushBRes = await pushDocuments({ tenant, docs: env.DOCS, queue }, scope, {
+      documents: [
+        {
+          externalId: "race",
+          url: "https://example.com/race",
+          title: "Race",
+          markdown: "# Rev 2\n\nBody B.",
+        },
+      ],
+    });
+    expect(pushBRes).toEqual({ written: 1, unchanged: 0, deleted: 0 });
+
+    // Release Push A's delayed put; it must write to v1.md without clobbering v2.md.
+    releasePutA();
+    await pushA;
+
+    expect(queue.sent).toHaveLength(1);
+    const queuedMsg = queue.sent[0] as { documentId: string; orgId: string; revision?: number };
+    expect(queuedMsg.revision).toBe(2);
+
+    await runIngestBatch(
+      {
+        messages: [
+          {
+            id: newId("msg"),
+            timestamp: new Date(),
+            attempts: 1,
+            body: queuedMsg,
+            ack() {},
+            retry() {},
+          },
+        ],
+      },
+      { db: env.DB, docs: env.DOCS, embedder: fakeEmbedder(), retriever },
+    );
+
+    const chunks = await tenant.documents.listChunks(queuedMsg.documentId);
+    expect(chunks.map((c) => c.text)).toEqual(["Body B."]);
+
+    // Re-pushing Body B is a true no-op.
+    const repeatB = await pushDocuments({ tenant, docs: env.DOCS, queue }, scope, {
+      documents: [
+        {
+          externalId: "race",
+          url: "https://example.com/race",
+          title: "Race",
+          markdown: "# Rev 2\n\nBody B.",
+        },
+      ],
+    });
+    expect(repeatB).toEqual({ written: 0, unchanged: 1, deleted: 0 });
   });
 });
