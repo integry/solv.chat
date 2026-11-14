@@ -104,7 +104,7 @@ describe("admin same-origin check", () => {
     const app = createTestApp();
     const ctx = createExecutionContext();
     const response = await app.fetch(
-      new Request("https://example.com/api/admin/assistants", { method: "GET" }),
+      new Request("https://example.com/api/admin/unknown", { method: "GET" }),
       env,
       ctx,
     );
@@ -114,21 +114,30 @@ describe("admin same-origin check", () => {
   });
 });
 
-describe("queue stub", () => {
-  it("retries every message in the batch instead of acknowledging", async () => {
+describe("queue consumer", () => {
+  it("acknowledges messages for unknown or deleted documents", async () => {
     const app = createTestApp();
     const ctx = createExecutionContext();
     const batch = createMessageBatch("solvchat-ingest", [
-      { id: "msg-1", timestamp: new Date(), attempts: 1, body: { docId: "doc_1" } },
-      { id: "msg-2", timestamp: new Date(), attempts: 1, body: { docId: "doc_2" } },
+      {
+        id: "msg-1",
+        timestamp: new Date(),
+        attempts: 1,
+        body: { documentId: "doc_1", orgId: "org_00000000000000000000", contentHash: "h1" },
+      },
+      {
+        id: "msg-2",
+        timestamp: new Date(),
+        attempts: 1,
+        body: { documentId: "doc_2", orgId: "org_00000000000000000000", contentHash: "h2" },
+      },
     ]);
 
     await app.queue(batch, env, ctx);
     const result = await getQueueResult(batch, ctx);
 
     expect(result.outcome).toBe("ok");
-    expect(result.ackAll).toBe(false);
-    expect(result.explicitAcks).toEqual([]);
-    expect(result.retryBatch.retry).toBe(true);
+    expect(result.explicitAcks).toEqual(["msg-1", "msg-2"]);
+    expect(result.retryBatch.retry).toBe(false);
   });
 });
