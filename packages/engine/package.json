@@ -1,7 +1,19 @@
 {
   "name": "@solvchat/engine",
   "version": "0.0.0",
+  "description": "Cloudflare Worker chat engine, retrieval pipeline, and admin/widget server for solv.chat.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/integry/solv.chat.git",
+    "directory": "packages/engine"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

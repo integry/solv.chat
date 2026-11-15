@@ -702,4 +702,27 @@ describe("Tests screen", () => {
     );
     expect((screen.getByLabelText("Words") as HTMLInputElement).value).toBe("alpha-newer-draft");
   });
+
+  it("places the status badge inside .actions alongside Edit and Delete", async () => {
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Question A?",
+          expectation: { kind: "contains", phrase: "alpha" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    const badge = await screen.findByText("Not run yet");
+    const actions = badge.closest(".actions");
+    expect(actions).toBeTruthy();
+    expect(actions?.querySelectorAll("button")).toHaveLength(2);
+  });
 });

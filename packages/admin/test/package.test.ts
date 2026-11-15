@@ -44,7 +44,11 @@ describe("@solvchat/admin packed package", () => {
   let consumerDir = "";
 
   beforeAll(() => {
-    execFileSync("npm", ["run", "build"], { cwd: adminDir, stdio: "pipe" });
+    execFileSync("npm", ["run", "build"], {
+      cwd: adminDir,
+      stdio: "pipe",
+      env: { ...process.env, NODE_ENV: "production" },
+    });
 
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "solvchat-admin-pack-"));
     const coreTgz = packTarball(coreDir, tmpDir);
