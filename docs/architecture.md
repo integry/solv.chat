@@ -236,10 +236,29 @@ credential is involved, which makes them safer than MCP tools.
 Built in:
 
 - `navigate` — go to a URL on the same site (same origin, or an origin the owner
-  listed), optionally to a section. The conversation continues on the new page.
+  listed), optionally to a section:
+  - Same-document target (only the fragment differs, or the current URL with a
+    section): scrolls to the section and continues the conversation in place.
+  - Same-origin target: persists the pending continuation in per-origin
+    `sessionStorage` and calls `location.assign`; the next page's widget resumes
+    the conversation on connect (dropped as "the visitor moved on" if the
+    visitor sends a new message first or after 2 minutes).
+  - Listed other origin: keeps the conversation on the current page and renders
+    a button ("Open <host> in a new tab") that opens the owner's URL with
+    `target="_blank"` and `rel="noopener noreferrer"` on click, without passing
+    any transcript, ids, or extra parameters.
+  - Any other origin: refused.
 - `highlight` — scroll to an element and point at it with a short note.
 - `fill` — put values into form fields the owner has marked as fillable. It never
   submits.
+
+The owner marks what the built-ins may touch with two attributes:
+`data-solv-target="<name>"` on anything `highlight` may point at, and
+`data-solv-fill="<name>"` on each field `fill` may set; `data-solv-no-fill` on
+a form or any ancestor takes everything inside it out of scope. The model is
+given these names, never a selector, so what it can reach is exactly what the
+markup offers. Password, payment and one-time-code fields are refused even
+when marked.
 
 Custom: the site registers its own actions in code,
 

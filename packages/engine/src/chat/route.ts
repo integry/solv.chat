@@ -1,8 +1,10 @@
 import {
+  type ActionResult,
   type BehaviourConfig,
   type ChatEvent,
   type ChatHistoryTurn,
   newId,
+  type PageAction,
   parseChatRequest,
   parseFeedbackRequest,
   serializeChatEvent,
@@ -20,9 +22,11 @@ import {
 } from "../providers/retrieval.js";
 import type { LlmProvider } from "../providers/types.js";
 import type { AuthProvider, Principal, Seams } from "../seams/types.js";
-import { answerMessage } from "./answer.js";
+import { actionRunnerFor } from "./actionRunner.js";
+import { answerMessage, answerWithActionResults } from "./answer.js";
 import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
 import { mcpRunnerFor } from "./mcpRunner.js";
+import type { ToolRunner } from "./toolLoop.js";
 
 export interface ChatEnv {
   DB: D1Database;
@@ -170,67 +174,97 @@ interface StreamAnswerParams {
   pageUrl: string | undefined;
   preview: boolean;
   history: ChatHistoryTurn[] | undefined;
+  pageActions: readonly PageAction[] | undefined;
+  actionsEnabled: boolean;
   origin: string | null;
 }
 
-function streamAnswerResponse(params: StreamAnswerParams): Response {
-  const { env, seams, ctx, overrides } = params;
+interface StreamResumeParams {
+  env: ChatEnv;
+  seams: Seams;
+  ctx: Pick<ExecutionContext, "waitUntil">;
+  overrides: ChatRouteOverrides | undefined;
+  tenant: ReturnType<typeof forPublicScope>;
+  orgId: string;
+  assistantId: string;
+  visitorId: string;
+  behaviour: BehaviourConfig;
+  /** The published version's tool allow-list, as for a fresh answer. */
+  allowedTools: readonly string[];
+  conversationId: string;
+  resumeMessageId: string;
+  actionResults: readonly ActionResult[];
+  pageActions: readonly PageAction[] | undefined;
+  actionsEnabled: boolean;
+  origin: string | null;
+}
+
+async function resolveAnswerDeps(params: {
+  env: ChatEnv;
+  seams: Seams;
+  overrides: ChatRouteOverrides | undefined;
+  tenant: ReturnType<typeof forPublicScope>;
+  orgId: string;
+  assistantId: string;
+  allowedTools: readonly string[];
+  pageActions: readonly PageAction[] | undefined;
+  actionsEnabled: boolean;
+  preview: boolean;
+}) {
+  const { env, seams, overrides } = params;
   const providerKind = overrides?.providerKind ?? resolveProvider(env.SOLV_LLM_PROVIDER);
   const tier = overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER);
   const model =
     overrides?.model ??
     (providerKind === "anthropic" ? ANTHROPIC_MODELS[tier] : OPENAI_MODELS[tier]);
 
+  const embedder =
+    overrides?.embedder ?? openAIEmbedder({ apiKey: await seams.keys.embeddingKey(params.orgId) });
+  const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
+  const provider =
+    overrides?.provider ??
+    (await llmProviderFor({ orgId: params.orgId, provider: providerKind, tier }, seams.keys));
+
+  const actionRunner = params.preview
+    ? null
+    : actionRunnerFor(params.pageActions, { builtinsEnabled: params.actionsEnabled });
+  // No tool switched on and published means no runner, so the request
+  // carries no `tools` key and this is phase 1 behaviour exactly.
+  const mcp = await mcpRunnerFor(
+    {
+      tenant: params.tenant,
+      secretKey: env.SOLV_SECRET_KEY ?? "",
+      fetchImpl: overrides?.fetch,
+    },
+    params.assistantId,
+    params.allowedTools,
+  );
+  const runners: ToolRunner[] = [];
+  if (actionRunner) runners.push(actionRunner);
+  if (mcp) runners.push(mcp);
+
+  return {
+    tenant: params.tenant,
+    embedder,
+    retriever,
+    provider,
+    model,
+    usage: seams.usage,
+    runners,
+  };
+}
+
+function streamEventsResponse(
+  origin: string | null,
+  ctx: Pick<ExecutionContext, "waitUntil">,
+  produce: () => AsyncIterable<ChatEvent>,
+): Response {
   let cancelled = false;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const pipeline = (async () => {
         try {
-          const embedder =
-            overrides?.embedder ??
-            openAIEmbedder({ apiKey: await seams.keys.embeddingKey(params.orgId) });
-          const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
-          const provider =
-            overrides?.provider ??
-            (await llmProviderFor(
-              { orgId: params.orgId, provider: providerKind, tier },
-              seams.keys,
-            ));
-
-          // No tool switched on and published means no runner, so the request
-          // carries no `tools` key and this is phase 1 behaviour exactly.
-          const mcp = await mcpRunnerFor(
-            {
-              tenant: params.tenant,
-              secretKey: env.SOLV_SECRET_KEY ?? "",
-              fetchImpl: overrides?.fetch,
-            },
-            params.assistantId,
-            params.allowedTools,
-          );
-
-          for await (const event of answerMessage(
-            {
-              tenant: params.tenant,
-              embedder,
-              retriever,
-              provider,
-              model,
-              usage: seams.usage,
-              runners: mcp ? [mcp] : [],
-            },
-            {
-              orgId: params.orgId,
-              assistantId: params.assistantId,
-              visitorId: params.visitorId,
-              message: params.message,
-              behaviour: params.behaviour,
-              conversationId: params.conversationId,
-              pageUrl: params.pageUrl,
-              preview: params.preview,
-              history: params.history,
-            },
-          )) {
+          for await (const event of produce()) {
             if (!cancelled) {
               controller.enqueue(encoder.encode(serializeChatEvent(event)));
             }
@@ -271,7 +305,41 @@ function streamAnswerResponse(params: StreamAnswerParams): Response {
 
   return new Response(stream, {
     status: 200,
-    headers: sseHeaders(params.origin),
+    headers: sseHeaders(origin),
+  });
+}
+
+function streamAnswerResponse(params: StreamAnswerParams): Response {
+  return streamEventsResponse(params.origin, params.ctx, async function* () {
+    const deps = await resolveAnswerDeps(params);
+    yield* answerMessage(deps, {
+      orgId: params.orgId,
+      assistantId: params.assistantId,
+      visitorId: params.visitorId,
+      message: params.message,
+      behaviour: params.behaviour,
+      conversationId: params.conversationId,
+      pageUrl: params.pageUrl,
+      preview: params.preview,
+      history: params.history,
+      pageActions: params.preview ? undefined : params.pageActions,
+    });
+  });
+}
+
+function streamResumeResponse(params: StreamResumeParams): Response {
+  return streamEventsResponse(params.origin, params.ctx, async function* () {
+    const deps = await resolveAnswerDeps({ ...params, preview: false });
+    yield* answerWithActionResults(deps, {
+      orgId: params.orgId,
+      assistantId: params.assistantId,
+      visitorId: params.visitorId,
+      conversationId: params.conversationId,
+      resumeMessageId: params.resumeMessageId,
+      actionResults: params.actionResults,
+      behaviour: params.behaviour,
+      pageActions: params.pageActions,
+    });
   });
 }
 
@@ -339,6 +407,9 @@ export async function adminChatRoute(
     pageUrl: parsed.value.pageUrl,
     preview: true,
     history: parsed.value.history,
+    // The preview has no page, so there is nothing to offer and nothing to resume.
+    pageActions: undefined,
+    actionsEnabled: false,
     origin: null,
   });
 }
@@ -402,12 +473,32 @@ export async function chatRoute(
     return eventStreamOf({ type: "error", message: "This assistant is not available." }, origin);
   }
 
-  const message = parsed.value.message;
-  if (parsed.value.actionResults !== undefined || message === undefined) {
-    return eventStreamOf(
-      { type: "error", message: "Resuming actions is not supported yet." },
+  // A resuming request continues an answer instead of starting one. Same
+  // guards, same version, same visitor: only the body differs.
+  if (parsed.value.actionResults !== undefined) {
+    return streamResumeResponse({
+      env,
+      seams,
+      ctx,
+      overrides,
+      tenant,
+      orgId: assistant.orgId,
+      assistantId: assistant.id,
+      visitorId: parsed.value.visitorId,
+      behaviour: version.config.behaviour,
+      allowedTools: version.config.allowedTools,
+      conversationId: parsed.value.conversationId ?? "",
+      resumeMessageId: parsed.value.resumeMessageId ?? "",
+      actionResults: parsed.value.actionResults,
+      pageActions: parsed.value.pageActions,
+      actionsEnabled: version.config.actions.builtins,
       origin,
-    );
+    });
+  }
+
+  const message = parsed.value.message;
+  if (message === undefined) {
+    return eventStreamOf({ type: "error", message: "Invalid chat request." }, origin);
   }
 
   return streamAnswerResponse({
@@ -426,6 +517,8 @@ export async function chatRoute(
     pageUrl: parsed.value.pageUrl,
     preview: false,
     history: undefined,
+    pageActions: parsed.value.pageActions,
+    actionsEnabled: version.config.actions.builtins,
     origin,
   });
 }
@@ -533,6 +626,12 @@ export async function publicConfigRoute(
       position: published.config.widget.position,
       greeting: published.config.behaviour.greeting,
       suggestedQuestions: [...published.config.behaviour.suggestedQuestions],
+      // What the widget needs to gate the built-ins and check a navigate
+      // target. No secrets: both values are the owner's public choices.
+      actions: {
+        builtins: published.config.actions.builtins,
+        allowedOrigins: [...published.config.actions.allowedOrigins],
+      },
     },
     { status: 200, headers: corsHeaders(origin) },
   );

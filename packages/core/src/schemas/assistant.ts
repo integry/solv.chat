@@ -10,34 +10,34 @@ export interface AssistantInput {
  * Origins are compared byte-for-byte against the Origin header at runtime, so
  * we normalise here and reject anything that is not exactly an origin.
  * Accepting a path or a wildcard would quietly widen who may embed the
- * assistant, which is the one mistake in this file that costs money.
+ * assistant or where `navigate` may send a visitor.
  */
-function parseOrigin(raw: unknown, i: number, errors: Errors): string | null {
+export function parseOriginValue(raw: unknown, field: string, errors: Errors): string | null {
   if (typeof raw !== "string" || raw.trim() === "") {
-    errors.add(`allowedOrigins[${i}]`, "must be a non-empty string");
+    errors.add(field, "must be a non-empty string");
     return null;
   }
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    errors.add(`allowedOrigins[${i}]`, "must be an absolute URL such as https://example.com");
+    errors.add(field, "must be an absolute URL such as https://example.com");
     return null;
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
-    errors.add(`allowedOrigins[${i}]`, "must use http or https");
+    errors.add(field, "must use http or https");
     return null;
   }
   if (url.username !== "" || url.password !== "") {
-    errors.add(`allowedOrigins[${i}]`, "must be an origin only, with no credentials");
+    errors.add(field, "must be an origin only, with no credentials");
     return null;
   }
   if (url.hostname.includes("*")) {
-    errors.add(`allowedOrigins[${i}]`, "must not contain wildcards");
+    errors.add(field, "must not contain wildcards");
     return null;
   }
   if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
-    errors.add(`allowedOrigins[${i}]`, "must be an origin only, with no path");
+    errors.add(field, "must be an origin only, with no path");
     return null;
   }
   return url.origin;
@@ -56,7 +56,7 @@ export function parseAssistantInput(value: unknown): Result<AssistantInput> {
     errors.add("allowedOrigins", "must be an array");
   } else {
     value.allowedOrigins.forEach((raw, i) => {
-      const origin = parseOrigin(raw, i, errors);
+      const origin = parseOriginValue(raw, `allowedOrigins[${i}]`, errors);
       // De-duplicate: the admin lets an owner paste a list, and a repeat would
       // otherwise show twice on the Widget screen.
       if (origin !== null && !origins.includes(origin)) origins.push(origin);
