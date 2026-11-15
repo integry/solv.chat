@@ -9,9 +9,15 @@ interface ServerDbRow {
   label: string;
   url: string;
   auth_kind: McpAuthKind;
+  header_name: string | null;
   secret_ciphertext: string | null;
   enabled: number;
   created_at: number;
+}
+
+interface ServerWithStatsDbRow extends ServerDbRow {
+  tool_count: number;
+  allowed_count: number;
 }
 
 interface ToolDbRow {
@@ -24,6 +30,18 @@ interface ToolDbRow {
   allowed: number;
 }
 
+interface AllowedToolDbRow {
+  id: string;
+  server_id: string;
+  name: string;
+  description: string;
+  input_schema: string;
+  url: string;
+  auth_kind: McpAuthKind;
+  header_name: string | null;
+  label: string;
+}
+
 export interface McpServerRow {
   id: string;
   orgId: string;
@@ -31,9 +49,15 @@ export interface McpServerRow {
   label: string;
   url: string;
   authKind: McpAuthKind;
+  headerName: string | null;
   hasSecret: boolean;
   enabled: boolean;
   createdAt: number;
+}
+
+export interface McpServerWithStatsRow extends McpServerRow {
+  toolCount: number;
+  allowedCount: number;
 }
 
 export interface McpToolRow {
@@ -46,12 +70,25 @@ export interface McpToolRow {
   allowed: boolean;
 }
 
+export interface McpAllowedToolRow {
+  id: string;
+  serverId: string;
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  url: string;
+  authKind: McpAuthKind;
+  headerName: string | null;
+  label: string;
+}
+
 export interface CreateMcpServerInput {
   id: string;
   assistantId: string;
   label: string;
   url: string;
   authKind: McpAuthKind;
+  headerName?: string | null | undefined;
   secretCiphertext: string | null;
   enabled: boolean;
   createdAt: number;
@@ -61,6 +98,8 @@ export interface UpdateMcpServerInput {
   label: string;
   url: string;
   enabled: boolean;
+  authKind?: McpAuthKind | undefined;
+  headerName?: string | null | undefined;
 }
 
 export interface UpsertMcpToolInput {
@@ -72,7 +111,7 @@ export interface UpsertMcpToolInput {
 }
 
 const SERVER_COLUMNS =
-  "id, org_id, assistant_id, label, url, auth_kind, secret_ciphertext, enabled, created_at";
+  "id, org_id, assistant_id, label, url, auth_kind, header_name, secret_ciphertext, enabled, created_at";
 const TOOL_COLUMNS = "id, org_id, server_id, name, description, input_schema, allowed";
 
 const mapServer = (row: ServerDbRow): McpServerRow => ({
@@ -82,9 +121,16 @@ const mapServer = (row: ServerDbRow): McpServerRow => ({
   label: row.label,
   url: row.url,
   authKind: row.auth_kind,
+  headerName: row.header_name,
   hasSecret: row.secret_ciphertext !== null,
   enabled: row.enabled === 1,
   createdAt: row.created_at,
+});
+
+const mapServerWithStats = (row: ServerWithStatsDbRow): McpServerWithStatsRow => ({
+  ...mapServer(row),
+  toolCount: Number(row.tool_count ?? 0),
+  allowedCount: Number(row.allowed_count ?? 0),
 });
 
 const mapTool = (row: ToolDbRow): McpToolRow => ({
@@ -95,6 +141,18 @@ const mapTool = (row: ToolDbRow): McpToolRow => ({
   description: row.description,
   inputSchema: safeJsonObject(row.input_schema),
   allowed: row.allowed === 1,
+});
+
+const mapAllowedTool = (row: AllowedToolDbRow): McpAllowedToolRow => ({
+  id: row.id,
+  serverId: row.server_id,
+  name: row.name,
+  description: row.description,
+  inputSchema: safeJsonObject(row.input_schema),
+  url: row.url,
+  authKind: row.auth_kind,
+  headerName: row.header_name,
+  label: row.label,
 });
 
 /** Tenant-scoped data access for `mcp_servers` and `mcp_tools`. */
@@ -110,6 +168,24 @@ export function mcpFor(db: D1Database, orgId: string) {
       return res.results.map(mapServer);
     },
 
+    async listServersWithStats(assistantId: string): Promise<McpServerWithStatsRow[]> {
+      const res = await prepare(
+        db,
+        `SELECT s.id, s.org_id, s.assistant_id, s.label, s.url, s.auth_kind, s.header_name,
+                s.secret_ciphertext, s.enabled, s.created_at,
+                COUNT(t.id) AS tool_count,
+                COALESCE(SUM(t.allowed), 0) AS allowed_count
+           FROM mcp_servers s
+           LEFT JOIN mcp_tools t ON t.server_id = s.id AND t.org_id = s.org_id
+          WHERE s.org_id = ?1 AND s.assistant_id = ?2
+          GROUP BY s.id
+          ORDER BY s.created_at ASC`,
+      )
+        .bind(orgId, assistantId)
+        .all<ServerWithStatsDbRow>();
+      return res.results.map(mapServerWithStats);
+    },
+
     async getServer(id: string): Promise<McpServerRow | null> {
       const row = await prepare(
         db,
@@ -120,11 +196,61 @@ export function mcpFor(db: D1Database, orgId: string) {
       return row ? mapServer(row) : null;
     },
 
+    async getServerWithStats(id: string): Promise<McpServerWithStatsRow | null> {
+      const row = await prepare(
+        db,
+        `SELECT s.id, s.org_id, s.assistant_id, s.label, s.url, s.auth_kind, s.header_name,
+                s.secret_ciphertext, s.enabled, s.created_at,
+                COUNT(t.id) AS tool_count,
+                COALESCE(SUM(t.allowed), 0) AS allowed_count
+           FROM mcp_servers s
+           LEFT JOIN mcp_tools t ON t.server_id = s.id AND t.org_id = s.org_id
+          WHERE s.org_id = ?1 AND s.id = ?2
+          GROUP BY s.id`,
+      )
+        .bind(orgId, id)
+        .first<ServerWithStatsDbRow>();
+      return row ? mapServerWithStats(row) : null;
+    },
+
+    /**
+     * The stored ciphertext for one server.
+     *
+     * Deliberately a separate method with a name that says what it returns:
+     * every other accessor maps to `McpServerRow`, which carries `hasSecret`
+     * and never this value, so a list or detail response cannot leak it by
+     * accident.
+     */
+    async readSecretCiphertext(id: string): Promise<string | null> {
+      const row = await prepare(
+        db,
+        "SELECT secret_ciphertext FROM mcp_servers WHERE org_id = ?1 AND id = ?2",
+      )
+        .bind(orgId, id)
+        .first<{ secret_ciphertext: string | null }>();
+      return row?.secret_ciphertext ?? null;
+    },
+
+    /**
+     * Sets or clears the credential without touching label, URL or enabled, so
+     * an owner editing a label cannot blank a credential by omission.
+     */
+    async setSecretCiphertext(id: string, ciphertext: string | null): Promise<boolean> {
+      const res = await prepare(
+        db,
+        "UPDATE mcp_servers SET secret_ciphertext = ?3 WHERE org_id = ?1 AND id = ?2",
+      )
+        .bind(orgId, id, ciphertext)
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
     async createServer(input: CreateMcpServerInput): Promise<McpServerRow> {
+      const headerName = input.headerName ?? null;
       await prepareInsert(
         db,
-        `INSERT INTO mcp_servers (id, org_id, assistant_id, label, url, auth_kind, secret_ciphertext, enabled, created_at)
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
+        `INSERT INTO mcp_servers (id, org_id, assistant_id, label, url, auth_kind, header_name, secret_ciphertext, enabled, created_at)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
       )
         .bind(
           orgId,
@@ -133,6 +259,7 @@ export function mcpFor(db: D1Database, orgId: string) {
           input.label,
           input.url,
           input.authKind,
+          headerName,
           input.secretCiphertext,
           input.enabled ? 1 : 0,
           input.createdAt,
@@ -146,6 +273,7 @@ export function mcpFor(db: D1Database, orgId: string) {
         label: input.label,
         url: input.url,
         authKind: input.authKind,
+        headerName,
         hasSecret: input.secretCiphertext !== null,
         enabled: input.enabled,
         createdAt: input.createdAt,
@@ -153,11 +281,21 @@ export function mcpFor(db: D1Database, orgId: string) {
     },
 
     async updateServer(id: string, input: UpdateMcpServerInput): Promise<boolean> {
+      const sets = ["label = ?3", "url = ?4", "enabled = ?5"];
+      const params: unknown[] = [orgId, id, input.label, input.url, input.enabled ? 1 : 0];
+      if (input.authKind !== undefined) {
+        sets.push(`auth_kind = ?${params.length + 1}`);
+        params.push(input.authKind);
+      }
+      if (input.headerName !== undefined) {
+        sets.push(`header_name = ?${params.length + 1}`);
+        params.push(input.headerName);
+      }
       const res = await prepare(
         db,
-        "UPDATE mcp_servers SET label = ?3, url = ?4, enabled = ?5 WHERE org_id = ?1 AND id = ?2",
+        `UPDATE mcp_servers SET ${sets.join(", ")} WHERE org_id = ?1 AND id = ?2`,
       )
-        .bind(orgId, id, input.label, input.url, input.enabled ? 1 : 0)
+        .bind(...params)
         .run();
       return (res.meta.changes ?? 0) > 0;
     },
@@ -208,6 +346,52 @@ export function mcpFor(db: D1Database, orgId: string) {
         .bind(orgId, id, allowed ? 1 : 0)
         .run();
       return (res.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Drops tools the server no longer offers. Refresh upserts what is there
+     * and then calls this, rather than deleting everything first: deleting
+     * would lose the `allowed` flag on every refresh.
+     */
+    async removeToolsNotIn(serverId: string, names: readonly string[]): Promise<number> {
+      const res = await prepare(
+        db,
+        `DELETE FROM mcp_tools
+          WHERE org_id = ?1 AND server_id = ?2
+            AND name NOT IN (SELECT value FROM json_each(?3))`,
+      )
+        .bind(orgId, serverId, JSON.stringify([...names]))
+        .run();
+      return res.meta.changes ?? 0;
+    },
+
+    async getToolByName(serverId: string, name: string): Promise<McpToolRow | null> {
+      const row = await prepare(
+        db,
+        `SELECT ${TOOL_COLUMNS} FROM mcp_tools WHERE org_id = ?1 AND server_id = ?2 AND name = ?3`,
+      )
+        .bind(orgId, serverId, name)
+        .first<ToolDbRow>();
+      return row ? mapTool(row) : null;
+    },
+
+    /**
+     * Every switched-on tool of every enabled server for one assistant, with
+     * the server it belongs to.
+     */
+    async listAllowedTools(assistantId: string): Promise<McpAllowedToolRow[]> {
+      const res = await prepare(
+        db,
+        `SELECT t.id, t.server_id, t.name, t.description, t.input_schema,
+                s.url, s.auth_kind, s.header_name, s.label
+           FROM mcp_tools t
+           JOIN mcp_servers s ON s.id = t.server_id AND s.org_id = t.org_id
+          WHERE t.org_id = ?1 AND s.assistant_id = ?2 AND t.allowed = 1 AND s.enabled = 1
+          ORDER BY s.created_at ASC, t.name ASC`,
+      )
+        .bind(orgId, assistantId)
+        .all<AllowedToolDbRow>();
+      return res.results.map(mapAllowedTool);
     },
   };
 }

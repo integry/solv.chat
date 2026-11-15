@@ -45,6 +45,7 @@ export interface Env {
   INGEST_QUEUE: Queue;
   SOLV_LLM_PROVIDER?: string | undefined;
   SOLV_LLM_TIER?: string | undefined;
+  SOLV_SECRET_KEY?: string | undefined;
 }
 
 export interface App {
@@ -130,6 +131,8 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           retriever: vectorizeRetriever(env.VECTORS),
           publicBaseUrl: url.origin,
           fetchImpl: options?.fetch,
+          // Used only to seal and open stored MCP credentials.
+          secretKey: env.SOLV_SECRET_KEY ?? "",
         });
       }
       if (

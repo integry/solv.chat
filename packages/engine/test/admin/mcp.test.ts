@@ -1,0 +1,578 @@
+import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import { beforeEach, describe, expect, it } from "vitest";
+import { createApp } from "../../src/app.js";
+import { forPrincipal } from "../../src/db/tenant.js";
+import { openSecret } from "../../src/security/secretBox.js";
+import { type createTestApp, fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
+
+const ORG_A = TEST_ORG_ID;
+const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
+const TEST_SECRET_KEY = "test-secret-key-for-mcp-admin-tests";
+const CREDENTIAL = "sk-live-super-secret-token-value";
+
+interface McpToolDef {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+function mcpFetch(
+  toolsOrHandler:
+    | McpToolDef[]
+    | ((method: string, id: unknown, requestHeaders: Headers) => Response),
+  options: { requiredHeader?: { name: string; value: string } } = {},
+): typeof fetch {
+  return async (_input, init) => {
+    const headers = new Headers(init?.headers);
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    const method = String(body.method ?? "");
+
+    if (options.requiredHeader) {
+      const actual = headers.get(options.requiredHeader.name);
+      if (actual !== options.requiredHeader.value) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+    }
+
+    if (method === "initialize") {
+      return Response.json({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          protocolVersion: "2025-11-25",
+          capabilities: { tools: {} },
+          serverInfo: { name: "fake-mcp", version: "1.0.0" },
+        },
+      });
+    }
+    if (method === "notifications/initialized") {
+      return new Response(null, { status: 202 });
+    }
+    if (typeof toolsOrHandler === "function") {
+      return toolsOrHandler(method, body.id, headers);
+    }
+    if (method === "tools/list") {
+      return Response.json({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: { tools: toolsOrHandler },
+      });
+    }
+    return Response.json({
+      jsonrpc: "2.0",
+      id: body.id,
+      error: { code: -32601, message: "Method not found" },
+    });
+  };
+}
+
+function appForOrg(orgId: string, fetchImpl?: typeof fetch) {
+  return createApp(
+    fakeSeams({
+      auth: {
+        async authenticate() {
+          return { orgId, userId: "owner", role: "owner" };
+        },
+      },
+    }),
+    fetchImpl ? { fetch: fetchImpl } : undefined,
+  );
+}
+
+async function call(
+  app: ReturnType<typeof createTestApp>,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<Response> {
+  const ctx = createExecutionContext();
+  const headers: Record<string, string> = {};
+  if (method !== "GET" && method !== "HEAD") {
+    headers.Origin = "https://example.com";
+  }
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+  const response = await app.fetch(
+    new Request(`https://example.com${path}`, {
+      method,
+      headers,
+      body: body === undefined ? null : JSON.stringify(body),
+    }),
+    { ...env, SOLV_SECRET_KEY: TEST_SECRET_KEY },
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  return response;
+}
+
+async function createAssistant(app: ReturnType<typeof createTestApp>, name = "Support Bot") {
+  const res = await call(app, "POST", "/api/admin/assistants", {
+    name,
+    allowedOrigins: [],
+  });
+  const data = (await res.json()) as { assistant: { id: string } };
+  return data.assistant.id;
+}
+
+describe("admin MCP servers and tools API", () => {
+  beforeEach(async () => {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM mcp_tools"),
+      env.DB.prepare("DELETE FROM mcp_servers"),
+      env.DB.prepare("DELETE FROM assistant_versions"),
+      env.DB.prepare("DELETE FROM assistants"),
+      env.DB.prepare("DELETE FROM orgs WHERE id != ?1").bind(ORG_A),
+      env.DB.prepare("INSERT INTO orgs (id, name) VALUES (?1, ?2)").bind(ORG_B, "Org B"),
+    ]);
+  });
+
+  it("creates a server, lists tools with allowed = false, and never exposes credential or ciphertext", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch(
+        [
+          {
+            name: "lookup_order",
+            description: "Look up an order by id",
+            inputSchema: { type: "object", properties: { id: { type: "string" } } },
+          },
+          {
+            name: "list_invoices",
+            description: "List recent invoices",
+            inputSchema: { type: "object" },
+          },
+        ],
+        { requiredHeader: { name: "x-api-key", value: CREDENTIAL } },
+      ),
+    );
+    const assistantId = await createAssistant(app);
+
+    const createRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+      label: "Orders",
+      url: "https://tools.example.com/mcp",
+      authKind: "static_header",
+      headerName: "x-api-key",
+      headerValue: CREDENTIAL,
+    });
+    expect(createRes.status).toBe(201);
+    const createText = await createRes.text();
+    const created = JSON.parse(createText) as {
+      server: {
+        id: string;
+        label: string;
+        url: string;
+        authKind: string;
+        headerName: string | null;
+        hasSecret: boolean;
+        enabled: boolean;
+        toolCount: number;
+        allowedCount: number;
+      };
+      tools: Array<{ id: string; name: string; allowed: boolean }>;
+      refreshError?: string;
+    };
+    expect(created.refreshError).toBeUndefined();
+    expect(created.server.authKind).toBe("static_header");
+    expect(created.server.headerName).toBe("x-api-key");
+    expect(created.server.hasSecret).toBe(true);
+    expect(created.server.enabled).toBe(true);
+    expect(created.server.toolCount).toBe(2);
+    expect(created.server.allowedCount).toBe(0);
+    expect(created.tools).toHaveLength(2);
+    expect(created.tools.every((t) => t.allowed === false)).toBe(true);
+
+    const row = await env.DB.prepare(
+      "SELECT secret_ciphertext, auth_kind, enabled FROM mcp_servers WHERE org_id = ?1 AND id = ?2",
+    )
+      .bind(ORG_A, created.server.id)
+      .first<{ secret_ciphertext: string | null; auth_kind: string; enabled: number }>();
+    expect(row?.auth_kind).toBe("static_header");
+    expect(row?.enabled).toBe(1);
+    const ciphertext = row?.secret_ciphertext ?? "";
+    expect(ciphertext).not.toBe("");
+    // The stored form round-trips through openSecret at the call site.
+    expect(await openSecret(TEST_SECRET_KEY, ciphertext)).toBe(CREDENTIAL);
+
+    expect(createText).not.toContain(CREDENTIAL);
+    expect(createText).not.toContain(ciphertext);
+
+    for (const path of [
+      `/api/admin/assistants/${assistantId}/mcp-servers`,
+      `/api/admin/mcp-servers/${created.server.id}/tools`,
+    ]) {
+      const text = await (await call(app, "GET", path)).text();
+      expect(text).not.toContain(CREDENTIAL);
+      expect(text).not.toContain(ciphertext);
+    }
+  });
+
+  it("keeps the server and reports refreshError when the remote server errors on create", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch(() => new Response("Internal Server Error", { status: 500 })),
+    );
+    const assistantId = await createAssistant(app);
+
+    const res = await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+      label: "Broken",
+      url: "https://tools.example.com/mcp",
+      authKind: "none",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as {
+      server: { id: string; toolCount: number };
+      tools: unknown[];
+      refreshError?: string;
+    };
+    expect(body.tools).toEqual([]);
+    expect(body.server.toolCount).toBe(0);
+    expect(body.refreshError).toBeTruthy();
+
+    const listRes = await call(app, "GET", `/api/admin/assistants/${assistantId}/mcp-servers`);
+    expect(listRes.status).toBe(200);
+    const listBody = (await listRes.json()) as { servers: Array<{ id: string }> };
+    expect(listBody.servers.map((s) => s.id)).toEqual([body.server.id]);
+  });
+
+  it("rejects non-https and private URLs with 400 naming url and creates no row", async () => {
+    const app = appForOrg(ORG_A, mcpFetch([]));
+    const assistantId = await createAssistant(app);
+
+    for (const badUrl of ["http://tools.example.com/mcp", "https://127.0.0.1/mcp"]) {
+      const res = await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Bad",
+        url: badUrl,
+        authKind: "none",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { fields?: string[] };
+      expect(body.fields?.some((f) => f.startsWith("url:"))).toBe(true);
+    }
+
+    const countRow = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM mcp_servers WHERE org_id = ?1",
+    )
+      .bind(ORG_A)
+      .first<{ count: number }>();
+    expect(countRow?.count).toBe(0);
+  });
+
+  it("refresh adds new tools, updates changed tools, prunes dropped tools, and preserves allowed", async () => {
+    let currentTools: McpToolDef[] = [
+      {
+        name: "lookup_order",
+        description: "v1 description",
+        inputSchema: { type: "object", properties: { id: { type: "string" } } },
+      },
+      {
+        name: "deprecated_tool",
+        description: "Will be removed",
+        inputSchema: { type: "object" },
+      },
+    ];
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch((method, id) => {
+        if (method === "tools/list") {
+          return Response.json({ jsonrpc: "2.0", id, result: { tools: currentTools } });
+        }
+        return Response.json({ jsonrpc: "2.0", id, error: { code: -32601, message: "n/a" } });
+      }),
+    );
+    const assistantId = await createAssistant(app);
+
+    const createRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+      label: "Orders",
+      url: "https://tools.example.com/mcp",
+      authKind: "none",
+    });
+    const created = (await createRes.json()) as {
+      server: { id: string };
+      tools: Array<{ id: string; name: string }>;
+    };
+    const lookupTool = created.tools.find((t) => t.name === "lookup_order");
+    expect(lookupTool).toBeDefined();
+
+    // Switch lookup_order on.
+    const toggleRes = await call(
+      app,
+      "PATCH",
+      `/api/admin/mcp-servers/${created.server.id}/tools/${lookupTool?.id}`,
+      { allowed: true },
+    );
+    expect(toggleRes.status).toBe(200);
+
+    // Second refresh: update lookup_order, add new_tool, drop deprecated_tool.
+    currentTools = [
+      {
+        name: "lookup_order",
+        description: "v2 description",
+        inputSchema: { type: "object", properties: { orderId: { type: "string" } } },
+      },
+      {
+        name: "new_tool",
+        description: "Brand new",
+        inputSchema: { type: "object" },
+      },
+    ];
+
+    const refreshRes = await call(
+      app,
+      "POST",
+      `/api/admin/mcp-servers/${created.server.id}/refresh`,
+    );
+    expect(refreshRes.status).toBe(200);
+    const refreshed = (await refreshRes.json()) as {
+      tools: Array<{ name: string; description: string; inputSchema: unknown; allowed: boolean }>;
+    };
+    expect(refreshed.tools).toHaveLength(2);
+
+    const surviving = refreshed.tools.find((t) => t.name === "lookup_order");
+    const added = refreshed.tools.find((t) => t.name === "new_tool");
+    expect(surviving?.description).toBe("v2 description");
+    expect(surviving?.inputSchema).toEqual({
+      type: "object",
+      properties: { orderId: { type: "string" } },
+    });
+    expect(surviving?.allowed).toBe(true);
+    expect(added?.allowed).toBe(false);
+    expect(refreshed.tools.find((t) => t.name === "deprecated_tool")).toBeUndefined();
+  });
+
+  it("keeps mcp_tools.allowed and draft allowedTools in step when toggling tools", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch([
+        { name: "tool_a", description: "A", inputSchema: { type: "object" } },
+        { name: "tool_b", description: "B", inputSchema: { type: "object" } },
+      ]),
+    );
+    const assistantId = await createAssistant(app);
+
+    const createRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+      label: "Tools",
+      url: "https://tools.example.com/mcp",
+      authKind: "none",
+    });
+    const created = (await createRes.json()) as {
+      server: { id: string };
+      tools: Array<{ id: string; name: string }>;
+    };
+    const toolA = created.tools.find((t) => t.name === "tool_a");
+    expect(toolA).toBeDefined();
+
+    // Switch on.
+    const onRes = await call(
+      app,
+      "PATCH",
+      `/api/admin/mcp-servers/${created.server.id}/tools/${toolA?.id}`,
+      { allowed: true },
+    );
+    expect(onRes.status).toBe(200);
+    expect(((await onRes.json()) as { tool: { allowed: boolean } }).tool.allowed).toBe(true);
+
+    const draftAfterOn = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: { config: { allowedTools: string[] } } };
+    expect(draftAfterOn.draft.config.allowedTools).toEqual(["tool_a"]);
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    expect((await tenant.mcp.listAllowedTools(assistantId)).map((t) => t.name)).toEqual(["tool_a"]);
+
+    // Switch off.
+    const offRes = await call(
+      app,
+      "PATCH",
+      `/api/admin/mcp-servers/${created.server.id}/tools/${toolA?.id}`,
+      { allowed: false },
+    );
+    expect(offRes.status).toBe(200);
+    expect(((await offRes.json()) as { tool: { allowed: boolean } }).tool.allowed).toBe(false);
+
+    const draftAfterOff = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: { config: { allowedTools: string[] } } };
+    expect(draftAfterOff.draft.config.allowedTools).toEqual([]);
+    expect(await tenant.mcp.listAllowedTools(assistantId)).toEqual([]);
+  });
+
+  it("preserves credential when PATCH omits it, clears on empty string, and validates URL on PATCH", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch([{ name: "ping", description: "Ping", inputSchema: { type: "object" } }], {
+        requiredHeader: { name: "x-api-key", value: CREDENTIAL },
+      }),
+    );
+    const assistantId = await createAssistant(app);
+
+    const createRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+      label: "Auth Server",
+      url: "https://tools.example.com/mcp",
+      authKind: "static_header",
+      headerName: "x-api-key",
+      headerValue: CREDENTIAL,
+    });
+    const created = (await createRes.json()) as { server: { id: string } };
+
+    // PATCH omitting headerValue leaves credential untouched.
+    const patchLabelRes = await call(app, "PATCH", `/api/admin/mcp-servers/${created.server.id}`, {
+      label: "Renamed Server",
+    });
+    expect(patchLabelRes.status).toBe(200);
+    const patchLabelText = await patchLabelRes.text();
+    const patchLabelBody = JSON.parse(patchLabelText) as {
+      server: { label: string; hasSecret: boolean };
+    };
+    expect(patchLabelBody.server.label).toBe("Renamed Server");
+    expect(patchLabelBody.server.hasSecret).toBe(true);
+    expect(patchLabelText).not.toContain(CREDENTIAL);
+
+    // Refresh still succeeds using the preserved credential.
+    const refreshOk = await call(
+      app,
+      "POST",
+      `/api/admin/mcp-servers/${created.server.id}/refresh`,
+    );
+    expect(refreshOk.status).toBe(200);
+
+    // PATCH with non-https URL fails with 400 naming url.
+    const badUrlRes = await call(app, "PATCH", `/api/admin/mcp-servers/${created.server.id}`, {
+      url: "http://tools.example.com/mcp",
+    });
+    expect(badUrlRes.status).toBe(400);
+    const badUrlBody = (await badUrlRes.json()) as { fields?: string[] };
+    expect(badUrlBody.fields?.some((f) => f.startsWith("url:"))).toBe(true);
+
+    // PATCH with explicit empty string clears credential.
+    const clearRes = await call(app, "PATCH", `/api/admin/mcp-servers/${created.server.id}`, {
+      headerValue: "",
+    });
+    expect(clearRes.status).toBe(200);
+    const clearBody = (await clearRes.json()) as { server: { hasSecret: boolean } };
+    expect(clearBody.server.hasSecret).toBe(false);
+
+    // With authKind still static_header and cleared secret, refresh fails cleanly (502).
+    const refreshMissing = await call(
+      app,
+      "POST",
+      `/api/admin/mcp-servers/${created.server.id}/refresh`,
+    );
+    expect(refreshMissing.status).toBe(502);
+    const refreshMissingBody = (await refreshMissing.json()) as { error: string };
+    expect(refreshMissingBody.error).toContain("credential that is not set");
+  });
+
+  it("returns 404 on every verb for another org's ids and leaves their rows untouched", async () => {
+    const appA = appForOrg(
+      ORG_A,
+      mcpFetch([{ name: "secret_tool", description: "A", inputSchema: { type: "object" } }]),
+    );
+    const appB = appForOrg(ORG_B, mcpFetch([]));
+
+    const assistantA = await createAssistant(appA, "Org A Bot");
+    const createRes = await call(appA, "POST", `/api/admin/assistants/${assistantA}/mcp-servers`, {
+      label: "Org A Server",
+      url: "https://tools.example.com/mcp",
+      authKind: "none",
+    });
+    const created = (await createRes.json()) as {
+      server: { id: string };
+      tools: Array<{ id: string }>;
+    };
+    const serverId = created.server.id;
+    const toolId = created.tools[0]?.id ?? "";
+
+    const checks: Array<[string, string, unknown?]> = [
+      ["GET", `/api/admin/assistants/${assistantA}/mcp-servers`],
+      [
+        "POST",
+        `/api/admin/assistants/${assistantA}/mcp-servers`,
+        { label: "X", url: "https://tools.example.com/mcp", authKind: "none" },
+      ],
+      ["PATCH", `/api/admin/mcp-servers/${serverId}`, { label: "Hijacked" }],
+      ["DELETE", `/api/admin/mcp-servers/${serverId}`],
+      ["POST", `/api/admin/mcp-servers/${serverId}/refresh`],
+      ["GET", `/api/admin/mcp-servers/${serverId}/tools`],
+      ["PATCH", `/api/admin/mcp-servers/${serverId}/tools/${toolId}`, { allowed: true }],
+    ];
+
+    for (const [method, path, body] of checks) {
+      const res = await call(appB, method, path, body);
+      expect(res.status, `${method} ${path} should be 404 for another org`).toBe(404);
+    }
+
+    // Org A's server and tool are completely untouched.
+    const listA = (await (
+      await call(appA, "GET", `/api/admin/assistants/${assistantA}/mcp-servers`)
+    ).json()) as { servers: Array<{ label: string; allowedCount: number }> };
+    expect(listA.servers).toHaveLength(1);
+    expect(listA.servers[0]?.label).toBe("Org A Server");
+    expect(listA.servers[0]?.allowedCount).toBe(0);
+  });
+
+  it("deletes a server and its tools via the service path", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch([{ name: "one_tool", description: "One", inputSchema: { type: "object" } }]),
+    );
+    const assistantId = await createAssistant(app);
+
+    const createRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+      label: "Temp",
+      url: "https://tools.example.com/mcp",
+      authKind: "none",
+    });
+    const created = (await createRes.json()) as { server: { id: string } };
+
+    const delRes = await call(app, "DELETE", `/api/admin/mcp-servers/${created.server.id}`);
+    expect(delRes.status).toBe(200);
+    expect(await delRes.json()).toEqual({ deleted: true });
+
+    const toolsRow = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM mcp_tools WHERE org_id = ?1 AND server_id = ?2",
+    )
+      .bind(ORG_A, created.server.id)
+      .first<{ count: number }>();
+    expect(toolsRow?.count).toBe(0);
+  });
+
+  it("exposes getToolByName and listAllowedTools filtered to enabled servers", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch([
+        { name: "enabled_tool", description: "Enabled", inputSchema: { type: "object" } },
+        { name: "disabled_tool", description: "Off", inputSchema: { type: "object" } },
+      ]),
+    );
+    const assistantId = await createAssistant(app);
+    const createRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+      label: "Server 1",
+      url: "https://tools.example.com/mcp",
+      authKind: "none",
+    });
+    const created = (await createRes.json()) as {
+      server: { id: string };
+      tools: Array<{ id: string; name: string }>;
+    };
+    const enabledTool = created.tools.find((t) => t.name === "enabled_tool");
+    await call(
+      app,
+      "PATCH",
+      `/api/admin/mcp-servers/${created.server.id}/tools/${enabledTool?.id}`,
+      { allowed: true },
+    );
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const byName = await tenant.mcp.getToolByName(created.server.id, "enabled_tool");
+    expect(byName?.allowed).toBe(true);
+    expect(await tenant.mcp.getToolByName(created.server.id, "missing")).toBeNull();
+    expect((await tenant.mcp.listAllowedTools(assistantId)).map((t) => t.name)).toEqual([
+      "enabled_tool",
+    ]);
+
+    // Disabling the server excludes its tools from listAllowedTools.
+    await call(app, "PATCH", `/api/admin/mcp-servers/${created.server.id}`, { enabled: false });
+    expect(await tenant.mcp.listAllowedTools(assistantId)).toEqual([]);
+  });
+});
