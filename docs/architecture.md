@@ -254,6 +254,31 @@ survives a page change, and a chat protocol whose event stream and request body
 are versioned so `action` events and action results can be added without
 breaking installed widgets.
 
+## Answer tests
+
+An owner writes down questions the assistant must keep getting right. A test is
+a question plus one expectation: the answer cites a given URL, contains a
+phrase, does not contain a phrase, or declines (uses the fallback).
+
+- Tests run against the draft, through the same pipeline as "Try it": no
+  conversation is stored and usage is metered.
+- Publish runs them first. If any fail, the owner sees which and why, and can
+  fix the draft or publish anyway; the choice is recorded on the run.
+- `solv test` runs them from CI with the ingest key and exits non-zero on a
+  failure. Tests can be declared in `solv.config.json`.
+- Conversations and Gaps offer "Add to tests" on any exchange.
+- A run is capped (number of tests, wall time) so one click cannot spend
+  without limit.
+
+## Reports
+
+The Reports screen answers "is it working?" over a date range the owner picks
+(7, 30 or 90 days): questions asked, share answered, share with a thumbs down,
+cost, the most asked questions, the most frequent unanswered questions, and the
+sources cited most and never. Everything is computed from stored rows; the
+table can be downloaded as CSV. The open engine sends no email; scheduled
+digests belong to the cloud layer.
+
 ## Widget
 
 A custom element, `<solv-chat assistant="pk_...">`, loaded with one script tag.
