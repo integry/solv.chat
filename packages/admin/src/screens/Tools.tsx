@@ -390,9 +390,17 @@ function ToolList({
     setBusyId(tool.id);
     setError(null);
     try {
-      await patchJson(`/api/admin/mcp-servers/${server.id}/tools/${tool.id}`, {
-        allowed: !tool.allowed,
-      });
+      const res = await patchJson<{ tool: McpToolView }>(
+        `/api/admin/mcp-servers/${server.id}/tools/${tool.id}`,
+        {
+          allowed: !tool.allowed,
+        },
+      );
+      if (toolsRes.value && res.tool) {
+        toolsRes.setValue({
+          tools: toolsRes.value.tools.map((t) => (t.id === tool.id ? res.tool : t)),
+        });
+      }
       // The chat path requires the tool name in the published version too, so
       // a switch alone does not reach visitors. Saying so here is the
       // difference between "it works" and "it looks broken".
@@ -491,8 +499,8 @@ export function Tools({ assistantId }: ToolsProps) {
     setActionError(null);
     try {
       await deleteJson(`/api/admin/mcp-servers/${serverId}`);
-      if (expandedId === serverId) setExpandedId(null);
-      if (editingId === serverId) setEditingId(null);
+      setExpandedId((current) => (current === serverId ? null : current));
+      setEditingId((current) => (current === serverId ? null : current));
       setConfirmDeleteId(null);
       serversRes.reload();
     } catch (err) {
@@ -621,10 +629,12 @@ export function Tools({ assistantId }: ToolsProps) {
                 <EditServerForm
                   server={server}
                   onSaved={() => {
-                    setEditingId(null);
+                    setEditingId((current) => (current === server.id ? null : current));
                     serversRes.reload();
                   }}
-                  onCancel={() => setEditingId(null)}
+                  onCancel={() =>
+                    setEditingId((current) => (current === server.id ? null : current))
+                  }
                 />
               )}
 

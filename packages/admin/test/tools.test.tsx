@@ -50,6 +50,7 @@ interface FakeServerOptions {
   nextPostError?: { status: number; body: unknown };
   nextRefreshError?: { status: number; body: unknown };
   refreshedTools?: McpToolView[];
+  onRequest?: (method: string, path: string) => Promise<void> | void;
 }
 
 function installFakeServer(options: FakeServerOptions = {}) {
@@ -73,6 +74,8 @@ function installFakeServer(options: FakeServerOptions = {}) {
       typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
     const path = new URL(rawUrl, "https://example.com").pathname;
     const method = (init?.method ?? "GET").toUpperCase();
+
+    await options.onRequest?.(method, path);
 
     if (path === "/api/admin/assistants" && method === "GET") {
       return Response.json({ assistants: [assistant] });
@@ -412,5 +415,134 @@ describe("Tools screen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(await screen.findByText("That tool server could not be reached.")).toBeTruthy();
     expect(screen.getByText("Order lookup")).toBeTruthy();
+  });
+
+  it("applies the updated tool before reload completes so a quick second toggle reverses it", async () => {
+    let toolsGetCount = 0;
+    let releaseSecondGet!: () => void;
+    const secondGetPending = new Promise<void>((resolve) => {
+      releaseSecondGet = resolve;
+    });
+
+    const server = installFakeServer({
+      servers: [makeServer()],
+      toolsByServer: { mcp_1: [makeTool({ allowed: false })] },
+      onRequest: async (method, path) => {
+        if (method === "GET" && path === "/api/admin/mcp-servers/mcp_1/tools") {
+          toolsGetCount += 1;
+          if (toolsGetCount === 2) {
+            await secondGetPending;
+          }
+        }
+      },
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Tools" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View tools" }));
+
+    const toggle = (await screen.findByRole("checkbox", { name: /Off/i })) as HTMLInputElement;
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(server.patches).toHaveLength(1));
+    expect(server.patches[0]?.body).toEqual({ allowed: true });
+
+    // Even while the reload GET is still pending, the checkbox reflects the
+    // authoritative PATCH response and is enabled for the next toggle.
+    const updatedToggle = (await screen.findByRole("checkbox", {
+      name: /Visitors can use this/i,
+    })) as HTMLInputElement;
+    await waitFor(() => expect(updatedToggle.disabled).toBe(false));
+    expect(updatedToggle.checked).toBe(true);
+
+    fireEvent.click(updatedToggle);
+    await waitFor(() => expect(server.patches).toHaveLength(2));
+    expect(server.patches[1]?.body).toEqual({ allowed: false });
+
+    releaseSecondGet();
+    await waitFor(() =>
+      expect((screen.getByRole("checkbox", { name: /Off/i }) as HTMLInputElement).checked).toBe(
+        false,
+      ),
+    );
+  });
+
+  it("preserves a newer server editor when an earlier save or credential removal completes", async () => {
+    let releasePatch!: () => void;
+    let patchPending = new Promise<void>((resolve) => {
+      releasePatch = resolve;
+    });
+    let holdNextPatch = true;
+
+    const server = installFakeServer({
+      servers: [
+        makeServer({ id: "mcp_1", label: "Server A", hasSecret: true, authKind: "static_header" }),
+        makeServer({ id: "mcp_2", label: "Server B" }),
+      ],
+      onRequest: async (method, path) => {
+        if (method === "PATCH" && path === "/api/admin/mcp-servers/mcp_1" && holdNextPatch) {
+          await patchPending;
+        }
+      },
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Tools" }));
+    await screen.findByText("Server A");
+
+    const [editServerA] = screen.getAllByRole("button", { name: "Edit" });
+    if (!editServerA) throw new Error("Expected Edit button for Server A");
+    fireEvent.click(editServerA);
+    fireEvent.change(screen.getByLabelText("What this is", { selector: "#edit-mcp_1-label" }), {
+      target: { value: "Server A saved" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // Switch to Server B's editor while Server A's PATCH is still pending.
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const bLabelInput = screen.getByLabelText("What this is", {
+      selector: "#edit-mcp_2-label",
+    }) as HTMLInputElement;
+    fireEvent.change(bLabelInput, { target: { value: "Server B unsaved" } });
+
+    releasePatch();
+    await waitFor(() => expect(server.patches).toHaveLength(1));
+    await screen.findByText("Server A saved");
+
+    // Server B's editor and unsaved input must still be intact.
+    expect(
+      (
+        screen.getByLabelText("What this is", {
+          selector: "#edit-mcp_2-label",
+        }) as HTMLInputElement
+      ).value,
+    ).toBe("Server B unsaved");
+
+    // Now test the Remove credential completion path in the same way.
+    patchPending = new Promise<void>((resolve) => {
+      releasePatch = resolve;
+    });
+    holdNextPatch = true;
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove credential" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("What this is", { selector: "#edit-mcp_2-label" }), {
+      target: { value: "Server B still unsaved" },
+    });
+
+    releasePatch();
+    await waitFor(() => expect(server.patches).toHaveLength(2));
+    await waitFor(() =>
+      expect(screen.getAllByText("Credential: not set").length).toBeGreaterThanOrEqual(2),
+    );
+    expect(
+      (
+        screen.getByLabelText("What this is", {
+          selector: "#edit-mcp_2-label",
+        }) as HTMLInputElement
+      ).value,
+    ).toBe("Server B still unsaved");
   });
 });
