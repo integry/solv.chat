@@ -252,6 +252,43 @@ export function messagesFor(db: D1Database, orgId: string) {
       return (res.meta.changes ?? 0) > 0;
     },
 
+    /**
+     * Extends an active, unexpired resume lease only if the caller still owns
+     * the claimed revision. Returns false if the lease expired or was reclaimed.
+     */
+    async renewReplyClaim(params: {
+      conversationId: string;
+      id: string;
+      claimToken: string;
+      revision: number;
+      now: number;
+      ttlMs: number;
+    }): Promise<boolean> {
+      const res = await prepare(
+        db,
+        `UPDATE messages
+            SET resume_claimed_at = ?3
+          WHERE org_id = ?1
+            AND id = ?2
+            AND conversation_id = ?4
+            AND role = 'assistant'
+            AND resume_claim = ?5
+            AND resume_revision = ?6
+            AND resume_claimed_at > ?7`,
+      )
+        .bind(
+          orgId,
+          params.id,
+          params.now,
+          params.conversationId,
+          params.claimToken,
+          params.revision,
+          params.now - params.ttlMs,
+        )
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
     /** Releases an active resume claim if the continuation fails before completing. */
     async releaseReplyClaim(id: string, claimToken: string): Promise<boolean> {
       const res = await prepare(

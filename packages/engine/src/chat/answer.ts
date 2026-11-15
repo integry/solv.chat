@@ -30,6 +30,7 @@ export const SCORE_FLOOR = 0.3;
 export const TOP_K = 6;
 /** Lease duration for an active resume claim before a stalled worker's lock expires. */
 export const RESUME_CLAIM_TTL_MS = 60_000;
+const RESUME_CLAIM_RENEW_INTERVAL_MS = Math.floor(RESUME_CLAIM_TTL_MS / 3);
 
 export interface AnswerDeps {
   tenant: Tenant;
@@ -563,14 +564,48 @@ export async function* answerWithActionResults(
   }
 
   let completed = false;
+  let leaseLost = false;
+  let renewInFlight = false;
+  const ensureLease = async (): Promise<boolean> => {
+    if (leaseLost) return false;
+    const ok = await deps.tenant.messages.renewReplyClaim({
+      conversationId: conversation.id,
+      id: pendingReply.id,
+      claimToken,
+      revision: pendingReply.resumeRevision,
+      now: clock(),
+      ttlMs: RESUME_CLAIM_TTL_MS,
+    });
+    if (!ok) {
+      leaseLost = true;
+    }
+    return ok;
+  };
+  const heartbeat = setInterval(() => {
+    if (leaseLost || renewInFlight) return;
+    renewInFlight = true;
+    void ensureLease()
+      .catch(() => {
+        // Best-effort background renewal; awaited checkpoints also fence.
+      })
+      .finally(() => {
+        renewInFlight = false;
+      });
+  }, RESUME_CLAIM_RENEW_INTERVAL_MS);
+
   try {
     const history: LlmMessage[] = allMessages
       .slice(0, questionIndex)
       .map((m) => ({ role: m.role, content: m.content }));
 
-    const embedded = await deps.embedder.embed([questionMsg.content], (tokens) =>
-      recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
-    );
+    const embedded = await deps.embedder.embed([questionMsg.content], async (tokens) => {
+      if (!(await ensureLease())) return;
+      await recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens));
+    });
+    if (!(await ensureLease())) {
+      yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+      return;
+    }
     const [vector] = embedded.vectors;
     if (!vector) {
       yield { type: "error", message: "The assistant could not complete this response." };
@@ -627,6 +662,8 @@ export async function* answerWithActionResults(
     let tokensIn = 0;
     let tokensOut = 0;
 
+    let abortedByLease = false;
+
     try {
       const loop = resumeToolLoop(
         {
@@ -642,6 +679,7 @@ export async function* answerWithActionResults(
             // continues the same message, so `messages` stays 0.
             await recordMessageUsage(deps, input, clock(), callTokensIn, callTokensOut, cost, 0);
           },
+          ensureLease,
           now: deps.now,
         },
         request,
@@ -657,6 +695,7 @@ export async function* answerWithActionResults(
           newCalls = step.value.calls;
           nextPending = step.value.pending;
           nextContinuation = step.value.continuation;
+          abortedByLease = step.value.abortedByLease ?? false;
           break;
         }
         const event = step.value;
@@ -679,6 +718,11 @@ export async function* answerWithActionResults(
         return;
       }
       throw err;
+    }
+
+    if (abortedByLease) {
+      yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+      return;
     }
 
     const resumedCitations = citableByUrl(chunks).map((c) => ({ url: c.url, title: c.title }));
@@ -729,6 +773,7 @@ export async function* answerWithActionResults(
 
     yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
   } finally {
+    clearInterval(heartbeat);
     if (!completed) {
       try {
         await deps.tenant.messages.releaseReplyClaim(pendingReply.id, claimToken);

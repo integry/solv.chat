@@ -998,4 +998,188 @@ describe("chat/pageActions", () => {
     const assistantTurn = conversation.turns.find((t) => t.id === done1.messageId);
     expect(assistantTurn?.citations).toEqual(expectedCitations);
   });
+
+  it("F5: fences an active resume worker that loses lease ownership before it emits output or records usage", async () => {
+    await publishConfig(true);
+    let releaseStreamA!: () => void;
+    const streamAGate = new Promise<void>((resolve) => {
+      releaseStreamA = resolve;
+    });
+    let enterStreamA!: () => void;
+    const enteredStreamA = new Promise<void>((resolve) => {
+      enterStreamA = resolve;
+    });
+
+    let callCount = 0;
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        callCount += 1;
+        if (callCount === 1) {
+          yield { kind: "text", text: "Opening. " };
+          yield { kind: "tool_call", call: NAVIGATE_CALL };
+          yield { kind: "usage", tokensIn: 50, tokensOut: 10, stopReason: "tools" };
+          return;
+        }
+        if (callCount === 2) {
+          // Resume A holds its stream open past lease expiry.
+          enterStreamA();
+          await streamAGate;
+          yield { kind: "text", text: "Stale from A." };
+          yield { kind: "usage", tokensIn: 999, tokensOut: 999, stopReason: "end" };
+          return;
+        }
+        if (callCount === 3) {
+          // Resume B takes over the expired lease and completes.
+          yield { kind: "text", text: "From B." };
+          yield { kind: "usage", tokensIn: 60, tokensOut: 15, stopReason: "end" };
+          return;
+        }
+        throw new Error(`unexpected provider call ${callCount}`);
+      },
+    };
+
+    const recordedUsage: Array<{ tokensIn: number; tokensOut: number; messages: number }> = [];
+    const app = createApp(
+      fakeSeams({
+        usage: {
+          async record(event) {
+            recordedUsage.push({
+              tokensIn: event.tokensIn,
+              tokensOut: event.tokensOut,
+              messages: event.messages,
+            });
+          },
+        },
+      }),
+      {
+        chat: { embedder, retriever, provider, model: ANTHROPIC_MODELS.fast },
+      },
+    );
+
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION],
+    });
+    const firstDone = first.find((e) => e.type === "done");
+    if (firstDone?.type !== "done") throw new Error("expected done");
+
+    // Start Resume A and wait until it is inside provider.stream().
+    const resumeAPromise = postChat(app, {
+      conversationId: firstDone.conversationId,
+      resumeMessageId: firstDone.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+    });
+    await enteredStreamA;
+
+    // Expire A's lease and let Resume B reclaim and complete the reply.
+    await env.DB.prepare("UPDATE messages SET resume_claimed_at = ?1 WHERE id = ?2")
+      .bind(Date.now() - RESUME_CLAIM_TTL_MS - 1000, firstDone.messageId)
+      .run();
+
+    const resumeB = await postChat(app, {
+      conversationId: firstDone.conversationId,
+      resumeMessageId: firstDone.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+    });
+    expect(
+      resumeB.filter((e): e is Extract<ChatEvent, { type: "token" }> => e.type === "token"),
+    ).toEqual([{ type: "token", text: "From B." }]);
+    expect(resumeB.some((e) => e.type === "done")).toBe(true);
+
+    // Release A's stream; A must stop without emitting tokens or recording usage.
+    releaseStreamA();
+    const resumeA = await resumeAPromise;
+    expect(resumeA.some((e) => e.type === "token")).toBe(false);
+    expect(resumeA.some((e) => e.type === "done")).toBe(false);
+    expect(resumeA).toEqual([
+      { type: "error", message: "This answer can no longer be continued." },
+    ]);
+
+    const stored = await tenant.messages.get(firstDone.messageId);
+    expect(stored?.content).toBe("Opening. From B.");
+    expect(stored?.tokensIn).toBe(110);
+    expect(stored?.tokensOut).toBe(25);
+
+    const modelUsage = recordedUsage.filter((u) => u.tokensIn > 0 || u.tokensOut > 0);
+    expect(modelUsage).toEqual([
+      { tokensIn: 50, tokensOut: 10, messages: 1 },
+      { tokensIn: 60, tokensOut: 15, messages: 0 },
+    ]);
+  });
+
+  it("F5: renewReplyClaim extends an unexpired owned lease and rejects expired or stolen leases", async () => {
+    await publishConfig(true);
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder,
+        retriever,
+        provider: scriptedProvider([{ text: "Opening. ", calls: [NAVIGATE_CALL] }]),
+        model: ANTHROPIC_MODELS.fast,
+      },
+    });
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION],
+    });
+    const firstDone = first.find((e) => e.type === "done");
+    if (firstDone?.type !== "done") throw new Error("expected done");
+
+    const claimed = await tenant.messages.claimPendingReply({
+      conversationId: firstDone.conversationId,
+      id: firstDone.messageId,
+      claimToken: "worker-a",
+      revision: 0,
+      now: 10_000,
+      ttlMs: RESUME_CLAIM_TTL_MS,
+    });
+    expect(claimed).toBe(true);
+
+    // Active renewal before expiry succeeds and pushes the deadline forward.
+    expect(
+      await tenant.messages.renewReplyClaim({
+        conversationId: firstDone.conversationId,
+        id: firstDone.messageId,
+        claimToken: "worker-a",
+        revision: 0,
+        now: 50_000,
+        ttlMs: RESUME_CLAIM_TTL_MS,
+      }),
+    ).toBe(true);
+
+    // Wrong token or wrong revision is rejected.
+    expect(
+      await tenant.messages.renewReplyClaim({
+        conversationId: firstDone.conversationId,
+        id: firstDone.messageId,
+        claimToken: "worker-b",
+        revision: 0,
+        now: 55_000,
+        ttlMs: RESUME_CLAIM_TTL_MS,
+      }),
+    ).toBe(false);
+    expect(
+      await tenant.messages.renewReplyClaim({
+        conversationId: firstDone.conversationId,
+        id: firstDone.messageId,
+        claimToken: "worker-a",
+        revision: 1,
+        now: 55_000,
+        ttlMs: RESUME_CLAIM_TTL_MS,
+      }),
+    ).toBe(false);
+
+    // Once expired (50_000 <= 110_000 - 60_000), renewal is rejected even before takeover.
+    expect(
+      await tenant.messages.renewReplyClaim({
+        conversationId: firstDone.conversationId,
+        id: firstDone.messageId,
+        claimToken: "worker-a",
+        revision: 0,
+        now: 50_000 + RESUME_CLAIM_TTL_MS,
+        ttlMs: RESUME_CLAIM_TTL_MS,
+      }),
+    ).toBe(false);
+  });
 });

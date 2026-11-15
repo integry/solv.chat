@@ -92,6 +92,11 @@ export interface ToolLoopDeps {
   reserveCalls?: ((count: number) => Promise<boolean>) | undefined;
   /** Recorded per model call so the spend cap sees real spend, not one event. */
   onModelUsage: (tokensIn: number, tokensOut: number, costMicros: number) => Promise<void>;
+  /**
+   * Optional lease/ownership check called before model/tool work, before
+   * emitting output, and before recording usage. Returning false stops the loop.
+   */
+  ensureLease?: (() => Promise<boolean>) | undefined;
   now?: (() => number) | undefined;
 }
 
@@ -116,6 +121,8 @@ export interface ToolLoopOutcome {
   pending: ToolCall[];
   /** Present only when `pending.length > 0`, to restore model context on resume. */
   continuation?: ToolLoopContinuation | undefined;
+  /** True when the loop stopped early because the caller lost its resume lease. */
+  abortedByLease?: boolean | undefined;
 }
 
 /** Truncates on a UTF-8 boundary and says so, so the model is not misled. */
@@ -276,8 +283,19 @@ async function* runLoopFrom(
   let text = initialText;
   let toolsOffered = definitions.length > 0;
   let budgetNoticeSent = false;
+  let leaseLost = false;
+  const checkLease = async (): Promise<boolean> => {
+    if (leaseLost) return false;
+    if (!deps.ensureLease) return true;
+    const ok = await deps.ensureLease();
+    if (!ok) leaseLost = true;
+    return ok;
+  };
 
   for (let iteration = 0; ; iteration++) {
+    if (!(await checkLease())) {
+      return { text, calls, pending: [], abortedByLease: true };
+    }
     const stream = deps.provider.stream({
       ...baseRequest,
       messages: [...messages],
@@ -296,6 +314,9 @@ async function* runLoopFrom(
     try {
       for await (const chunk of stream as AsyncIterable<LlmChunk>) {
         if (chunk.kind === "text") {
+          if (!(await checkLease())) {
+            break;
+          }
           assistantText += chunk.text;
           text += chunk.text;
           // Forwarded as it arrives: the visible difference between this and a
@@ -303,6 +324,9 @@ async function* runLoopFrom(
           // take that away.
           yield { kind: "text", text: chunk.text };
         } else if (chunk.kind === "tool_call") {
+          if (!(await checkLease())) {
+            break;
+          }
           asked.push(chunk.call);
         } else {
           tokensIn = chunk.tokensIn;
@@ -310,14 +334,19 @@ async function* runLoopFrom(
           usageReported = true;
         }
       }
-      completed = true;
+      completed = !leaseLost;
     } finally {
       // Per model call, so three calls bill three times. Recorded in `finally`
       // for the same reason phase 1 records before persisting: tokens the
       // provider reported are owed whether or not the rest of the turn works.
-      if (usageReported || completed) {
+      // If the resume lease was lost, stop before recording usage for the stale worker.
+      if ((usageReported || completed) && (await checkLease())) {
         await deps.onModelUsage(tokensIn, tokensOut, costMicros(deps.model, tokensIn, tokensOut));
       }
+    }
+
+    if (leaseLost) {
+      return { text, calls, pending: [], abortedByLease: true };
     }
 
     if (asked.length === 0) {
@@ -333,6 +362,9 @@ async function* runLoopFrom(
       : deps.priorCalls + calls.length + asked.length > MAX_TOOL_CALLS_PER_CONVERSATION;
 
     if (!overIterations && !overTime && !overConversation && deps.reserveCalls) {
+      if (!(await checkLease())) {
+        return { text, calls, pending: [], abortedByLease: true };
+      }
       overConversation = !(await deps.reserveCalls(asked.length));
     }
 
@@ -375,6 +407,9 @@ async function* runLoopFrom(
 
     try {
       for (const call of asked) {
+        if (!(await checkLease())) {
+          return { text, calls, pending: [], abortedByLease: true };
+        }
         const runner = byName.get(call.name);
         const timedOutBeforeStart =
           controller.signal.aborted || clock() - startedAt >= TOOL_WALL_TIME_MS;
@@ -433,6 +468,9 @@ async function* runLoopFrom(
           // a third party's payload is not theirs to keep.
           resultPreview: outcome.content.slice(0, RESULT_PREVIEW_CHARS),
         });
+        if (!(await checkLease())) {
+          return { text, calls, pending: [], abortedByLease: true };
+        }
         yield {
           kind: "tool",
           call,
