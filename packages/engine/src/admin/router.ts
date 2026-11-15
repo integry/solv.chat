@@ -38,6 +38,7 @@ import {
   testProviderKey,
   updateProviderSettings,
 } from "./providers.js";
+import { parseReportDays, reportFor } from "./reports.js";
 import { importSitemapUrls, previewSitemap } from "./sitemap.js";
 import {
   createSource,
@@ -234,6 +235,11 @@ async function assistantRoutes(
           resolveSettings: deps.resolveSettings,
           checkConfigError: deps.checkConfigError,
         }),
+      );
+    }
+    if (action === "report" && method === "GET") {
+      return Response.json(
+        await reportFor(tenant, assistantId, parseReportDays(url.searchParams.get("days"))),
       );
     }
     if (action === "install" && method === "GET") {
