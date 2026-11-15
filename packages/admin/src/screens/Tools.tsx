@@ -230,6 +230,13 @@ function EditServerForm({
   onSaved: (sessionId: number) => void;
   onCancel: (sessionId: number) => void;
 }) {
+  const initialRef = useRef({
+    label: server.label,
+    url: server.url,
+    enabled: server.enabled,
+    needsCredential: server.authKind === "static_header",
+    headerName: server.headerName ?? "Authorization",
+  });
   const [label, setLabel] = useState(server.label);
   const [url, setUrl] = useState(server.url);
   const [enabled, setEnabled] = useState(server.enabled);
@@ -248,16 +255,26 @@ function EditServerForm({
     setFormError(null);
     const submittedValue = headerValue;
     setHeaderValue("");
+    const initial = initialRef.current;
+    const patch: Record<string, unknown> = {};
+    if (label !== initial.label) patch.label = label;
+    if (url !== initial.url) patch.url = url;
+    if (enabled !== initial.enabled) patch.enabled = enabled;
+    if (needsCredential !== initial.needsCredential) {
+      if (needsCredential) {
+        patch.authKind = "static_header";
+        patch.headerName = headerName;
+        if (submittedValue !== "") patch.headerValue = submittedValue;
+      } else {
+        patch.authKind = "none";
+        patch.headerValue = "";
+      }
+    } else if (needsCredential) {
+      if (headerName !== initial.headerName) patch.headerName = headerName;
+      if (submittedValue !== "") patch.headerValue = submittedValue;
+    }
     try {
-      await patchJson(`/api/admin/mcp-servers/${server.id}`, {
-        label,
-        url,
-        enabled,
-        authKind: needsCredential ? "static_header" : "none",
-        ...(needsCredential
-          ? { headerName, ...(submittedValue !== "" ? { headerValue: submittedValue } : {}) }
-          : { headerValue: "" }),
-      });
+      await patchJson(`/api/admin/mcp-servers/${server.id}`, patch);
       onSaved(sessionId);
     } catch (err) {
       if (err instanceof ApiError) {

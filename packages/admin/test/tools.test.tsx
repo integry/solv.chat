@@ -618,4 +618,86 @@ describe("Tools screen", () => {
       ).value,
     ).toBe("Server A reopened after remove");
   });
+
+  it("does not overwrite completed disable or credential changes when submitting a reopened editor", async () => {
+    let releasePatch!: () => void;
+    let patchPending = new Promise<void>((resolve) => {
+      releasePatch = resolve;
+    });
+    let holdNextPatch = true;
+
+    const server = installFakeServer({
+      servers: [
+        makeServer({
+          id: "mcp_1",
+          label: "Server A",
+          enabled: true,
+          hasSecret: true,
+          authKind: "static_header",
+          headerName: "X-Api-Key",
+        }),
+      ],
+      onRequest: async (method, path) => {
+        if (method === "PATCH" && path === "/api/admin/mcp-servers/mcp_1" && holdNextPatch) {
+          await patchPending;
+        }
+      },
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Tools" }));
+    await screen.findByText("Server A");
+
+    // 1. Start a disabling save and hold it pending.
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByLabelText("Enabled"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // 2. Close and reopen the same server's editor while the disabling PATCH is pending.
+    fireEvent.click(screen.getByRole("button", { name: "Close edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("What this is", { selector: "#edit-mcp_1-label" }), {
+      target: { value: "Server A renamed" },
+    });
+
+    // 3. Complete the disabling save before submitting the rename.
+    holdNextPatch = false;
+    releasePatch();
+    await waitFor(() => expect(server.patches).toHaveLength(1));
+    expect(server.patches[0]?.body).toEqual({ enabled: false });
+    await screen.findByText("Disabled");
+
+    // 4. Submit the rename; it must only send the edited label and keep the server disabled.
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(server.patches).toHaveLength(2));
+    expect(server.patches[1]?.body).toEqual({ label: "Server A renamed" });
+    await screen.findByText("Server A renamed");
+    expect(screen.getByText("Disabled")).toBeTruthy();
+
+    // 5. Repeat with Remove credential pending while a reopened editor only changes the URL.
+    patchPending = new Promise<void>((resolve) => {
+      releasePatch = resolve;
+    });
+    holdNextPatch = true;
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove credential" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Address", { selector: "#edit-mcp_1-url" }), {
+      target: { value: "https://tools.example.com/v2" },
+    });
+
+    holdNextPatch = false;
+    releasePatch();
+    await waitFor(() => expect(server.patches).toHaveLength(3));
+    expect(server.patches[2]?.body).toEqual({ headerValue: "" });
+    await screen.findByText("Credential: not set");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(server.patches).toHaveLength(4));
+    expect(server.patches[3]?.body).toEqual({ url: "https://tools.example.com/v2" });
+    await screen.findByText("https://tools.example.com/v2");
+    expect(screen.getByText("Credential: not set")).toBeTruthy();
+  });
 });
