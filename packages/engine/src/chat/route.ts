@@ -25,6 +25,7 @@ import type { AuthProvider, Principal, Seams } from "../seams/types.js";
 import { actionRunnerFor } from "./actionRunner.js";
 import { answerMessage, answerWithActionResults } from "./answer.js";
 import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
+import { mcpRunnerFor } from "./mcpRunner.js";
 import type { ToolRunner } from "./toolLoop.js";
 
 export interface ChatEnv {
@@ -32,6 +33,8 @@ export interface ChatEnv {
   VECTORS: VectorizeIndex;
   SOLV_LLM_PROVIDER?: string | undefined;
   SOLV_LLM_TIER?: string | undefined;
+  /** Opens stored MCP credentials at call time. */
+  SOLV_SECRET_KEY?: string | undefined;
 }
 
 const DEFAULT_PROVIDER = "anthropic" as const;
@@ -69,6 +72,7 @@ export interface ChatRouteOverrides {
   model?: ModelInfo | undefined;
   providerKind?: "anthropic" | "openai" | undefined;
   tier?: Tier | undefined;
+  fetch?: typeof fetch | undefined;
 }
 
 const encoder = new TextEncoder();
@@ -160,6 +164,12 @@ interface StreamAnswerParams {
   visitorId: string;
   message: string;
   behaviour: BehaviourConfig;
+  /**
+   * The version's tool allow-list: published for a visitor, draft for the
+   * owner's preview. Taken from the same row the behaviour came from, so the
+   * two can never disagree about which version is answering.
+   */
+  allowedTools: readonly string[];
   conversationId: string | undefined;
   pageUrl: string | undefined;
   preview: boolean;
@@ -179,6 +189,8 @@ interface StreamResumeParams {
   assistantId: string;
   visitorId: string;
   behaviour: BehaviourConfig;
+  /** The published version's tool allow-list, as for a fresh answer. */
+  allowedTools: readonly string[];
   conversationId: string;
   resumeMessageId: string;
   actionResults: readonly ActionResult[];
@@ -193,6 +205,8 @@ async function resolveAnswerDeps(params: {
   overrides: ChatRouteOverrides | undefined;
   tenant: ReturnType<typeof forPublicScope>;
   orgId: string;
+  assistantId: string;
+  allowedTools: readonly string[];
   pageActions: readonly PageAction[] | undefined;
   actionsEnabled: boolean;
   preview: boolean;
@@ -214,7 +228,22 @@ async function resolveAnswerDeps(params: {
   const actionRunner = params.preview
     ? null
     : actionRunnerFor(params.pageActions, { builtinsEnabled: params.actionsEnabled });
-  const runners: ToolRunner[] = actionRunner ? [actionRunner] : [];
+  const reservedNames = actionRunner ? actionRunner.definitions.map((d) => d.name) : [];
+  // No tool switched on and published means no runner, so the request
+  // carries no `tools` key and this is phase 1 behaviour exactly.
+  const mcp = await mcpRunnerFor(
+    {
+      tenant: params.tenant,
+      secretKey: env.SOLV_SECRET_KEY ?? "",
+      fetchImpl: overrides?.fetch,
+    },
+    params.assistantId,
+    params.allowedTools,
+    reservedNames,
+  );
+  const runners: ToolRunner[] = [];
+  if (actionRunner) runners.push(actionRunner);
+  if (mcp) runners.push(mcp);
 
   return {
     tenant: params.tenant,
@@ -375,6 +404,7 @@ export async function adminChatRoute(
     visitorId: parsed.value.visitorId,
     message,
     behaviour: version.config.behaviour,
+    allowedTools: version.config.allowedTools,
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: true,
@@ -458,6 +488,7 @@ export async function chatRoute(
       assistantId: assistant.id,
       visitorId: parsed.value.visitorId,
       behaviour: version.config.behaviour,
+      allowedTools: version.config.allowedTools,
       conversationId: parsed.value.conversationId ?? "",
       resumeMessageId: parsed.value.resumeMessageId ?? "",
       actionResults: parsed.value.actionResults,
@@ -483,6 +514,7 @@ export async function chatRoute(
     visitorId: parsed.value.visitorId,
     message,
     behaviour: version.config.behaviour,
+    allowedTools: version.config.allowedTools,
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: false,
