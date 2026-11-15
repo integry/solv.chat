@@ -59,8 +59,10 @@ export async function updateDraft(
  * assistant with no published version or no draft. See
  * `versionsFor().publishDraft` for the guards.
  *
- * The spec says Publish runs the tests. Answer tests are phase 2; that step
- * slots in at the top of this function.
+ * The specification's "Publish runs the tests" step happens in the route,
+ * above this function: a failing run must not reach the batch at all, and
+ * keeping the run out of here leaves this function's guards and its Conflict
+ * semantics exactly as the phase 1 tests pin them.
  */
 export async function publishDraft(tenant: Tenant, assistantId: string): Promise<VersionRow> {
   const draft = await tenant.versions.draft(assistantId);

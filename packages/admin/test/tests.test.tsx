@@ -1,0 +1,391 @@
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { App } from "../src/App.js";
+import type { AnswerTest, Assistant, TestRunResponse } from "../src/api/types.js";
+
+function makeAssistant(): Assistant {
+  return {
+    id: "ast_1",
+    orgId: "org_00000000000000000000",
+    name: "Docs Bot",
+    publicKey: "pk_ast_1",
+    allowedOrigins: [],
+    hasIngestKey: true,
+    createdAt: 1_700_000_000_000,
+  };
+}
+
+function createDeferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+function installFakeServer(options?: {
+  tests?: AnswerTest[];
+  runResponse?: TestRunResponse | (() => Promise<TestRunResponse>);
+}) {
+  const assistant = makeAssistant();
+  const tests: AnswerTest[] = options?.tests ? [...options.tests] : [];
+  let nextId = 1;
+
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
+    const path = new URL(url, "https://example.com").pathname;
+    const method = (init?.method ?? "GET").toUpperCase();
+
+    if (path === "/api/admin/assistants" && method === "GET") {
+      return Response.json({ assistants: [assistant] });
+    }
+
+    if (path === `/api/admin/assistants/${assistant.id}/tests` && method === "GET") {
+      return Response.json({ tests: [...tests] });
+    }
+
+    if (path === `/api/admin/assistants/${assistant.id}/tests` && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        question: string;
+        expectation: AnswerTest["expectation"];
+      };
+      const created: AnswerTest = {
+        id: `tst_${nextId++}`,
+        orgId: assistant.orgId,
+        assistantId: assistant.id,
+        question: body.question,
+        expectation: body.expectation,
+        createdAt: 1_700_000_000_000 + nextId,
+        latestResult: null,
+      };
+      tests.push(created);
+      return Response.json({ test: created }, { status: 201 });
+    }
+
+    const testMatch = /^\/api\/admin\/tests\/([^/]+)$/.exec(path);
+    if (testMatch?.[1]) {
+      const testId = testMatch[1];
+      const idx = tests.findIndex((t) => t.id === testId);
+      if (idx === -1) return Response.json({ error: "Not found." }, { status: 404 });
+
+      if (method === "PATCH") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          question?: string;
+          expectation?: AnswerTest["expectation"];
+        };
+        const current = tests[idx];
+        if (!current) return Response.json({ error: "Not found." }, { status: 404 });
+        const updated: AnswerTest = {
+          ...current,
+          question: body.question ?? current.question,
+          expectation: body.expectation ?? current.expectation,
+        };
+        tests[idx] = updated;
+        return Response.json({ test: updated });
+      }
+
+      if (method === "DELETE") {
+        tests.splice(idx, 1);
+        return Response.json({ deleted: true });
+      }
+    }
+
+    if (path === `/api/admin/assistants/${assistant.id}/test-runs` && method === "POST") {
+      const res =
+        typeof options?.runResponse === "function"
+          ? await options.runResponse()
+          : (options?.runResponse ?? {
+              runId: "run_1",
+              passed: true,
+              results: [],
+            });
+      for (const result of res.results) {
+        const target = tests.find((t) => t.id === result.testId);
+        if (target) target.latestResult = result;
+      }
+      return Response.json(res, { status: 201 });
+    }
+
+    if (path === "/api/admin/overview" || path.endsWith("/overview")) {
+      return Response.json({
+        messages: 0,
+        answeredShare: 0,
+        topQuestions: [],
+        todayCostMicros: 0,
+      });
+    }
+
+    return Response.json({ error: "Not found." }, { status: 404 });
+  });
+
+  vi.stubGlobal("fetch", fetchMock);
+  return { tests, fetchMock };
+}
+
+describe("Tests screen", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows empty state when there are no tests", async () => {
+    installFakeServer({ tests: [] });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Tests" })).toBeTruthy();
+    expect(
+      await screen.findByText("No tests yet. Add a question your assistant should get right."),
+    ).toBeTruthy();
+    const runBtn = screen.getByRole("button", { name: "Run now" }) as HTMLButtonElement;
+    expect(runBtn.disabled).toBe(true);
+  });
+
+  it("lists existing tests with their expectations and latest results", async () => {
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "What does Pro cost?",
+          expectation: { kind: "contains", phrase: "$29" },
+          createdAt: 1_700_000_000_000,
+          latestResult: {
+            testId: "tst_1",
+            question: "What does Pro cost?",
+            expectation: { kind: "contains", phrase: "$29" },
+            outcome: "passed",
+            reason: 'Said "$29".',
+            excerpt: "Pro costs $29 per month.",
+          },
+        },
+        {
+          id: "tst_2",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Can I get a refund?",
+          expectation: { kind: "cites", url: "https://example.com/refunds" },
+          createdAt: 1_700_000_000_100,
+          latestResult: {
+            testId: "tst_2",
+            question: "Can I get a refund?",
+            expectation: { kind: "cites", url: "https://example.com/refunds" },
+            outcome: "failed",
+            reason: "Did not cite https://example.com/refunds. Cited: nothing.",
+            excerpt: "Refunds are handled case by case.",
+          },
+        },
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    expect(await screen.findByText("What does Pro cost?")).toBeTruthy();
+    expect(screen.getByText('It must mention "$29"')).toBeTruthy();
+    expect(screen.getByText("Passed")).toBeTruthy();
+    expect(screen.getByText('Said "$29".')).toBeTruthy();
+    expect(screen.getByText("Pro costs $29 per month.")).toBeTruthy();
+
+    expect(screen.getByText("Can I get a refund?")).toBeTruthy();
+    expect(screen.getByText("It must link to https://example.com/refunds")).toBeTruthy();
+    expect(screen.getByText("Failed")).toBeTruthy();
+    expect(
+      screen.getByText("Did not cite https://example.com/refunds. Cited: nothing."),
+    ).toBeTruthy();
+  });
+
+  it("adds each of the four expectations and shows the extra field only when needed", async () => {
+    const server = installFakeServer({ tests: [] });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Tests" });
+
+    // 1. contains ("It must mention")
+    fireEvent.click(screen.getByRole("button", { name: "Add test" }));
+    expect(screen.getByText("The answer has to include these words.")).toBeTruthy();
+    expect(screen.getByLabelText("Words")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Question"), {
+      target: { value: "Q1?" },
+    });
+    fireEvent.change(screen.getByLabelText("Words"), {
+      target: { value: "hello" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+    expect(await screen.findByText("Q1?")).toBeTruthy();
+
+    // 2. notContains ("It must not mention")
+    fireEvent.click(screen.getByRole("button", { name: "Add test" }));
+    fireEvent.change(screen.getByLabelText("What the answer must do"), {
+      target: { value: "notContains" },
+    });
+    expect(screen.getByText("The answer must never include these words.")).toBeTruthy();
+    expect(screen.getByLabelText("Words")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Q2?" } });
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+    expect(await screen.findByText("Q2?")).toBeTruthy();
+
+    // 3. cites ("It must link to")
+    fireEvent.click(screen.getByRole("button", { name: "Add test" }));
+    fireEvent.change(screen.getByLabelText("What the answer must do"), {
+      target: { value: "cites" },
+    });
+    expect(screen.getByText("The answer has to show this page as a source.")).toBeTruthy();
+    expect(screen.getByLabelText("Page address")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Q3?" } });
+    fireEvent.change(screen.getByLabelText("Page address"), {
+      target: { value: "https://example.com/docs" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+    expect(await screen.findByText("Q3?")).toBeTruthy();
+
+    // 4. declines ("It must say it does not know") -> no extra field
+    fireEvent.click(screen.getByRole("button", { name: "Add test" }));
+    fireEvent.change(screen.getByLabelText("What the answer must do"), {
+      target: { value: "declines" },
+    });
+    expect(screen.getByText("For questions your site should not answer.")).toBeTruthy();
+    expect(screen.queryByLabelText("Words")).toBeNull();
+    expect(screen.queryByLabelText("Page address")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Q4?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+    expect(await screen.findByText("Q4?")).toBeTruthy();
+
+    expect(server.tests.map((t) => t.expectation)).toEqual([
+      { kind: "contains", phrase: "hello" },
+      { kind: "notContains", phrase: "secret" },
+      { kind: "cites", url: "https://example.com/docs" },
+      { kind: "declines" },
+    ]);
+  });
+
+  it("edits and deletes a test", async () => {
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Old question?",
+          expectation: { kind: "contains", phrase: "old" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    expect(await screen.findByText("Old question?")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    fireEvent.change(screen.getByLabelText("Question"), {
+      target: { value: "Updated question?" },
+    });
+    fireEvent.change(screen.getByLabelText("Words"), {
+      target: { value: "updated" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    expect(await screen.findByText("Updated question?")).toBeTruthy();
+    expect(screen.getByText('It must mention "updated"')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => {
+      expect(screen.queryByText("Updated question?")).toBeNull();
+    });
+    expect(
+      screen.getByText("No tests yet. Add a question your assistant should get right."),
+    ).toBeTruthy();
+  });
+
+  it("runs all tests with progress state, mixed outcomes, and stopped-early notice", async () => {
+    const deferred = createDeferred<TestRunResponse>();
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Pass question?",
+          expectation: { kind: "contains", phrase: "yes" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+        {
+          id: "tst_2",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Fail question?",
+          expectation: { kind: "contains", phrase: "never" },
+          createdAt: 1_700_000_000_100,
+          latestResult: null,
+        },
+        {
+          id: "tst_3",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Skipped question?",
+          expectation: { kind: "declines" },
+          createdAt: 1_700_000_000_200,
+          latestResult: null,
+        },
+      ],
+      runResponse: () => deferred.promise,
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    await screen.findByText("Pass question?");
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+
+    expect(screen.getByText("Running tests against your draft…")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Running…" })).toBeTruthy();
+
+    deferred.resolve({
+      runId: "run_1",
+      passed: false,
+      stopped: "The run took too long and stopped early.",
+      results: [
+        {
+          testId: "tst_1",
+          question: "Pass question?",
+          expectation: { kind: "contains", phrase: "yes" },
+          outcome: "passed",
+          reason: 'Said "yes".',
+          excerpt: "Yes, we support that.",
+        },
+        {
+          testId: "tst_2",
+          question: "Fail question?",
+          expectation: { kind: "contains", phrase: "never" },
+          outcome: "failed",
+          reason: 'Did not say "never".',
+          excerpt: "Here is the answer.",
+        },
+        {
+          testId: "tst_3",
+          question: "Skipped question?",
+          expectation: { kind: "declines" },
+          outcome: "not_run",
+          reason: "The run took too long and stopped early.",
+          excerpt: "",
+        },
+      ],
+    });
+
+    expect(await screen.findByText("Passed")).toBeTruthy();
+    expect(screen.getByText("Failed")).toBeTruthy();
+    expect(screen.getByText("Not run")).toBeTruthy();
+    expect(screen.getByText('Said "yes".')).toBeTruthy();
+    expect(screen.getByText("Yes, we support that.")).toBeTruthy();
+    expect(screen.getByText('Did not say "never".')).toBeTruthy();
+    expect(screen.getByText("Here is the answer.")).toBeTruthy();
+    expect(
+      screen.getAllByText("The run took too long and stopped early.").length,
+    ).toBeGreaterThanOrEqual(1);
+  });
+});

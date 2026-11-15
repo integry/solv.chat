@@ -1,9 +1,11 @@
 import type { ActionsConfig, WidgetConfig, WidgetPosition } from "@solvchat/core";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { ApiError, patchJson, postJson, putJson } from "../api/client.js";
-import type { Assistant, VersionRow } from "../api/types.js";
+import { ApiError, patchJson, putJson } from "../api/client.js";
+import { FailedTestsError, publishAssistant } from "../api/publish.js";
+import type { Assistant, TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { useAssistantMutation } from "../shell/useAssistantMutations.js";
+import { FailedTestsPanel } from "./FailedTestsPanel.js";
 import { History } from "./History.js";
 
 export interface WidgetProps {
@@ -61,6 +63,7 @@ export function Widget({ assistantId }: WidgetProps) {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [failedRun, setFailedRun] = useState<TestRunSummary | null>(null);
 
   const mutation = useAssistantMutation(assistantId);
   const { saving, publishing, busy } = mutation;
@@ -266,6 +269,7 @@ export function Widget({ assistantId }: WidgetProps) {
     setFieldErrors({});
     setFormError(null);
     setStatusMessage(null);
+    setFailedRun(null);
 
     const submittedOriginsText = originsText;
     const submittedWidget = { title, accentColor, position };
@@ -339,12 +343,13 @@ export function Widget({ assistantId }: WidgetProps) {
     });
   }
 
-  async function handlePublish() {
+  async function handlePublish(force = false) {
     // Publishing sends the saved draft, not the form: with unsaved edits the
     // owner would publish something other than what they see.
     if (busy || unsaved) return;
     setFormError(null);
     setStatusMessage(null);
+    setFailedRun(null);
     const {
       title: t,
       accentColor: a,
@@ -358,9 +363,7 @@ export function Widget({ assistantId }: WidgetProps) {
     };
     try {
       await mutation.run("publishing", async () => {
-        const res = await postJson<{ version: VersionRow }>(
-          `/api/admin/assistants/${assistantId}/publish`,
-        );
+        const res = await publishAssistant(assistantId, force);
         publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
         setStatusMessage(
@@ -370,7 +373,11 @@ export function Widget({ assistantId }: WidgetProps) {
         draftRes.reload();
       });
     } catch (err) {
-      setFormError(err instanceof ApiError ? err.message : "Could not publish.");
+      if (err instanceof FailedTestsError) {
+        setFailedRun(err.run);
+      } else {
+        setFormError(err instanceof ApiError ? err.message : "Could not publish.");
+      }
     }
   }
 
@@ -398,7 +405,7 @@ export function Widget({ assistantId }: WidgetProps) {
             className="btn btn-secondary"
             disabled={busy || unsaved}
             aria-describedby={unsaved ? "widget-publish-hint" : undefined}
-            onClick={handlePublish}
+            onClick={() => void handlePublish(false)}
           >
             {publishing ? "Publishing…" : "Publish"}
           </button>
@@ -419,6 +426,14 @@ export function Widget({ assistantId }: WidgetProps) {
         <p className="error-text" role="alert">
           {formError}
         </p>
+      )}
+      {failedRun && (
+        <FailedTestsPanel
+          run={failedRun}
+          busy={busy}
+          onFix={() => setFailedRun(null)}
+          onPublishAnyway={() => void handlePublish(true)}
+        />
       )}
 
       <form className="stack" onSubmit={handleSave}>

@@ -5,10 +5,7 @@ export interface NavigationProps {
   onNavigate: (path: string) => void;
 }
 
-/**
- * Primary admin navigation, built from NAV_ITEMS. Tests arrives with the
- * answer-tests task; everything else in the specification's list is here.
- */
+/** Primary admin navigation, built from NAV_ITEMS. */
 export function Navigation({ current, onNavigate }: NavigationProps) {
   return (
     <nav className="nav" aria-label="Primary">

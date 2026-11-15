@@ -276,5 +276,11 @@ export function testsFor(db: D1Database, orgId: string) {
         publishedAnyway: false,
       };
     },
+
+    async markPublishedAnyway(runId: string): Promise<void> {
+      await prepare(db, "UPDATE test_runs SET published_anyway = 1 WHERE org_id = ?1 AND id = ?2")
+        .bind(orgId, runId)
+        .run();
+    },
   };
 }

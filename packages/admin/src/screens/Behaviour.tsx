@@ -1,9 +1,11 @@
 import type { BehaviourConfig } from "@solvchat/core";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { ApiError, postJson, putJson } from "../api/client.js";
-import type { VersionRow } from "../api/types.js";
+import { ApiError, putJson } from "../api/client.js";
+import { FailedTestsError, publishAssistant } from "../api/publish.js";
+import type { TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { useAssistantMutation } from "../shell/useAssistantMutations.js";
+import { FailedTestsPanel } from "./FailedTestsPanel.js";
 import { History } from "./History.js";
 
 export interface BehaviourProps {
@@ -50,6 +52,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [failedRun, setFailedRun] = useState<TestRunSummary | null>(null);
 
   const mutation = useAssistantMutation(assistantId);
   const { saving, publishing, busy } = mutation;
@@ -172,6 +175,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     setFieldErrors({});
     setFormError(null);
     setStatusMessage(null);
+    setFailedRun(null);
 
     const submitted = { greeting, persona, fallbackText, questionsText };
 
@@ -209,18 +213,17 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     }
   }
 
-  async function handlePublish() {
+  async function handlePublish(force = false) {
     // Publishing sends the saved draft, not the form: with unsaved edits the
     // owner would publish something other than what they see.
     if (busy || unsaved) return;
     setFormError(null);
     setStatusMessage(null);
+    setFailedRun(null);
     const snapshot = { assistantId, fields: { ...latestRef.current } };
     try {
       await mutation.run("publishing", async () => {
-        const res = await postJson<{ version: VersionRow }>(
-          `/api/admin/assistants/${assistantId}/publish`,
-        );
+        const res = await publishAssistant(assistantId, force);
         publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
         setStatusMessage(
@@ -230,7 +233,11 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         draft.reload();
       });
     } catch (err) {
-      setFormError(err instanceof ApiError ? err.message : "Could not publish.");
+      if (err instanceof FailedTestsError) {
+        setFailedRun(err.run);
+      } else {
+        setFormError(err instanceof ApiError ? err.message : "Could not publish.");
+      }
     }
   }
 
@@ -257,7 +264,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
             className="btn btn-secondary"
             disabled={busy || unsaved}
             aria-describedby={unsaved ? "behaviour-publish-hint" : undefined}
-            onClick={handlePublish}
+            onClick={() => void handlePublish(false)}
           >
             {publishing ? "Publishing…" : "Publish"}
           </button>
@@ -278,6 +285,14 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         <p className="error-text" role="alert">
           {formError}
         </p>
+      )}
+      {failedRun && (
+        <FailedTestsPanel
+          run={failedRun}
+          busy={busy}
+          onFix={() => setFailedRun(null)}
+          onPublishAnyway={() => void handlePublish(true)}
+        />
       )}
 
       <form className="stack" onSubmit={handleSave}>

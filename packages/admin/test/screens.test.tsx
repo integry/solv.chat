@@ -50,6 +50,7 @@ function installFakeServer(options?: {
       ];
 
   const answerPosts: Array<{ question: string; answer: string; fromMessageId: string }> = [];
+  const testPosts: Array<{ question: string; expectation: unknown }> = [];
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -209,11 +210,32 @@ function installFakeServer(options?: {
       return Response.json(info);
     }
 
+    if (path === `/api/admin/assistants/${assistant.id}/tests` && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        question: string;
+        expectation: unknown;
+      };
+      testPosts.push(body);
+      return Response.json(
+        {
+          test: {
+            id: `tst_${testPosts.length}`,
+            orgId: assistant.orgId,
+            assistantId: assistant.id,
+            question: body.question,
+            expectation: body.expectation,
+            createdAt: 1_700_000_000_000,
+          },
+        },
+        { status: 201 },
+      );
+    }
+
     return Response.json({ error: "Not found." }, { status: 404 });
   });
 
   vi.stubGlobal("fetch", fetchMock);
-  return { answerPosts };
+  return { answerPosts, testPosts };
 }
 
 describe("admin phase 1 screens", () => {
@@ -762,7 +784,7 @@ describe("admin phase 1 screens", () => {
     expect(await screen.findByText("Copied.")).toBeTruthy();
   });
 
-  it("keeps Tools and Tests out of navigation and exposes keyboard-reachable links", async () => {
+  it("exposes all nine navigation items in order and keyboard-reachable links", async () => {
     installFakeServer();
     render(<App />);
 
@@ -776,6 +798,7 @@ describe("admin phase 1 screens", () => {
       "Tools",
       "Behaviour",
       "Widget",
+      "Tests",
       "Install",
     ]);
     for (const link of links) {
@@ -901,5 +924,44 @@ describe("admin phase 1 screens", () => {
     const list = await screen.findByRole("list", { name: "What the assistant did" });
     expect(list.textContent).toContain("Tool: lookup_order");
     expect(list.textContent).toContain("On the page: navigate — did not work");
+  });
+
+  it("adds a test from a conversation turn pre-filled with the visitor's question", async () => {
+    const server = installFakeServer();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add to tests" }));
+
+    const questionInput = screen.getByLabelText("Question") as HTMLInputElement;
+    expect(questionInput.value).toBe("How do I start?");
+
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "Sign up" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    expect(await screen.findByText("Added to tests.")).toBeTruthy();
+    expect(server.testPosts).toEqual([
+      { question: "How do I start?", expectation: { kind: "contains", phrase: "Sign up" } },
+    ]);
+  });
+
+  it("adds a test from a gap pre-filled with the gap's question", async () => {
+    const server = installFakeServer();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Gaps" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add to tests" }));
+
+    const questionInput = screen.getByLabelText("Question") as HTMLInputElement;
+    expect(questionInput.value).toBe("Do you ship to Spain?");
+
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "Spain" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    expect(await screen.findByText("Added to tests.")).toBeTruthy();
+    expect(server.testPosts).toEqual([
+      { question: "Do you ship to Spain?", expectation: { kind: "contains", phrase: "Spain" } },
+    ]);
   });
 });

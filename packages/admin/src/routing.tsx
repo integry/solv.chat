@@ -8,6 +8,7 @@ export type ScreenId =
   | "tools"
   | "behaviour"
   | "widget"
+  | "tests"
   | "install";
 
 export interface NavItem {
@@ -21,11 +22,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "conversations", label: "Conversations", path: "/admin/conversations" },
   { id: "gaps", label: "Gaps", path: "/admin/gaps" },
   { id: "sources", label: "Sources", path: "/admin/sources" },
-  // Position taken from docs/architecture.md, "Admin": Sources · Tools ·
-  // Behaviour · Widget · Tests.
   { id: "tools", label: "Tools", path: "/admin/tools" },
   { id: "behaviour", label: "Behaviour", path: "/admin/behaviour" },
   { id: "widget", label: "Widget", path: "/admin/widget" },
+  { id: "tests", label: "Tests", path: "/admin/tests" },
   { id: "install", label: "Install", path: "/admin/install" },
 ];
 

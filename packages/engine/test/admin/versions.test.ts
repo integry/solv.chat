@@ -3,10 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Conflict } from "../../src/admin/errors.js";
 import { adminRoutes } from "../../src/admin/router.js";
 import { publishDraft, updateDraft } from "../../src/admin/versions.js";
+import { createApp } from "../../src/app.js";
 import type { AssistantRow } from "../../src/db/assistants.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import type { VersionRow } from "../../src/db/versions.js";
-import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
+import { ANTHROPIC_MODELS } from "../../src/models.js";
+import type { LlmChunk, LlmProvider } from "../../src/providers/types.js";
+import type { fakeEmbedder } from "../fakes/fakeEmbedder.js";
+import { memoryRetriever } from "../fakes/memoryRetriever.js";
+import { createTestApp, fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
 
 async function call(
   app: ReturnType<typeof createTestApp>,
@@ -471,5 +476,139 @@ describe("admin versions API", () => {
     expect(rows.find((r) => r.state === "published")?.id).toBe(firstPublished?.id);
 
     await expect(publishDraft(racingTenant, assistantId)).rejects.toBeInstanceOf(Conflict);
+  });
+});
+
+function constantEmbedder(): ReturnType<typeof fakeEmbedder> {
+  return {
+    dimensions: 4,
+    async embed(texts, onBilled) {
+      await onBilled(texts.length * 4);
+      return { vectors: texts.map(() => [1, 0, 0, 0]) };
+    },
+  };
+}
+
+function scriptedProvider(answerText: string): LlmProvider {
+  return {
+    name: "anthropic",
+    model: ANTHROPIC_MODELS.fast.id,
+    async *stream(): AsyncIterable<LlmChunk> {
+      yield { kind: "text", text: answerText };
+      yield { kind: "usage", tokensIn: 10, tokensOut: 5 };
+    },
+  };
+}
+
+describe("publish gate with answer tests", () => {
+  let assistantId: string;
+
+  function makeApp(answerText: string) {
+    return createApp(fakeSeams(), {
+      chat: {
+        embedder: constantEmbedder(),
+        retriever: memoryRetriever(),
+        provider: scriptedProvider(answerText),
+      },
+    });
+  }
+
+  beforeEach(async () => {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM test_runs"),
+      env.DB.prepare("DELETE FROM tests"),
+      env.DB.prepare("DELETE FROM assistant_versions"),
+      env.DB.prepare("DELETE FROM assistants"),
+    ]);
+
+    const app = makeApp("Pro costs $29.");
+    const res = await call(app, "POST", "/api/admin/assistants", {
+      name: "Tested Bot",
+      allowedOrigins: [],
+    });
+    const created = (await res.json()) as { assistant: AssistantRow };
+    assistantId = created.assistant.id;
+  });
+
+  it("refuses publish with 409 and test results when a test fails, leaving assistant_versions untouched", async () => {
+    const app = makeApp("Contact sales for pricing.");
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+
+    const versionsBefore = await tableVersions(assistantId);
+    const res = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    expect(res.status).toBe(409);
+
+    const body = (await res.json()) as {
+      error: string;
+      run: { id: string; results: Array<{ outcome: string; reason: string }> };
+    };
+    expect(body.error).toBe("Some tests did not pass.");
+    expect(body.run.results).toHaveLength(1);
+    expect(body.run.results[0]?.outcome).toBe("failed");
+    expect(body.run.results[0]?.reason).toBe('Did not say "$29".');
+
+    const versionsAfter = await tableVersions(assistantId);
+    expect(versionsAfter).toEqual(versionsBefore);
+  });
+
+  it("publishes with force: true when tests fail and records published_anyway = 1", async () => {
+    const app = makeApp("Contact sales for pricing.");
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+
+    const res = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      force: true,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      version: VersionRow;
+      run?: { id: string; passed: boolean };
+    };
+    expect(body.version.state).toBe("published");
+    expect(body.run?.passed).toBe(false);
+
+    const row = await env.DB.prepare("SELECT passed, published_anyway FROM test_runs WHERE id = ?1")
+      .bind(body.run?.id)
+      .first<{ passed: number; published_anyway: number }>();
+    expect(row).toEqual({ passed: 0, published_anyway: 1 });
+  });
+
+  it("publishes normally when all tests pass and leaves published_anyway = 0", async () => {
+    const app = makeApp("Pro costs $29 per month.");
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "declines" },
+    });
+
+    const res = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      version: VersionRow;
+      run?: { id: string; passed: boolean };
+    };
+    expect(body.version.state).toBe("published");
+    expect(body.run?.passed).toBe(true);
+
+    const row = await env.DB.prepare("SELECT passed, published_anyway FROM test_runs WHERE id = ?1")
+      .bind(body.run?.id)
+      .first<{ passed: number; published_anyway: number }>();
+    expect(row).toEqual({ passed: 1, published_anyway: 0 });
+  });
+
+  it("runs no tests when the assistant has no tests", async () => {
+    const app = makeApp("Anything");
+    const res = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { version: VersionRow; run?: unknown };
+    expect(body.version.state).toBe("published");
+    expect(body.run).toBeUndefined();
+
+    const runs = await env.DB.prepare("SELECT COUNT(*) AS n FROM test_runs").first<{ n: number }>();
+    expect(runs?.n).toBe(0);
   });
 });

@@ -11,6 +11,7 @@ import {
   listTests,
   type RunDeps,
   runAnswerTests,
+  type TestResult,
   updateTest,
 } from "./answerTests.js";
 import {
@@ -112,6 +113,18 @@ function readPagingParams(url: URL): { limit?: number; offset?: number } {
   };
 }
 
+async function maybeRunTestsBeforePublish(
+  deps: AdminRouteDeps,
+  assistantId: string,
+): Promise<{ runId: string; passed: boolean; results: TestResult[]; stopped?: string } | null> {
+  const count = await deps.tenant.tests.countFor(assistantId);
+  if (count === 0) return null;
+  if (!deps.resolveRunDeps) {
+    throw new Error("Answer test runner is not configured.");
+  }
+  return runAnswerTests(await deps.resolveRunDeps(), assistantId);
+}
+
 async function assistantRoutes(
   request: Request,
   url: URL,
@@ -162,7 +175,34 @@ async function assistantRoutes(
       return Response.json({ draft });
     }
     if (action === "publish" && method === "POST") {
-      return Response.json({ version: await publishDraft(tenant, assistantId) });
+      const body =
+        request.headers.get("content-length") === "0"
+          ? {}
+          : await readJsonBody(request).catch(() => ({}));
+      const force = isPlainObject(body) && body.force === true;
+      // The specification's order: tests, then promote. A run only happens if
+      // the owner has tests; publishing with none is the phase 1 path exactly.
+      const run = await maybeRunTestsBeforePublish(deps, assistantId);
+      if (run !== null && !run.passed && !force) {
+        // 409, not 400: the request was well formed, and the reason it did not
+        // happen is a state the owner can inspect and then override.
+        return Response.json(
+          {
+            error: "Some tests did not pass.",
+            run: { id: run.runId, results: run.results, stopped: run.stopped ?? null },
+          },
+          { status: 409 },
+        );
+      }
+      const version = await publishDraft(tenant, assistantId);
+      if (run !== null && !run.passed && force) {
+        // The specification: "the choice is recorded on the run".
+        await tenant.tests.markPublishedAnyway(run.runId);
+      }
+      return Response.json({
+        version,
+        ...(run ? { run: { id: run.runId, passed: run.passed } } : {}),
+      });
     }
     if (action === "sources" && method === "GET") {
       return Response.json({ sources: await listSources(tenant, assistantId) });

@@ -3,6 +3,7 @@ import type { ConversationDetail } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
 import { EntryEditor } from "./EntryEditor.js";
+import { TestEditor } from "./TestEditor.js";
 
 export interface ConversationProps {
   assistantId: string;
@@ -17,6 +18,11 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
     fromMessageId: string;
     question: string;
   } | null>(null);
+  const [addingTest, setAddingTest] = useState<{
+    turnId: string;
+    question: string;
+  } | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const detail = detailRes.value;
 
@@ -58,6 +64,12 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
           </button>
         </div>
       </div>
+
+      {statusMessage && (
+        <p className="notice-text" role="status">
+          {statusMessage}
+        </p>
+      )}
 
       {detailRes.status === "loading" && !detail ? (
         <p className="muted">Loading conversation…</p>
@@ -115,27 +127,46 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                   </div>
                 )}
 
-                {isUnanswered && (
+                {!isUser && (
                   <div className="actions">
-                    {turn.answerDocumentId ? (
-                      <span className="badge badge-published">Handled</span>
-                    ) : (
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={() =>
-                          setAnswering({
-                            turnId: turn.id,
-                            // The reply's own id: the engine links the
-                            // answer through the question the reply records.
-                            fromMessageId: turn.id,
-                            question: questionTurn?.content ?? "",
-                          })
-                        }
-                      >
-                        Write the right answer
-                      </button>
-                    )}
+                    {isUnanswered &&
+                      (turn.answerDocumentId ? (
+                        <span className="badge badge-published">Handled</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => {
+                            setAddingTest(null);
+                            setStatusMessage(null);
+                            setAnswering({
+                              turnId: turn.id,
+                              // The reply's own id: the engine links the
+                              // answer through the question the reply records.
+                              fromMessageId: turn.id,
+                              question: questionTurn?.content ?? "",
+                            });
+                          }}
+                        >
+                          Write the right answer
+                        </button>
+                      ))}
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => {
+                        setAnswering(null);
+                        setStatusMessage(null);
+                        setAddingTest({
+                          turnId: turn.id,
+                          // The visitor's question, not the reply: a test is a
+                          // question plus an expectation.
+                          question: questionTurn?.content ?? "",
+                        });
+                      }}
+                    >
+                      Add to tests
+                    </button>
                   </div>
                 )}
 
@@ -152,6 +183,19 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                       detailRes.reload();
                     }}
                     onCancel={() => setAnswering(null)}
+                  />
+                )}
+
+                {addingTest?.turnId === turn.id && (
+                  <TestEditor
+                    key={turn.id}
+                    assistantId={assistantId}
+                    initialQuestion={addingTest.question}
+                    onSaved={() => {
+                      setAddingTest(null);
+                      setStatusMessage("Added to tests.");
+                    }}
+                    onCancel={() => setAddingTest(null)}
                   />
                 )}
               </div>

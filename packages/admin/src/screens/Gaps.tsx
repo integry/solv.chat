@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { GapSummary, GapsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { EntryEditor } from "./EntryEditor.js";
+import { TestEditor } from "./TestEditor.js";
 
 export interface GapsProps {
   assistantId: string;
@@ -19,6 +20,8 @@ export function Gaps({ assistantId }: GapsProps) {
     `/api/admin/assistants/${assistantId}/gaps?limit=${PAGE_SIZE}&offset=${offset}`,
   );
   const [editingGap, setEditingGap] = useState<GapSummary | null>(null);
+  const [addingTestGap, setAddingTestGap] = useState<GapSummary | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const page = gapsRes.value;
   const gaps = page?.gaps ?? [];
@@ -37,6 +40,12 @@ export function Gaps({ assistantId }: GapsProps) {
         </div>
       </div>
 
+      {statusMessage && (
+        <p className="notice-text" role="status">
+          {statusMessage}
+        </p>
+      )}
+
       {editingGap && (
         <EntryEditor
           assistantId={assistantId}
@@ -50,6 +59,19 @@ export function Gaps({ assistantId }: GapsProps) {
             gapsRes.reload();
           }}
           onCancel={() => setEditingGap(null)}
+        />
+      )}
+
+      {addingTestGap && (
+        <TestEditor
+          key={addingTestGap.exampleMessageId}
+          assistantId={assistantId}
+          initialQuestion={addingTestGap.displayQuestion || addingTestGap.question}
+          onSaved={() => {
+            setAddingTestGap(null);
+            setStatusMessage("Added to tests.");
+          }}
+          onCancel={() => setAddingTestGap(null)}
         />
       )}
 
@@ -78,13 +100,30 @@ export function Gaps({ assistantId }: GapsProps) {
                         {gap.handled && <span className="badge badge-published">Handled</span>}
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => setEditingGap(gap)}
-                    >
-                      Write the right answer
-                    </button>
+                    <div className="actions">
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => {
+                          setAddingTestGap(null);
+                          setStatusMessage(null);
+                          setEditingGap(gap);
+                        }}
+                      >
+                        Write the right answer
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => {
+                          setEditingGap(null);
+                          setStatusMessage(null);
+                          setAddingTestGap(gap);
+                        }}
+                      >
+                        Add to tests
+                      </button>
+                    </div>
                   </div>
                 </li>
               ))}
