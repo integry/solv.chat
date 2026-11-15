@@ -1,12 +1,13 @@
 import { type BehaviourConfig, type ChatEvent, newId } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { type ResolvedChunk, resolveChunks } from "../ingest/resolve.js";
-import { costMicros, type ModelInfo } from "../models.js";
+import type { ModelInfo } from "../models.js";
 import { ProviderError } from "../providers/error.js";
 import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
 import type { LlmMessage, LlmProvider } from "../providers/types.js";
 import type { UsageSink } from "../seams/types.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
+import { runToolLoop, type StoredToolCall, type ToolRunner } from "./toolLoop.js";
 
 // A chunk below the floor is noise; including it would make the model answer
 // from unrelated pages, which is worse than admitting the gap. The numbers are
@@ -22,6 +23,11 @@ export interface AnswerDeps {
   model: ModelInfo;
   usage: UsageSink;
   now?: (() => number) | undefined;
+  /**
+   * Tool sources for this answer. Empty (the default) reproduces phase 1
+   * exactly: no `tools` key on the request, one model call.
+   */
+  runners?: readonly ToolRunner[] | undefined;
 }
 
 export interface AnswerInput {
@@ -101,6 +107,7 @@ async function recordMessageUsage(
   tokensIn: number,
   tokensOut: number,
   cost: number,
+  messages = 1,
 ): Promise<void> {
   // Usage goes through the seam, never straight into usage_daily: the hosted
   // service meters and bills from these events.
@@ -108,7 +115,7 @@ async function recordMessageUsage(
     orgId: input.orgId,
     assistantId: input.assistantId,
     at,
-    messages: 1,
+    messages,
     tokensIn,
     tokensOut,
     costMicros: cost,
@@ -227,56 +234,74 @@ export async function* answerMessage(
     question: input.message,
   });
 
+  // Calls already stored in this conversation bound what this answer may add.
+  // Zero for a preview: nothing is stored, so nothing is counted.
+  const priorCalls = input.preview ? 0 : await deps.tenant.messages.countToolCalls(conversationId);
+
   let text = "";
+  let toolCalls: StoredToolCall[] = [];
   let tokensIn = 0;
   let tokensOut = 0;
-  let usageReported = false;
+  let modelCalls = 0;
 
   try {
-    for await (const chunk of deps.provider.stream(request)) {
-      if (chunk.kind === "text") {
-        text += chunk.text;
-        // Forward immediately rather than buffering: the visible difference
-        // between this product and a form is that the answer starts at once.
-        yield { type: "token", text: chunk.text };
-      } else if (chunk.kind === "usage") {
-        tokensIn = chunk.tokensIn;
-        tokensOut = chunk.tokensOut;
-        usageReported = true;
+    const loop = runToolLoop(
+      {
+        provider: deps.provider,
+        model: deps.model,
+        runners: deps.runners ?? [],
+        priorCalls,
+        // One usage event per model call, so a three-call answer is three
+        // events and the spend cap sees the real total; only the first counts
+        // toward `usage_daily.messages` so Overview still counts answers.
+        onModelUsage: async (callTokensIn, callTokensOut, cost) => {
+          const messageCount = modelCalls === 0 ? 1 : 0;
+          modelCalls += 1;
+          tokensIn += callTokensIn;
+          tokensOut += callTokensOut;
+          await recordMessageUsage(
+            deps,
+            input,
+            clock(),
+            callTokensIn,
+            callTokensOut,
+            cost,
+            messageCount,
+          );
+        },
+        now: deps.now,
+      },
+      request,
+    );
+    for (;;) {
+      const step = await loop.next();
+      if (step.done) {
+        text = step.value.text;
+        toolCalls = step.value.calls;
+        break;
+      }
+      const event = step.value;
+      if (event.kind === "text") {
+        yield { type: "token", text: event.text };
+      } else {
+        // Detail the widget may show and a v1 widget ignores.
+        yield {
+          type: "tool",
+          name: event.call.name,
+          state: event.state,
+          callId: event.call.callId,
+          kind: event.source,
+          ...(event.ok === undefined ? {} : { ok: event.ok }),
+        };
       }
     }
   } catch (err) {
-    // Whatever ended the stream, tokens the provider already reported are
-    // billed and must reach the usage sink.
-    if (usageReported) {
-      await recordMessageUsage(
-        deps,
-        input,
-        clock(),
-        tokensIn,
-        tokensOut,
-        costMicros(deps.model, tokensIn, tokensOut),
-      );
-    }
     if (err instanceof ProviderError) {
       yield { type: "error", message: "The assistant could not complete this response." };
       return;
     }
     throw err;
   }
-
-  // The model request is billed the moment the stream completes, so its usage
-  // is recorded before anything else can fail: emitting citations and storing
-  // the reply both come after, and a rejected D1 write must not leave spend
-  // out of Overview or the cap check. Recorded exactly once on this path.
-  await recordMessageUsage(
-    deps,
-    input,
-    clock(),
-    tokensIn,
-    tokensOut,
-    costMicros(deps.model, tokensIn, tokensOut),
-  );
 
   // Citations after the text: the widget renders them under the answer, and
   // emitting them first would show links before there is anything to link to.
@@ -294,7 +319,9 @@ export async function* answerMessage(
       role: "assistant",
       content: text,
       citations,
-      toolCalls: null,
+      // null when nothing was called, so Conversations can tell "no tools" from
+      // "tools that returned nothing".
+      toolCalls: toolCalls.length > 0 ? toolCalls : null,
       tokensIn,
       tokensOut,
       answered: true,

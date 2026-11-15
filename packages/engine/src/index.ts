@@ -16,6 +16,19 @@ export {
   SAFETY_FRAME,
 } from "./chat/prompt.js";
 export type { ChatRouteOverrides } from "./chat/route.js";
+export {
+  MAX_TOOL_CALLS_PER_CONVERSATION,
+  MAX_TOOL_ITERATIONS,
+  MAX_TOOL_RESULT_BYTES,
+  runToolLoop,
+  type StoredToolCall,
+  TOOL_WALL_TIME_MS,
+  type ToolLoopDeps,
+  type ToolLoopEvent,
+  type ToolLoopOutcome,
+  type ToolRunner,
+  type ToolRunResult,
+} from "./chat/toolLoop.js";
 export { type Chunk, chunkMarkdown, MAX_CHARS, OVERLAP_CHARS } from "./ingest/chunk.js";
 export { type IngestConsumerDeps, runIngestBatch } from "./ingest/consumer.js";
 export { type ResolvedChunk, resolveChunks } from "./ingest/resolve.js";
