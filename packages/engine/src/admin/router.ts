@@ -31,8 +31,8 @@ import {
 import { overviewFor } from "./overview.js";
 import {
   getProviderSettingsView,
-  parseProviderName,
   type ProviderAdminDeps,
+  parseProviderName,
   removeProviderKey,
   setProviderKey,
   testProviderKey,
@@ -60,9 +60,7 @@ export interface AdminRouteDeps {
   fetchImpl?: typeof fetch | undefined;
   costUnit?: "usd" | "credits" | undefined;
   resolveSettings?: (() => Promise<EffectiveProviderSettings>) | undefined;
-  checkConfigError?:
-    | ((resolved?: EffectiveProviderSettings) => Promise<string | null>)
-    | undefined;
+  checkConfigError?: ((resolved?: EffectiveProviderSettings) => Promise<string | null>) | undefined;
   keys?: KeyProvider | undefined;
   envSecretPresence?: Record<LlmProviderName, boolean> | undefined;
   /**

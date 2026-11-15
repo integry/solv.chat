@@ -5,11 +5,7 @@ export interface NavigationProps {
   onNavigate: (path: string) => void;
 }
 
-function renderNavItem(
-  item: NavItem,
-  current: ScreenId,
-  onNavigate: (path: string) => void,
-) {
+function renderNavItem(item: NavItem, current: ScreenId, onNavigate: (path: string) => void) {
   const active = item.id === current;
   return (
     <li key={item.id}>

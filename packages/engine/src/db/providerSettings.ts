@@ -84,10 +84,7 @@ export function providerSettingsFor(db: D1Database, orgId: string) {
       return getProviderSettings(db, orgId);
     },
 
-    async upsert(
-      patch: ProviderSettingsPatch,
-      now = Date.now(),
-    ): Promise<StoredProviderSettings> {
+    async upsert(patch: ProviderSettingsPatch, now = Date.now()): Promise<StoredProviderSettings> {
       const existing = await getProviderSettings(db, orgId);
       const next: StoredProviderSettings = {
         llmProvider:

@@ -14,12 +14,7 @@ const ANTHROPIC_VERSION = "2026-10-21";
 const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
 const OPENROUTER_AUTH_KEY_URL = "https://openrouter.ai/api/v1/auth/key";
 
-const ALLOWED_SETTINGS_KEYS = new Set([
-  "llmProvider",
-  "llmTier",
-  "llmModel",
-  "embeddingsProvider",
-]);
+const ALLOWED_SETTINGS_KEYS = new Set(["llmProvider", "llmTier", "llmModel", "embeddingsProvider"]);
 
 export interface ProviderKeyStatus {
   source: SettingSource;

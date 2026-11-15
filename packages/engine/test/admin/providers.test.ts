@@ -103,7 +103,7 @@ describe("admin provider settings & keys", () => {
     expect(bodyDefault.settings.llmTier).toEqual({ value: "fast", source: "none" });
     expect(bodyDefault.settings.llmModel).toEqual({ value: null, source: "none" });
     expect(bodyDefault.settings.embeddingsProvider).toEqual({ value: "openai", source: "none" });
-    expect(bodyDefault.keys.anthropic.source).toBe("none");
+    expect(bodyDefault.keys.anthropic?.source).toBe("none");
     expect(bodyDefault.configError).toContain("Settings → Providers");
     expect(bodyDefault.configError).toContain("SOLV_ANTHROPIC_KEY");
 
@@ -124,7 +124,7 @@ describe("admin provider settings & keys", () => {
       value: "openrouter",
       source: "environment",
     });
-    expect(bodyEnv.keys.openai.source).toBe("environment");
+    expect(bodyEnv.keys.openai?.source).toBe("environment");
     expect(bodyEnv.configError).toBeNull();
 
     // 3. Stored settings beat environment variables
@@ -160,7 +160,10 @@ describe("admin provider settings & keys", () => {
     expect(resReset.status).toBe(200);
     const bodyReset = (await resReset.json()) as typeof bodyDefault;
     expect(bodyReset.settings.llmProvider).toEqual({ value: "openai", source: "environment" });
-    expect(bodyReset.settings.llmModel).toEqual({ value: "vendor/from-env", source: "environment" });
+    expect(bodyReset.settings.llmModel).toEqual({
+      value: "vendor/from-env",
+      source: "environment",
+    });
     expect(bodyReset.settings.embeddingsProvider).toEqual({
       value: "openrouter",
       source: "environment",
@@ -299,7 +302,10 @@ describe("admin provider settings & keys", () => {
 
     const resB = await call(appB, envB, "/api/admin/providers");
     const bodyB = (await resB.json()) as {
-      settings: { llmProvider: { value: string; source: string }; llmModel: { value: string | null } };
+      settings: {
+        llmProvider: { value: string; source: string };
+        llmModel: { value: string | null };
+      };
       keys: { openrouter: { source: string } };
     };
     expect(bodyB.settings.llmProvider.value).toBe("anthropic");
@@ -320,7 +326,7 @@ describe("admin provider settings & keys", () => {
       });
       if (url.includes("/embeddings")) {
         return Response.json({
-          data: [{ embedding: new Array(1536).fill(0.01) }],
+          data: [{ index: 0, embedding: new Array(1536).fill(0.01) }],
           usage: { total_tokens: 3 },
         });
       }
@@ -413,7 +419,9 @@ describe("admin provider settings & keys", () => {
 
     const embedCall = seenHeaders.find((c) => c.url.includes("openrouter.ai/api/v1/embeddings"));
     expect(embedCall?.auth).toBe("Bearer sk-stored-openrouter-123");
-    const chatCall = seenHeaders.find((c) => c.url.includes("openrouter.ai/api/v1/chat/completions"));
+    const chatCall = seenHeaders.find((c) =>
+      c.url.includes("openrouter.ai/api/v1/chat/completions"),
+    );
     expect(chatCall?.auth).toBe("Bearer sk-stored-openrouter-123");
   });
 

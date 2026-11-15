@@ -21,7 +21,7 @@ const PROVIDERS: readonly LlmProviderName[] = ["anthropic", "openai", "openroute
 
 function SourceBadge({ source, label }: { source: SettingSource; label?: string }) {
   return (
-    <span className="badge" aria-label={label ? `${label} source: ${source}` : `source: ${source}`}>
+    <span className="badge" title={label ? `${label} source: ${source}` : `source: ${source}`}>
       {source}
     </span>
   );
@@ -139,7 +139,9 @@ function ProviderKeyCard({
             autoComplete="off"
             value={keyInput}
             disabled={busy}
-            placeholder={status.source === "stored" ? "Enter a new key to replace" : "Paste API key"}
+            placeholder={
+              status.source === "stored" ? "Enter a new key to replace" : "Paste API key"
+            }
             onChange={(e) => setKeyInput(e.target.value)}
           />
         </div>
