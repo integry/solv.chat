@@ -247,7 +247,13 @@ textarea:focus-visible {
   margin-top: 8px;
 }
 
-.solv-nav-recovery {
+.solv-nav-status {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--solv-muted);
+}
+
+.solv-nav-external {
   margin-top: 8px;
 }
 

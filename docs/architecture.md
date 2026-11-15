@@ -236,7 +236,18 @@ credential is involved, which makes them safer than MCP tools.
 Built in:
 
 - `navigate` — go to a URL on the same site (same origin, or an origin the owner
-  listed), optionally to a section. The conversation continues on the new page.
+  listed), optionally to a section:
+  - Same-document target (only the fragment differs, or the current URL with a
+    section): scrolls to the section and continues the conversation in place.
+  - Same-origin target: persists the pending continuation in per-origin
+    `sessionStorage` and calls `location.assign`; the next page's widget resumes
+    the conversation on connect (dropped as "the visitor moved on" if the
+    visitor sends a new message first or after 2 minutes).
+  - Listed other origin: keeps the conversation on the current page and renders
+    a button ("Open <host> in a new tab") that opens the owner's URL with
+    `target="_blank"` and `rel="noopener noreferrer"` on click, without passing
+    any transcript, ids, or extra parameters.
+  - Any other origin: refused.
 - `highlight` — scroll to an element and point at it with a short note.
 - `fill` — put values into form fields the owner has marked as fillable. It never
   submits.

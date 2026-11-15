@@ -11,17 +11,17 @@ import {
   installBuiltins,
   setBeforeNavigate,
   setHighlightHost,
+  setOnExternalNavigate,
 } from "./builtins.js";
 import { readEventLines } from "./sse.js";
 import {
   claimConversation,
-  consumeCrossOriginHandoff,
   loadConversation,
+  PENDING_RESUME_TTL_MS,
   type PendingResume,
   type SavedConversation,
   type SavedTurn,
   saveConversation,
-  stageCrossOriginHandoff,
   visitorId,
 } from "./storage.js";
 import { styles } from "./styles.js";
@@ -45,7 +45,18 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-export const NAVIGATION_RECOVERY_MS = 1000;
+
+function buildMovedOnResults(pending: PendingResume): ActionResult[] {
+  return pending.actionResults.map((entry) =>
+    pending.navigateCallId
+      ? entry.callId === pending.navigateCallId
+        ? { callId: entry.callId, ok: false as const, error: "the visitor moved on" }
+        : entry
+      : entry.ok
+        ? { callId: entry.callId, ok: false as const, error: "the visitor moved on" }
+        : entry,
+  );
+}
 
 const SCRIPT_ORIGIN = (() => {
   const current = typeof document !== "undefined" ? document.currentScript : null;
@@ -140,19 +151,33 @@ export class SolvChat extends HTMLElement {
     }
     setHighlightHost(this.#root);
 
+    let expiredPending: PendingResume | null = null;
     const assistant = this.#assistant();
     if (assistant) {
       claimConversation(assistant, this.#owner);
-      const handoff = consumeCrossOriginHandoff(assistant);
-      const saved = handoff ?? loadConversation(assistant);
-      this.#restore(saved ?? { conversationId: null, open: false, turns: [] });
-      if (handoff) {
-        this.#persist();
+      const saved = loadConversation(assistant);
+      if (saved?.pendingResume) {
+        if (Date.now() - saved.pendingResume.createdAt > PENDING_RESUME_TTL_MS) {
+          expiredPending = saved.pendingResume;
+          delete saved.pendingResume;
+        }
       }
+      this.#restore(saved ?? { conversationId: null, open: false, turns: [] });
+    }
+
+    if (expiredPending) {
+      this.#persist();
+      void this.#reportDroppedResume(expiredPending);
     }
 
     if (this.#pendingResume && this.#resumedBubble) {
-      void this.#resumeAfterConfigLoad();
+      const pending = this.#pendingResume;
+      const target = this.#resumedBubble;
+      // Consume immediately so a second connect cannot resume the same continuation.
+      this.#pendingResume = null;
+      this.#resumedBubble = null;
+      this.#persist();
+      void this.#resumeAfterConfigLoad(pending, target);
     } else {
       void this.#loadConfig();
     }
@@ -161,6 +186,7 @@ export class SolvChat extends HTMLElement {
   disconnectedCallback(): void {
     clearHighlight();
     setBeforeNavigate(null);
+    setOnExternalNavigate(null);
     this.#pendingResume = null;
     this.#resumedBubble = null;
     if (this.#abortController) {
@@ -689,6 +715,14 @@ export class SolvChat extends HTMLElement {
     this.#sending = true;
     this.#sendBtn.disabled = true;
 
+    const pending = this.#pendingResume;
+    if (pending) {
+      this.#pendingResume = null;
+      this.#resumedBubble = null;
+      this.#clearPendingNavigation(pending.resumeMessageId);
+      this.#persist();
+    }
+
     const userTurn: SavedTurn = { role: "user", text: trimmed };
     this.#turns.push(userTurn);
     const userBubble = this.#appendBubble("user");
@@ -705,6 +739,10 @@ export class SolvChat extends HTMLElement {
     const { signal } = controller;
 
     try {
+      if (pending) {
+        await this.#reportDroppedResume(pending, signal);
+        if (signal.aborted) return;
+      }
       const requestBody: Record<string, unknown> = {
         // Sent on every request so the engine can refuse a version it does not
         // support instead of guessing what this widget means.
@@ -866,15 +904,21 @@ export class SolvChat extends HTMLElement {
     }
   }
 
-  async #resumeAfterConfigLoad(): Promise<void> {
+  async #resumeAfterConfigLoad(
+    pending: PendingResume,
+    target: { bubble: HTMLDivElement; textEl: HTMLDivElement; turn: SavedTurn },
+  ): Promise<void> {
     await this.#loadConfig();
-    const pending = this.#pendingResume;
-    const target = this.#resumedBubble;
-    if (!this.isConnected || !pending || !target) return;
+    if (!this.isConnected) return;
 
-    this.#pendingResume = null;
-    this.#resumedBubble = null;
-    this.#persist();
+    const actionResults =
+      pending.navigateCallId && typeof location !== "undefined"
+        ? pending.actionResults.map((entry) =>
+            entry.callId === pending.navigateCallId
+              ? { ...entry, ok: true as const, result: serialiseResult({ opened: location.href }) }
+              : entry,
+          )
+        : pending.actionResults;
 
     const controller = new AbortController();
     this.#abortController = controller;
@@ -886,7 +930,7 @@ export class SolvChat extends HTMLElement {
       const response = await this.#sendActionResumeRequest(
         pending.conversationId,
         pending.resumeMessageId,
-        pending.actionResults,
+        actionResults,
         signal,
       );
       await this.#consumeStream(
@@ -912,6 +956,51 @@ export class SolvChat extends HTMLElement {
         this.#persist();
       }
     }
+  }
+
+  #clearPendingNavigation(resumeMessageId: string): void {
+    for (const el of this.#messagesEl.querySelectorAll(".solv-nav-status")) {
+      el.remove();
+    }
+    for (const turn of this.#turns) {
+      if (turn.messageId === resumeMessageId && turn.awaiting) {
+        delete turn.awaiting;
+      }
+    }
+  }
+
+  async #reportDroppedResume(pending: PendingResume, signal?: AbortSignal): Promise<void> {
+    try {
+      const controller = new AbortController();
+      if (signal) {
+        if (signal.aborted) return;
+        signal.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+      const response = await this.#sendActionResumeRequest(
+        pending.conversationId,
+        pending.resumeMessageId,
+        buildMovedOnResults(pending),
+        controller.signal,
+      );
+      await response.text().catch(() => {});
+    } catch {
+      // Best-effort notification; never block a new message or connect.
+    }
+  }
+
+  #appendExternalNavButton(bubble: HTMLDivElement, target: URL): void {
+    const wrap = document.createElement("div");
+    wrap.className = "solv-nav-external";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "solv-fb-btn solv-nav-open";
+    btn.textContent = `Open ${target.host} in a new tab`;
+    btn.addEventListener("click", () => {
+      window.open(target.href, "_blank", "noopener,noreferrer");
+    });
+    wrap.append(btn);
+    bubble.append(wrap);
+    this.#scrollToBottom();
   }
 
   async #sendActionResumeRequest(
@@ -946,72 +1035,6 @@ export class SolvChat extends HTMLElement {
     });
   }
 
-  #waitForNavigationDeparture(bubble: HTMLDivElement, signal: AbortSignal): Promise<boolean> {
-    if (signal.aborted || !this.isConnected) return Promise.resolve(false);
-    return new Promise((resolve) => {
-      let settled = false;
-      let recoveryEl: HTMLDivElement | null = null;
-      const finish = (canceled: boolean) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        recoveryEl?.remove();
-        if (typeof window !== "undefined") {
-          window.removeEventListener("pagehide", onLeave);
-        }
-        signal.removeEventListener("abort", onLeave);
-        resolve(canceled);
-      };
-      const onLeave = () => finish(false);
-      const timer = setTimeout(() => {
-        if (settled || signal.aborted || !this.isConnected) {
-          finish(false);
-          return;
-        }
-        // Elapsed time alone cannot distinguish a slow destination from a
-        // canceled navigation. Keep pendingResume intact until departure, and
-        // offer an explicit recovery control if the visitor stayed on this page.
-        recoveryEl = document.createElement("div");
-        recoveryEl.className = "solv-nav-recovery";
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "solv-fb-btn solv-nav-recover";
-        btn.textContent = "Continue here";
-        btn.addEventListener(
-          "click",
-          () => {
-            if (settled || signal.aborted || !this.isConnected) {
-              finish(false);
-              return;
-            }
-            if (typeof window !== "undefined" && typeof window.stop === "function") {
-              try {
-                window.stop();
-              } catch {
-                // Ignore stop() errors in restricted contexts.
-              }
-            }
-            // If pagehide/abort fired while stopping, departure already began;
-            // retain continuation state instead of resuming locally.
-            if (settled || signal.aborted || !this.isConnected) {
-              finish(false);
-              return;
-            }
-            finish(true);
-          },
-          { once: true },
-        );
-        recoveryEl.append(btn);
-        bubble.append(recoveryEl);
-        this.#scrollToBottom();
-      }, NAVIGATION_RECOVERY_MS);
-      if (typeof window !== "undefined") {
-        window.addEventListener("pagehide", onLeave, { once: true });
-      }
-      signal.addEventListener("abort", onLeave, { once: true });
-    });
-  }
-
   /**
    * Runs the queued actions and sends their results back so the answer can
    * continue. A second request rather than a held stream: `navigate` replaces
@@ -1033,20 +1056,21 @@ export class SolvChat extends HTMLElement {
     );
 
     const results: ActionResult[] = [];
-    let navigated = false;
     try {
       for (let i = 0; i < toRun.length; i++) {
         const request = toRun[i];
         if (!request || signal.aborted) return;
         clearHighlight();
-        setBeforeNavigate((targetHref) => {
-          navigated = true;
+        let navigatedTo: URL | null = null;
+        let externalTarget: URL | null = null;
+        setBeforeNavigate((target) => {
+          navigatedTo = target;
           const pendingResults: ActionResult[] = [
             ...results,
             {
               callId: request.callId,
               ok: true,
-              result: serialiseResult({ opened: targetHref }),
+              result: serialiseResult({ opened: target.href }),
             },
             ...toRun.slice(i + 1).map((rem) => ({
               callId: rem.callId,
@@ -1059,55 +1083,38 @@ export class SolvChat extends HTMLElement {
             resumeMessageId: done.messageId,
             actionResults: pendingResults,
             depth,
+            createdAt: Date.now(),
+            navigateCallId: request.callId,
           };
-          let isCrossOrigin = false;
-          try {
-            const parsed = new URL(targetHref, location.href);
-            isCrossOrigin = parsed.origin !== location.origin;
-          } catch {
-            // Ignore unparseable targetHref.
-          }
-          let handoffHref: string | undefined;
           if (request.name) {
             if (!assistantTurn.actions) assistantTurn.actions = [];
             assistantTurn.actions.push({ name: request.name, ok: true });
             this.#persist();
-            if (isCrossOrigin) {
-              handoffHref = stageCrossOriginHandoff(
-                this.#assistant(),
-                targetHref,
-                this.#snapshot(),
-              );
-            }
             assistantTurn.actions.pop();
           } else {
             this.#persist();
-            if (isCrossOrigin) {
-              handoffHref = stageCrossOriginHandoff(
-                this.#assistant(),
-                targetHref,
-                this.#snapshot(),
-              );
-            }
           }
-          return handoffHref;
         });
-        let result = await runAction(request);
+        setOnExternalNavigate((target) => {
+          externalTarget = target;
+        });
+        const result = await runAction(request);
         setBeforeNavigate(null);
+        setOnExternalNavigate(null);
         if (signal.aborted) return;
-        if (navigated) {
-          navigated = false;
+        if (navigatedTo !== null) {
+          const target: URL = navigatedTo;
           if (result.ok) {
-            const canceled = await this.#waitForNavigationDeparture(bubble, signal);
-            if (!canceled || signal.aborted) return;
-            result = {
-              callId: request.callId,
-              ok: false,
-              error: "Navigation was canceled.",
-            };
+            const status = document.createElement("div");
+            status.className = "solv-nav-status";
+            status.setAttribute("role", "status");
+            status.textContent = `Taking you to ${target.pathname || "/"}…`;
+            bubble.append(status);
+            this.#scrollToBottom();
+            return;
           }
-          // Navigation failed or was canceled while the document stayed active:
-          // clear the pending handoff so this widget resumes the answer.
+          // Navigation threw synchronously while the document stayed active:
+          // clear the pending continuation so this widget resumes the answer.
           this.#pendingResume = null;
         }
         results.push(result);
@@ -1117,10 +1124,14 @@ export class SolvChat extends HTMLElement {
           this.#appendActionNote(bubble, request.name, result.ok);
           this.#scrollToBottom();
         }
+        if (externalTarget !== null) {
+          this.#appendExternalNavButton(bubble, externalTarget);
+        }
         this.#persist();
       }
     } finally {
       setBeforeNavigate(null);
+      setOnExternalNavigate(null);
     }
 
     const response = await this.#sendActionResumeRequest(

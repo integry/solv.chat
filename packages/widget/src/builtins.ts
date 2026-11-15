@@ -72,7 +72,8 @@ const installedBuiltins = new Map<string, RegisteredAction>();
 const schemaEncoder = new TextEncoder();
 let activeHighlight: ActiveHighlight | null = null;
 let highlightHost: ShadowRoot | null = null;
-let beforeNavigate: ((targetHref: string) => string | undefined) | null = null;
+let beforeNavigate: ((target: URL) => void) | null = null;
+let onExternalNavigate: ((target: URL) => void) | null = null;
 
 /** Sets the widget shadow root that hosts highlight notes styled by styles.ts. */
 export function setHighlightHost(root: ShadowRoot | null): void {
@@ -80,10 +81,13 @@ export function setHighlightHost(root: ShadowRoot | null): void {
 }
 
 /** Registers a hook invoked right before `navigate` leaves the current document. */
-export function setBeforeNavigate(
-  handler: ((targetHref: string) => string | undefined) | null,
-): void {
+export function setBeforeNavigate(handler: ((target: URL) => void) | null): void {
   beforeNavigate = handler;
+}
+
+/** Registers a hook invoked when `navigate` targets a listed external origin. */
+export function setOnExternalNavigate(handler: ((target: URL) => void) | null): void {
+  onExternalNavigate = handler;
 }
 
 function escapeAttrValue(value: string): string {
@@ -410,8 +414,12 @@ export function installBuiltins(settings: BuiltinSettings): void {
           }
           return { opened: target.href };
         }
-        const destination = beforeNavigate?.(target.href) ?? target.href;
-        location.assign(destination);
+        if (target.origin !== location.origin) {
+          onExternalNavigate?.(target);
+          return { opened: false };
+        }
+        beforeNavigate?.(target);
+        location.assign(target.href);
         // The conversation survives this because the transcript, the
         // conversation id and the pending resume are persisted before leaving.
         return { opened: target.href };

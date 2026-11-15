@@ -28,6 +28,8 @@ export interface PendingResume {
   resumeMessageId: string;
   actionResults: ActionResult[];
   depth: number;
+  createdAt: number;
+  navigateCallId?: string;
 }
 
 export interface SavedConversation {
@@ -39,9 +41,8 @@ export interface SavedConversation {
 
 const VISITOR_KEY = "solv-chat-visitor";
 const OPEN_PREFIX = "solv-chat-open:";
-const HANDOFF_HASH_PARAM = "solv_handoff=";
 const MAX_SAVED_TURNS = 20;
-const MAX_HANDOFF_BYTES = 16_384;
+export const PENDING_RESUME_TTL_MS = 2 * 60 * 1000;
 
 let fallbackVisitorId: string | null = null;
 const activeOwners = new Map<string, symbol>();
@@ -86,15 +87,6 @@ export function visitorId(): string {
   }
 }
 
-function adoptVisitorId(id: string): void {
-  fallbackVisitorId = id;
-  try {
-    localStorage.setItem(VISITOR_KEY, id);
-  } catch {
-    // Ignore storage quota or private-mode errors.
-  }
-}
-
 /**
  * The open conversation, kept per assistant key in sessionStorage.
  *
@@ -114,10 +106,16 @@ function parsePendingResume(raw: unknown): PendingResume | undefined {
     !Array.isArray(record.actionResults) ||
     typeof record.depth !== "number" ||
     !Number.isInteger(record.depth) ||
-    record.depth < 1
+    record.depth < 1 ||
+    typeof record.createdAt !== "number" ||
+    !Number.isFinite(record.createdAt)
   ) {
     return undefined;
   }
+  const navigateCallId =
+    typeof record.navigateCallId === "string" && record.navigateCallId !== ""
+      ? record.navigateCallId
+      : undefined;
   const actionResults: ActionResult[] = [];
   for (const item of record.actionResults) {
     if (typeof item !== "object" || item === null || Array.isArray(item)) return undefined;
@@ -138,6 +136,8 @@ function parsePendingResume(raw: unknown): PendingResume | undefined {
     resumeMessageId: record.resumeMessageId,
     actionResults,
     depth: record.depth,
+    createdAt: record.createdAt,
+    ...(navigateCallId ? { navigateCallId } : {}),
   };
 }
 
@@ -197,185 +197,5 @@ export function saveConversation(assistant: string, saved: SavedConversation, ow
     );
   } catch {
     // Ignore storage quota or private-mode errors.
-  }
-}
-
-interface CrossOriginHandoff {
-  assistant: string;
-  targetOrigin: string;
-  visitorId: string;
-  saved: SavedConversation;
-}
-
-const handoffEncoder = new TextEncoder();
-const handoffDecoder = new TextDecoder();
-
-function encodeHandoffPayload(json: string): string {
-  const bytes = handoffEncoder.encode(json);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function decodeHandoffPayload(encoded: string): string | null {
-  if (!encoded) return null;
-  try {
-    const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
-    const pad = base64.length % 4 === 0 ? "" : "=".repeat(4 - (base64.length % 4));
-    const binary = atob(base64 + pad);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return handoffDecoder.decode(bytes);
-  } catch {
-    return null;
-  }
-}
-
-function parseHandoff(encoded: string): CrossOriginHandoff | null {
-  const raw = decodeHandoffPayload(encoded);
-  if (raw === null) return null;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
-    const record = parsed as Record<string, unknown>;
-    if (
-      typeof record.assistant !== "string" ||
-      record.assistant === "" ||
-      typeof record.targetOrigin !== "string" ||
-      record.targetOrigin === "" ||
-      typeof record.visitorId !== "string"
-    ) {
-      return null;
-    }
-    const saved = parseSavedConversation(record.saved);
-    if (!saved) return null;
-    return {
-      assistant: record.assistant,
-      targetOrigin: record.targetOrigin,
-      visitorId: record.visitorId,
-      saved,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function extractHandoffFromHash(hash: string): { encoded: string; cleanedHash: string } | null {
-  if (!hash.startsWith("#")) return null;
-  if (hash.startsWith(`#${HANDOFF_HASH_PARAM}`)) {
-    const start = 1 + HANDOFF_HASH_PARAM.length;
-    const amp = hash.indexOf("&", start);
-    if (amp === -1) {
-      return { encoded: hash.slice(start), cleanedHash: "" };
-    }
-    return { encoded: hash.slice(start, amp), cleanedHash: `#${hash.slice(amp + 1)}` };
-  }
-  const idx = hash.indexOf(`&${HANDOFF_HASH_PARAM}`);
-  if (idx === -1) return null;
-  const before = hash.slice(0, idx);
-  const start = idx + 1 + HANDOFF_HASH_PARAM.length;
-  const amp = hash.indexOf("&", start);
-  if (amp === -1) {
-    return { encoded: hash.slice(start), cleanedHash: before };
-  }
-  return { encoded: hash.slice(start, amp), cleanedHash: `${before}${hash.slice(amp)}` };
-}
-
-function replaceLocationHash(cleanedHash: string): void {
-  try {
-    if (typeof history !== "undefined" && typeof history.replaceState === "function") {
-      history.replaceState(null, "", `${location.pathname}${location.search}${cleanedHash}`);
-    }
-  } catch {
-    // Ignore history API errors in restricted contexts.
-  }
-}
-
-/**
- * Encodes the conversation into the destination URL's hash fragment so a
- * real cross-site navigation can restore and resume it where storage and
- * `window.name` are cleared or partitioned by the browser.
- */
-export function stageCrossOriginHandoff(
-  assistant: string,
-  targetHref: string,
-  saved: SavedConversation,
-): string {
-  if (!assistant || !targetHref) return targetHref;
-  try {
-    const base = typeof location !== "undefined" ? location.href : undefined;
-    const url = new URL(targetHref, base);
-    let turns = saved.turns.slice(-MAX_SAVED_TURNS);
-    const buildJson = (candidateTurns: SavedTurn[]): string => {
-      const payload: CrossOriginHandoff = {
-        assistant,
-        targetOrigin: url.origin,
-        visitorId: visitorId(),
-        saved: {
-          conversationId: saved.conversationId,
-          open: saved.open,
-          turns: candidateTurns,
-          ...(saved.pendingResume ? { pendingResume: saved.pendingResume } : {}),
-        },
-      };
-      return JSON.stringify(payload);
-    };
-    let json = buildJson(turns);
-    while (turns.length > 0 && handoffEncoder.encode(json).byteLength > MAX_HANDOFF_BYTES) {
-      turns = turns.slice(1);
-      json = buildJson(turns);
-    }
-    const encoded = encodeHandoffPayload(json);
-    const existingHash = url.hash;
-    url.hash =
-      existingHash === "" || existingHash === "#"
-        ? `#${HANDOFF_HASH_PARAM}${encoded}`
-        : `${existingHash}&${HANDOFF_HASH_PARAM}${encoded}`;
-    return url.href;
-  } catch {
-    return targetHref;
-  }
-}
-
-/**
- * Consumes a staged cross-origin handoff from the destination URL's hash
- * fragment for `assistant` on `location.origin`, cleaning the URL and adopting
- * the visitor id so the conversation continues.
- */
-export function consumeCrossOriginHandoff(assistant: string): SavedConversation | null {
-  if (!assistant || typeof location === "undefined") return null;
-  try {
-    const extracted = extractHandoffFromHash(location.hash);
-    if (!extracted) return null;
-    const handoff = parseHandoff(extracted.encoded);
-    if (!handoff) {
-      replaceLocationHash(extracted.cleanedHash);
-      return null;
-    }
-    if (handoff.assistant !== assistant || handoff.targetOrigin !== location.origin) {
-      return null;
-    }
-    replaceLocationHash(extracted.cleanedHash);
-    if (extracted.cleanedHash.length > 1 && typeof document !== "undefined") {
-      const rawId = extracted.cleanedHash.slice(1);
-      let decodedId = rawId;
-      try {
-        decodedId = decodeURIComponent(rawId);
-      } catch {
-        // Keep raw fragment id when malformed.
-      }
-      const target =
-        document.getElementById(decodedId) ??
-        (decodedId !== rawId ? document.getElementById(rawId) : null);
-      if (target && typeof target.scrollIntoView === "function") {
-        target.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-    }
-    if (handoff.visitorId) {
-      adoptVisitorId(handoff.visitorId);
-    }
-    return handoff.saved;
-  } catch {
-    return null;
   }
 }

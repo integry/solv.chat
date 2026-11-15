@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   MAX_ACTION_RESULT_BYTES,
   MAX_ACTION_SCHEMA_BYTES,
@@ -7,7 +9,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearRegistry, listForRequest, lookup, register, runAction } from "../src/actions.js";
 import { HIGHLIGHT_DURATION_MS, installBuiltins } from "../src/builtins.js";
-import { NAVIGATION_RECOVERY_MS, parsePublicConfig } from "../src/element.js";
+import { parsePublicConfig } from "../src/element.js";
+import { PENDING_RESUME_TTL_MS } from "../src/storage.js";
 import "../src/widget.js";
 
 function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
@@ -52,7 +55,6 @@ describe("built-in page actions", () => {
     document.body.replaceChildren();
     localStorage.clear();
     sessionStorage.clear();
-    window.name = "";
   });
 
   afterEach(() => {
@@ -133,8 +135,9 @@ describe("built-in page actions", () => {
       expect(assign).toHaveBeenCalledWith(new URL("/pricing", location.href).href);
     });
 
-    it("navigates to a configured allowed origin", async () => {
+    it("does not call location.assign or window.open for a configured allowed origin and returns opened: false", async () => {
       const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
+      const open = vi.spyOn(window, "open").mockImplementation(() => null);
       installBuiltins({ enabled: true, allowedOrigins: ["https://shop.example.com"] });
 
       const result = await runAction({
@@ -145,7 +148,11 @@ describe("built-in page actions", () => {
       });
 
       expect(result.ok).toBe(true);
-      expect(assign).toHaveBeenCalledWith("https://shop.example.com/cart");
+      if (result.ok) {
+        expect(JSON.parse(result.result ?? "{}")).toEqual({ opened: false });
+      }
+      expect(assign).not.toHaveBeenCalled();
+      expect(open).not.toHaveBeenCalled();
     });
 
     it.each([
@@ -570,13 +577,19 @@ describe("built-in page actions", () => {
       expect(assign).toHaveBeenCalledTimes(1);
       // Old page must not send a competing follow-up chat request.
       expect(chatBodies).toHaveLength(1);
+      expect((root1.querySelector(".solv-nav-status") as HTMLElement | null)?.textContent).toBe(
+        "Taking you to /pricing…",
+      );
 
-      // Simulate destination page load with a fresh widget instance.
+      // Simulate destination page load with a fresh widget instance (and a second connect).
       el1.remove();
       clearRegistry();
       const el2 = document.createElement("solv-chat");
       el2.setAttribute("assistant", "pk_nav_resume");
       document.body.append(el2);
+      const el3 = document.createElement("solv-chat");
+      el3.setAttribute("assistant", "pk_nav_resume");
+      document.body.append(el3);
       await flushAsync();
 
       expect(assignCalls).toBe(1);
@@ -587,7 +600,7 @@ describe("built-in page actions", () => {
         {
           callId: "call_nav",
           ok: true,
-          result: JSON.stringify({ opened: new URL("/pricing", location.href).href }),
+          result: JSON.stringify({ opened: location.href }),
         },
       ]);
 
@@ -602,9 +615,12 @@ describe("built-in page actions", () => {
     });
 
     it("caps persisted navigation result at MAX_ACTION_RESULT_BYTES so long URLs pass request validation", async () => {
+      const prevUrl = location.href;
       const longPath = `/pricing?q=${"a".repeat(MAX_ACTION_RESULT_BYTES + 500)}`;
       const chatBodies: Array<Record<string, unknown>> = [];
-      vi.spyOn(location, "assign").mockImplementation(() => {});
+      vi.spyOn(location, "assign").mockImplementation((url) => {
+        history.replaceState(null, "", String(url));
+      });
 
       let chatStep = 0;
       globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -643,35 +659,39 @@ describe("built-in page actions", () => {
         return new Response("Not found", { status: 404 });
       }) as typeof fetch;
 
-      const el1 = document.createElement("solv-chat");
-      el1.setAttribute("assistant", "pk_nav_long");
-      document.body.append(el1);
-      await flushAsync();
+      try {
+        const el1 = document.createElement("solv-chat");
+        el1.setAttribute("assistant", "pk_nav_long");
+        document.body.append(el1);
+        await flushAsync();
 
-      const root1 = el1.shadowRoot as ShadowRoot;
-      (root1.querySelector(".solv-launcher") as HTMLButtonElement).click();
-      (root1.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open long URL";
-      (root1.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
-      await flushAsync();
+        const root1 = el1.shadowRoot as ShadowRoot;
+        (root1.querySelector(".solv-launcher") as HTMLButtonElement).click();
+        (root1.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open long URL";
+        (root1.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+        await flushAsync();
 
-      el1.remove();
-      clearRegistry();
-      const el2 = document.createElement("solv-chat");
-      el2.setAttribute("assistant", "pk_nav_long");
-      document.body.append(el2);
-      await flushAsync();
+        el1.remove();
+        clearRegistry();
+        const el2 = document.createElement("solv-chat");
+        el2.setAttribute("assistant", "pk_nav_long");
+        document.body.append(el2);
+        await flushAsync();
 
-      expect(chatBodies).toHaveLength(2);
-      const resumeBody = chatBodies[1] as {
-        actionResults?: Array<{ callId: string; ok: boolean; result?: string }>;
-      };
-      const navResult = resumeBody.actionResults?.[0];
-      expect(navResult?.ok).toBe(true);
-      expect(new TextEncoder().encode(navResult?.result ?? "").byteLength).toBeLessThanOrEqual(
-        MAX_ACTION_RESULT_BYTES,
-      );
-      expect(navResult?.result).toMatch(/\n\[truncated\]$/);
-      expect(parseChatRequest(chatBodies[1]).ok).toBe(true);
+        expect(chatBodies).toHaveLength(2);
+        const resumeBody = chatBodies[1] as {
+          actionResults?: Array<{ callId: string; ok: boolean; result?: string }>;
+        };
+        const navResult = resumeBody.actionResults?.[0];
+        expect(navResult?.ok).toBe(true);
+        expect(new TextEncoder().encode(navResult?.result ?? "").byteLength).toBeLessThanOrEqual(
+          MAX_ACTION_RESULT_BYTES,
+        );
+        expect(navResult?.result).toMatch(/\n\[truncated\]$/);
+        expect(parseChatRequest(chatBodies[1]).ok).toBe(true);
+      } finally {
+        history.replaceState(null, "", prevUrl);
+      }
     });
   });
 
@@ -799,163 +819,17 @@ describe("built-in page actions", () => {
     });
   });
 
-  describe("F12: cross-origin navigation and continuation for configured origins", () => {
-    it("navigates to an allowed origin, hands off conversation via URL fragment, and resumes on arrival even when window.name is cleared", async () => {
-      const originalUrl = location.href;
-      window.name = "host-window";
-      let assignedUrl = "";
-      const assign = vi.spyOn(location, "assign").mockImplementation((url: string | URL) => {
-        assignedUrl = String(url);
-      });
-      const chatBodies: Array<Record<string, unknown>> = [];
-      let chatStep = 0;
-
-      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.endsWith("/v1/assistants/pk_cross_origin")) {
-          return Response.json({
-            title: "Helper",
-            accentColor: "#2563eb",
-            position: "right",
-            greeting: "Hi!",
-            suggestedQuestions: [],
-            actions: { builtins: true, allowedOrigins: ["https://shop.example.com"] },
-          });
-        }
-        if (url.endsWith("/v1/chat")) {
-          chatStep++;
-          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-          if (chatStep === 1) {
-            return new Response(
-              sseStream([
-                'event: token\ndata: {"text":"Opening your cart"}\n\n',
-                'event: action\ndata: {"callId":"call_x","name":"navigate","input":{"url":"https://shop.example.com/cart"},"confirm":false}\n\n',
-                'event: done\ndata: {"messageId":"msg_x1","conversationId":"conv_x","awaitingActions":["call_x"]}\n\n',
-              ]),
-              { status: 200, headers: { "content-type": "text/event-stream" } },
-            );
-          }
-          return new Response(
-            sseStream([
-              'event: token\ndata: {"text":" — here is your cart."}\n\n',
-              'event: done\ndata: {"messageId":"msg_x2","conversationId":"conv_x"}\n\n',
-            ]),
-            { status: 200, headers: { "content-type": "text/event-stream" } },
-          );
-        }
-        return new Response("Not found", { status: 404 });
-      }) as typeof fetch;
-
-      try {
-        const el1 = document.createElement("solv-chat");
-        el1.setAttribute("assistant", "pk_cross_origin");
-        el1.setAttribute("endpoint", "https://bot.example.com");
-        document.body.append(el1);
-        await flushAsync();
-
-        const root1 = el1.shadowRoot as ShadowRoot;
-        (root1.querySelector(".solv-launcher") as HTMLButtonElement).click();
-        (root1.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open shop";
-        (root1.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
-        await flushAsync();
-
-        expect(assign).toHaveBeenCalledTimes(1);
-        expect(assignedUrl).toMatch(/^https:\/\/shop\.example\.com\/cart#solv_handoff=/);
-        expect(chatBodies).toHaveLength(1);
-        expect(window.name).toBe("host-window");
-
-        window.dispatchEvent(new Event("pagehide"));
-        await flushAsync();
-        el1.remove();
-        clearRegistry();
-
-        // Simulate real cross-site navigation: browser clears window.name and isolates storage.
-        window.name = "";
-        sessionStorage.clear();
-        localStorage.clear();
-        const happyWindow = window as unknown as { happyDOM?: { setURL: (url: string) => void } };
-        happyWindow.happyDOM?.setURL(assignedUrl);
-
-        const el2 = document.createElement("solv-chat");
-        el2.setAttribute("assistant", "pk_cross_origin");
-        el2.setAttribute("endpoint", "https://bot.example.com");
-        document.body.append(el2);
-        await flushAsync();
-
-        expect(location.href).toBe("https://shop.example.com/cart");
-        expect(chatBodies).toHaveLength(2);
-        expect(chatBodies[1]?.conversationId).toBe("conv_x");
-        expect(chatBodies[1]?.resumeMessageId).toBe("msg_x1");
-        expect(chatBodies[1]?.visitorId).toBe(chatBodies[0]?.visitorId);
-        expect(chatBodies[1]?.actionResults).toEqual([
-          {
-            callId: "call_x",
-            ok: true,
-            result: JSON.stringify({ opened: "https://shop.example.com/cart" }),
-          },
-        ]);
-
-        const bubbles = (el2.shadowRoot as ShadowRoot).querySelectorAll(".solv-bubble--assistant");
-        expect(bubbles[1]?.querySelector(".solv-bubble-text")?.textContent).toBe(
-          "Opening your cart — here is your cart.",
-        );
-        expect(bubbles[1]?.querySelector(".solv-feedback")).not.toBeNull();
-      } finally {
-        const happyWindow = window as unknown as { happyDOM?: { setURL: (url: string) => void } };
-        happyWindow.happyDOM?.setURL(originalUrl);
-      }
-    });
-
-    it("preserves destination #section hash and rejects mismatched assistant or origin handoffs", async () => {
-      const originalUrl = location.href;
-      const saved = {
-        conversationId: "conv_sec",
-        open: true,
-        turns: [{ role: "user" as const, text: "Go to payment" }],
-      };
-      const happyWindow = window as unknown as { happyDOM?: { setURL: (url: string) => void } };
-
-      try {
-        const { stageCrossOriginHandoff, consumeCrossOriginHandoff } = await import(
-          "../src/storage.js"
-        );
-        const handoffUrl = stageCrossOriginHandoff(
-          "pk_scope",
-          "https://shop.example.com/checkout#payment",
-          saved,
-        );
-        expect(handoffUrl).toMatch(/^https:\/\/shop\.example\.com\/checkout#payment&solv_handoff=/);
-
-        // Wrong origin must not consume or adopt the handoff.
-        happyWindow.happyDOM?.setURL(
-          handoffUrl.replace("https://shop.example.com", "https://evil.example.com"),
-        );
-        expect(consumeCrossOriginHandoff("pk_scope")).toBeNull();
-
-        // Wrong assistant on the target origin must not consume the handoff.
-        happyWindow.happyDOM?.setURL(handoffUrl);
-        expect(consumeCrossOriginHandoff("pk_other")).toBeNull();
-
-        // Matching assistant and origin consumes it and restores #payment.
-        const consumed = consumeCrossOriginHandoff("pk_scope");
-        expect(consumed?.conversationId).toBe("conv_sec");
-        expect(location.href).toBe("https://shop.example.com/checkout#payment");
-      } finally {
-        happyWindow.happyDOM?.setURL(originalUrl);
-      }
-    });
-
-    it("stops navigation and resumes locally when cross-origin navigation is canceled", async () => {
-      vi.useFakeTimers();
-      window.name = "host-window";
-      const stopSpy = vi.spyOn(window, "stop").mockImplementation(() => {});
+  describe("navigate: external origins, dropped and expired continuations", () => {
+    it("renders an open-in-new-tab button for a listed other origin, continues in place, and opens the exact URL on click", async () => {
       const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
+      const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+      const targetUrl = "https://shop.example.com/cart?item=42#summary";
       const chatBodies: Array<Record<string, unknown>> = [];
       let chatStep = 0;
 
       globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
-        if (url.endsWith("/v1/assistants/pk_cross_cancel")) {
+        if (url.endsWith("/v1/assistants/pk_ext_nav")) {
           return Response.json({
             title: "Helper",
             accentColor: "#2563eb",
@@ -971,17 +845,17 @@ describe("built-in page actions", () => {
           if (chatStep === 1) {
             return new Response(
               sseStream([
-                'event: token\ndata: {"text":"Opening shop"}\n\n',
-                'event: action\ndata: {"callId":"call_xc","name":"navigate","input":{"url":"https://shop.example.com/cart"},"confirm":false}\n\n',
-                'event: done\ndata: {"messageId":"msg_xc1","conversationId":"conv_xc","awaitingActions":["call_xc"]}\n\n',
+                'event: token\ndata: {"text":"You can view your cart."}\n\n',
+                `event: action\ndata: ${JSON.stringify({ callId: "call_ext", name: "navigate", input: { url: targetUrl }, confirm: false })}\n\n`,
+                'event: done\ndata: {"messageId":"msg_e1","conversationId":"conv_e","awaitingActions":["call_ext"]}\n\n',
               ]),
               { status: 200, headers: { "content-type": "text/event-stream" } },
             );
           }
           return new Response(
             sseStream([
-              'event: token\ndata: {"text":" — stayed here."}\n\n',
-              'event: done\ndata: {"messageId":"msg_xc2","conversationId":"conv_xc"}\n\n',
+              'event: token\ndata: {"text":" Use the button above to open it."}\n\n',
+              'event: done\ndata: {"messageId":"msg_e2","conversationId":"conv_e"}\n\n',
             ]),
             { status: 200, headers: { "content-type": "text/event-stream" } },
           );
@@ -990,36 +864,204 @@ describe("built-in page actions", () => {
       }) as typeof fetch;
 
       const el = document.createElement("solv-chat");
-      el.setAttribute("assistant", "pk_cross_cancel");
+      el.setAttribute("assistant", "pk_ext_nav");
       document.body.append(el);
-      await vi.advanceTimersByTimeAsync(0);
+      await flushAsync();
 
       const root = el.shadowRoot as ShadowRoot;
       (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
-      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open shop";
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open my cart";
       (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
-      await vi.advanceTimersByTimeAsync(0);
+      await flushAsync();
 
-      expect(assign).toHaveBeenCalledTimes(1);
-      expect(String(assign.mock.calls[0]?.[0])).toMatch(
-        /^https:\/\/shop\.example\.com\/cart#solv_handoff=/,
-      );
-      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS);
-      const recoverBtn = root.querySelector(".solv-nav-recover") as HTMLButtonElement | null;
-      expect(recoverBtn).not.toBeNull();
-      recoverBtn?.click();
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(stopSpy).toHaveBeenCalledTimes(1);
-      expect(window.name).toBe("host-window");
+      expect(assign).not.toHaveBeenCalled();
+      expect(openSpy).not.toHaveBeenCalled();
       expect(chatBodies).toHaveLength(2);
       expect(chatBodies[1]?.actionResults).toEqual([
         {
-          callId: "call_xc",
-          ok: false,
-          error: "Navigation was canceled.",
+          callId: "call_ext",
+          ok: true,
+          result: JSON.stringify({ opened: false }),
         },
       ]);
+
+      const btn = root.querySelector(".solv-nav-open") as HTMLButtonElement | null;
+      expect(btn).not.toBeNull();
+      expect(btn?.textContent).toBe("Open shop.example.com in a new tab");
+
+      const bubbles = root.querySelectorAll(".solv-bubble--assistant");
+      expect(bubbles[1]?.querySelector(".solv-bubble-text")?.textContent).toBe(
+        "You can view your cart. Use the button above to open it.",
+      );
+      expect(bubbles[1]?.querySelector(".solv-feedback")).not.toBeNull();
+
+      btn?.click();
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(openSpy).toHaveBeenCalledWith(targetUrl, "_blank", "noopener,noreferrer");
+    });
+
+    it("drops a pending continuation with 'the visitor moved on' when the visitor sends a new message", async () => {
+      vi.spyOn(location, "assign").mockImplementation(() => {});
+      const chatBodies: Array<Record<string, unknown>> = [];
+      let chatStep = 0;
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_moved_on")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatStep++;
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (chatStep === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Taking you to pricing"}\n\n',
+                'event: action\ndata: {"callId":"call_m1","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_m1","conversationId":"conv_m","awaitingActions":["call_m1"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          if (chatStep === 2) {
+            return new Response(
+              sseStream([
+                'event: done\ndata: {"messageId":"msg_m1_ack","conversationId":"conv_m"}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"Here is the FAQ instead."}\n\n',
+              'event: done\ndata: {"messageId":"msg_m2","conversationId":"conv_m"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_moved_on");
+      document.body.append(el);
+      await flushAsync();
+
+      const root = el.shadowRoot as ShadowRoot;
+      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Go to pricing";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await flushAsync();
+
+      expect(root.querySelector(".solv-nav-status")?.textContent).toBe("Taking you to /pricing…");
+
+      // Document stayed alive and visitor sends a new message.
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Actually, show FAQ";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await flushAsync();
+
+      expect(root.querySelector(".solv-nav-status")).toBeNull();
+      expect(chatBodies).toHaveLength(3);
+      expect(chatBodies[1]?.resumeMessageId).toBe("msg_m1");
+      expect(chatBodies[1]?.actionResults).toEqual([
+        { callId: "call_m1", ok: false, error: "the visitor moved on" },
+      ]);
+      expect(chatBodies[2]?.message).toBe("Actually, show FAQ");
+
+      const saved = JSON.parse(sessionStorage.getItem("solv-chat-open:pk_moved_on") ?? "{}") as {
+        pendingResume?: unknown;
+      };
+      expect(saved.pendingResume).toBeUndefined();
+    });
+
+    it("drops a pending continuation older than 2 minutes on connect", async () => {
+      const chatBodies: Array<Record<string, unknown>> = [];
+      sessionStorage.setItem(
+        "solv-chat-open:pk_expired",
+        JSON.stringify({
+          conversationId: "conv_exp",
+          open: true,
+          turns: [
+            { role: "user", text: "Go to pricing" },
+            {
+              role: "assistant",
+              text: "Taking you there",
+              messageId: "msg_exp",
+              awaiting: ["call_exp"],
+            },
+          ],
+          pendingResume: {
+            conversationId: "conv_exp",
+            resumeMessageId: "msg_exp",
+            actionResults: [
+              {
+                callId: "call_exp",
+                ok: true,
+                result: JSON.stringify({ opened: "https://example.com/pricing" }),
+              },
+            ],
+            depth: 1,
+            createdAt: Date.now() - PENDING_RESUME_TTL_MS - 1000,
+            navigateCallId: "call_exp",
+          },
+        }),
+      );
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_expired")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          return new Response(
+            sseStream([
+              'event: done\ndata: {"messageId":"msg_exp_ack","conversationId":"conv_exp"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_expired");
+      document.body.append(el);
+      await flushAsync();
+
+      expect(chatBodies).toHaveLength(1);
+      expect(chatBodies[0]?.resumeMessageId).toBe("msg_exp");
+      expect(chatBodies[0]?.actionResults).toEqual([
+        { callId: "call_exp", ok: false, error: "the visitor moved on" },
+      ]);
+
+      const saved = JSON.parse(sessionStorage.getItem("solv-chat-open:pk_expired") ?? "{}") as {
+        pendingResume?: unknown;
+      };
+      expect(saved.pendingResume).toBeUndefined();
+    });
+
+    it("contains no references to window.name in packages/widget/src", () => {
+      const srcDir = join(import.meta.dirname, "../src");
+      const files = readdirSync(srcDir).filter((name) => name.endsWith(".ts"));
+      for (const file of files) {
+        const content = readFileSync(join(srcDir, file), "utf8");
+        expect(content, `${file} must not reference window.name`).not.toMatch(/\bwindow\.name\b/);
+      }
     });
   });
 
@@ -1171,201 +1213,7 @@ describe("built-in page actions", () => {
     });
   });
 
-  describe("F8: canceled or failed navigation recovery", () => {
-    it("clears pendingResume and continues the answer when document remains active after canceled navigation", async () => {
-      vi.useFakeTimers();
-      const assign = vi.spyOn(location, "assign").mockImplementation(() => {
-        // Simulate beforeunload confirmation canceled by visitor: document stays mounted, no pagehide.
-      });
-      const chatBodies: Array<Record<string, unknown>> = [];
-      let chatStep = 0;
-
-      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.endsWith("/v1/assistants/pk_nav_cancel")) {
-          return Response.json({
-            title: "Helper",
-            accentColor: "#2563eb",
-            position: "right",
-            greeting: "Hi!",
-            suggestedQuestions: [],
-            actions: { builtins: true, allowedOrigins: [] },
-          });
-        }
-        if (url.endsWith("/v1/chat")) {
-          chatStep++;
-          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-          if (chatStep === 1) {
-            return new Response(
-              sseStream([
-                'event: token\ndata: {"text":"Opening pricing"}\n\n',
-                'event: action\ndata: {"callId":"call_cancel","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
-                'event: done\ndata: {"messageId":"msg_c1","conversationId":"conv_c","awaitingActions":["call_cancel"]}\n\n',
-              ]),
-              { status: 200, headers: { "content-type": "text/event-stream" } },
-            );
-          }
-          return new Response(
-            sseStream([
-              'event: token\ndata: {"text":" — stayed on this page."}\n\n',
-              'event: done\ndata: {"messageId":"msg_c2","conversationId":"conv_c"}\n\n',
-            ]),
-            { status: 200, headers: { "content-type": "text/event-stream" } },
-          );
-        }
-        return new Response("Not found", { status: 404 });
-      }) as typeof fetch;
-
-      const el = document.createElement("solv-chat");
-      el.setAttribute("assistant", "pk_nav_cancel");
-      document.body.append(el);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const root = el.shadowRoot as ShadowRoot;
-      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
-      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Go to pricing";
-      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(assign).toHaveBeenCalledTimes(1);
-      // Pre-navigation persistence occurred.
-      const preSaved = JSON.parse(
-        sessionStorage.getItem("solv-chat-open:pk_nav_cancel") ?? "{}",
-      ) as { pendingResume?: { resumeMessageId: string } };
-      expect(preSaved.pendingResume?.resumeMessageId).toBe("msg_c1");
-
-      // Document remains active past recovery window: widget preserves handoff and offers recovery.
-      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS);
-
-      expect(assign).toHaveBeenCalledTimes(1);
-      expect(chatBodies).toHaveLength(1);
-      const stillSaved = JSON.parse(
-        sessionStorage.getItem("solv-chat-open:pk_nav_cancel") ?? "{}",
-      ) as { pendingResume?: { resumeMessageId: string } };
-      expect(stillSaved.pendingResume?.resumeMessageId).toBe("msg_c1");
-
-      const recoverBtn = root.querySelector(".solv-nav-recover") as HTMLButtonElement | null;
-      expect(recoverBtn).not.toBeNull();
-      recoverBtn?.click();
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(root.querySelector(".solv-nav-recover")).toBeNull();
-      expect(chatBodies).toHaveLength(2);
-      expect(chatBodies[1]?.resumeMessageId).toBe("msg_c1");
-      expect(chatBodies[1]?.actionResults).toEqual([
-        {
-          callId: "call_cancel",
-          ok: false,
-          error: "Navigation was canceled.",
-        },
-      ]);
-
-      const postSaved = JSON.parse(
-        sessionStorage.getItem("solv-chat-open:pk_nav_cancel") ?? "{}",
-      ) as { pendingResume?: unknown };
-      expect(postSaved.pendingResume).toBeUndefined();
-
-      const bubbles = root.querySelectorAll(".solv-bubble--assistant");
-      const activeBubble = bubbles[1];
-      expect(activeBubble?.querySelector(".solv-bubble-text")?.textContent).toBe(
-        "Opening pricing — stayed on this page.",
-      );
-      expect(activeBubble?.querySelector(".solv-action")?.textContent).toBe(
-        "Could not run navigate",
-      );
-      expect(activeBubble?.querySelector(".solv-feedback")).not.toBeNull();
-    });
-
-    it("preserves pendingResume when a slow navigation departs after NAVIGATION_RECOVERY_MS", async () => {
-      vi.useFakeTimers();
-      vi.spyOn(location, "assign").mockImplementation(() => {});
-      const chatBodies: Array<Record<string, unknown>> = [];
-      let chatStep = 0;
-
-      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.endsWith("/v1/assistants/pk_nav_slow")) {
-          return Response.json({
-            title: "Helper",
-            accentColor: "#2563eb",
-            position: "right",
-            greeting: "Hi!",
-            suggestedQuestions: [],
-            actions: { builtins: true, allowedOrigins: [] },
-          });
-        }
-        if (url.endsWith("/v1/chat")) {
-          chatStep++;
-          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-          if (chatStep === 1) {
-            return new Response(
-              sseStream([
-                'event: token\ndata: {"text":"Opening pricing"}\n\n',
-                'event: action\ndata: {"callId":"call_slow","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
-                'event: done\ndata: {"messageId":"msg_s1","conversationId":"conv_s","awaitingActions":["call_slow"]}\n\n',
-              ]),
-              { status: 200, headers: { "content-type": "text/event-stream" } },
-            );
-          }
-          return new Response(
-            sseStream([
-              'event: token\ndata: {"text":" — welcome to pricing."}\n\n',
-              'event: done\ndata: {"messageId":"msg_s2","conversationId":"conv_s"}\n\n',
-            ]),
-            { status: 200, headers: { "content-type": "text/event-stream" } },
-          );
-        }
-        return new Response("Not found", { status: 404 });
-      }) as typeof fetch;
-
-      const el1 = document.createElement("solv-chat");
-      el1.setAttribute("assistant", "pk_nav_slow");
-      document.body.append(el1);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const root1 = el1.shadowRoot as ShadowRoot;
-      (root1.querySelector(".solv-launcher") as HTMLButtonElement).click();
-      (root1.querySelector("#solv-input") as HTMLTextAreaElement).value = "Go to pricing";
-      (root1.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
-      await vi.advanceTimersByTimeAsync(0);
-
-      // Slow destination takes longer than NAVIGATION_RECOVERY_MS.
-      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS * 3);
-      expect(chatBodies).toHaveLength(1);
-      expect(root1.querySelector(".solv-nav-recover")).not.toBeNull();
-      const midSaved = JSON.parse(sessionStorage.getItem("solv-chat-open:pk_nav_slow") ?? "{}") as {
-        pendingResume?: { resumeMessageId: string };
-      };
-      expect(midSaved.pendingResume?.resumeMessageId).toBe("msg_s1");
-
-      // Destination finally responds and replaces the document.
-      window.dispatchEvent(new Event("pagehide"));
-      await vi.advanceTimersByTimeAsync(0);
-      expect(chatBodies).toHaveLength(1);
-      expect(root1.querySelector(".solv-nav-recover")).toBeNull();
-
-      el1.remove();
-      clearRegistry();
-      const el2 = document.createElement("solv-chat");
-      el2.setAttribute("assistant", "pk_nav_slow");
-      document.body.append(el2);
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(chatBodies).toHaveLength(2);
-      expect(chatBodies[1]?.resumeMessageId).toBe("msg_s1");
-      expect(chatBodies[1]?.actionResults).toEqual([
-        {
-          callId: "call_slow",
-          ok: true,
-          result: JSON.stringify({ opened: new URL("/pricing", location.href).href }),
-        },
-      ]);
-      const bubbles = (el2.shadowRoot as ShadowRoot).querySelectorAll(".solv-bubble--assistant");
-      expect(bubbles[1]?.querySelector(".solv-bubble-text")?.textContent).toBe(
-        "Opening pricing — welcome to pricing.",
-      );
-    });
-
+  describe("synchronous location.assign failure", () => {
     it("recovers immediately when location.assign throws synchronously", async () => {
       const assign = vi.spyOn(location, "assign").mockImplementation(() => {
         throw new Error("Navigation blocked");
@@ -1436,158 +1284,6 @@ describe("built-in page actions", () => {
       const bubbles = root.querySelectorAll(".solv-bubble--assistant");
       expect(bubbles[1]?.querySelector(".solv-action")?.textContent).toBe("Could not run navigate");
       expect(bubbles[1]?.querySelector(".solv-feedback")).not.toBeNull();
-    });
-  });
-
-  describe("F15: recovery stops pending navigation and respects departure", () => {
-    it("stops a delayed pending navigation before clearing pendingResume and resuming locally", async () => {
-      vi.useFakeTimers();
-      let pendingNavTimer: ReturnType<typeof setTimeout> | null = null;
-      let departed = false;
-      const events: string[] = [];
-
-      vi.spyOn(location, "assign").mockImplementation(() => {
-        pendingNavTimer = setTimeout(() => {
-          departed = true;
-          window.dispatchEvent(new Event("pagehide"));
-        }, NAVIGATION_RECOVERY_MS * 2);
-      });
-      const stopSpy = vi.spyOn(window, "stop").mockImplementation(() => {
-        events.push("window.stop");
-        if (pendingNavTimer !== null) {
-          clearTimeout(pendingNavTimer);
-          pendingNavTimer = null;
-        }
-      });
-
-      const chatBodies: Array<Record<string, unknown>> = [];
-      let chatStep = 0;
-
-      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.endsWith("/v1/assistants/pk_nav_delay")) {
-          return Response.json({
-            title: "Helper",
-            accentColor: "#2563eb",
-            position: "right",
-            greeting: "Hi!",
-            suggestedQuestions: [],
-            actions: { builtins: true, allowedOrigins: ["https://shop.example.com"] },
-          });
-        }
-        if (url.endsWith("/v1/chat")) {
-          chatStep++;
-          if (chatStep === 2) events.push("resume.fetch");
-          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-          if (chatStep === 1) {
-            return new Response(
-              sseStream([
-                'event: token\ndata: {"text":"Opening shop"}\n\n',
-                'event: action\ndata: {"callId":"call_delay","name":"navigate","input":{"url":"https://shop.example.com/cart"},"confirm":false}\n\n',
-                'event: done\ndata: {"messageId":"msg_d1","conversationId":"conv_d","awaitingActions":["call_delay"]}\n\n',
-              ]),
-              { status: 200, headers: { "content-type": "text/event-stream" } },
-            );
-          }
-          return new Response(
-            sseStream([
-              'event: token\ndata: {"text":" — canceled and continued here."}\n\n',
-              'event: done\ndata: {"messageId":"msg_d2","conversationId":"conv_d"}\n\n',
-            ]),
-            { status: 200, headers: { "content-type": "text/event-stream" } },
-          );
-        }
-        return new Response("Not found", { status: 404 });
-      }) as typeof fetch;
-
-      const el = document.createElement("solv-chat");
-      el.setAttribute("assistant", "pk_nav_delay");
-      document.body.append(el);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const root = el.shadowRoot as ShadowRoot;
-      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
-      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open shop";
-      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
-      await vi.advanceTimersByTimeAsync(0);
-
-      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS);
-      const recoverBtn = root.querySelector(".solv-nav-recover") as HTMLButtonElement | null;
-      expect(recoverBtn).not.toBeNull();
-      recoverBtn?.click();
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(stopSpy).toHaveBeenCalledTimes(1);
-      expect(events).toEqual(["window.stop", "resume.fetch"]);
-
-      // Even after the original delayed navigation window elapses, departure never occurs.
-      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS * 3);
-      expect(departed).toBe(false);
-      expect(chatBodies).toHaveLength(2);
-      const postSaved = JSON.parse(
-        sessionStorage.getItem("solv-chat-open:pk_nav_delay") ?? "{}",
-      ) as { pendingResume?: unknown };
-      expect(postSaved.pendingResume).toBeUndefined();
-    });
-
-    it("retains continuation state when departure has already begun during recovery", async () => {
-      vi.useFakeTimers();
-      vi.spyOn(location, "assign").mockImplementation(() => {});
-      vi.spyOn(window, "stop").mockImplementation(() => {
-        // Simulate a navigation that already committed just as recovery was clicked.
-        window.dispatchEvent(new Event("pagehide"));
-      });
-      const chatBodies: Array<Record<string, unknown>> = [];
-
-      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.endsWith("/v1/assistants/pk_nav_departing")) {
-          return Response.json({
-            title: "Helper",
-            accentColor: "#2563eb",
-            position: "right",
-            greeting: "Hi!",
-            suggestedQuestions: [],
-            actions: { builtins: true, allowedOrigins: [] },
-          });
-        }
-        if (url.endsWith("/v1/chat")) {
-          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-          return new Response(
-            sseStream([
-              'event: token\ndata: {"text":"Opening pricing"}\n\n',
-              'event: action\ndata: {"callId":"call_dep","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
-              'event: done\ndata: {"messageId":"msg_dep1","conversationId":"conv_dep","awaitingActions":["call_dep"]}\n\n',
-            ]),
-            { status: 200, headers: { "content-type": "text/event-stream" } },
-          );
-        }
-        return new Response("Not found", { status: 404 });
-      }) as typeof fetch;
-
-      const el = document.createElement("solv-chat");
-      el.setAttribute("assistant", "pk_nav_departing");
-      document.body.append(el);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const root = el.shadowRoot as ShadowRoot;
-      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
-      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Go to pricing";
-      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
-      await vi.advanceTimersByTimeAsync(0);
-
-      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS);
-      const recoverBtn = root.querySelector(".solv-nav-recover") as HTMLButtonElement | null;
-      expect(recoverBtn).not.toBeNull();
-      recoverBtn?.click();
-      await vi.advanceTimersByTimeAsync(0);
-
-      // Local resume must NOT run, and pendingResume must remain intact for the destination.
-      expect(chatBodies).toHaveLength(1);
-      const saved = JSON.parse(
-        sessionStorage.getItem("solv-chat-open:pk_nav_departing") ?? "{}",
-      ) as { pendingResume?: { resumeMessageId: string } };
-      expect(saved.pendingResume?.resumeMessageId).toBe("msg_dep1");
     });
   });
 });
