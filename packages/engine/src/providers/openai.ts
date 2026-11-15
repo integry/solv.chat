@@ -282,6 +282,9 @@ function toResponsesTool(tool: ToolDefinition) {
     name: tool.name,
     description: tool.description,
     parameters: tool.inputSchema,
+    // Responses API defaults `strict` to true, which rejects or forces optional
+    // parameters into `required`. Set `strict: false` to preserve supplied schemas.
+    strict: false,
   };
 }
 

@@ -393,6 +393,7 @@ describe("openaiProvider", () => {
             name: "lookup_order",
             description: "Look up an order by id.",
             parameters: SAMPLE_TOOL.inputSchema,
+            strict: false,
           },
         ],
         input: [
@@ -411,6 +412,55 @@ describe("openaiProvider", () => {
           },
         ],
       });
+    });
+
+    it("preserves optional tool parameters by setting strict: false on Responses tools", async () => {
+      let body: Record<string, unknown> = {};
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async (_input, init) => {
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return sseResponse(COMPLETE_TEXT_STREAM);
+        },
+      });
+
+      const toolWithOptionalParam: ToolDefinition = {
+        name: "search_orders",
+        description: "Search orders.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            limit: { type: "integer" },
+          },
+          required: ["query"],
+        },
+      };
+
+      await collect(
+        provider.stream({
+          ...SAMPLE_REQUEST,
+          tools: [toolWithOptionalParam],
+        }),
+      );
+
+      expect(body.tools).toEqual([
+        {
+          type: "function",
+          name: "search_orders",
+          description: "Search orders.",
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+              limit: { type: "integer" },
+            },
+            required: ["query"],
+          },
+          strict: false,
+        },
+      ]);
     });
 
     it("distinguishes failed tool results from successful ones with identical content", async () => {
