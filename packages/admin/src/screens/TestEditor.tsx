@@ -1,5 +1,5 @@
 import type { TestExpectation } from "@solvchat/core";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, patchJson, postJson } from "../api/client.js";
 import type { AnswerTest } from "../api/types.js";
 
@@ -77,20 +77,36 @@ export function TestEditor(props: TestEditorProps) {
   const [busy, setBusy] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
+  const sessionRef = useRef(0);
+
+  const initialQuestion = props.initialQuestion ?? "";
+  const initialExpectationKind = props.initialExpectation?.kind ?? "contains";
+  const initialExpectationDetail = detailOf(props.initialExpectation);
 
   useEffect(() => {
-    setQuestion(props.initialQuestion ?? "");
-    setKind(props.initialExpectation?.kind ?? "contains");
-    setDetail(detailOf(props.initialExpectation));
+    void props.assistantId;
+    void props.testId;
+    sessionRef.current++;
+    setQuestion(initialQuestion);
+    setKind(initialExpectationKind);
+    setDetail(initialExpectationDetail);
+    setBusy(false);
     setFieldErrors({});
     setFormError(null);
-  }, [props.initialQuestion, props.initialExpectation]);
+  }, [
+    props.assistantId,
+    props.testId,
+    initialQuestion,
+    initialExpectationKind,
+    initialExpectationDetail,
+  ]);
 
   const chosen = EXPECTATIONS.find((option) => option.kind === kind) ?? EXPECTATIONS[0];
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (busy) return;
+    const submitSession = sessionRef.current;
     setBusy(true);
     setFieldErrors({});
     setFormError(null);
@@ -108,25 +124,29 @@ export function TestEditor(props: TestEditorProps) {
           });
       props.onSaved(saved.test);
     } catch (err) {
-      if (err instanceof ApiError) {
-        setFieldErrors(err.fields);
-        const renderedKeys = new Set([
-          "question",
-          ...(chosen.field !== null ? ["expectation.phrase", "expectation.url"] : []),
-        ]);
-        const unmatched = Object.entries(err.fields)
-          .filter(([key]) => !renderedKeys.has(key))
-          .map(([, message]) => message);
-        if (unmatched.length > 0) {
-          setFormError(unmatched.join(" "));
-        } else if (Object.keys(err.fields).length === 0) {
-          setFormError(err.message);
+      if (sessionRef.current === submitSession) {
+        if (err instanceof ApiError) {
+          setFieldErrors(err.fields);
+          const renderedKeys = new Set([
+            "question",
+            ...(chosen.field !== null ? ["expectation.phrase", "expectation.url"] : []),
+          ]);
+          const unmatched = Object.entries(err.fields)
+            .filter(([key]) => !renderedKeys.has(key))
+            .map(([, message]) => message);
+          if (unmatched.length > 0) {
+            setFormError(unmatched.join(" "));
+          } else if (Object.keys(err.fields).length === 0) {
+            setFormError(err.message);
+          }
+        } else {
+          setFormError("Could not save that test.");
         }
-      } else {
-        setFormError("Could not save that test.");
       }
     } finally {
-      setBusy(false);
+      if (sessionRef.current === submitSession) {
+        setBusy(false);
+      }
     }
   }
 

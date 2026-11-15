@@ -33,6 +33,7 @@ function installFakeServer(options?: {
     answer: string;
     fromMessageId: string;
   }) => Promise<Response> | Response;
+  onTestPost?: () => Promise<void>;
 }) {
   const assistant = makeAssistant(options?.allowedOrigins ?? []);
   const gaps: GapSummary[] = options?.gaps
@@ -211,6 +212,7 @@ function installFakeServer(options?: {
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/tests` && method === "POST") {
+      if (options?.onTestPost) await options.onTestPost();
       const body = JSON.parse(String(init?.body ?? "{}")) as {
         question: string;
         expectation: unknown;
@@ -963,5 +965,147 @@ describe("admin phase 1 screens", () => {
     expect(server.testPosts).toEqual([
       { question: "Do you ship to Spain?", expectation: { kind: "contains", phrase: "Spain" } },
     ]);
+  });
+
+  it("does not close a newer gap test editor when an earlier gap test save finishes", async () => {
+    let resolveFirst!: () => void;
+    const firstPost = new Promise<void>((res) => {
+      resolveFirst = res;
+    });
+    let postCount = 0;
+    installFakeServer({
+      gaps: [
+        {
+          question: "gap a?",
+          displayQuestion: "Gap A?",
+          times: 2,
+          lastAsked: 1_700_000_500_000,
+          exampleMessageId: "msg_gap_a",
+          handled: false,
+          documentId: null,
+        },
+        {
+          question: "gap b?",
+          displayQuestion: "Gap B?",
+          times: 1,
+          lastAsked: 1_700_000_400_000,
+          exampleMessageId: "msg_gap_b",
+          handled: false,
+          documentId: null,
+        },
+      ],
+      onTestPost: async () => {
+        postCount++;
+        if (postCount === 1) await firstPost;
+      },
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Gaps" }));
+    const [addA, addB] = await screen.findAllByRole("button", { name: "Add to tests" });
+    if (!addA || !addB) throw new Error("Expected Add to tests buttons for both gaps");
+    fireEvent.click(addA);
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "Alpha" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    // While Gap A's save is in flight, switch to Gap B and type an expectation.
+    fireEvent.click(addB);
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Gap B?");
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "Beta draft" } });
+
+    resolveFirst();
+    expect(await screen.findByText("Added to tests.")).toBeTruthy();
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Gap B?");
+    expect((screen.getByLabelText("Words") as HTMLInputElement).value).toBe("Beta draft");
+  });
+
+  it("does not close a newer conversation test editor when an earlier save finishes", async () => {
+    let resolveFirst!: () => void;
+    const firstPost = new Promise<void>((res) => {
+      resolveFirst = res;
+    });
+    let postCount = 0;
+    installFakeServer({
+      conversationDetails: {
+        cnv_1: {
+          conversation: {
+            id: "cnv_1",
+            assistantId: "ast_1",
+            visitorId: "vis_1",
+            startedAt: 1_700_000_100_000,
+            pageUrl: "https://example.com/pricing",
+          },
+          turns: [
+            {
+              id: "msg_u1",
+              role: "user",
+              content: "First question?",
+              citations: [],
+              answered: true,
+              replyTo: null,
+              answerDocumentId: null,
+              createdAt: 1_700_000_100_000,
+              feedback: [],
+            },
+            {
+              id: "msg_a1",
+              role: "assistant",
+              content: "First reply.",
+              citations: [],
+              answered: true,
+              replyTo: "msg_u1",
+              answerDocumentId: null,
+              createdAt: 1_700_000_101_000,
+              feedback: [],
+            },
+            {
+              id: "msg_u2",
+              role: "user",
+              content: "Second question?",
+              citations: [],
+              answered: true,
+              replyTo: null,
+              answerDocumentId: null,
+              createdAt: 1_700_000_102_000,
+              feedback: [],
+            },
+            {
+              id: "msg_a2",
+              role: "assistant",
+              content: "Second reply.",
+              citations: [],
+              answered: true,
+              replyTo: "msg_u2",
+              answerDocumentId: null,
+              createdAt: 1_700_000_103_000,
+              feedback: [],
+            },
+          ],
+        },
+      },
+      onTestPost: async () => {
+        postCount++;
+        if (postCount === 1) await firstPost;
+      },
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+    const [addFirst, addSecond] = await screen.findAllByRole("button", { name: "Add to tests" });
+    if (!addFirst || !addSecond) throw new Error("Expected Add to tests buttons for both turns");
+    fireEvent.click(addFirst);
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "First" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    // While first turn's save is in flight, switch to second turn and type an expectation.
+    fireEvent.click(addSecond);
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Second question?");
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "Second draft" } });
+
+    resolveFirst();
+    expect(await screen.findByText("Added to tests.")).toBeTruthy();
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Second question?");
+    expect((screen.getByLabelText("Words") as HTMLInputElement).value).toBe("Second draft");
   });
 });

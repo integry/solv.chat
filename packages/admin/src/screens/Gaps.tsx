@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { GapSummary, GapsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { EntryEditor } from "./EntryEditor.js";
@@ -20,7 +20,11 @@ export function Gaps({ assistantId }: GapsProps) {
     `/api/admin/assistants/${assistantId}/gaps?limit=${PAGE_SIZE}&offset=${offset}`,
   );
   const [editingGap, setEditingGap] = useState<GapSummary | null>(null);
-  const [addingTestGap, setAddingTestGap] = useState<GapSummary | null>(null);
+  const [addingTestGap, setAddingTestGap] = useState<{
+    sessionId: number;
+    gap: GapSummary;
+  } | null>(null);
+  const nextTestSessionId = useRef(1);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const page = gapsRes.value;
@@ -62,18 +66,22 @@ export function Gaps({ assistantId }: GapsProps) {
         />
       )}
 
-      {addingTestGap && (
-        <TestEditor
-          key={addingTestGap.exampleMessageId}
-          assistantId={assistantId}
-          initialQuestion={addingTestGap.displayQuestion || addingTestGap.question}
-          onSaved={() => {
-            setAddingTestGap(null);
-            setStatusMessage("Added to tests.");
-          }}
-          onCancel={() => setAddingTestGap(null)}
-        />
-      )}
+      {addingTestGap &&
+        (() => {
+          const sessionId = addingTestGap.sessionId;
+          return (
+            <TestEditor
+              key={sessionId}
+              assistantId={assistantId}
+              initialQuestion={addingTestGap.gap.displayQuestion || addingTestGap.gap.question}
+              onSaved={() => {
+                setAddingTestGap((current) => (current?.sessionId === sessionId ? null : current));
+                setStatusMessage("Added to tests.");
+              }}
+              onCancel={() => setAddingTestGap(null)}
+            />
+          );
+        })()}
 
       {gapsRes.status === "loading" && !gapsRes.value ? (
         <p className="muted">Loading gaps…</p>
@@ -118,7 +126,10 @@ export function Gaps({ assistantId }: GapsProps) {
                         onClick={() => {
                           setEditingGap(null);
                           setStatusMessage(null);
-                          setAddingTestGap(gap);
+                          setAddingTestGap({
+                            sessionId: nextTestSessionId.current++,
+                            gap,
+                          });
                         }}
                       >
                         Add to tests

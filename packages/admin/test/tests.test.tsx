@@ -26,6 +26,8 @@ function createDeferred<T = void>() {
 function installFakeServer(options?: {
   tests?: AnswerTest[];
   runResponse?: TestRunResponse | (() => Promise<TestRunResponse>);
+  onPostTest?: () => Promise<void>;
+  onPatchTest?: () => Promise<void>;
 }) {
   const assistant = makeAssistant();
   const tests: AnswerTest[] = options?.tests ? [...options.tests] : [];
@@ -46,6 +48,7 @@ function installFakeServer(options?: {
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/tests` && method === "POST") {
+      if (options?.onPostTest) await options.onPostTest();
       if (tests.length >= 50) {
         return Response.json(
           {
@@ -79,6 +82,7 @@ function installFakeServer(options?: {
       if (idx === -1) return Response.json({ error: "Not found." }, { status: 404 });
 
       if (method === "PATCH") {
+        if (options?.onPatchTest) await options.onPatchTest();
         const body = JSON.parse(String(init?.body ?? "{}")) as {
           question?: string;
           expectation?: AnswerTest["expectation"];
@@ -425,5 +429,164 @@ describe("Tests screen", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toBe("an assistant can have at most 50 tests");
     expect(screen.queryByText("One too many?")).toBeNull();
+  });
+
+  it("clears stale run and server results when a test is edited", async () => {
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "What does Pro cost?",
+          expectation: { kind: "contains", phrase: "$29" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+      ],
+      runResponse: {
+        runId: "run_1",
+        passed: true,
+        results: [
+          {
+            testId: "tst_1",
+            question: "What does Pro cost?",
+            expectation: { kind: "contains", phrase: "$29" },
+            outcome: "passed",
+            reason: 'Said "$29".',
+            excerpt: "Pro costs $29 per month.",
+          },
+        ],
+      },
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    await screen.findByText("What does Pro cost?");
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    expect(await screen.findByText("Passed")).toBeTruthy();
+    expect(screen.getByText('Said "$29".')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "$99" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    expect(await screen.findByText('It must mention "$99"')).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByText("Passed")).toBeNull();
+    });
+    expect(screen.queryByText('Said "$29".')).toBeNull();
+    expect(screen.getByText("Not run yet")).toBeTruthy();
+  });
+
+  it("ignores a server latestResult whose question or expectation no longer matches", async () => {
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "What does Pro cost?",
+          expectation: { kind: "contains", phrase: "$99" },
+          createdAt: 1_700_000_000_000,
+          latestResult: {
+            testId: "tst_1",
+            question: "What does Pro cost?",
+            expectation: { kind: "contains", phrase: "$29" },
+            outcome: "passed",
+            reason: 'Said "$29".',
+            excerpt: "Pro costs $29 per month.",
+          },
+        },
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    expect(await screen.findByText('It must mention "$99"')).toBeTruthy();
+    expect(screen.getByText("Not run yet")).toBeTruthy();
+    expect(screen.queryByText("Passed")).toBeNull();
+    expect(screen.queryByText('Said "$29".')).toBeNull();
+  });
+
+  it("does not close a newer edit session when an earlier edit save finishes", async () => {
+    const firstPatch = createDeferred<void>();
+    let patchCount = 0;
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Question A?",
+          expectation: { kind: "contains", phrase: "alpha" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+        {
+          id: "tst_2",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Question B?",
+          expectation: { kind: "contains", phrase: "beta" },
+          createdAt: 1_700_000_000_100,
+          latestResult: null,
+        },
+      ],
+      onPatchTest: async () => {
+        patchCount++;
+        if (patchCount === 1) await firstPatch.promise;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    await screen.findByText("Question A?");
+    const [editA] = screen.getAllByRole("button", { name: "Edit" });
+    if (!editA) throw new Error("Expected Edit button for Question A");
+    fireEvent.click(editA);
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "alpha-updated" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    // While A's save is in flight, switch to editing B and enter changes.
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Question B?");
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "beta-draft" } });
+
+    firstPatch.resolve();
+    expect(await screen.findByText('It must mention "alpha-updated"')).toBeTruthy();
+
+    // B's editor must still be open with its unsaved changes.
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Question B?");
+    expect((screen.getByLabelText("Words") as HTMLInputElement).value).toBe("beta-draft");
+  });
+
+  it("does not close a newer add session when an earlier add save finishes", async () => {
+    const firstPost = createDeferred<void>();
+    let postCount = 0;
+    installFakeServer({
+      tests: [],
+      onPostTest: async () => {
+        postCount++;
+        if (postCount === 1) await firstPost.promise;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Tests" });
+    fireEvent.click(screen.getByRole("button", { name: "Add test" }));
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "First question?" } });
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "first" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    // Close and reopen Add test while the first save is still in flight.
+    fireEvent.click(screen.getByRole("button", { name: "Add test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add test" }));
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Second draft?" } });
+
+    firstPost.resolve();
+    expect(await screen.findByText("First question?")).toBeTruthy();
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Second draft?");
   });
 });

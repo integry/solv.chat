@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ConversationDetail } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
@@ -19,9 +19,11 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
     question: string;
   } | null>(null);
   const [addingTest, setAddingTest] = useState<{
+    sessionId: number;
     turnId: string;
     question: string;
   } | null>(null);
+  const nextTestSessionId = useRef(1);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const detail = detailRes.value;
@@ -158,6 +160,7 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                         setAnswering(null);
                         setStatusMessage(null);
                         setAddingTest({
+                          sessionId: nextTestSessionId.current++,
                           turnId: turn.id,
                           // The visitor's question, not the reply: a test is a
                           // question plus an expectation.
@@ -186,18 +189,24 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                   />
                 )}
 
-                {addingTest?.turnId === turn.id && (
-                  <TestEditor
-                    key={turn.id}
-                    assistantId={assistantId}
-                    initialQuestion={addingTest.question}
-                    onSaved={() => {
-                      setAddingTest(null);
-                      setStatusMessage("Added to tests.");
-                    }}
-                    onCancel={() => setAddingTest(null)}
-                  />
-                )}
+                {addingTest?.turnId === turn.id &&
+                  (() => {
+                    const sessionId = addingTest.sessionId;
+                    return (
+                      <TestEditor
+                        key={sessionId}
+                        assistantId={assistantId}
+                        initialQuestion={addingTest.question}
+                        onSaved={() => {
+                          setAddingTest((current) =>
+                            current?.sessionId === sessionId ? null : current,
+                          );
+                          setStatusMessage("Added to tests.");
+                        }}
+                        onCancel={() => setAddingTest(null)}
+                      />
+                    );
+                  })()}
               </div>
             );
           })}

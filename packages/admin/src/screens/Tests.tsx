@@ -1,4 +1,5 @@
-import { useState } from "react";
+import type { TestExpectation } from "@solvchat/core";
+import { useRef, useState } from "react";
 import { ApiError, deleteJson, postJson } from "../api/client.js";
 import type { AnswerTest, TestOutcome, TestResult, TestRunResponse } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
@@ -6,6 +7,25 @@ import { describeExpectation, TestEditor } from "./TestEditor.js";
 
 export interface TestsProps {
   assistantId: string;
+}
+
+function expectationsEqual(a: TestExpectation, b: TestExpectation): boolean {
+  if (a.kind !== b.kind) return false;
+  switch (a.kind) {
+    case "cites":
+      return b.kind === "cites" && a.url === b.url;
+    case "contains":
+    case "notContains":
+      return b.kind === a.kind && a.phrase === b.phrase;
+    case "declines":
+      return true;
+  }
+}
+
+function resultMatchesTest(result: TestResult, test: AnswerTest): boolean {
+  return (
+    result.question === test.question && expectationsEqual(result.expectation, test.expectation)
+  );
 }
 
 function outcomeBadge(outcome: TestOutcome): { label: string; className: string } {
@@ -23,8 +43,12 @@ export function Tests({ assistantId }: TestsProps) {
   const testsRes = useResource<{ tests: AnswerTest[] }>(
     `/api/admin/assistants/${assistantId}/tests`,
   );
-  const [adding, setAdding] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [addingSessionId, setAddingSessionId] = useState<number | null>(null);
+  const [editingSession, setEditingSession] = useState<{
+    sessionId: number;
+    testId: string;
+  } | null>(null);
+  const nextEditorSessionId = useRef(1);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [runResults, setRunResults] = useState<Map<string, TestResult> | null>(null);
@@ -63,7 +87,13 @@ export function Tests({ assistantId }: TestsProps) {
     setStatusMessage(null);
     try {
       await deleteJson<{ deleted: true }>(`/api/admin/tests/${testId}`);
-      if (editingId === testId) setEditingId(null);
+      setEditingSession((current) => (current?.testId === testId ? null : current));
+      setRunResults((prev) => {
+        if (!prev?.has(testId)) return prev;
+        const next = new Map(prev);
+        next.delete(testId);
+        return next;
+      });
       testsRes.setValue({ tests: tests.filter((t) => t.id !== testId) });
       setStatusMessage("Test deleted.");
     } catch (err) {
@@ -96,8 +126,8 @@ export function Tests({ assistantId }: TestsProps) {
             className="btn btn-primary"
             disabled={running}
             onClick={() => {
-              setEditingId(null);
-              setAdding((prev) => !prev);
+              setEditingSession(null);
+              setAddingSessionId((prev) => (prev === null ? nextEditorSessionId.current++ : null));
             }}
           >
             Add test
@@ -126,16 +156,17 @@ export function Tests({ assistantId }: TestsProps) {
         </p>
       )}
 
-      {adding && (
+      {addingSessionId !== null && (
         <TestEditor
+          key={`add-${addingSessionId}`}
           assistantId={assistantId}
           onSaved={(created) => {
-            setAdding(false);
+            setAddingSessionId((current) => (current === addingSessionId ? null : current));
             setStatusMessage("Test saved.");
             testsRes.setValue({ tests: [...tests, created] });
             testsRes.reload();
           }}
-          onCancel={() => setAdding(false)}
+          onCancel={() => setAddingSessionId(null)}
         />
       )}
 
@@ -150,32 +181,53 @@ export function Tests({ assistantId }: TestsProps) {
       ) : (
         <ul className="history-list">
           {tests.map((test) => {
-            const result = runResults?.get(test.id) ?? test.latestResult ?? null;
+            const rawResult = runResults?.get(test.id) ?? test.latestResult ?? null;
+            const result = rawResult && resultMatchesTest(rawResult, test) ? rawResult : null;
             const badge = result ? outcomeBadge(result.outcome) : null;
 
             return (
               <li key={test.id} className="source-card stack">
-                {editingId === test.id ? (
-                  <TestEditor
-                    key={test.id}
-                    assistantId={assistantId}
-                    testId={test.id}
-                    initialQuestion={test.question}
-                    initialExpectation={test.expectation}
-                    onSaved={(updated) => {
-                      setEditingId(null);
-                      setStatusMessage("Test saved.");
-                      testsRes.setValue({
-                        tests: tests.map((item) =>
-                          item.id === updated.id
-                            ? { ...updated, latestResult: item.latestResult ?? null }
-                            : item,
-                        ),
-                      });
-                      testsRes.reload();
-                    }}
-                    onCancel={() => setEditingId(null)}
-                  />
+                {editingSession?.testId === test.id ? (
+                  (() => {
+                    const sessionId = editingSession.sessionId;
+                    return (
+                      <TestEditor
+                        key={sessionId}
+                        assistantId={assistantId}
+                        testId={test.id}
+                        initialQuestion={test.question}
+                        initialExpectation={test.expectation}
+                        onSaved={(updated) => {
+                          setEditingSession((current) =>
+                            current?.sessionId === sessionId ? null : current,
+                          );
+                          setStatusMessage("Test saved.");
+                          setRunResults((prev) => {
+                            if (!prev?.has(updated.id)) return prev;
+                            const next = new Map(prev);
+                            next.delete(updated.id);
+                            return next;
+                          });
+                          testsRes.setValue({
+                            tests: tests.map((item) =>
+                              item.id === updated.id
+                                ? {
+                                    ...updated,
+                                    latestResult:
+                                      item.latestResult &&
+                                      resultMatchesTest(item.latestResult, updated)
+                                        ? item.latestResult
+                                        : null,
+                                  }
+                                : item,
+                            ),
+                          });
+                          testsRes.reload();
+                        }}
+                        onCancel={() => setEditingSession(null)}
+                      />
+                    );
+                  })()
                 ) : (
                   <>
                     <div className="source-header">
@@ -194,8 +246,11 @@ export function Tests({ assistantId }: TestsProps) {
                           className="btn btn-secondary btn-sm"
                           disabled={running}
                           onClick={() => {
-                            setAdding(false);
-                            setEditingId(test.id);
+                            setAddingSessionId(null);
+                            setEditingSession({
+                              sessionId: nextEditorSessionId.current++,
+                              testId: test.id,
+                            });
                           }}
                         >
                           Edit
