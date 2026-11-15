@@ -212,14 +212,138 @@ const HTML_CLOSE_TAG_RE = /<\/[A-Za-z][A-Za-z0-9-]*\s*>/y;
 const HTML_OPEN_TAG_RE =
   /<([A-Za-z][A-Za-z0-9-]*)(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/y;
 
+function findImageEnd(text: string, bangPos: number): number {
+  let i = bangPos + 2;
+  let bracketDepth = 0;
+  let closeBracket = -1;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "\n") return -1;
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (ch === "[") {
+      bracketDepth++;
+    } else if (ch === "]") {
+      if (bracketDepth === 0) {
+        closeBracket = i;
+        break;
+      }
+      bracketDepth--;
+    }
+    i++;
+  }
+  if (closeBracket === -1) return -1;
+
+  const nextCh = text[closeBracket + 1];
+  if (nextCh === "[") {
+    let j = closeBracket + 2;
+    while (j < text.length) {
+      const ch = text[j];
+      if (ch === "\n" || ch === "[") return -1;
+      if (ch === "\\") {
+        j += 2;
+        continue;
+      }
+      if (ch === "]") return j + 1;
+      j++;
+    }
+    return -1;
+  }
+
+  if (nextCh !== "(") return -1;
+
+  let j = closeBracket + 2;
+  while (j < text.length && (text[j] === " " || text[j] === "\t")) {
+    j++;
+  }
+  if (j < text.length && text[j] === ")") {
+    return j + 1;
+  }
+
+  if (text[j] === "<") {
+    j++;
+    let closedAngle = false;
+    while (j < text.length) {
+      const ch = text[j];
+      if (ch === "\n" || ch === "<") return -1;
+      if (ch === "\\") {
+        j += 2;
+        continue;
+      }
+      if (ch === ">") {
+        j++;
+        closedAngle = true;
+        break;
+      }
+      j++;
+    }
+    if (!closedAngle) return -1;
+  } else {
+    const destStart = j;
+    let parenDepth = 0;
+    while (j < text.length) {
+      const ch = text[j];
+      if (ch === "\n") return -1;
+      if (ch === " " || ch === "\t") break;
+      if (ch === "\\") {
+        j += 2;
+        continue;
+      }
+      if (ch === "(") {
+        parenDepth++;
+      } else if (ch === ")") {
+        if (parenDepth === 0) {
+          return j + 1;
+        }
+        parenDepth--;
+      }
+      j++;
+    }
+    if (parenDepth !== 0 || j === destStart) return -1;
+  }
+
+  const wsStart = j;
+  while (j < text.length && (text[j] === " " || text[j] === "\t")) {
+    j++;
+  }
+  if (j >= text.length) return -1;
+  if (text[j] === ")") return j + 1;
+  if (j === wsStart) return -1;
+
+  const quote = text[j];
+  if (quote !== '"' && quote !== "'" && quote !== "(") return -1;
+  const endQuote = quote === "(" ? ")" : quote;
+  j++;
+  let closedTitle = false;
+  while (j < text.length) {
+    const ch = text[j];
+    if (ch === "\n") return -1;
+    if (ch === "\\") {
+      j += 2;
+      continue;
+    }
+    if (quote === "(" && ch === "(") return -1;
+    if (ch === endQuote) {
+      j++;
+      closedTitle = true;
+      break;
+    }
+    j++;
+  }
+  if (!closedTitle) return -1;
+
+  while (j < text.length && (text[j] === " " || text[j] === "\t")) {
+    j++;
+  }
+  return text[j] === ")" ? j + 1 : -1;
+}
+
 function findOpaqueLiteralSpanEnd(text: string, pos: number): number {
   const ch = text[pos];
   if (ch === "!" && text[pos + 1] === "[") {
-    const imgBounds = findLinkEnd(text, pos + 1);
-    if (imgBounds) {
-      return imgBounds.closeParen + 1;
-    }
-    return -1;
+    return findImageEnd(text, pos);
   }
 
   if (ch === "<") {
@@ -306,15 +430,23 @@ function findInlineClose(text: string, from: number, marker: "**" | "*"): number
         if (runLen >= 2 && i > from && !/\s/.test(text[i - 1] ?? "")) {
           return i;
         }
-      } else if (runLen === 1) {
-        if (i > from && !/\s/.test(text[i - 1] ?? "")) {
-          return i;
+        if (runLen === 1 && runEnd < text.length && !/\s/.test(text[runEnd] ?? "")) {
+          const nestedClose = findInlineClose(text, runEnd, "*");
+          if (nestedClose !== -1) {
+            i = nestedClose + 1;
+            continue;
+          }
         }
-      } else if (runLen === 2 && runEnd < text.length && !/\s/.test(text[runEnd] ?? "")) {
-        const nestedClose = findInlineClose(text, runEnd, "**");
-        if (nestedClose !== -1) {
-          i = nestedClose + 2;
-          continue;
+      } else {
+        if (runLen === 2 && runEnd < text.length && !/\s/.test(text[runEnd] ?? "")) {
+          const nestedClose = findInlineClose(text, runEnd, "**");
+          if (nestedClose !== -1) {
+            i = nestedClose + 2;
+            continue;
+          }
+        }
+        if ((runLen === 1 || runLen >= 3) && i > from && !/\s/.test(text[i - 1] ?? "")) {
+          return i;
         }
       }
       i = runEnd;

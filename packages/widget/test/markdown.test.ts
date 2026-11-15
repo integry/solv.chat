@@ -120,6 +120,28 @@ describe("Markdown rendering", () => {
     expect(ems[0]?.querySelectorAll("strong")).toHaveLength(2);
     expect(ems[1]?.textContent).toBe("outer **unclosed end");
     expect(multi.querySelector("p > strong > em")?.textContent).toBe("italic");
+
+    for (const adjacent of ["**outer *italic***", "*outer **bold***", "***both***"]) {
+      const adjSingle = document.createElement("div");
+      renderMarkdown(adjSingle, adjacent);
+      expect(adjSingle.textContent).not.toContain("*");
+
+      const adjIncremental = document.createElement("div");
+      for (let len = 1; len <= adjacent.length; len++) {
+        renderMarkdown(adjIncremental, adjacent.slice(0, len));
+      }
+      expect(serializeDom(adjIncremental)).toEqual(serializeDom(adjSingle));
+    }
+
+    const boldOuter = document.createElement("div");
+    renderMarkdown(boldOuter, "**outer *italic***");
+    expect(boldOuter.querySelector("p > strong > em")?.textContent).toBe("italic");
+    expect(boldOuter.querySelector("p > strong")?.textContent).toBe("outer italic");
+
+    const unclosedInner = document.createElement("div");
+    renderMarkdown(unclosedInner, "**outer *unclosed**");
+    expect(unclosedInner.querySelector("p > strong")?.textContent).toBe("outer *unclosed");
+    expect(unclosedInner.querySelector("em")).toBeNull();
   });
 
   it("renders unordered and ordered lists with one level of nesting", () => {
@@ -309,6 +331,13 @@ describe("Markdown rendering", () => {
         '<script>const s = "**x**";</script>',
         '**wrap <img alt="a**b" src=x> and ![c**d](https://example.com/x.png) end**',
         "1 < 2 and **still bold** > 0",
+        '![**diagram**](https://example.com/image.png "Caption")',
+        "![*alt*](https://example.com/image.png 'Single \"title\"')",
+        "![*alt*](https://example.com/image.png (Paren title))",
+        '![**diagram**](<https://example.com/my image.png> "Caption")',
+        "![**diagram**][figure]",
+        "![*collapsed*][]",
+        '**wrap ![**diagram**](https://example.com/image.png "Caption") and ![*ref*][figure] end**',
       ].join("\n\n"),
     );
 
@@ -316,7 +345,7 @@ describe("Markdown rendering", () => {
     expect(container.querySelectorAll("em, code")).toHaveLength(0);
 
     const paragraphs = container.querySelectorAll("p");
-    expect(paragraphs).toHaveLength(8);
+    expect(paragraphs).toHaveLength(15);
     expect(paragraphs[0]?.querySelector("strong")).toBeNull();
     expect(paragraphs[0]?.textContent).toBe("![**diagram**](https://example.com/image.png)");
     expect(paragraphs[1]?.textContent).toBe("![*alt* and `code`](https://example.com/a*b*.png)");
@@ -332,6 +361,26 @@ describe("Markdown rendering", () => {
       'wrap <img alt="a**b" src=x> and ![c**d](https://example.com/x.png) end',
     );
     expect(paragraphs[7]?.querySelector("strong")?.textContent).toBe("still bold");
+    expect(paragraphs[8]?.querySelector("strong")).toBeNull();
+    expect(paragraphs[8]?.textContent).toBe(
+      '![**diagram**](https://example.com/image.png "Caption")',
+    );
+    expect(paragraphs[9]?.textContent).toBe(
+      "![*alt*](https://example.com/image.png 'Single \"title\"')",
+    );
+    expect(paragraphs[10]?.textContent).toBe(
+      "![*alt*](https://example.com/image.png (Paren title))",
+    );
+    expect(paragraphs[11]?.querySelector("strong")).toBeNull();
+    expect(paragraphs[11]?.textContent).toBe(
+      '![**diagram**](<https://example.com/my image.png> "Caption")',
+    );
+    expect(paragraphs[12]?.querySelector("strong")).toBeNull();
+    expect(paragraphs[12]?.textContent).toBe("![**diagram**][figure]");
+    expect(paragraphs[13]?.textContent).toBe("![*collapsed*][]");
+    expect(paragraphs[14]?.querySelector("strong")?.textContent).toBe(
+      'wrap ![**diagram**](https://example.com/image.png "Caption") and ![*ref*][figure] end',
+    );
   });
 
   it("preserves opaque script, style, and comment spans across blank lines and block-level markers", () => {
