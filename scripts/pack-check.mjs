@@ -169,6 +169,69 @@ function checkAdminBundleSync(enginePkgDir) {
   return [];
 }
 
+const ENGINE_EMBEDDER_EXPORTS = [
+  "createApp",
+  "passwordAuth",
+  "SINGLE_ORG_ID",
+  "secretKeys",
+  "usageDaily",
+  "basicLimits",
+  "DEFAULT_DAILY_CAP_MICROS",
+];
+
+const ENGINE_EMBEDDER_TYPES = [
+  "PasswordAuthEnv",
+  "SecretKeyEnv",
+  "CapMicrosResolver",
+  "AuthProvider",
+  "KeyProvider",
+  "UsageSink",
+  "Limits",
+  "Seams",
+];
+
+function checkEngineExports(enginePkgDir, manifest, fileSet) {
+  const errors = [];
+
+  if (manifest.exports?.["./package.json"] !== "./package.json") {
+    errors.push('missing required export "./package.json": "./package.json"');
+  }
+  if (manifest.exports?.["./migrations/*"] !== "./migrations/*") {
+    errors.push('missing required export "./migrations/*": "./migrations/*"');
+  }
+
+  if (fileSet.has("dist/index.js")) {
+    const indexUrl = pathToFileURL(path.join(enginePkgDir, "dist/index.js")).href;
+    const raw = execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        "import(process.argv[1]).then((m) => process.stdout.write(JSON.stringify(Object.keys(m))))",
+        indexUrl,
+      ],
+      { encoding: "utf8" },
+    );
+    const exportedNames = new Set(JSON.parse(raw));
+    for (const name of ENGINE_EMBEDDER_EXPORTS) {
+      if (!exportedNames.has(name)) {
+        errors.push(`engine dist/index.js is missing required export: ${name}`);
+      }
+    }
+  }
+
+  if (fileSet.has("dist/index.d.ts")) {
+    const dts = readFileSync(path.join(enginePkgDir, "dist/index.d.ts"), "utf8");
+    for (const name of ENGINE_EMBEDDER_TYPES) {
+      if (!new RegExp(`\\b${name}\\b`).test(dts)) {
+        errors.push(`engine dist/index.d.ts is missing required type export: ${name}`);
+      }
+    }
+  }
+
+  return errors;
+}
+
 export function checkPackagePack(pkgDir) {
   const manifest = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
   const stdout = execFileSync("npm", ["pack", "--dry-run", "--json"], {
@@ -182,7 +245,14 @@ export function checkPackagePack(pkgDir) {
   const errors = [];
 
   for (const req of collectRequiredEntries(manifest)) {
-    if (!fileSet.has(req)) {
+    if (req.includes("*")) {
+      const starIndex = req.indexOf("*");
+      const prefix = req.slice(0, starIndex);
+      const suffix = req.slice(starIndex + 1);
+      if (!files.some((f) => f.startsWith(prefix) && f.endsWith(suffix))) {
+        errors.push(`missing required file matching: ${req}`);
+      }
+    } else if (!fileSet.has(req)) {
       errors.push(`missing required file: ${req}`);
     }
   }
@@ -212,6 +282,7 @@ export function checkPackagePack(pkgDir) {
     if (fileSet.has("dist/adminBundle.js")) {
       errors.push(...checkAdminBundleSync(pkgDir));
     }
+    errors.push(...checkEngineExports(pkgDir, manifest, fileSet));
   }
 
   for (const f of files) {

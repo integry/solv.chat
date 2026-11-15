@@ -21,7 +21,9 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./migrations/*": "./migrations/*",
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",

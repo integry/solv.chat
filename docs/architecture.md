@@ -452,8 +452,26 @@ The cloud layer replaces these and nothing else:
 - `Limits` — answers "may this org do this?". The open build enforces only the
   per-assistant spend cap and rate limits.
 
-`packages/engine` exports `createApp(seams)`. Its own `src/worker.ts` calls it
-with the open implementations.
+`packages/engine` exports `createApp(seams)` and the open seam implementations
+(`passwordAuth`, `PasswordAuthEnv`, `SINGLE_ORG_ID`, `secretKeys`, `SecretKeyEnv`,
+`usageDaily`, `basicLimits`, `CapMicrosResolver`, `DEFAULT_DAILY_CAP_MICROS`),
+along with `./migrations/*` and `./package.json` so an embedder can apply
+migrations from the installed package:
+
+```ts
+import { basicLimits, createApp, passwordAuth, secretKeys, usageDaily } from "@solvchat/engine";
+
+const app = createApp({
+  auth: passwordAuth(env, env.DB),
+  keys: secretKeys(env, env.DB),
+  usage: usageDaily(env.DB),
+  limits: basicLimits(env.DB),
+});
+```
+
+An embedder replaces one or more fields of `seams` (such as `auth`) and keeps
+the defaults for the rest. Its own `src/worker.ts` calls `createApp` with the
+open implementations.
 
 ## Phases
 
