@@ -598,10 +598,12 @@ export async function* answerWithActionResults(
       .slice(0, questionIndex)
       .map((m) => ({ role: m.role, content: m.content }));
 
-    const embedded = await deps.embedder.embed([questionMsg.content], async (tokens) => {
-      if (!(await ensureLease())) return;
-      await recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens));
-    });
+    // Embedding spend is incurred once the provider reports it, even if the
+    // resume lease is lost before the callback runs; the checkpoint right
+    // below still fences retrieval, model calls, output, and reply persistence.
+    const embedded = await deps.embedder.embed([questionMsg.content], (tokens) =>
+      recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
+    );
     if (!(await ensureLease())) {
       yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
       return;

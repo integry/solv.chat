@@ -13,8 +13,9 @@ import { RESUME_CLAIM_TTL_MS } from "../../src/chat/answer.js";
 import { SAFETY_FRAME } from "../../src/chat/prompt.js";
 import { MAX_TOOL_CALLS_PER_CONVERSATION } from "../../src/chat/toolLoop.js";
 import { forPrincipal } from "../../src/db/tenant.js";
-import { ANTHROPIC_MODELS } from "../../src/models.js";
+import { ANTHROPIC_MODELS, costMicros } from "../../src/models.js";
 import { ProviderError } from "../../src/providers/error.js";
+import { type Embedder, embeddingCostMicros } from "../../src/providers/retrieval.js";
 import type { LlmProvider, LlmRequest, ToolCall } from "../../src/providers/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
@@ -1181,5 +1182,248 @@ describe("chat/pageActions", () => {
         ttlMs: RESUME_CLAIM_TTL_MS,
       }),
     ).toBe(false);
+  });
+
+  it("F6: records reported model usage from a suspended resume worker after lease transfer while blocking reply mutations and output", async () => {
+    await publishConfig(true);
+    let releaseStreamA!: () => void;
+    const streamAGate = new Promise<void>((resolve) => {
+      releaseStreamA = resolve;
+    });
+    let reportedUsageA!: () => void;
+    const usageReportedByA = new Promise<void>((resolve) => {
+      reportedUsageA = resolve;
+    });
+
+    let callCount = 0;
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        callCount += 1;
+        if (callCount === 1) {
+          yield { kind: "text", text: "Opening. " };
+          yield { kind: "tool_call", call: NAVIGATE_CALL };
+          yield { kind: "usage", tokensIn: 50, tokensOut: 10, stopReason: "tools" };
+          return;
+        }
+        if (callCount === 2) {
+          // Resume A receives a usage report from the provider, then is suspended
+          // before stream completion / final lease checkpoint.
+          yield { kind: "usage", tokensIn: 999, tokensOut: 999, stopReason: "end" };
+          reportedUsageA();
+          await streamAGate;
+          return;
+        }
+        if (callCount === 3) {
+          // Resume B takes over the expired lease and completes.
+          yield { kind: "text", text: "From B." };
+          yield { kind: "usage", tokensIn: 60, tokensOut: 15, stopReason: "end" };
+          return;
+        }
+        throw new Error(`unexpected provider call ${callCount}`);
+      },
+    };
+
+    const recordedUsage: Array<{
+      tokensIn: number;
+      tokensOut: number;
+      costMicros: number;
+      messages: number;
+    }> = [];
+    const app = createApp(
+      fakeSeams({
+        usage: {
+          async record(event) {
+            recordedUsage.push({
+              tokensIn: event.tokensIn,
+              tokensOut: event.tokensOut,
+              costMicros: event.costMicros,
+              messages: event.messages,
+            });
+          },
+        },
+      }),
+      {
+        chat: { embedder, retriever, provider, model: ANTHROPIC_MODELS.fast },
+      },
+    );
+
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION],
+    });
+    const firstDone = first.find((e) => e.type === "done");
+    if (firstDone?.type !== "done") throw new Error("expected done");
+
+    // Start Resume A and wait until its provider stream has reported usage, then suspend it.
+    const resumeAPromise = postChat(app, {
+      conversationId: firstDone.conversationId,
+      resumeMessageId: firstDone.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+    });
+    await usageReportedByA;
+
+    // Expire A's lease and let Resume B reclaim and complete the reply.
+    await env.DB.prepare("UPDATE messages SET resume_claimed_at = ?1 WHERE id = ?2")
+      .bind(Date.now() - RESUME_CLAIM_TTL_MS - 1000, firstDone.messageId)
+      .run();
+
+    const resumeB = await postChat(app, {
+      conversationId: firstDone.conversationId,
+      resumeMessageId: firstDone.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+    });
+    expect(
+      resumeB.filter((e): e is Extract<ChatEvent, { type: "token" }> => e.type === "token"),
+    ).toEqual([{ type: "token", text: "From B." }]);
+    expect(resumeB.some((e) => e.type === "done")).toBe(true);
+
+    // Finish A; its reply mutations and output must remain blocked, while its
+    // already-reported provider usage is recorded.
+    releaseStreamA();
+    const resumeA = await resumeAPromise;
+    expect(resumeA.some((e) => e.type === "token")).toBe(false);
+    expect(resumeA.some((e) => e.type === "citation")).toBe(false);
+    expect(resumeA.some((e) => e.type === "done")).toBe(false);
+    expect(resumeA).toEqual([
+      { type: "error", message: "This answer can no longer be continued." },
+    ]);
+
+    const stored = await tenant.messages.get(firstDone.messageId);
+    expect(stored?.content).toBe("Opening. From B.");
+    expect(stored?.tokensIn).toBe(110);
+    expect(stored?.tokensOut).toBe(25);
+
+    const modelUsage = recordedUsage.filter((u) => u.tokensIn > 0 || u.tokensOut > 0);
+    expect(modelUsage).toEqual([
+      {
+        tokensIn: 50,
+        tokensOut: 10,
+        costMicros: costMicros(ANTHROPIC_MODELS.fast, 50, 10),
+        messages: 1,
+      },
+      {
+        tokensIn: 60,
+        tokensOut: 15,
+        costMicros: costMicros(ANTHROPIC_MODELS.fast, 60, 15),
+        messages: 0,
+      },
+      {
+        tokensIn: 999,
+        tokensOut: 999,
+        costMicros: costMicros(ANTHROPIC_MODELS.fast, 999, 999),
+        messages: 0,
+      },
+    ]);
+  });
+
+  it("F6: records reported embedding usage from a resume worker after lease transfer while blocking retrieval and output", async () => {
+    await publishConfig(true);
+    let releaseEmbedA!: () => void;
+    const embedAGate = new Promise<void>((resolve) => {
+      releaseEmbedA = resolve;
+    });
+    let enteredEmbedA!: () => void;
+    const embedAEntered = new Promise<void>((resolve) => {
+      enteredEmbedA = resolve;
+    });
+
+    let embedCalls = 0;
+    const gatedEmbedder: Embedder = {
+      dimensions: embedder.dimensions,
+      async embed(inputs, onUsage) {
+        embedCalls += 1;
+        if (embedCalls === 2) {
+          // Resume A enters embed, is suspended before reporting/completing,
+          // then reports embedding tokens after losing its lease.
+          const result = await embedder.embed(inputs, async () => {});
+          enteredEmbedA();
+          await embedAGate;
+          await onUsage?.(120);
+          return result;
+        }
+        return embedder.embed(inputs, onUsage);
+      },
+    };
+
+    const recordedUsage: Array<{
+      tokensIn: number;
+      tokensOut: number;
+      costMicros: number;
+      messages: number;
+    }> = [];
+    const app = createApp(
+      fakeSeams({
+        usage: {
+          async record(event) {
+            recordedUsage.push({
+              tokensIn: event.tokensIn,
+              tokensOut: event.tokensOut,
+              costMicros: event.costMicros,
+              messages: event.messages,
+            });
+          },
+        },
+      }),
+      {
+        chat: {
+          embedder: gatedEmbedder,
+          retriever,
+          provider: scriptedProvider([
+            { text: "Opening. ", calls: [NAVIGATE_CALL] },
+            { text: "From B.", calls: [] },
+          ]),
+          model: ANTHROPIC_MODELS.fast,
+        },
+      },
+    );
+
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION],
+    });
+    const firstDone = first.find((e) => e.type === "done");
+    if (firstDone?.type !== "done") throw new Error("expected done");
+
+    const resumeAPromise = postChat(app, {
+      conversationId: firstDone.conversationId,
+      resumeMessageId: firstDone.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+    });
+    await embedAEntered;
+
+    // Expire A's lease and let Resume B reclaim and complete the reply.
+    await env.DB.prepare("UPDATE messages SET resume_claimed_at = ?1 WHERE id = ?2")
+      .bind(Date.now() - RESUME_CLAIM_TTL_MS - 1000, firstDone.messageId)
+      .run();
+
+    const resumeB = await postChat(app, {
+      conversationId: firstDone.conversationId,
+      resumeMessageId: firstDone.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+    });
+    expect(resumeB.some((e) => e.type === "done")).toBe(true);
+
+    // Finish A's embedder call; its embedding cost is recorded even though A
+    // lost the lease, while A stops before retrieval, model call, or reply mutation.
+    releaseEmbedA();
+    const resumeA = await resumeAPromise;
+    expect(resumeA).toEqual([
+      { type: "error", message: "This answer can no longer be continued." },
+    ]);
+
+    const stored = await tenant.messages.get(firstDone.messageId);
+    expect(stored?.content).toBe("Opening. From B.");
+
+    const embeddingUsage = recordedUsage.filter(
+      (u) => u.messages === 0 && u.tokensIn === 0 && u.tokensOut === 0,
+    );
+    expect(embeddingUsage).toContainEqual({
+      tokensIn: 0,
+      tokensOut: 0,
+      costMicros: embeddingCostMicros(120),
+      messages: 0,
+    });
   });
 });

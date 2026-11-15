@@ -93,8 +93,9 @@ export interface ToolLoopDeps {
   /** Recorded per model call so the spend cap sees real spend, not one event. */
   onModelUsage: (tokensIn: number, tokensOut: number, costMicros: number) => Promise<void>;
   /**
-   * Optional lease/ownership check called before model/tool work, before
-   * emitting output, and before recording usage. Returning false stops the loop.
+   * Optional lease/ownership check called before model/tool work and before
+   * emitting output. Returning false stops the loop without suppressing
+   * already-reported model usage.
    */
   ensureLease?: (() => Promise<boolean>) | undefined;
   now?: (() => number) | undefined;
@@ -338,9 +339,9 @@ async function* runLoopFrom(
     } finally {
       // Per model call, so three calls bill three times. Recorded in `finally`
       // for the same reason phase 1 records before persisting: tokens the
-      // provider reported are owed whether or not the rest of the turn works.
-      // If the resume lease was lost, stop before recording usage for the stale worker.
-      if ((usageReported || completed) && (await checkLease())) {
+      // provider reported are owed whether or not the rest of the turn works,
+      // even if the resume lease was lost before the stream finished.
+      if (usageReported || completed) {
         await deps.onModelUsage(tokensIn, tokensOut, costMicros(deps.model, tokensIn, tokensOut));
       }
     }
