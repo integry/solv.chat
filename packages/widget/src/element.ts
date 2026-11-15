@@ -15,7 +15,6 @@ import {
 import { readEventLines } from "./sse.js";
 import {
   claimConversation,
-  clearCrossOriginHandoff,
   consumeCrossOriginHandoff,
   loadConversation,
   type PendingResume,
@@ -978,7 +977,30 @@ export class SolvChat extends HTMLElement {
         btn.type = "button";
         btn.className = "solv-fb-btn solv-nav-recover";
         btn.textContent = "Continue here";
-        btn.addEventListener("click", () => finish(true), { once: true });
+        btn.addEventListener(
+          "click",
+          () => {
+            if (settled || signal.aborted || !this.isConnected) {
+              finish(false);
+              return;
+            }
+            if (typeof window !== "undefined" && typeof window.stop === "function") {
+              try {
+                window.stop();
+              } catch {
+                // Ignore stop() errors in restricted contexts.
+              }
+            }
+            // If pagehide/abort fired while stopping, departure already began;
+            // retain continuation state instead of resuming locally.
+            if (settled || signal.aborted || !this.isConnected) {
+              finish(false);
+              return;
+            }
+            finish(true);
+          },
+          { once: true },
+        );
         recoveryEl.append(btn);
         bubble.append(recoveryEl);
         this.#scrollToBottom();
@@ -1038,29 +1060,37 @@ export class SolvChat extends HTMLElement {
             actionResults: pendingResults,
             depth,
           };
-          let crossOrigin: string | null = null;
+          let isCrossOrigin = false;
           try {
             const parsed = new URL(targetHref, location.href);
-            if (parsed.origin !== location.origin) {
-              crossOrigin = parsed.origin;
-            }
+            isCrossOrigin = parsed.origin !== location.origin;
           } catch {
             // Ignore unparseable targetHref.
           }
+          let handoffHref: string | undefined;
           if (request.name) {
             if (!assistantTurn.actions) assistantTurn.actions = [];
             assistantTurn.actions.push({ name: request.name, ok: true });
             this.#persist();
-            if (crossOrigin !== null) {
-              stageCrossOriginHandoff(this.#assistant(), crossOrigin, this.#snapshot());
+            if (isCrossOrigin) {
+              handoffHref = stageCrossOriginHandoff(
+                this.#assistant(),
+                targetHref,
+                this.#snapshot(),
+              );
             }
             assistantTurn.actions.pop();
           } else {
             this.#persist();
-            if (crossOrigin !== null) {
-              stageCrossOriginHandoff(this.#assistant(), crossOrigin, this.#snapshot());
+            if (isCrossOrigin) {
+              handoffHref = stageCrossOriginHandoff(
+                this.#assistant(),
+                targetHref,
+                this.#snapshot(),
+              );
             }
           }
+          return handoffHref;
         });
         let result = await runAction(request);
         setBeforeNavigate(null);
@@ -1079,7 +1109,6 @@ export class SolvChat extends HTMLElement {
           // Navigation failed or was canceled while the document stayed active:
           // clear the pending handoff so this widget resumes the answer.
           this.#pendingResume = null;
-          clearCrossOriginHandoff();
         }
         results.push(result);
         if (request.name) {

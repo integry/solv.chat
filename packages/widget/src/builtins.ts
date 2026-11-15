@@ -72,7 +72,7 @@ const installedBuiltins = new Map<string, RegisteredAction>();
 const schemaEncoder = new TextEncoder();
 let activeHighlight: ActiveHighlight | null = null;
 let highlightHost: ShadowRoot | null = null;
-let beforeNavigate: ((targetHref: string) => void) | null = null;
+let beforeNavigate: ((targetHref: string) => string | undefined) | null = null;
 
 /** Sets the widget shadow root that hosts highlight notes styled by styles.ts. */
 export function setHighlightHost(root: ShadowRoot | null): void {
@@ -80,7 +80,9 @@ export function setHighlightHost(root: ShadowRoot | null): void {
 }
 
 /** Registers a hook invoked right before `navigate` leaves the current document. */
-export function setBeforeNavigate(handler: ((targetHref: string) => void) | null): void {
+export function setBeforeNavigate(
+  handler: ((targetHref: string) => string | undefined) | null,
+): void {
   beforeNavigate = handler;
 }
 
@@ -408,8 +410,8 @@ export function installBuiltins(settings: BuiltinSettings): void {
           }
           return { opened: target.href };
         }
-        beforeNavigate?.(target.href);
-        location.assign(target.href);
+        const destination = beforeNavigate?.(target.href) ?? target.href;
+        location.assign(destination);
         // The conversation survives this because the transcript, the
         // conversation id and the pending resume are persisted before leaving.
         return { opened: target.href };

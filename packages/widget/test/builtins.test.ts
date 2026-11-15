@@ -800,10 +800,13 @@ describe("built-in page actions", () => {
   });
 
   describe("F12: cross-origin navigation and continuation for configured origins", () => {
-    it("navigates to an allowed origin, hands off conversation via window.name, and resumes on arrival", async () => {
+    it("navigates to an allowed origin, hands off conversation via URL fragment, and resumes on arrival even when window.name is cleared", async () => {
       const originalUrl = location.href;
       window.name = "host-window";
-      const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
+      let assignedUrl = "";
+      const assign = vi.spyOn(location, "assign").mockImplementation((url: string | URL) => {
+        assignedUrl = String(url);
+      });
       const chatBodies: Array<Record<string, unknown>> = [];
       let chatStep = 0;
 
@@ -856,20 +859,22 @@ describe("built-in page actions", () => {
         (root1.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
         await flushAsync();
 
-        expect(assign).toHaveBeenCalledWith("https://shop.example.com/cart");
+        expect(assign).toHaveBeenCalledTimes(1);
+        expect(assignedUrl).toMatch(/^https:\/\/shop\.example\.com\/cart#solv_handoff=/);
         expect(chatBodies).toHaveLength(1);
-        expect(window.name).toContain("https://shop.example.com");
+        expect(window.name).toBe("host-window");
 
         window.dispatchEvent(new Event("pagehide"));
         await flushAsync();
         el1.remove();
         clearRegistry();
 
-        // Simulate arriving at https://shop.example.com/cart with empty origin storage.
+        // Simulate real cross-site navigation: browser clears window.name and isolates storage.
+        window.name = "";
         sessionStorage.clear();
         localStorage.clear();
         const happyWindow = window as unknown as { happyDOM?: { setURL: (url: string) => void } };
-        happyWindow.happyDOM?.setURL("https://shop.example.com/cart");
+        happyWindow.happyDOM?.setURL(assignedUrl);
 
         const el2 = document.createElement("solv-chat");
         el2.setAttribute("assistant", "pk_cross_origin");
@@ -877,7 +882,7 @@ describe("built-in page actions", () => {
         document.body.append(el2);
         await flushAsync();
 
-        expect(window.name).toBe("host-window");
+        expect(location.href).toBe("https://shop.example.com/cart");
         expect(chatBodies).toHaveLength(2);
         expect(chatBodies[1]?.conversationId).toBe("conv_x");
         expect(chatBodies[1]?.resumeMessageId).toBe("msg_x1");
@@ -901,9 +906,49 @@ describe("built-in page actions", () => {
       }
     });
 
-    it("restores window.name and resumes locally when cross-origin navigation is canceled", async () => {
+    it("preserves destination #section hash and rejects mismatched assistant or origin handoffs", async () => {
+      const originalUrl = location.href;
+      const saved = {
+        conversationId: "conv_sec",
+        open: true,
+        turns: [{ role: "user" as const, text: "Go to payment" }],
+      };
+      const happyWindow = window as unknown as { happyDOM?: { setURL: (url: string) => void } };
+
+      try {
+        const { stageCrossOriginHandoff, consumeCrossOriginHandoff } = await import(
+          "../src/storage.js"
+        );
+        const handoffUrl = stageCrossOriginHandoff(
+          "pk_scope",
+          "https://shop.example.com/checkout#payment",
+          saved,
+        );
+        expect(handoffUrl).toMatch(/^https:\/\/shop\.example\.com\/checkout#payment&solv_handoff=/);
+
+        // Wrong origin must not consume or adopt the handoff.
+        happyWindow.happyDOM?.setURL(
+          handoffUrl.replace("https://shop.example.com", "https://evil.example.com"),
+        );
+        expect(consumeCrossOriginHandoff("pk_scope")).toBeNull();
+
+        // Wrong assistant on the target origin must not consume the handoff.
+        happyWindow.happyDOM?.setURL(handoffUrl);
+        expect(consumeCrossOriginHandoff("pk_other")).toBeNull();
+
+        // Matching assistant and origin consumes it and restores #payment.
+        const consumed = consumeCrossOriginHandoff("pk_scope");
+        expect(consumed?.conversationId).toBe("conv_sec");
+        expect(location.href).toBe("https://shop.example.com/checkout#payment");
+      } finally {
+        happyWindow.happyDOM?.setURL(originalUrl);
+      }
+    });
+
+    it("stops navigation and resumes locally when cross-origin navigation is canceled", async () => {
       vi.useFakeTimers();
       window.name = "host-window";
+      const stopSpy = vi.spyOn(window, "stop").mockImplementation(() => {});
       const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
       const chatBodies: Array<Record<string, unknown>> = [];
       let chatStep = 0;
@@ -955,13 +1000,17 @@ describe("built-in page actions", () => {
       (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(assign).toHaveBeenCalledWith("https://shop.example.com/cart");
+      expect(assign).toHaveBeenCalledTimes(1);
+      expect(String(assign.mock.calls[0]?.[0])).toMatch(
+        /^https:\/\/shop\.example\.com\/cart#solv_handoff=/,
+      );
       await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS);
       const recoverBtn = root.querySelector(".solv-nav-recover") as HTMLButtonElement | null;
       expect(recoverBtn).not.toBeNull();
       recoverBtn?.click();
       await vi.advanceTimersByTimeAsync(0);
 
+      expect(stopSpy).toHaveBeenCalledTimes(1);
       expect(window.name).toBe("host-window");
       expect(chatBodies).toHaveLength(2);
       expect(chatBodies[1]?.actionResults).toEqual([
@@ -1387,6 +1436,158 @@ describe("built-in page actions", () => {
       const bubbles = root.querySelectorAll(".solv-bubble--assistant");
       expect(bubbles[1]?.querySelector(".solv-action")?.textContent).toBe("Could not run navigate");
       expect(bubbles[1]?.querySelector(".solv-feedback")).not.toBeNull();
+    });
+  });
+
+  describe("F15: recovery stops pending navigation and respects departure", () => {
+    it("stops a delayed pending navigation before clearing pendingResume and resuming locally", async () => {
+      vi.useFakeTimers();
+      let pendingNavTimer: ReturnType<typeof setTimeout> | null = null;
+      let departed = false;
+      const events: string[] = [];
+
+      vi.spyOn(location, "assign").mockImplementation(() => {
+        pendingNavTimer = setTimeout(() => {
+          departed = true;
+          window.dispatchEvent(new Event("pagehide"));
+        }, NAVIGATION_RECOVERY_MS * 2);
+      });
+      const stopSpy = vi.spyOn(window, "stop").mockImplementation(() => {
+        events.push("window.stop");
+        if (pendingNavTimer !== null) {
+          clearTimeout(pendingNavTimer);
+          pendingNavTimer = null;
+        }
+      });
+
+      const chatBodies: Array<Record<string, unknown>> = [];
+      let chatStep = 0;
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_nav_delay")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: ["https://shop.example.com"] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatStep++;
+          if (chatStep === 2) events.push("resume.fetch");
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (chatStep === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Opening shop"}\n\n',
+                'event: action\ndata: {"callId":"call_delay","name":"navigate","input":{"url":"https://shop.example.com/cart"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_d1","conversationId":"conv_d","awaitingActions":["call_delay"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":" — canceled and continued here."}\n\n',
+              'event: done\ndata: {"messageId":"msg_d2","conversationId":"conv_d"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_nav_delay");
+      document.body.append(el);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const root = el.shadowRoot as ShadowRoot;
+      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open shop";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS);
+      const recoverBtn = root.querySelector(".solv-nav-recover") as HTMLButtonElement | null;
+      expect(recoverBtn).not.toBeNull();
+      recoverBtn?.click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+      expect(events).toEqual(["window.stop", "resume.fetch"]);
+
+      // Even after the original delayed navigation window elapses, departure never occurs.
+      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS * 3);
+      expect(departed).toBe(false);
+      expect(chatBodies).toHaveLength(2);
+      const postSaved = JSON.parse(
+        sessionStorage.getItem("solv-chat-open:pk_nav_delay") ?? "{}",
+      ) as { pendingResume?: unknown };
+      expect(postSaved.pendingResume).toBeUndefined();
+    });
+
+    it("retains continuation state when departure has already begun during recovery", async () => {
+      vi.useFakeTimers();
+      vi.spyOn(location, "assign").mockImplementation(() => {});
+      vi.spyOn(window, "stop").mockImplementation(() => {
+        // Simulate a navigation that already committed just as recovery was clicked.
+        window.dispatchEvent(new Event("pagehide"));
+      });
+      const chatBodies: Array<Record<string, unknown>> = [];
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_nav_departing")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"Opening pricing"}\n\n',
+              'event: action\ndata: {"callId":"call_dep","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
+              'event: done\ndata: {"messageId":"msg_dep1","conversationId":"conv_dep","awaitingActions":["call_dep"]}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_nav_departing");
+      document.body.append(el);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const root = el.shadowRoot as ShadowRoot;
+      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Go to pricing";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS);
+      const recoverBtn = root.querySelector(".solv-nav-recover") as HTMLButtonElement | null;
+      expect(recoverBtn).not.toBeNull();
+      recoverBtn?.click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Local resume must NOT run, and pendingResume must remain intact for the destination.
+      expect(chatBodies).toHaveLength(1);
+      const saved = JSON.parse(
+        sessionStorage.getItem("solv-chat-open:pk_nav_departing") ?? "{}",
+      ) as { pendingResume?: { resumeMessageId: string } };
+      expect(saved.pendingResume?.resumeMessageId).toBe("msg_dep1");
     });
   });
 });
