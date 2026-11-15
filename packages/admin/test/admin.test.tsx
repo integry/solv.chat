@@ -122,7 +122,7 @@ function installFakeServer(options: FakeServerOptions = {}) {
     | null = null;
   const chatBodies: Array<Record<string, unknown>> = [];
   const calls: Array<{ method: string; path: string }> = [];
-  const publishes: Array<{ force: boolean }> = [];
+  const publishes: Array<{ force: boolean; runId?: string }> = [];
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -267,9 +267,12 @@ function installFakeServer(options: FakeServerOptions = {}) {
       const id = publishMatch[1];
       const draft = drafts.get(id);
       if (!draft) return Response.json({ error: "Not found." }, { status: 404 });
-      const rawBody = init?.body ? (JSON.parse(String(init.body)) as { force?: unknown }) : {};
+      const rawBody = init?.body
+        ? (JSON.parse(String(init.body)) as { force?: unknown; runId?: unknown })
+        : {};
       const force = rawBody.force === true;
-      publishes.push({ force });
+      const runId = typeof rawBody.runId === "string" ? rawBody.runId : undefined;
+      publishes.push(runId !== undefined ? { force, runId } : { force });
       if (options.failingTests && options.failingTests.length > 0 && !force) {
         return Response.json(
           {
@@ -1394,7 +1397,7 @@ describe("admin app", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Publish anyway" }));
     expect(await screen.findByText(/^Published \(/)).toBeTruthy();
-    expect(server.publishes).toEqual([{ force: false }, { force: true }]);
+    expect(server.publishes).toEqual([{ force: false }, { force: true, runId: "run_1" }]);
   });
 
   it("lets the owner go back and fix a failing test from Widget without publishing", async () => {

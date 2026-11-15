@@ -18,11 +18,13 @@ export class FailedTestsError extends Error {
 export async function publishAssistant(
   assistantId: string,
   force: boolean,
+  runId?: string,
 ): Promise<{ version: VersionRow }> {
   try {
+    const body = force ? (runId ? { force: true, runId } : { force: true }) : undefined;
     return await postJson<{ version: VersionRow }>(
       `/api/admin/assistants/${assistantId}/publish`,
-      force ? { force: true } : undefined,
+      body,
     );
   } catch (err) {
     if (

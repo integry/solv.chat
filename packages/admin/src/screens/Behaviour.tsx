@@ -213,7 +213,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     }
   }
 
-  async function handlePublish(force = false) {
+  async function handlePublish(force = false, runId?: string) {
     // Publishing sends the saved draft, not the form: with unsaved edits the
     // owner would publish something other than what they see.
     if (busy || unsaved) return;
@@ -223,7 +223,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     const snapshot = { assistantId, fields: { ...latestRef.current } };
     try {
       await mutation.run("publishing", async () => {
-        const res = await publishAssistant(assistantId, force);
+        const res = await publishAssistant(assistantId, force, runId);
         publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
         setStatusMessage(
@@ -291,7 +291,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
           run={failedRun}
           busy={busy}
           onFix={() => setFailedRun(null)}
-          onPublishAnyway={() => void handlePublish(true)}
+          onPublishAnyway={() => void handlePublish(true, failedRun.id)}
         />
       )}
 

@@ -1,4 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import { newId } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Conflict } from "../../src/admin/errors.js";
 import { adminRoutes } from "../../src/admin/router.js";
@@ -503,11 +504,30 @@ function scriptedProvider(answerText: string): LlmProvider {
 describe("publish gate with answer tests", () => {
   let assistantId: string;
 
-  function makeApp(answerText: string) {
+  async function seedChunk(retriever: ReturnType<typeof memoryRetriever>) {
+    const sourceId = newId("src");
+    const docId = newId("doc");
+    const chunkId = newId("chk");
+    const now = Date.now();
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO sources (id, org_id, assistant_id, kind, label, settings, created_at) VALUES (?1, ?2, ?3, 'push', 'Docs', '{}', ?4)",
+      ).bind(sourceId, TEST_ORG_ID, assistantId, now),
+      env.DB.prepare(
+        "INSERT INTO documents (id, org_id, source_id, external_id, url, title, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4, 'https://example.com/pricing', 'Pricing', 'hash', ?5)",
+      ).bind(docId, TEST_ORG_ID, sourceId, docId, now),
+      env.DB.prepare(
+        "INSERT INTO chunks (id, org_id, document_id, ordinal, text, heading_path) VALUES (?1, ?2, ?3, 0, 'Pro costs $29.', '')",
+      ).bind(chunkId, TEST_ORG_ID, docId),
+    ]);
+    await retriever.upsert([{ chunkId, vector: [1, 0, 0, 0], orgId: TEST_ORG_ID, assistantId }]);
+  }
+
+  function makeApp(answerText: string, retriever = memoryRetriever()) {
     return createApp(fakeSeams(), {
       chat: {
         embedder: constantEmbedder(),
-        retriever: memoryRetriever(),
+        retriever,
         provider: scriptedProvider(answerText),
       },
     });
@@ -517,6 +537,9 @@ describe("publish gate with answer tests", () => {
     await env.DB.batch([
       env.DB.prepare("DELETE FROM test_runs"),
       env.DB.prepare("DELETE FROM tests"),
+      env.DB.prepare("DELETE FROM chunks"),
+      env.DB.prepare("DELETE FROM documents"),
+      env.DB.prepare("DELETE FROM sources"),
       env.DB.prepare("DELETE FROM assistant_versions"),
       env.DB.prepare("DELETE FROM assistants"),
     ]);
@@ -610,5 +633,177 @@ describe("publish gate with answer tests", () => {
 
     const runs = await env.DB.prepare("SELECT COUNT(*) AS n FROM test_runs").first<{ n: number }>();
     expect(runs?.n).toBe(0);
+  });
+
+  it("rejects publish with 409 when the draft is edited while tests are running", async () => {
+    let signalRunning!: () => void;
+    const testRunning = new Promise<void>((resolve) => {
+      signalRunning = resolve;
+    });
+    let releaseProvider!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+
+    const retriever = memoryRetriever();
+    await seedChunk(retriever);
+
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder: constantEmbedder(),
+        retriever,
+        provider: {
+          name: "anthropic",
+          model: ANTHROPIC_MODELS.fast.id,
+          async *stream() {
+            signalRunning();
+            await gate;
+            yield { kind: "text", text: "Pro costs $29." };
+            yield { kind: "usage", tokensIn: 10, tokensOut: 5 };
+          },
+        },
+      },
+    });
+
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+
+    const publishPromise = call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    await testRunning;
+
+    const editRes = await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Untested greeting" },
+    });
+    expect(editRes.status).toBe(200);
+
+    releaseProvider();
+    const publishRes = await publishPromise;
+    expect(publishRes.status).toBe(409);
+
+    const rows = await tableVersions(assistantId);
+    expect(rows.filter((r) => r.state === "published")).toHaveLength(0);
+    const draft = rows.find((r) => r.state === "draft");
+    expect(JSON.parse(draft?.config ?? "{}").behaviour.greeting).toBe("Untested greeting");
+  });
+
+  it("records published_anyway = 1 on the reviewed run when force: true submits runId", async () => {
+    let callCount = 0;
+    const retriever = memoryRetriever();
+    await seedChunk(retriever);
+
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder: constantEmbedder(),
+        retriever,
+        provider: {
+          name: "anthropic",
+          model: ANTHROPIC_MODELS.fast.id,
+          async *stream() {
+            callCount++;
+            // Even if a second run would pass, submitting runId must not re-run
+            // tests and must record the override on the inspected failing run.
+            yield {
+              kind: "text",
+              text: callCount === 1 ? "Contact sales for pricing." : "Pro costs $29.",
+            };
+            yield { kind: "usage", tokensIn: 10, tokensOut: 5 };
+          },
+        },
+      },
+    });
+
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+
+    const firstRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    expect(firstRes.status).toBe(409);
+    const firstBody = (await firstRes.json()) as { run: { id: string } };
+    const reviewedRunId = firstBody.run.id;
+
+    const overrideRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      force: true,
+      runId: reviewedRunId,
+    });
+    expect(overrideRes.status).toBe(200);
+    const overrideBody = (await overrideRes.json()) as {
+      version: VersionRow;
+      run: { id: string; passed: boolean };
+    };
+    expect(overrideBody.version.state).toBe("published");
+    expect(overrideBody.run).toEqual({ id: reviewedRunId, passed: false });
+    expect(callCount).toBe(1);
+
+    const runsCount = await env.DB.prepare("SELECT COUNT(*) AS n FROM test_runs").first<{
+      n: number;
+    }>();
+    expect(runsCount?.n).toBe(1);
+
+    const row = await env.DB.prepare("SELECT passed, published_anyway FROM test_runs WHERE id = ?1")
+      .bind(reviewedRunId)
+      .first<{ passed: number; published_anyway: number }>();
+    expect(row).toEqual({ passed: 0, published_anyway: 1 });
+  });
+
+  it("rejects force: true with runId with 409 if the draft changed after the failing run", async () => {
+    const app = makeApp("Contact sales for pricing.");
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+
+    const firstRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    expect(firstRes.status).toBe(409);
+    const firstBody = (await firstRes.json()) as { run: { id: string } };
+
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Changed after failing run" },
+    });
+
+    const overrideRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      force: true,
+      runId: firstBody.run.id,
+    });
+    expect(overrideRes.status).toBe(409);
+
+    const rows = await tableVersions(assistantId);
+    expect(rows.filter((r) => r.state === "published")).toHaveLength(0);
+    const runRow = await env.DB.prepare("SELECT published_anyway FROM test_runs WHERE id = ?1")
+      .bind(firstBody.run.id)
+      .first<{ published_anyway: number }>();
+    expect(runRow?.published_anyway).toBe(0);
+  });
+
+  it("rejects force: true with a runId from another assistant with 404", async () => {
+    const app = makeApp("Contact sales for pricing.");
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+    const firstRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    expect(firstRes.status).toBe(409);
+    const firstBody = (await firstRes.json()) as { run: { id: string } };
+
+    const otherRes = await call(app, "POST", "/api/admin/assistants", {
+      name: "Other Bot",
+      allowedOrigins: [],
+    });
+    const other = (await otherRes.json()) as { assistant: AssistantRow };
+
+    const overrideRes = await call(
+      app,
+      "POST",
+      `/api/admin/assistants/${other.assistant.id}/publish`,
+      { force: true, runId: firstBody.run.id },
+    );
+    expect(overrideRes.status).toBe(404);
+
+    const runRow = await env.DB.prepare("SELECT published_anyway FROM test_runs WHERE id = ?1")
+      .bind(firstBody.run.id)
+      .first<{ published_anyway: number }>();
+    expect(runRow?.published_anyway).toBe(0);
   });
 });

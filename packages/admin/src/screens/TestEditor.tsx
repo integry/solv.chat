@@ -110,7 +110,18 @@ export function TestEditor(props: TestEditorProps) {
     } catch (err) {
       if (err instanceof ApiError) {
         setFieldErrors(err.fields);
-        if (Object.keys(err.fields).length === 0) setFormError(err.message);
+        const renderedKeys = new Set([
+          "question",
+          ...(chosen.field !== null ? ["expectation.phrase", "expectation.url"] : []),
+        ]);
+        const unmatched = Object.entries(err.fields)
+          .filter(([key]) => !renderedKeys.has(key))
+          .map(([, message]) => message);
+        if (unmatched.length > 0) {
+          setFormError(unmatched.join(" "));
+        } else if (Object.keys(err.fields).length === 0) {
+          setFormError(err.message);
+        }
       } else {
         setFormError("Could not save that test.");
       }

@@ -11,7 +11,6 @@ import {
   listTests,
   type RunDeps,
   runAnswerTests,
-  type TestResult,
   updateTest,
 } from "./answerTests.js";
 import {
@@ -47,7 +46,14 @@ import {
   listSources,
   updateSource,
 } from "./sources.js";
-import { getDraft, listVersions, publishDraft, rollbackTo, updateDraft } from "./versions.js";
+import {
+  configRevision,
+  getDraft,
+  listVersions,
+  publishDraft,
+  rollbackTo,
+  updateDraft,
+} from "./versions.js";
 
 export interface AdminRouteDeps {
   tenant: Tenant;
@@ -113,10 +119,7 @@ function readPagingParams(url: URL): { limit?: number; offset?: number } {
   };
 }
 
-async function maybeRunTestsBeforePublish(
-  deps: AdminRouteDeps,
-  assistantId: string,
-): Promise<{ runId: string; passed: boolean; results: TestResult[]; stopped?: string } | null> {
+async function maybeRunTestsBeforePublish(deps: AdminRouteDeps, assistantId: string) {
   const count = await deps.tenant.tests.countFor(assistantId);
   if (count === 0) return null;
   if (!deps.resolveRunDeps) {
@@ -180,6 +183,35 @@ async function assistantRoutes(
           ? {}
           : await readJsonBody(request).catch(() => ({}));
       const force = isPlainObject(body) && body.force === true;
+      const rawRunId = isPlainObject(body) ? body.runId : undefined;
+      if (rawRunId !== undefined && (typeof rawRunId !== "string" || rawRunId.trim() === "")) {
+        throw new BadRequest(["runId: must be a non-empty string"]);
+      }
+
+      if (force && typeof rawRunId === "string") {
+        const reviewedRun = await tenant.tests.getRunForAssistant(assistantId, rawRunId);
+        if (reviewedRun === null) {
+          throw new NotFound("test run");
+        }
+        const draft = await getDraft(tenant, assistantId);
+        const currentRevision = await configRevision(draft);
+        if (
+          reviewedRun.versionId !== draft.id ||
+          (reviewedRun.configHash !== null && reviewedRun.configHash !== currentRevision)
+        ) {
+          throw new Conflict("The draft changed after those tests ran. Please try again.");
+        }
+        const version = await publishDraft(tenant, assistantId, draft);
+        if (!reviewedRun.passed) {
+          // The specification: "the choice is recorded on the run".
+          await tenant.tests.markPublishedAnyway(reviewedRun.id);
+        }
+        return Response.json({
+          version,
+          run: { id: reviewedRun.id, passed: reviewedRun.passed },
+        });
+      }
+
       // The specification's order: tests, then promote. A run only happens if
       // the owner has tests; publishing with none is the phase 1 path exactly.
       const run = await maybeRunTestsBeforePublish(deps, assistantId);
@@ -194,7 +226,7 @@ async function assistantRoutes(
           { status: 409 },
         );
       }
-      const version = await publishDraft(tenant, assistantId);
+      const version = await publishDraft(tenant, assistantId, run?.draft);
       if (run !== null && !run.passed && force) {
         // The specification: "the choice is recorded on the run".
         await tenant.tests.markPublishedAnyway(run.runId);
@@ -300,7 +332,10 @@ async function assistantRoutes(
       if (!deps.resolveRunDeps) {
         throw new Error("Answer test runner is not configured.");
       }
-      const run = await runAnswerTests(await deps.resolveRunDeps(), assistantId);
+      const { draft: _draft, ...run } = await runAnswerTests(
+        await deps.resolveRunDeps(),
+        assistantId,
+      );
       return Response.json(run, { status: 201 });
     }
     throw new NotFound();

@@ -46,6 +46,15 @@ function installFakeServer(options?: {
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/tests` && method === "POST") {
+      if (tests.length >= 50) {
+        return Response.json(
+          {
+            error: "That is not valid.",
+            fields: ["tests: an assistant can have at most 50 tests"],
+          },
+          { status: 400 },
+        );
+      }
       const body = JSON.parse(String(init?.body ?? "{}")) as {
         question: string;
         expectation: AnswerTest["expectation"];
@@ -387,5 +396,34 @@ describe("Tests screen", () => {
     expect(
       screen.getAllByText("The run took too long and stopped early.").length,
     ).toBeGreaterThanOrEqual(1);
+  });
+
+  it("displays the test-limit validation error when creating a 51st test", async () => {
+    const existing: AnswerTest[] = Array.from({ length: 50 }, (_, i) => ({
+      id: `tst_${i + 1}`,
+      orgId: "org_00000000000000000000",
+      assistantId: "ast_1",
+      question: `Existing question ${i + 1}?`,
+      expectation: { kind: "declines" as const },
+      createdAt: 1_700_000_000_000 + i,
+      latestResult: null,
+    }));
+    installFakeServer({ tests: existing });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    await screen.findByText("Existing question 1?");
+    fireEvent.click(screen.getByRole("button", { name: "Add test" }));
+    fireEvent.change(screen.getByLabelText("Question"), {
+      target: { value: "One too many?" },
+    });
+    fireEvent.change(screen.getByLabelText("Words"), {
+      target: { value: "limit" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("an assistant can have at most 50 tests");
+    expect(screen.queryByText("One too many?")).toBeNull();
   });
 });

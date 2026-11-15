@@ -165,27 +165,40 @@ export function versionsFor(db: D1Database, orgId: string) {
       draftId: string,
       nextDraftId: string,
       publishedAt: number,
+      expectedConfig?: string,
     ): Promise<VersionRow | null> {
+      const configClause = expectedConfig === undefined ? "" : " AND config = ?4";
+      const promoteConfigClause = expectedConfig === undefined ? "" : " AND config = ?5";
+      const archiveArgs: unknown[] =
+        expectedConfig === undefined
+          ? [orgId, assistantId, draftId]
+          : [orgId, assistantId, draftId, expectedConfig];
+      const promoteArgs: unknown[] =
+        expectedConfig === undefined
+          ? [orgId, draftId, publishedAt, assistantId]
+          : [orgId, draftId, publishedAt, assistantId, expectedConfig];
+
       const results = await db.batch([
         // Archive first: the partial unique index allows one published row, so
         // promoting the draft would fail with the old one still published.
-        // Guarded on `draftId` still being the current draft so a stale batch
-        // never archives the active published version.
+        // Guarded on `draftId` still being the current draft (and unchanged
+        // config when bound to a test run) so a stale batch never archives the
+        // active published version.
         prepare(
           db,
           `UPDATE assistant_versions SET state = 'archived'
            WHERE org_id = ?1 AND assistant_id = ?2 AND state = 'published'
              AND EXISTS (
                SELECT 1 FROM assistant_versions
-               WHERE org_id = ?1 AND assistant_id = ?2 AND id = ?3 AND state = 'draft'
+               WHERE org_id = ?1 AND assistant_id = ?2 AND id = ?3 AND state = 'draft'${configClause}
              )`,
-        ).bind(orgId, assistantId, draftId),
+        ).bind(...archiveArgs),
         // The draft becomes the published version and keeps its id, so a "Try it"
         // conversation started against the draft still resolves afterwards.
         prepare(
           db,
-          "UPDATE assistant_versions SET state = 'published', published_at = ?3 WHERE org_id = ?1 AND assistant_id = ?4 AND id = ?2 AND state = 'draft'",
-        ).bind(orgId, draftId, publishedAt, assistantId),
+          `UPDATE assistant_versions SET state = 'published', published_at = ?3 WHERE org_id = ?1 AND assistant_id = ?4 AND id = ?2 AND state = 'draft'${promoteConfigClause}`,
+        ).bind(...promoteArgs),
         // Derive the fresh draft from the promoted row inside the same batch
         // so a completed draft update between the initial read and this batch
         // is neither lost nor overwritten. Guarded on no draft existing so a
