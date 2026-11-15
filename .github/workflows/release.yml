@@ -1,0 +1,166 @@
+# Release workflow: publishes @solvchat/core, @solvchat/widget, @solvchat/cli,
+# and @solvchat/engine to npm from a v<semver> tag on main.
+#
+# npm documentation references:
+# - Provenance (--provenance, id-token: write, repository field, GitHub-hosted runner):
+#   https://docs.npmjs.com/generating-provenance-statements
+# - Granular access tokens (NPM_TOKEN scoped read/write on @solvchat, bypass 2FA for CI):
+#   https://docs.npmjs.com/creating-and-viewing-access-tokens
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run verification and npm publish --dry-run without publishing"
+        type: boolean
+        required: true
+        default: true
+      tag:
+        description: "Optional v<semver> tag to test (defaults to v0.0.0-dryrun for dry runs)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag and branch
+        id: meta
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${INPUT_DRY_RUN}" != "false" ]; then
+            DRY_RUN="true"
+          else
+            DRY_RUN="false"
+          fi
+
+          TAG=""
+          EXPLICIT_TAG="false"
+          if [ "${DRY_RUN}" = "false" ]; then
+            if [[ "${GITHUB_REF}" != refs/tags/* ]]; then
+              echo "::error::Real publishing must run on a v<semver> tag ref (got ${GITHUB_REF})."
+              exit 1
+            fi
+            TAG="${GITHUB_REF_NAME}"
+            if [ -n "${INPUT_TAG}" ] && [ "${INPUT_TAG}" != "${TAG}" ]; then
+              echo "::error::Input tag (${INPUT_TAG}) must match triggering tag ref (${TAG}) for real publishing."
+              exit 1
+            fi
+            EXPLICIT_TAG="true"
+          else
+            if [ -n "${INPUT_TAG}" ]; then
+              TAG="${INPUT_TAG}"
+              EXPLICIT_TAG="true"
+            elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+              TAG="${GITHUB_REF_NAME}"
+              EXPLICIT_TAG="true"
+            else
+              TAG="v0.0.0-dryrun"
+            fi
+          fi
+
+          VERSION=$(node -e 'import("./scripts/set-version.mjs").then((m) => process.stdout.write(m.parseReleaseTag(process.argv[1])))' "${TAG}")
+          DIST_TAG=$(node -e 'import("./scripts/set-version.mjs").then((m) => process.stdout.write(m.getDistTag(process.argv[1])))' "${TAG}")
+
+          if [ "${EXPLICIT_TAG}" = "true" ]; then
+            git fetch origin main "refs/tags/${TAG}:refs/tags/${TAG}"
+            TARGET_COMMIT=$(git rev-parse --verify "refs/tags/${TAG}^{commit}")
+            if ! git merge-base --is-ancestor "${TARGET_COMMIT}" origin/main; then
+              echo "::error::Tag ${TAG} (${TARGET_COMMIT}) is not on main."
+              exit 1
+            fi
+            if [ "${DRY_RUN}" = "false" ]; then
+              if [ "${TARGET_COMMIT}" != "${GITHUB_SHA}" ] || [ "$(git rev-parse HEAD)" != "${TARGET_COMMIT}" ]; then
+                echo "::error::Tag ${TAG} (${TARGET_COMMIT}) does not match triggering commit (${GITHUB_SHA})."
+                exit 1
+              fi
+            elif [ "$(git rev-parse HEAD)" != "${TARGET_COMMIT}" ]; then
+              git checkout --detach "${TARGET_COMMIT}"
+            fi
+          fi
+
+          echo "dry_run=${DRY_RUN}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "dist_tag=${DIST_TAG}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+      - run: npm run verify
+
+      - name: Set package versions
+        run: node scripts/set-version.mjs "${{ steps.meta.outputs.tag }}"
+
+      - name: Verify packed tarballs at release version
+        run: npm run pack-check
+
+      - name: Dry run publish and write tarball summary
+        if: steps.meta.outputs.dry_run == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "## Dry-run release summary (\`${{ steps.meta.outputs.version }}\`)"
+            echo ""
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          for pkg_dir in packages/core packages/widget packages/cli packages/engine; do
+            pkg_name=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).name)' "${pkg_dir}/package.json")
+            echo "Dry-run publishing ${pkg_name}@${{ steps.meta.outputs.version }} (tag: ${{ steps.meta.outputs.dist_tag }})..."
+            (cd "${pkg_dir}" && npm publish --dry-run --access public --tag "${{ steps.meta.outputs.dist_tag }}")
+
+            {
+              echo "### \`${pkg_name}@${{ steps.meta.outputs.version }}\`"
+              echo ""
+              echo "| File | Size (bytes) |"
+              echo "| --- | ---: |"
+              (cd "${pkg_dir}" && npm pack --dry-run --json) | node -e '
+                const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+                const files = (Array.isArray(data) ? data[0] : data).files ?? [];
+                for (const f of files) {
+                  console.log(`| \`${f.path}\` | ${f.size} |`);
+                }
+              '
+              echo ""
+            } >> "${GITHUB_STEP_SUMMARY}"
+          done
+
+      - name: Publish packages to npm
+        if: steps.meta.outputs.dry_run == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          for pkg_dir in packages/core packages/widget packages/cli packages/engine; do
+            pkg_name=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).name)' "${pkg_dir}/package.json")
+            if npm view "${pkg_name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${pkg_name}@${VERSION} is already published on npm; skipping."
+              continue
+            fi
+            echo "Publishing ${pkg_name}@${VERSION} (tag: ${{ steps.meta.outputs.dist_tag }})..."
+            (cd "${pkg_dir}" && npm publish --access public --provenance --tag "${{ steps.meta.outputs.dist_tag }}")
+          done
