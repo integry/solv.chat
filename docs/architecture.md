@@ -82,6 +82,13 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
   not support with an `error` event, and clients ignore event types they do not
   know. Responds with server-sent events: `token`, `citation`, `tool`, `done`,
   `error` (and `action` from phase 2).
+
+  An answer that needs a page action pauses rather than waiting on the open
+  stream: the engine emits `action` events and then `done` with
+  `awaitingActions`, and the widget runs them and sends a second request with
+  the same conversation id, `resumeMessageId` and `actionResults`, and no
+  `message`. A held-open stream would not survive `navigate`, which replaces
+  the page the stream belongs to.
 - `POST /v1/feedback` — thumbs up or down on a message.
 - `GET /v1/assistants/:publicKey` — published widget config (title, colours, greeting,
   suggested questions). No secrets, no prompts.

@@ -295,6 +295,11 @@ export async function adminChatRoute(
     return eventStreamOf({ type: "error", message: "This assistant is not available." });
   }
 
+  const message = parsed.value.message;
+  if (message === undefined) {
+    return eventStreamOf({ type: "error", message: "Resuming actions is not supported yet." });
+  }
+
   return streamAnswerResponse({
     env,
     seams,
@@ -304,7 +309,7 @@ export async function adminChatRoute(
     orgId: assistant.orgId,
     assistantId: assistant.id,
     visitorId: parsed.value.visitorId,
-    message: parsed.value.message,
+    message,
     behaviour: version.config.behaviour,
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
@@ -373,6 +378,14 @@ export async function chatRoute(
     return eventStreamOf({ type: "error", message: "This assistant is not available." }, origin);
   }
 
+  const message = parsed.value.message;
+  if (message === undefined) {
+    return eventStreamOf(
+      { type: "error", message: "Resuming actions is not supported yet." },
+      origin,
+    );
+  }
+
   return streamAnswerResponse({
     env,
     seams,
@@ -382,7 +395,7 @@ export async function chatRoute(
     orgId: assistant.orgId,
     assistantId: assistant.id,
     visitorId: parsed.value.visitorId,
-    message: parsed.value.message,
+    message,
     behaviour: version.config.behaviour,
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
