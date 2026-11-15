@@ -537,4 +537,59 @@ describe("admin provider settings & keys", () => {
     const resolvedBody = (await resolvedRes.json()) as { configError: string | null };
     expect(resolvedBody.configError).toBeNull();
   });
+
+  it("preserves omitted fields across concurrent patches and supports explicit null resets", async () => {
+    const { app, testEnv } = appFor(ORG_A, {
+      SOLV_LLM_PROVIDER: undefined,
+      SOLV_LLM_TIER: undefined,
+      SOLV_LLM_MODEL: undefined,
+      SOLV_EMBEDDINGS_PROVIDER: undefined,
+    });
+
+    // Two concurrent requests update disjoint fields before any row exists.
+    const [resA, resB] = await Promise.all([
+      call(app, testEnv, "/api/admin/providers", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ llmProvider: "openrouter", llmModel: "anthropic/claude-sonnet-4" }),
+      }),
+      call(app, testEnv, "/api/admin/providers", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ embeddingsProvider: "openrouter" }),
+      }),
+    ]);
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+
+    const afterConcurrent = (await (await call(app, testEnv, "/api/admin/providers")).json()) as {
+      settings: Record<string, { value: unknown; source: string }>;
+    };
+    expect(afterConcurrent.settings.llmProvider).toEqual({ value: "openrouter", source: "stored" });
+    expect(afterConcurrent.settings.llmModel).toEqual({
+      value: "anthropic/claude-sonnet-4",
+      source: "stored",
+    });
+    expect(afterConcurrent.settings.embeddingsProvider).toEqual({
+      value: "openrouter",
+      source: "stored",
+    });
+
+    // Explicit null resets only the supplied field while preserving omitted fields.
+    const resetModelRes = await call(app, testEnv, "/api/admin/providers", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ llmModel: null }),
+    });
+    expect(resetModelRes.status).toBe(200);
+    const afterReset = (await resetModelRes.json()) as {
+      settings: Record<string, { value: unknown; source: string }>;
+    };
+    expect(afterReset.settings.llmModel).toEqual({ value: null, source: "none" });
+    expect(afterReset.settings.llmProvider).toEqual({ value: "openrouter", source: "stored" });
+    expect(afterReset.settings.embeddingsProvider).toEqual({
+      value: "openrouter",
+      source: "stored",
+    });
+  });
 });

@@ -85,40 +85,41 @@ export function providerSettingsFor(db: D1Database, orgId: string) {
     },
 
     async upsert(patch: ProviderSettingsPatch, now = Date.now()): Promise<StoredProviderSettings> {
-      const existing = await getProviderSettings(db, orgId);
-      const next: StoredProviderSettings = {
-        llmProvider:
-          patch.llmProvider !== undefined ? patch.llmProvider : (existing?.llmProvider ?? null),
-        llmTier: patch.llmTier !== undefined ? patch.llmTier : (existing?.llmTier ?? null),
-        llmModel: patch.llmModel !== undefined ? patch.llmModel : (existing?.llmModel ?? null),
-        embeddingsProvider:
-          patch.embeddingsProvider !== undefined
-            ? patch.embeddingsProvider
-            : (existing?.embeddingsProvider ?? null),
-        updatedAt: now,
-      };
-      await db
+      const hasLlmProvider = patch.llmProvider !== undefined ? 1 : 0;
+      const hasLlmTier = patch.llmTier !== undefined ? 1 : 0;
+      const hasLlmModel = patch.llmModel !== undefined ? 1 : 0;
+      const hasEmbeddingsProvider = patch.embeddingsProvider !== undefined ? 1 : 0;
+
+      const row = await db
         .prepare(
           `INSERT INTO org_provider_settings (
              org_id, llm_provider, llm_tier, llm_model, embeddings_provider, updated_at
            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
            ON CONFLICT(org_id) DO UPDATE SET
-             llm_provider = excluded.llm_provider,
-             llm_tier = excluded.llm_tier,
-             llm_model = excluded.llm_model,
-             embeddings_provider = excluded.embeddings_provider,
-             updated_at = excluded.updated_at`,
+             llm_provider = CASE WHEN ?7 = 1 THEN excluded.llm_provider ELSE org_provider_settings.llm_provider END,
+             llm_tier = CASE WHEN ?8 = 1 THEN excluded.llm_tier ELSE org_provider_settings.llm_tier END,
+             llm_model = CASE WHEN ?9 = 1 THEN excluded.llm_model ELSE org_provider_settings.llm_model END,
+             embeddings_provider = CASE WHEN ?10 = 1 THEN excluded.embeddings_provider ELSE org_provider_settings.embeddings_provider END,
+             updated_at = excluded.updated_at
+           RETURNING llm_provider, llm_tier, llm_model, embeddings_provider, updated_at`,
         )
         .bind(
           orgId,
-          next.llmProvider,
-          next.llmTier,
-          next.llmModel,
-          next.embeddingsProvider,
-          next.updatedAt,
+          patch.llmProvider ?? null,
+          patch.llmTier ?? null,
+          patch.llmModel ?? null,
+          patch.embeddingsProvider ?? null,
+          now,
+          hasLlmProvider,
+          hasLlmTier,
+          hasLlmModel,
+          hasEmbeddingsProvider,
         )
-        .run();
-      return next;
+        .first<SettingsRow>();
+      if (!row) {
+        throw new Error("Failed to upsert provider settings");
+      }
+      return toSettings(row);
     },
 
     async listKeys(): Promise<StoredProviderKeyMeta[]> {

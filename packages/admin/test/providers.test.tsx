@@ -22,10 +22,11 @@ function initialView(): ProviderSettingsView {
   };
 }
 
-function installProvidersFakeServer() {
+function installProvidersFakeServer(options?: { deferReloadGet?: boolean }) {
   let state = initialView();
   let getCount = 0;
   const savedSettingsBodies: unknown[] = [];
+  let releaseDeferredGet: (() => void) | null = null;
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -35,7 +36,13 @@ function installProvidersFakeServer() {
 
     if (path === "/api/admin/providers" && method === "GET") {
       getCount += 1;
-      return Response.json(structuredClone(state));
+      const snapshot = structuredClone(state);
+      if (options?.deferReloadGet && getCount === 2) {
+        await new Promise<void>((resolve) => {
+          releaseDeferredGet = resolve;
+        });
+      }
+      return Response.json(snapshot);
     }
 
     if (path === "/api/admin/providers" && method === "PUT") {
@@ -91,6 +98,10 @@ function installProvidersFakeServer() {
   return {
     getCount: () => getCount,
     savedSettingsBodies,
+    releaseDeferredGet: () => {
+      releaseDeferredGet?.();
+      releaseDeferredGet = null;
+    },
   };
 }
 
@@ -155,5 +166,53 @@ describe("Providers screen", () => {
         embeddingsProvider: "openrouter",
       },
     ]);
+  });
+
+  it("ignores an earlier key-triggered reload GET that resolves after Save settings PUT", async () => {
+    const server = installProvidersFakeServer({ deferReloadGet: true });
+    render(<Providers />);
+
+    const llmProviderSelect = (await screen.findByLabelText(
+      "Answering provider",
+    )) as HTMLSelectElement;
+    const embeddingsSelect = screen.getByLabelText("Embeddings provider") as HTMLSelectElement;
+
+    // Owner edits settings before saving an API key.
+    fireEvent.change(llmProviderSelect, { target: { value: "openrouter" } });
+    fireEvent.change(screen.getByLabelText("OpenRouter model ID"), {
+      target: { value: "anthropic/claude-sonnet-4" },
+    });
+    fireEvent.change(embeddingsSelect, { target: { value: "openrouter" } });
+
+    // Saving the key starts GET #2, which is held in-flight with the old settings.
+    const openRouterCard = screen.getByRole("region", { name: "OpenRouter API key" });
+    fireEvent.change(within(openRouterCard).getByLabelText("API key"), {
+      target: { value: "sk-or-test-key" },
+    });
+    fireEvent.click(within(openRouterCard).getByRole("button", { name: "Save key" }));
+    expect(await within(openRouterCard).findByText("OpenRouter key saved.")).toBeTruthy();
+    await waitFor(() => {
+      expect(server.getCount()).toBe(2);
+    });
+
+    // While GET #2 is still pending, owner clicks Save settings (PUT completes first).
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    expect(await screen.findByText("Provider settings saved.")).toBeTruthy();
+
+    // Now the stale GET #2 resolves with the old settings.
+    server.releaseDeferredGet();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The form must keep the saved settings rather than reverting to the stale GET.
+    expect((screen.getByLabelText("Answering provider") as HTMLSelectElement).value).toBe(
+      "openrouter",
+    );
+    expect((screen.getByLabelText("OpenRouter model ID") as HTMLInputElement).value).toBe(
+      "anthropic/claude-sonnet-4",
+    );
+    expect((screen.getByLabelText("Embeddings provider") as HTMLSelectElement).value).toBe(
+      "openrouter",
+    );
   });
 });
