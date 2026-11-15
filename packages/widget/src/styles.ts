@@ -119,7 +119,8 @@ textarea:focus-visible {
   .solv-launcher,
   .solv-chip,
   .solv-send,
-  .solv-fb-btn {
+  .solv-fb-btn,
+  .solv-confirm {
     transition: none;
     animation: none;
   }
@@ -341,6 +342,33 @@ textarea:focus-visible {
   text-decoration: underline;
 }
 
+.solv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.solv-nav-status {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--solv-muted);
+}
+
+.solv-nav-external {
+  margin-top: 8px;
+}
+
+.solv-action {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  border: 1px solid var(--solv-border);
+  background: var(--solv-bg);
+  color: var(--solv-muted);
+  font-size: 12px;
+}
+
 .solv-feedback {
   display: flex;
   align-items: center;
@@ -458,6 +486,54 @@ textarea:focus-visible {
 .solv-send:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+.solv-highlight-note {
+  position: fixed;
+  z-index: 2147483647;
+  max-width: 260px;
+  padding: 6px 10px;
+  border: 1px solid var(--solv-border);
+  border-radius: 8px;
+  background: var(--solv-bg);
+  color: var(--solv-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: var(--solv-shadow);
+  pointer-events: none;
+}
+
+.solv-confirm {
+  align-self: flex-start;
+  max-width: 86%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--solv-surface);
+  border: 1px solid var(--solv-accent);
+}
+
+.solv-confirm-title {
+  font-weight: 600;
+}
+
+.solv-confirm-detail {
+  margin: 6px 0 8px;
+  padding-left: 1.1rem;
+  font-size: 13px;
+  /* Values come from the model and may be long; wrap rather than overflow. */
+  word-break: break-word;
+}
+
+.solv-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.solv-action-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--solv-muted);
 }
 
 .sr-only {

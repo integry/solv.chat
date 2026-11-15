@@ -1,3 +1,4 @@
+import { deriveKeyBits, SESSION_KEY_INFO } from "../../security/secretBox.js";
 import { constantTimeEqual } from "../../util/crypto.js";
 import type { AuthProvider } from "../types.js";
 
@@ -45,14 +46,17 @@ function decodeBase64Url(input: string): Uint8Array | null {
   }
 }
 
+/**
+ * Signs a session payload with the cookie MAC key, derived under its own label
+ * so it shares no bytes with the key that encrypts stored tool credentials.
+ * Deploying this change signs every open session out once — the same effect
+ * rotating SOLV_SECRET_KEY has always had, and documented as such.
+ */
 async function sign(payload: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
+  const bits = await deriveKeyBits(secret, SESSION_KEY_INFO);
+  const key = await crypto.subtle.importKey("raw", bits, { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
   const mac = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
   return encodeBase64Url(new Uint8Array(mac));
 }

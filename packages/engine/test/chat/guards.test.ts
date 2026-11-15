@@ -73,6 +73,7 @@ describe("chat/guards", () => {
         },
         limits: { dailyCostCapMicros: 2_000_000 },
         allowedTools: [],
+        actions: { builtins: false, allowedOrigins: [] },
       },
       createdAt: 1000,
     });
@@ -425,4 +426,100 @@ describe("chat/guards", () => {
       expect(res.status).toBe(404);
     },
   );
+
+  it("rejects action resumption requests (with or without message) on both /v1/chat and /api/admin/chat", async () => {
+    const embedSpy = vi.fn(fakeEmbedder().embed);
+    const streamSpy = vi.fn();
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.balanced.id,
+      async *stream() {
+        streamSpy();
+        yield { kind: "text", text: "nope" };
+      },
+    };
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder: { dimensions: 1536, embed: embedSpy },
+        retriever: memoryRetriever(),
+        provider,
+      },
+    });
+
+    const cases = [
+      {
+        name: "without message",
+        body: {
+          protocol: 2,
+          assistant: "pk_test_1",
+          visitorId: "vis_1",
+          resumeMessageId: "msg_1",
+          actionResults: [{ callId: "call_1", ok: true, result: "{}" }],
+        },
+      },
+      {
+        name: "with message",
+        body: {
+          protocol: 2,
+          assistant: "pk_test_1",
+          visitorId: "vis_1",
+          message: "Continue",
+          resumeMessageId: "msg_1",
+          actionResults: [{ callId: "call_1", ok: true, result: "{}" }],
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      // Public route (/v1/chat)
+      const publicCtx = createExecutionContext();
+      const publicRes = await app.fetch(
+        new Request("https://engine.example/v1/chat", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://site.example",
+          },
+          body: JSON.stringify(testCase.body),
+        }),
+        env,
+        publicCtx,
+      );
+      await waitOnExecutionContext(publicCtx);
+
+      expect(publicRes.status, `public ${testCase.name}`).toBe(200);
+      expect(publicRes.headers.get("access-control-allow-origin")).toBe("https://site.example");
+      expect(parseSseBody(await publicRes.text())).toEqual([
+        { type: "error", message: "This answer can no longer be continued." },
+      ]);
+
+      // Admin preview route (/api/admin/chat)
+      const adminCtx = createExecutionContext();
+      const adminRes = await app.fetch(
+        new Request("https://engine.example/api/admin/chat", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://engine.example",
+          },
+          body: JSON.stringify(testCase.body),
+        }),
+        env,
+        adminCtx,
+      );
+      await waitOnExecutionContext(adminCtx);
+
+      expect(adminRes.status, `admin ${testCase.name}`).toBe(200);
+      expect(parseSseBody(await adminRes.text())).toEqual([
+        { type: "error", message: "Resuming actions is not supported yet." },
+      ]);
+    }
+
+    expect(embedSpy).not.toHaveBeenCalled();
+    expect(streamSpy).not.toHaveBeenCalled();
+    const convCount = await env.DB.prepare("SELECT COUNT(*) AS n FROM conversations").first<{
+      n: number;
+    }>();
+    expect(convCount?.n).toBe(0);
+  });
 });

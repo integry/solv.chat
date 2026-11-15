@@ -13,9 +13,10 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "test": "vitest run scripts && npm run test --workspaces --if-present",
     "build": "npm run build -w @solvchat/core && npm run build -w @solvchat/widget && npm run build -w @solvchat/admin && npm run build -w @solvchat/cli && npm run build -w @solvchat/engine",
-    "verify": "npm run lint && npm run typecheck && npm test && npm run build"
+    "pack-check": "node scripts/pack-check.mjs",
+    "verify": "npm run lint && npm run typecheck && npm run build && npm test && npm run pack-check"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",

@@ -62,7 +62,7 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
   return {
     name: "openrouter",
     model: options.model,
-    async *stream(request) {
+    async *stream(request, streamOptions) {
       const messages =
         request.system.length > 0
           ? [{ role: "system" as const, content: request.system }, ...request.messages]
@@ -72,6 +72,7 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
       try {
         response = await doFetch(OPENROUTER_CHAT_COMPLETIONS_URL, {
           method: "POST",
+          ...(streamOptions?.signal ? { signal: streamOptions.signal } : {}),
           headers: {
             authorization: `Bearer ${options.apiKey}`,
             "content-type": "application/json",
@@ -105,7 +106,7 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
       let failure: ProviderError | undefined;
 
       try {
-        for await (const event of readEventStream(response.body)) {
+        for await (const event of readEventStream(response.body, streamOptions?.signal)) {
           const payload = event.data as OpenRouterChunkPayload;
 
           if (payload.usage) {

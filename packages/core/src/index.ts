@@ -1,13 +1,28 @@
 export { type IdPrefix, isId, newId } from "./ids.js";
 export { Errors, fail, ok, type Result } from "./result.js";
+export {
+  MAX_TEST_PHRASE_LENGTH,
+  MAX_TEST_QUESTION_LENGTH,
+  MAX_TESTS_PER_RUN,
+  parseTestInput,
+  type TestExpectation,
+  type TestInput,
+} from "./schemas/answerTest.js";
 export { type AssistantInput, parseAssistantInput } from "./schemas/assistant.js";
 export {
+  type ActionResult,
   CHAT_PROTOCOL_VERSION,
   type ChatEvent,
   type ChatHistoryTurn,
   type ChatRequest,
+  MAX_ACTION_DESCRIPTION_LENGTH,
+  MAX_ACTION_NAME_LENGTH,
+  MAX_ACTION_RESULT_BYTES,
+  MAX_ACTION_SCHEMA_BYTES,
   MAX_CHAT_HISTORY_TURNS,
   MAX_CHAT_MESSAGE_LENGTH,
+  MAX_PAGE_ACTIONS,
+  type PageAction,
   parseChatEventLine,
   parseChatRequest,
   SUPPORTED_CHAT_PROTOCOLS,
@@ -34,6 +49,7 @@ export {
   type SourceKind,
 } from "./schemas/source.js";
 export {
+  type ActionsConfig,
   type BehaviourConfig,
   defaultVersionConfig,
   type LimitsConfig,

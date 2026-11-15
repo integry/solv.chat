@@ -16,9 +16,39 @@ export {
   SAFETY_FRAME,
 } from "./chat/prompt.js";
 export type { ChatRouteOverrides } from "./chat/route.js";
+export {
+  MAX_TOOL_CALLS_PER_CONVERSATION,
+  MAX_TOOL_ITERATIONS,
+  MAX_TOOL_RESULT_BYTES,
+  runToolLoop,
+  type StoredToolCall,
+  TOOL_WALL_TIME_MS,
+  type ToolLoopDeps,
+  type ToolLoopEvent,
+  type ToolLoopOutcome,
+  type ToolRunner,
+  type ToolRunResult,
+} from "./chat/toolLoop.js";
 export { type Chunk, chunkMarkdown, MAX_CHARS, OVERLAP_CHARS } from "./ingest/chunk.js";
 export { type IngestConsumerDeps, runIngestBatch } from "./ingest/consumer.js";
 export { type ResolvedChunk, resolveChunks } from "./ingest/resolve.js";
+export {
+  callTool,
+  listTools,
+  MCP_MAX_RESPONSE_BYTES,
+  MCP_MAX_TOOL_RESULT_CHARS,
+  MCP_MAX_TOOLS,
+  MCP_TIMEOUT_MS,
+  type McpCallResult,
+  type McpClientOptions,
+} from "./mcp/client.js";
+export {
+  type McpAuthKind,
+  McpError,
+  type McpFailure,
+  type McpTarget,
+  type McpToolSpec,
+} from "./mcp/types.js";
 export {
   ANTHROPIC_MODELS,
   costMicros,
@@ -42,15 +72,34 @@ export {
   type VectorRecord,
   vectorizeRetriever,
 } from "./providers/retrieval.js";
-export type { LlmChunk, LlmMessage, LlmProvider, LlmRequest } from "./providers/types.js";
 export type {
-  AuthProvider,
-  KeyProvider,
-  LimitAction,
-  LimitDecision,
-  Limits,
-  Principal,
-  Seams,
-  UsageEvent,
-  UsageSink,
+  LlmChunk,
+  LlmMessage,
+  LlmProvider,
+  LlmRequest,
+  LlmToolResult,
+  StopReason,
+  ToolCall,
+  ToolDefinition,
+} from "./providers/types.js";
+export {
+  type AuthProvider,
+  type EmbeddingsProviderName,
+  type KeyProvider,
+  type LimitAction,
+  type LimitDecision,
+  type Limits,
+  type LlmProviderName,
+  type Principal,
+  type ScopeClaim,
+  type Seams,
+  StoredKeyError,
+  type UsageEvent,
+  type UsageSink,
 } from "./seams/types.js";
+export {
+  MAX_SECRET_LENGTH,
+  openSecret,
+  SecretBoxError,
+  sealSecret,
+} from "./security/secretBox.js";

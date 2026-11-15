@@ -1,8 +1,20 @@
 import { isPlainObject } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
+import { McpError } from "../mcp/types.js";
+import type { EffectiveProviderSettings } from "../providers/config.js";
 import type { Retriever } from "../providers/retrieval.js";
+import type { KeyProvider, LlmProviderName } from "../seams/types.js";
 import { writeTheRightAnswer } from "./answers.js";
+import {
+  createTest,
+  deleteTest,
+  listTestRuns,
+  listTests,
+  type RunDeps,
+  runAnswerTests,
+  updateTest,
+} from "./answerTests.js";
 import {
   createAssistant,
   getAssistant,
@@ -15,7 +27,27 @@ import { saveEntry } from "./entries.js";
 import { BadRequest, Conflict, NotFound, readJsonBody } from "./errors.js";
 import { listGaps } from "./gaps.js";
 import { getInstallInfo } from "./install.js";
+import {
+  createMcpServer,
+  deleteMcpServer,
+  listMcpServers,
+  listMcpTools,
+  type McpDeps,
+  refreshMcpTools,
+  setMcpToolAllowed,
+  updateMcpServer,
+} from "./mcp.js";
 import { overviewFor } from "./overview.js";
+import {
+  getProviderSettingsView,
+  type ProviderAdminDeps,
+  parseProviderName,
+  removeProviderKey,
+  setProviderKey,
+  testProviderKey,
+  updateProviderSettings,
+} from "./providers.js";
+import { parseReportDays, reportFor } from "./reports.js";
 import { importSitemapUrls, previewSitemap } from "./sitemap.js";
 import {
   createSource,
@@ -25,7 +57,14 @@ import {
   listSources,
   updateSource,
 } from "./sources.js";
-import { getDraft, listVersions, publishDraft, rollbackTo, updateDraft } from "./versions.js";
+import {
+  configRevision,
+  getDraft,
+  listVersions,
+  publishDraft,
+  rollbackTo,
+  updateDraft,
+} from "./versions.js";
 
 export interface AdminRouteDeps {
   tenant: Tenant;
@@ -36,7 +75,26 @@ export interface AdminRouteDeps {
   publicBaseUrl: string;
   fetchImpl?: typeof fetch | undefined;
   costUnit?: "usd" | "credits" | undefined;
-  checkConfigError?: (() => Promise<string | null>) | undefined;
+  resolveSettings?: (() => Promise<EffectiveProviderSettings>) | undefined;
+  checkConfigError?: ((resolved?: EffectiveProviderSettings) => Promise<string | null>) | undefined;
+  keys?: KeyProvider | undefined;
+  envSecretPresence?: Record<LlmProviderName, boolean> | undefined;
+  /**
+   * SOLV_SECRET_KEY, passed down from app.ts. Not read through a seam: the
+   * Biome rule in biome.json forbids importing seams/open outside worker.ts,
+   * and createApp(seams) must not depend on the open build.
+   */
+  secretKey?: string | undefined;
+  /** Lazily resolves provider/embedder/seams dependencies when running answer tests. */
+  resolveRunDeps?: (() => Promise<RunDeps>) | undefined;
+}
+
+function mcpDeps(deps: AdminRouteDeps): McpDeps {
+  return {
+    tenant: deps.tenant,
+    secretKey: deps.secretKey ?? "",
+    fetchImpl: deps.fetchImpl,
+  };
 }
 
 function readEntryFields(body: unknown): { question: string; answer: string } {
@@ -73,6 +131,15 @@ function readPagingParams(url: URL): { limit?: number; offset?: number } {
     ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
     ...(offset !== undefined && Number.isFinite(offset) ? { offset } : {}),
   };
+}
+
+async function maybeRunTestsBeforePublish(deps: AdminRouteDeps, assistantId: string) {
+  const count = await deps.tenant.tests.countFor(assistantId);
+  if (count === 0) return null;
+  if (!deps.resolveRunDeps) {
+    throw new Error("Answer test runner is not configured.");
+  }
+  return runAnswerTests(await deps.resolveRunDeps(), assistantId);
 }
 
 async function assistantRoutes(
@@ -125,7 +192,70 @@ async function assistantRoutes(
       return Response.json({ draft });
     }
     if (action === "publish" && method === "POST") {
-      return Response.json({ version: await publishDraft(tenant, assistantId) });
+      const body =
+        request.headers.get("content-length") === "0"
+          ? {}
+          : await readJsonBody(request).catch(() => ({}));
+      const force = isPlainObject(body) && body.force === true;
+      const rawRunId = isPlainObject(body) ? body.runId : undefined;
+      if (rawRunId !== undefined && (typeof rawRunId !== "string" || rawRunId.trim() === "")) {
+        throw new BadRequest(["runId: must be a non-empty string"]);
+      }
+
+      if (force && typeof rawRunId === "string") {
+        const reviewedRun = await tenant.tests.getRunForAssistant(assistantId, rawRunId);
+        if (reviewedRun === null) {
+          throw new NotFound("test run");
+        }
+        const draft = await getDraft(tenant, assistantId);
+        const currentRevision = await configRevision(draft);
+        if (
+          reviewedRun.versionId !== draft.id ||
+          reviewedRun.configHash === null ||
+          reviewedRun.configHash !== currentRevision
+        ) {
+          throw new Conflict("The draft changed after those tests ran. Please try again.");
+        }
+        // The specification: "the choice is recorded on the run" — committed in
+        // the same batch as promotion so the two cannot diverge.
+        const version = await publishDraft(
+          tenant,
+          assistantId,
+          draft,
+          reviewedRun.passed ? undefined : reviewedRun.id,
+        );
+        return Response.json({
+          version,
+          run: { id: reviewedRun.id, passed: reviewedRun.passed },
+        });
+      }
+
+      // The specification's order: tests, then promote. A run only happens if
+      // the owner has tests; publishing with none is the phase 1 path exactly.
+      const run = await maybeRunTestsBeforePublish(deps, assistantId);
+      if (run !== null && !run.passed && !force) {
+        // 409, not 400: the request was well formed, and the reason it did not
+        // happen is a state the owner can inspect and then override.
+        return Response.json(
+          {
+            error: "Some tests did not pass.",
+            run: { id: run.runId, results: run.results, stopped: run.stopped ?? null },
+          },
+          { status: 409 },
+        );
+      }
+      // The specification: "the choice is recorded on the run" — committed in
+      // the same batch as promotion so the two cannot diverge.
+      const version = await publishDraft(
+        tenant,
+        assistantId,
+        run?.draft,
+        run !== null && !run.passed && force ? run.runId : undefined,
+      );
+      return Response.json({
+        version,
+        ...(run ? { run: { id: run.runId, passed: run.passed } } : {}),
+      });
     }
     if (action === "sources" && method === "GET") {
       return Response.json({ sources: await listSources(tenant, assistantId) });
@@ -190,12 +320,45 @@ async function assistantRoutes(
       return Response.json(
         await overviewFor(tenant, assistantId, {
           costUnit: deps.costUnit,
+          resolveSettings: deps.resolveSettings,
           checkConfigError: deps.checkConfigError,
         }),
       );
     }
+    if (action === "report" && method === "GET") {
+      return Response.json(
+        await reportFor(tenant, assistantId, parseReportDays(url.searchParams.get("days"))),
+      );
+    }
     if (action === "install" && method === "GET") {
       return Response.json(await getInstallInfo(tenant, assistantId, deps.publicBaseUrl));
+    }
+    if (action === "mcp-servers" && method === "GET") {
+      return Response.json({ servers: await listMcpServers(tenant, assistantId) });
+    }
+    if (action === "mcp-servers" && method === "POST") {
+      const result = await createMcpServer(mcpDeps(deps), assistantId, await readJsonBody(request));
+      return Response.json(result, { status: 201 });
+    }
+    if (action === "tests" && method === "GET") {
+      return Response.json({ tests: await listTests(tenant, assistantId) });
+    }
+    if (action === "tests" && method === "POST") {
+      const test = await createTest(tenant, assistantId, await readJsonBody(request));
+      return Response.json({ test }, { status: 201 });
+    }
+    if (action === "test-runs" && method === "GET") {
+      return Response.json({ runs: await listTestRuns(tenant, assistantId) });
+    }
+    if (action === "test-runs" && method === "POST") {
+      if (!deps.resolveRunDeps) {
+        throw new Error("Answer test runner is not configured.");
+      }
+      const { draft: _draft, ...run } = await runAnswerTests(
+        await deps.resolveRunDeps(),
+        assistantId,
+      );
+      return Response.json(run, { status: 201 });
     }
     throw new NotFound();
   }
@@ -293,6 +456,127 @@ async function conversationRoutes(
   return Response.json(await getConversation(deps.tenant, conversationId));
 }
 
+async function mcpServerRoutes(
+  request: Request,
+  segments: string[],
+  deps: AdminRouteDeps,
+): Promise<Response> {
+  const method = request.method;
+  const serverId = segments[1];
+  if (!serverId) throw new NotFound();
+
+  if (segments.length === 2) {
+    if (method === "PATCH") {
+      return Response.json(
+        await updateMcpServer(mcpDeps(deps), serverId, await readJsonBody(request)),
+      );
+    }
+    if (method === "DELETE") {
+      return Response.json(await deleteMcpServer(deps.tenant, serverId));
+    }
+    throw new NotFound();
+  }
+
+  if (segments.length === 3) {
+    const sub = segments[2];
+    if (sub === "refresh" && method === "POST") {
+      const tools = await refreshMcpTools(mcpDeps(deps), serverId);
+      return Response.json({ tools });
+    }
+    if (sub === "tools" && method === "GET") {
+      return Response.json({ tools: await listMcpTools(deps.tenant, serverId) });
+    }
+    throw new NotFound();
+  }
+
+  if (segments.length === 4 && segments[2] === "tools" && segments[3] && method === "PATCH") {
+    return Response.json(
+      await setMcpToolAllowed(deps.tenant, serverId, segments[3], await readJsonBody(request)),
+    );
+  }
+
+  throw new NotFound();
+}
+
+function providerAdminDeps(deps: AdminRouteDeps): ProviderAdminDeps {
+  if (!deps.keys || !deps.resolveSettings || !deps.checkConfigError) {
+    throw new NotFound();
+  }
+  return {
+    tenant: deps.tenant,
+    orgId: deps.orgId,
+    keys: deps.keys,
+    secretKey: deps.secretKey ?? "",
+    envSecretPresence: deps.envSecretPresence ?? {
+      anthropic: false,
+      openai: false,
+      openrouter: false,
+    },
+    fetchImpl: deps.fetchImpl,
+    resolveSettings: deps.resolveSettings,
+    checkConfigError: deps.checkConfigError,
+  };
+}
+
+async function providerRoutes(
+  request: Request,
+  segments: string[],
+  deps: AdminRouteDeps,
+): Promise<Response> {
+  const method = request.method;
+  const pDeps = providerAdminDeps(deps);
+
+  if (segments.length === 1) {
+    if (method === "GET") {
+      return Response.json(await getProviderSettingsView(pDeps));
+    }
+    if (method === "PUT") {
+      return Response.json(await updateProviderSettings(pDeps, await readJsonBody(request)));
+    }
+    throw new NotFound();
+  }
+
+  if (segments[1] === "keys") {
+    const provider = parseProviderName(segments[2]);
+    if (!provider) throw new NotFound();
+
+    if (segments.length === 3) {
+      if (method === "PUT") {
+        return Response.json(await setProviderKey(pDeps, provider, await readJsonBody(request)));
+      }
+      if (method === "DELETE") {
+        return Response.json(await removeProviderKey(pDeps, provider));
+      }
+      throw new NotFound();
+    }
+
+    if (segments.length === 4 && segments[3] === "test" && method === "POST") {
+      return testProviderKey(pDeps, provider);
+    }
+  }
+
+  throw new NotFound();
+}
+
+async function testRoutes(
+  request: Request,
+  segments: string[],
+  deps: AdminRouteDeps,
+): Promise<Response> {
+  const method = request.method;
+  const testId = segments[1];
+  if (!testId || segments.length !== 2) throw new NotFound();
+
+  if (method === "PATCH") {
+    const test = await updateTest(deps.tenant, testId, await readJsonBody(request));
+    return Response.json({ test });
+  }
+  if (method === "DELETE") {
+    return Response.json(await deleteTest(deps.tenant, testId));
+  }
+  throw new NotFound();
+}
+
 /** Dispatches authenticated `/api/admin/*` requests with a tenant-scoped handle. */
 export async function adminRoutes(
   request: Request,
@@ -304,6 +588,9 @@ export async function adminRoutes(
     if (segments[0] === "assistants") return await assistantRoutes(request, url, segments, deps);
     if (segments[0] === "sources") return await sourceRoutes(request, url, segments, deps);
     if (segments[0] === "conversations") return await conversationRoutes(request, segments, deps);
+    if (segments[0] === "mcp-servers") return await mcpServerRoutes(request, segments, deps);
+    if (segments[0] === "providers") return await providerRoutes(request, segments, deps);
+    if (segments[0] === "tests") return await testRoutes(request, segments, deps);
     return Response.json({ error: "Not found." }, { status: 404 });
   } catch (error) {
     // Mapped here, once: a handler building its own responses would eventually
@@ -317,6 +604,11 @@ export async function adminRoutes(
     }
     if (error instanceof Conflict) {
       return Response.json({ error: error.message || "Please try again." }, { status: 409 });
+    }
+    if (error instanceof McpError) {
+      // The server the owner pointed us at failed, not this request. The
+      // message is already plain and carries no upstream body.
+      return Response.json({ error: error.message }, { status: 502 });
     }
     throw error;
   }

@@ -161,6 +161,21 @@ body {
   font-weight: 600;
 }
 
+.nav-section {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.nav-section-label {
+  padding: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .shell-main {
   padding: 1.5rem 2rem;
   min-width: 0;
@@ -269,6 +284,7 @@ body {
 
 .actions {
   display: flex;
+  align-items: center;
   gap: 0.5rem;
 }
 
@@ -345,6 +361,11 @@ body {
   border-radius: 6px;
 }
 
+.history-item > :first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .history-meta {
   display: flex;
   align-items: center;
@@ -363,6 +384,8 @@ body {
   border-radius: 999px;
   background: var(--bg);
   border: 1px solid var(--border);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .badge-published {
@@ -482,6 +505,18 @@ body {
   flex-wrap: wrap;
 }
 
+.source-row-header > :first-child {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.source-row-header > .actions {
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
 .source-kind {
   font-size: 0.75rem;
   font-weight: 600;
@@ -491,6 +526,16 @@ body {
 .source-label {
   font-weight: 600;
   font-size: 1rem;
+}
+
+.source-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.35rem;
+  font-size: 0.8125rem;
+  color: var(--muted);
 }
 
 .source-docs {
@@ -578,6 +623,12 @@ body {
   background: var(--warn-bg);
   color: var(--warn-text);
   border-color: #fde68a;
+}
+
+.badge-danger {
+  background: #fee2e2;
+  color: #991b1b;
+  border-color: #fecaca;
 }
 
 .snippet-box {

@@ -10,7 +10,9 @@ export type IdPrefix =
   | "msg"
   | "fbk"
   | "mcp"
-  | "tst";
+  | "tst"
+  // test_runs. Distinct from `tst` so a run id in a log is unambiguous.
+  | "run";
 
 const ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
 const BODY_LENGTH = 20;

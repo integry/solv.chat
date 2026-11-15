@@ -1,18 +1,36 @@
-import { type BehaviourConfig, type ChatEvent, newId } from "@solvchat/core";
+import {
+  type ActionResult,
+  type BehaviourConfig,
+  type ChatEvent,
+  newId,
+  type PageAction,
+} from "@solvchat/core";
+import type { Citation } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
 import { type ResolvedChunk, resolveChunks } from "../ingest/resolve.js";
-import { costMicros, type ModelInfo } from "../models.js";
+import type { ModelInfo } from "../models.js";
 import { ProviderError } from "../providers/error.js";
 import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
-import type { LlmMessage, LlmProvider } from "../providers/types.js";
+import type { LlmMessage, LlmProvider, LlmToolResult, ToolCall } from "../providers/types.js";
 import type { UsageSink } from "../seams/types.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
+import {
+  MAX_TOOL_CALLS_PER_CONVERSATION,
+  resumeToolLoop,
+  runToolLoop,
+  type StoredToolCall,
+  type ToolLoopContinuation,
+  type ToolRunner,
+} from "./toolLoop.js";
 
 // A chunk below the floor is noise; including it would make the model answer
 // from unrelated pages, which is worse than admitting the gap. The numbers are
 // ours: the spec says "above a score floor" and stops.
 export const SCORE_FLOOR = 0.3;
 export const TOP_K = 6;
+/** Lease duration for an active resume claim before a stalled worker's lock expires. */
+export const RESUME_CLAIM_TTL_MS = 60_000;
+const RESUME_CLAIM_RENEW_INTERVAL_MS = Math.floor(RESUME_CLAIM_TTL_MS / 4);
 
 export interface AnswerDeps {
   tenant: Tenant;
@@ -22,6 +40,12 @@ export interface AnswerDeps {
   model?: ModelInfo | undefined;
   usage: UsageSink;
   now?: (() => number) | undefined;
+  signal?: AbortSignal | undefined;
+  /**
+   * Tool sources for this answer. Empty (the default) reproduces phase 1
+   * exactly: no `tools` key on the request, one model call.
+   */
+  runners?: readonly ToolRunner[] | undefined;
 }
 
 export interface AnswerInput {
@@ -34,6 +58,24 @@ export interface AnswerInput {
   pageUrl?: string | undefined;
   preview?: boolean | undefined;
   history?: readonly LlmMessage[] | undefined;
+  pageActions?: readonly PageAction[] | undefined;
+}
+
+export interface ResumeInput {
+  orgId: string;
+  assistantId: string;
+  visitorId: string;
+  conversationId: string;
+  resumeMessageId: string;
+  actionResults: readonly ActionResult[];
+  behaviour: BehaviourConfig;
+  pageActions?: readonly PageAction[] | undefined;
+}
+
+const encoder = new TextEncoder();
+
+function confirmFor(name: string, pageActions: readonly PageAction[] | undefined): boolean {
+  return name === "fill" || (pageActions?.find((a) => a.name === name)?.confirm ?? false);
 }
 
 /**
@@ -48,6 +90,27 @@ function citableByUrl(chunks: readonly ResolvedChunk[]): ResolvedChunk[] {
     if (seen.has(chunk.url)) continue;
     seen.add(chunk.url);
     out.push(chunk);
+  }
+  return out;
+}
+
+/**
+ * Combines pre-pause citations with newly retrieved citations, deduplicating by
+ * URL so the completed answer retains attribution for text generated before and
+ * after each pause.
+ */
+function mergeCitations(existing: readonly Citation[], added: readonly Citation[]): Citation[] {
+  const seen = new Set<string>();
+  const out: Citation[] = [];
+  for (const citation of existing) {
+    if (seen.has(citation.url)) continue;
+    seen.add(citation.url);
+    out.push({ url: citation.url, title: citation.title });
+  }
+  for (const citation of added) {
+    if (seen.has(citation.url)) continue;
+    seen.add(citation.url);
+    out.push({ url: citation.url, title: citation.title });
   }
   return out;
 }
@@ -96,11 +159,12 @@ async function ensureConversation(
 
 async function recordMessageUsage(
   deps: AnswerDeps,
-  input: AnswerInput,
+  input: Pick<AnswerInput, "orgId" | "assistantId">,
   at: number,
   tokensIn: number,
   tokensOut: number,
   cost: number | null,
+  messages = 1,
 ): Promise<void> {
   // Usage goes through the seam, never straight into usage_daily: the hosted
   // service meters and bills from these events.
@@ -108,7 +172,7 @@ async function recordMessageUsage(
     orgId: input.orgId,
     assistantId: input.assistantId,
     at,
-    messages: 1,
+    messages,
     tokensIn,
     tokensOut,
     costMicros: cost ?? 0,
@@ -122,7 +186,7 @@ async function recordMessageUsage(
  */
 async function recordEmbeddingOnly(
   deps: AnswerDeps,
-  input: AnswerInput,
+  input: Pick<AnswerInput, "orgId" | "assistantId">,
   at: number,
   cost: number,
 ): Promise<void> {
@@ -175,8 +239,10 @@ export async function* answerMessage(
   // retriever, D1 read or model call must not make it vanish — so it is
   // recorded the moment the provider reports it, as spend that is not a
   // message. The answer's own usage event below carries model tokens only.
-  const embedded = await deps.embedder.embed([input.message], (tokens) =>
-    recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
+  const embedded = await deps.embedder.embed(
+    [input.message],
+    (tokens) => recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
+    deps.signal ? { signal: deps.signal } : undefined,
   );
   const [vector] = embedded.vectors;
   if (!vector) {
@@ -189,6 +255,7 @@ export async function* answerMessage(
     orgId: input.orgId,
     assistantId: input.assistantId,
     topK: TOP_K,
+    ...(deps.signal ? { signal: deps.signal } : {}),
   });
   const aboveFloor = hits.filter((hit) => hit.score >= SCORE_FLOOR);
   const chunks = await resolveChunks(deps.tenant, input.assistantId, aboveFloor);
@@ -229,38 +296,86 @@ export async function* answerMessage(
     question: input.message,
   });
 
+  // Atomically reserve conversation tool budget before dispatch so failed
+  // answers and concurrent requests cannot exceed the per-conversation cap.
+  // Previews have no stored conversation row and stay bounded in-memory.
+  const reserveCalls = input.preview
+    ? undefined
+    : (count: number) =>
+        deps.tenant.conversations.reserveToolCalls(
+          conversationId,
+          count,
+          MAX_TOOL_CALLS_PER_CONVERSATION,
+        );
+
   let text = "";
+  let toolCalls: StoredToolCall[] = [];
+  let pending: ToolCall[] = [];
+  let continuation: ToolLoopContinuation | undefined;
   let tokensIn = 0;
   let tokensOut = 0;
-  let reportedCostMicros: number | undefined;
-  let usageReported = false;
-
-  const resolveCost = (): number | null => {
-    if (reportedCostMicros !== undefined) return reportedCostMicros;
-    if (deps.model !== undefined) return costMicros(deps.model, tokensIn, tokensOut);
-    return null;
-  };
+  let modelCalls = 0;
+  // The stored reply's cost: the sum over its model calls, or null once any
+  // call's cost is unknown.
+  let messageCost: number | null = 0;
 
   try {
-    for await (const chunk of deps.provider.stream(request)) {
-      if (chunk.kind === "text") {
-        text += chunk.text;
-        // Forward immediately rather than buffering: the visible difference
-        // between this product and a form is that the answer starts at once.
-        yield { type: "token", text: chunk.text };
+    const loop = runToolLoop(
+      {
+        provider: deps.provider,
+        model: deps.model,
+        runners: deps.runners ?? [],
+        priorCalls: 0,
+        reserveCalls,
+        // One usage event per model call, so a three-call answer is three
+        // events and the spend cap sees the real total; only the first counts
+        // toward `usage_daily.messages` so Overview still counts answers.
+        onModelUsage: async (callTokensIn, callTokensOut, cost) => {
+          const messageCount = modelCalls === 0 ? 1 : 0;
+          modelCalls += 1;
+          tokensIn += callTokensIn;
+          tokensOut += callTokensOut;
+          messageCost = messageCost === null || cost === null ? null : messageCost + cost;
+          await recordMessageUsage(
+            deps,
+            input,
+            clock(),
+            callTokensIn,
+            callTokensOut,
+            cost,
+            messageCount,
+          );
+        },
+        signal: deps.signal,
+        now: deps.now,
+      },
+      request,
+    );
+    for (;;) {
+      const step = await loop.next();
+      if (step.done) {
+        text = step.value.text;
+        toolCalls = step.value.calls;
+        pending = step.value.pending;
+        continuation = step.value.continuation;
+        break;
+      }
+      const event = step.value;
+      if (event.kind === "text") {
+        yield { type: "token", text: event.text };
       } else {
-        tokensIn = chunk.tokensIn;
-        tokensOut = chunk.tokensOut;
-        reportedCostMicros = chunk.costMicros;
-        usageReported = true;
+        // Detail the widget may show and a v1 widget ignores.
+        yield {
+          type: "tool",
+          name: event.call.name,
+          state: event.state,
+          callId: event.call.callId,
+          kind: event.source,
+          ...(event.ok === undefined ? {} : { ok: event.ok }),
+        };
       }
     }
   } catch (err) {
-    // Whatever ended the stream, tokens the provider already reported are
-    // billed and must reach the usage sink.
-    if (usageReported) {
-      await recordMessageUsage(deps, input, clock(), tokensIn, tokensOut, resolveCost());
-    }
     if (err instanceof ProviderError) {
       yield { type: "error", message: "The assistant could not complete this response." };
       return;
@@ -268,22 +383,59 @@ export async function* answerMessage(
     throw err;
   }
 
-  // The model request is billed the moment the stream completes, so its usage
-  // is recorded before anything else can fail: emitting citations and storing
-  // the reply both come after, and a rejected D1 write must not leave spend
-  // out of Overview or the cap check. Recorded exactly once on this path.
-  const messageCost = resolveCost();
-  await recordMessageUsage(deps, input, clock(), tokensIn, tokensOut, messageCost);
+  const cited = citableByUrl(chunks);
+  const messageId = newId("msg");
+  const citations = cited.map((c) => ({ url: c.url, title: c.title }));
+
+  if (pending.length > 0) {
+    // Stored as it stands so the follow-up request can continue it, and so the
+    // per-conversation call cap counts what this pause already spent. The
+    // widget may be a fresh instance on a new page by then: D1 is the only
+    // state the two share.
+    if (!input.preview) {
+      await deps.tenant.messages.create({
+        id: messageId,
+        conversationId,
+        role: "assistant",
+        content: text,
+        citations,
+        toolCalls,
+        tokensIn,
+        tokensOut,
+        costMicros: messageCost,
+        // Not a gap: the answer is in progress, and Gaps is for questions the
+        // assistant could not answer at all.
+        answered: true,
+        createdAt: clock(),
+        replyTo: questionId,
+        resumeContext: continuation ?? null,
+      });
+    }
+    for (const call of pending) {
+      yield {
+        type: "action",
+        callId: call.callId,
+        name: call.name,
+        // Already validated against the schema the page sent.
+        input: call.input,
+        confirm: confirmFor(call.name, input.pageActions),
+      };
+    }
+    yield {
+      type: "done",
+      messageId,
+      conversationId,
+      awaitingActions: pending.map((call) => call.callId),
+    };
+    return;
+  }
 
   // Citations after the text: the widget renders them under the answer, and
   // emitting them first would show links before there is anything to link to.
-  const cited = citableByUrl(chunks);
   for (const chunk of cited) {
     yield { type: "citation", url: chunk.url, title: chunk.title };
   }
 
-  const messageId = newId("msg");
-  const citations = cited.map((c) => ({ url: c.url, title: c.title }));
   if (!input.preview) {
     await deps.tenant.messages.create({
       id: messageId,
@@ -291,7 +443,9 @@ export async function* answerMessage(
       role: "assistant",
       content: text,
       citations,
-      toolCalls: null,
+      // null when nothing was called, so Conversations can tell "no tools" from
+      // "tools that returned nothing".
+      toolCalls: toolCalls.length > 0 ? toolCalls : null,
       tokensIn,
       tokensOut,
       costMicros: messageCost,
@@ -302,4 +456,351 @@ export async function* answerMessage(
   }
 
   yield { type: "done", messageId, conversationId };
+}
+
+const RESUME_NOT_FOUND_MESSAGE = "This answer can no longer be continued.";
+
+function parseContinuation(raw: unknown): ToolLoopContinuation | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (!Array.isArray(obj.messages)) return undefined;
+  if (typeof obj.pendingTurn !== "object" || obj.pendingTurn === null) return undefined;
+  const pt = obj.pendingTurn as Record<string, unknown>;
+  if (
+    typeof pt.assistantText !== "string" ||
+    !Array.isArray(pt.asked) ||
+    !Array.isArray(pt.completedResults)
+  ) {
+    return undefined;
+  }
+  return {
+    messages: obj.messages as LlmMessage[],
+    pendingTurn: {
+      assistantText: pt.assistantText,
+      asked: pt.asked as ToolCall[],
+      completedResults: pt.completedResults as LlmToolResult[],
+    },
+  };
+}
+
+/**
+ * Continues a paused assistant reply once the widget posts back the results of
+ * the page actions it ran.
+ */
+export async function* answerWithActionResults(
+  deps: AnswerDeps,
+  input: ResumeInput,
+): AsyncIterable<ChatEvent> {
+  const clock = deps.now ?? Date.now;
+  const conversation = await deps.tenant.conversations.get(input.conversationId);
+  if (
+    conversation === null ||
+    conversation.assistantId !== input.assistantId ||
+    conversation.visitorId !== input.visitorId
+  ) {
+    yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+    return;
+  }
+
+  const pendingReply = await deps.tenant.messages.getPendingReply(
+    conversation.id,
+    input.resumeMessageId,
+  );
+  if (pendingReply === null) {
+    yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+    return;
+  }
+
+  const priorCalls = Array.isArray(pendingReply.toolCalls)
+    ? (pendingReply.toolCalls as StoredToolCall[])
+    : [];
+  const pendingCalls: ToolCall[] = [];
+  const pendingIds = new Set<string>();
+  for (const call of priorCalls) {
+    if (call.pending) {
+      pendingCalls.push({ callId: call.callId, name: call.name, input: call.input });
+      pendingIds.add(call.callId);
+    }
+  }
+
+  // Validate the submitted batch against the current pending batch before
+  // claiming, embedding, or calling the model: reject stale, unrelated,
+  // duplicate, or incomplete submissions without consuming pending calls.
+  const resultsByCallId = new Map<string, ActionResult>();
+  for (const r of input.actionResults) {
+    if (resultsByCallId.has(r.callId) || !pendingIds.has(r.callId)) {
+      yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+      return;
+    }
+    resultsByCallId.set(r.callId, r);
+  }
+  if (pendingIds.size === 0 || resultsByCallId.size !== pendingIds.size) {
+    yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+    return;
+  }
+
+  const allMessages = await deps.tenant.messages.list(conversation.id);
+  const replyIndex = allMessages.findIndex((m) => m.id === pendingReply.id);
+  let questionIndex = -1;
+  if (pendingReply.replyTo !== null) {
+    questionIndex = allMessages.findIndex(
+      (m) => m.id === pendingReply.replyTo && m.role === "user",
+    );
+  } else {
+    for (let i = replyIndex - 1; i >= 0; i--) {
+      if (allMessages[i]?.role === "user") {
+        questionIndex = i;
+        break;
+      }
+    }
+  }
+  const questionMsg = questionIndex >= 0 ? allMessages[questionIndex] : undefined;
+  if (!questionMsg) {
+    yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+    return;
+  }
+
+  // Atomically claim this pending revision so concurrent resumes cannot
+  // independently generate continuations or overwrite each other's writes.
+  const claimToken = crypto.randomUUID();
+  const claimed = await deps.tenant.messages.claimPendingReply({
+    conversationId: conversation.id,
+    id: pendingReply.id,
+    claimToken,
+    revision: pendingReply.resumeRevision,
+    now: clock(),
+    ttlMs: RESUME_CLAIM_TTL_MS,
+  });
+  if (!claimed) {
+    yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+    return;
+  }
+
+  let completed = false;
+  let leaseLost = false;
+  let lastRenewedAt: number | null = null;
+  // Keep only the throttled checkpoint check (removing the background
+  // setInterval heartbeat) so there is a single renewal mechanism: the engine
+  // already checks at natural checkpoints (post-embed, model/tool steps, and
+  // streamed chunks), throttling D1 writes to once per interval while always
+  // forcing a real awaited renewal immediately before persisting.
+  const ensureLease = async (force = false): Promise<boolean> => {
+    if (leaseLost) return false;
+    const now = clock();
+    if (!force && lastRenewedAt !== null && now - lastRenewedAt < RESUME_CLAIM_RENEW_INTERVAL_MS) {
+      return true;
+    }
+    const ok = await deps.tenant.messages.renewReplyClaim({
+      conversationId: conversation.id,
+      id: pendingReply.id,
+      claimToken,
+      revision: pendingReply.resumeRevision,
+      now,
+      ttlMs: RESUME_CLAIM_TTL_MS,
+    });
+    if (!ok) {
+      leaseLost = true;
+    } else {
+      lastRenewedAt = now;
+    }
+    return ok;
+  };
+
+  try {
+    const history: LlmMessage[] = allMessages
+      .slice(0, questionIndex)
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    // Embedding spend is incurred once the provider reports it, even if the
+    // resume lease is lost before the callback runs; the checkpoint right
+    // below still fences retrieval, model calls, output, and reply persistence.
+    const embedded = await deps.embedder.embed([questionMsg.content], (tokens) =>
+      recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
+    );
+    if (!(await ensureLease())) {
+      yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+      return;
+    }
+    const [vector] = embedded.vectors;
+    if (!vector) {
+      yield { type: "error", message: "The assistant could not complete this response." };
+      return;
+    }
+
+    const hits = await deps.retriever.query({
+      vector,
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      topK: TOP_K,
+    });
+    const aboveFloor = hits.filter((hit) => hit.score >= SCORE_FLOOR);
+    const chunks = await resolveChunks(deps.tenant, input.assistantId, aboveFloor);
+
+    const request = buildPrompt({
+      behaviour: input.behaviour,
+      chunks,
+      history,
+      question: questionMsg.content,
+    });
+
+    const llmResults: LlmToolResult[] = [];
+    const resolvedPriorCalls: StoredToolCall[] = priorCalls.map((call) => {
+      if (!call.pending) return call;
+      const result = resultsByCallId.get(call.callId);
+      const content = result
+        ? result.ok
+          ? (result.result ?? "")
+          : (result.error ?? "The page could not complete that action.")
+        : "The page did not return a result for this action.";
+      const ok = result?.ok ?? false;
+      llmResults.push({ callId: call.callId, content, isError: !ok });
+      const { pending: _dropPending, ...rest } = call;
+      return {
+        ...rest,
+        ok,
+        resultBytes: encoder.encode(content).byteLength,
+        resultPreview: content.slice(0, 200),
+      };
+    });
+
+    const reserveCalls = (count: number) =>
+      deps.tenant.conversations.reserveToolCalls(
+        conversation.id,
+        count,
+        MAX_TOOL_CALLS_PER_CONVERSATION,
+      );
+
+    let text = pendingReply.content;
+    let newCalls: StoredToolCall[] = [];
+    let nextPending: ToolCall[] = [];
+    let nextContinuation: ToolLoopContinuation | undefined;
+    let tokensIn = 0;
+    let tokensOut = 0;
+    let resumeCost: number | null = 0;
+
+    let abortedByLease = false;
+
+    try {
+      const loop = resumeToolLoop(
+        {
+          provider: deps.provider,
+          model: deps.model,
+          runners: deps.runners ?? [],
+          priorCalls: 0,
+          reserveCalls,
+          onModelUsage: async (callTokensIn, callTokensOut, cost) => {
+            tokensIn += callTokensIn;
+            tokensOut += callTokensOut;
+            resumeCost = resumeCost === null || cost === null ? null : resumeCost + cost;
+            // The pause already counted this answer as 1 message; resuming
+            // continues the same message, so `messages` stays 0.
+            await recordMessageUsage(deps, input, clock(), callTokensIn, callTokensOut, cost, 0);
+          },
+          ensureLease: () => ensureLease(),
+          now: deps.now,
+        },
+        request,
+        pendingReply.content,
+        pendingCalls,
+        llmResults,
+        parseContinuation(pendingReply.resumeContext),
+      );
+      for (;;) {
+        const step = await loop.next();
+        if (step.done) {
+          text = step.value.text;
+          newCalls = step.value.calls;
+          nextPending = step.value.pending;
+          nextContinuation = step.value.continuation;
+          abortedByLease = step.value.abortedByLease ?? false;
+          break;
+        }
+        const event = step.value;
+        if (event.kind === "text") {
+          yield { type: "token", text: event.text };
+        } else {
+          yield {
+            type: "tool",
+            name: event.call.name,
+            state: event.state,
+            callId: event.call.callId,
+            kind: event.source,
+            ...(event.ok === undefined ? {} : { ok: event.ok }),
+          };
+        }
+      }
+    } catch (err) {
+      if (err instanceof ProviderError) {
+        yield { type: "error", message: "The assistant could not complete this response." };
+        return;
+      }
+      throw err;
+    }
+
+    if (abortedByLease) {
+      yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+      return;
+    }
+
+    const resumedCitations = citableByUrl(chunks).map((c) => ({ url: c.url, title: c.title }));
+    // Retain citations that supported text generated before the pause alongside
+    // newly retrieved sources so the combined answer stays consistently attributed.
+    const citations = mergeCitations(pendingReply.citations, resumedCitations);
+
+    const mergedCalls = [...resolvedPriorCalls, ...newCalls];
+    if (!(await ensureLease(true))) {
+      yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+      return;
+    }
+    const saved = await deps.tenant.messages.completeReply({
+      id: pendingReply.id,
+      claimToken,
+      revision: pendingReply.resumeRevision,
+      content: text,
+      citations,
+      toolCalls: mergedCalls,
+      resumeContext: nextPending.length > 0 ? (nextContinuation ?? null) : null,
+      tokensIn,
+      tokensOut,
+      costMicros: resumeCost,
+    });
+    if (!saved) {
+      yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+      return;
+    }
+    completed = true;
+
+    if (nextPending.length > 0) {
+      for (const call of nextPending) {
+        yield {
+          type: "action",
+          callId: call.callId,
+          name: call.name,
+          input: call.input,
+          confirm: confirmFor(call.name, input.pageActions),
+        };
+      }
+      yield {
+        type: "done",
+        messageId: pendingReply.id,
+        conversationId: conversation.id,
+        awaitingActions: nextPending.map((call) => call.callId),
+      };
+      return;
+    }
+
+    for (const citation of citations) {
+      yield { type: "citation", url: citation.url, title: citation.title };
+    }
+
+    yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
+  } finally {
+    if (!completed) {
+      try {
+        await deps.tenant.messages.releaseReplyClaim(pendingReply.id, claimToken);
+      } catch {
+        // Best-effort cleanup; expired claims also recover after RESUME_CLAIM_TTL_MS.
+      }
+    }
+  }
 }

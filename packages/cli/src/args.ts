@@ -2,20 +2,23 @@ import { parseArgs } from "node:util";
 import type { ApplyOptions } from "./apply.js";
 import { CliError } from "./http.js";
 import type { PushOptions } from "./push.js";
+import type { TestOptions } from "./test.js";
 
 export type ParsedCommand =
-  | { kind: "help"; topic: "root" | "push" | "apply" }
+  | { kind: "help"; topic: "root" | "push" | "apply" | "test" }
   | { kind: "push"; options: PushOptions }
-  | { kind: "apply"; options: ApplyOptions };
+  | { kind: "apply"; options: ApplyOptions }
+  | { kind: "test"; options: TestOptions };
 
 export const ROOT_HELP = `Usage: solv <command> [options]
 
 Commands:
   push   Push a folder of Markdown files or a JSON batch to an assistant
   apply  Apply solv.config.json to an assistant's draft configuration
+  test   Run the assistant's answer tests and fail if any do not pass
 
 Environment variables:
-  SOLV_INGEST_KEY   Bearer key for solv push and solv apply
+  SOLV_INGEST_KEY   Bearer key for solv push, solv apply, and solv test
 
 Run 'solv <command> --help' for command-specific options.`;
 
@@ -46,6 +49,25 @@ Options:
 
 Environment variables:
   SOLV_INGEST_KEY     Bearer key used to authenticate ingest requests`;
+
+export const TEST_HELP = `Usage: solv test [file] [options]
+
+Arguments:
+  file                Config file whose "tests" replace the assistant's tests
+                      (optional; without it, the stored tests are run)
+
+Options:
+  --endpoint <url>    Worker base URL (required)
+  --assistant <id>    Assistant ID, e.g. ast_... (required)
+  --dry-run           Print what would run without sending anything
+  -h, --help          Show this help message
+
+Environment variables:
+  SOLV_INGEST_KEY     Bearer key used to authenticate ingest requests
+
+Exits non-zero if any test fails or does not run. A "tests" array in the file
+replaces the assistant's tests, including any added in the admin. At most 25
+tests may be declared and run per assistant.`;
 
 function readString(
   values: Record<string, string | boolean | (string | boolean)[] | undefined>,
@@ -169,6 +191,45 @@ function parseApplyArgs(args: string[], env: Record<string, string | undefined>)
   return { kind: "apply", options };
 }
 
+function parseTestArgs(args: string[], env: Record<string, string | undefined>): ParsedCommand {
+  let parsed: ReturnType<typeof parseArgs>;
+  try {
+    parsed = parseArgs({
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: {
+        endpoint: { type: "string" },
+        assistant: { type: "string" },
+        "dry-run": { type: "boolean", default: false },
+        help: { type: "boolean", short: "h", default: false },
+      },
+    });
+  } catch (err) {
+    throw new CliError(err instanceof Error ? err.message : String(err));
+  }
+
+  if (readBoolean(parsed.values, "help")) {
+    return { kind: "help", topic: "test" };
+  }
+
+  rejectExtraPositionals(parsed.positionals);
+
+  const endpoint = requireOption(readString(parsed.values, "endpoint"), "--endpoint");
+  const assistant = requireOption(readString(parsed.values, "assistant"), "--assistant");
+  const file = parsed.positionals[0];
+
+  const options: TestOptions = {
+    endpoint,
+    assistant,
+    dryRun: readBoolean(parsed.values, "dry-run"),
+  };
+  if (file !== undefined) options.file = file;
+  if (env.SOLV_INGEST_KEY !== undefined) options.ingestKey = env.SOLV_INGEST_KEY;
+
+  return { kind: "test", options };
+}
+
 /**
  * Parses CLI arguments using `node:util` `parseArgs` and reads credentials from
  * environment variables without exposing them as flags.
@@ -186,6 +247,9 @@ export function parseCliArgs(
   }
   if (command === "apply") {
     return parseApplyArgs(rest, env);
+  }
+  if (command === "test") {
+    return parseTestArgs(rest, env);
   }
   throw new CliError(`Unknown command: ${command}. Run 'solv --help' for usage.`);
 }

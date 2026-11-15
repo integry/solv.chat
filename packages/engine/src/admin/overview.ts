@@ -1,6 +1,7 @@
 import { defaultVersionConfig } from "@solvchat/core";
 import type { TopQuestionRow } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
+import type { EffectiveProviderSettings } from "../providers/config.js";
 import { utcDay } from "../util/time.js";
 import { NotFound } from "./errors.js";
 
@@ -29,13 +30,24 @@ export async function overviewFor(
   options?: {
     today?: string | undefined;
     costUnit?: "usd" | "credits" | undefined;
-    checkConfigError?: (() => Promise<string | null>) | undefined;
+    resolveSettings?: (() => Promise<EffectiveProviderSettings>) | undefined;
+    checkConfigError?:
+      | ((resolved?: EffectiveProviderSettings) => Promise<string | null>)
+      | undefined;
   },
 ): Promise<AssistantOverview> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
 
   const today = options?.today ?? utcDay(Date.now());
+  const settings = options?.resolveSettings ? await options.resolveSettings() : undefined;
+  const costUnit =
+    settings !== undefined
+      ? settings.llmProvider.value === "openrouter"
+        ? "credits"
+        : undefined
+      : options?.costUnit;
+
   const [messages, answeredShare, topQuestions, todayUsage, published, configError] =
     await Promise.all([
       tenant.messages.countFor(assistantId),
@@ -43,7 +55,7 @@ export async function overviewFor(
       tenant.messages.topQuestionsFor(assistantId, 5),
       tenant.usage.summaryFor(assistantId, today),
       tenant.versions.published(assistantId),
-      options?.checkConfigError ? options.checkConfigError() : Promise.resolve(null),
+      options?.checkConfigError ? options.checkConfigError(settings) : Promise.resolve(null),
     ]);
 
   const dailyCostCapMicros = published
@@ -60,7 +72,7 @@ export async function overviewFor(
     todayCostMicros: todayUsage?.costMicros ?? 0,
     todayCostUnknown: todayUsage?.costUnknown ?? false,
     dailyCostCapMicros,
-    ...(options?.costUnit !== undefined ? { costUnit: options.costUnit } : {}),
+    ...(costUnit !== undefined ? { costUnit } : {}),
     configError,
   };
 }

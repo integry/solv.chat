@@ -5,6 +5,8 @@ import { documentsFor } from "./documents.js";
 import { feedbackFor } from "./feedback.js";
 import { mcpFor } from "./mcp.js";
 import { messagesFor } from "./messages.js";
+import { providerSettingsFor } from "./providerSettings.js";
+import { reportsFor } from "./reports.js";
 import { sourcesFor } from "./sources.js";
 import { testsFor } from "./tests.js";
 import { usageFor } from "./usage.js";
@@ -29,8 +31,10 @@ export interface Tenant {
   readonly messages: ReturnType<typeof messagesFor>;
   readonly feedback: ReturnType<typeof feedbackFor>;
   readonly mcp: ReturnType<typeof mcpFor>;
+  readonly providerSettings: ReturnType<typeof providerSettingsFor>;
   readonly tests: ReturnType<typeof testsFor>;
   readonly usage: ReturnType<typeof usageFor>;
+  readonly reports: ReturnType<typeof reportsFor>;
 }
 
 /**
@@ -78,7 +82,9 @@ function build(db: D1Database, orgId: string): Tenant {
     messages: messagesFor(db, orgId),
     feedback: feedbackFor(db, orgId),
     mcp: mcpFor(db, orgId),
+    providerSettings: providerSettingsFor(db, orgId),
     tests: testsFor(db, orgId),
     usage: usageFor(db, orgId),
+    reports: reportsFor(db, orgId),
   };
 }

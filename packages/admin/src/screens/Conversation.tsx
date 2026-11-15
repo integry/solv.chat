@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ConversationDetail } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
 import { EntryEditor } from "./EntryEditor.js";
+import { TestEditor } from "./TestEditor.js";
 
 export interface ConversationProps {
   assistantId: string;
@@ -17,6 +18,13 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
     fromMessageId: string;
     question: string;
   } | null>(null);
+  const [addingTest, setAddingTest] = useState<{
+    sessionId: number;
+    turnId: string;
+    question: string;
+  } | null>(null);
+  const nextTestSessionId = useRef(1);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const detail = detailRes.value;
 
@@ -59,6 +67,12 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
         </div>
       </div>
 
+      {statusMessage && (
+        <p className="notice-text" role="status">
+          {statusMessage}
+        </p>
+      )}
+
       {detailRes.status === "loading" && !detail ? (
         <p className="muted">Loading conversation…</p>
       ) : detailRes.status === "error" ? (
@@ -90,6 +104,20 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                   </ul>
                 )}
 
+                {turn.toolCalls && turn.toolCalls.length > 0 && (
+                  <ul className="turn-citations" aria-label="What the assistant did">
+                    {turn.toolCalls.map((call) => (
+                      <li key={call.callId}>
+                        {/* Name and outcome only: the stored row holds no result body, by
+                            design — a third party's payload is not the owner's to keep. */}
+                        {call.kind === "action" ? "On the page: " : "Tool: "}
+                        {call.name}
+                        {call.pending ? " — waiting" : call.ok ? "" : " — did not work"}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
                 {turn.feedback.length > 0 && (
                   <div className="source-meta">
                     {turn.feedback.map((fb) => (
@@ -101,27 +129,47 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                   </div>
                 )}
 
-                {isUnanswered && (
+                {!isUser && (
                   <div className="actions">
-                    {turn.answerDocumentId ? (
-                      <span className="badge badge-published">Handled</span>
-                    ) : (
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={() =>
-                          setAnswering({
-                            turnId: turn.id,
-                            // The reply's own id: the engine links the
-                            // answer through the question the reply records.
-                            fromMessageId: turn.id,
-                            question: questionTurn?.content ?? "",
-                          })
-                        }
-                      >
-                        Write the right answer
-                      </button>
-                    )}
+                    {isUnanswered &&
+                      (turn.answerDocumentId ? (
+                        <span className="badge badge-published">Handled</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => {
+                            setAddingTest(null);
+                            setStatusMessage(null);
+                            setAnswering({
+                              turnId: turn.id,
+                              // The reply's own id: the engine links the
+                              // answer through the question the reply records.
+                              fromMessageId: turn.id,
+                              question: questionTurn?.content ?? "",
+                            });
+                          }}
+                        >
+                          Write the right answer
+                        </button>
+                      ))}
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => {
+                        setAnswering(null);
+                        setStatusMessage(null);
+                        setAddingTest({
+                          sessionId: nextTestSessionId.current++,
+                          turnId: turn.id,
+                          // The visitor's question, not the reply: a test is a
+                          // question plus an expectation.
+                          question: questionTurn?.content ?? "",
+                        });
+                      }}
+                    >
+                      Add to tests
+                    </button>
                   </div>
                 )}
 
@@ -140,6 +188,25 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                     onCancel={() => setAnswering(null)}
                   />
                 )}
+
+                {addingTest?.turnId === turn.id &&
+                  (() => {
+                    const sessionId = addingTest.sessionId;
+                    return (
+                      <TestEditor
+                        key={sessionId}
+                        assistantId={assistantId}
+                        initialQuestion={addingTest.question}
+                        onSaved={() => {
+                          setAddingTest((current) =>
+                            current?.sessionId === sessionId ? null : current,
+                          );
+                          setStatusMessage("Added to tests.");
+                        }}
+                        onCancel={() => setAddingTest(null)}
+                      />
+                    );
+                  })()}
               </div>
             );
           })}

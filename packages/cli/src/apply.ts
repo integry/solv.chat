@@ -1,7 +1,13 @@
 import { readFile } from "node:fs/promises";
-import { parseVersionConfig, type VersionConfig } from "@solvchat/core";
+import {
+  isPlainObject,
+  parseVersionConfig,
+  type TestInput,
+  type VersionConfig,
+} from "@solvchat/core";
 import { assertValidHeaderValue, CliError, normalizeEndpoint, requestJson } from "./http.js";
 import type { CliDeps } from "./push.js";
+import { parseDeclaredTests } from "./test.js";
 
 export interface ApplyOptions {
   file: string;
@@ -77,12 +83,23 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
     throw new CliError(parsed.errors.join("; "));
   }
 
+  // Separated before anything is sent. `parseVersionConfig` drops unknown
+  // keys, so leaving `tests` in the config body would look like it worked.
+  let declaredTests: TestInput[] | null = null;
+  if (isPlainObject(rawJson) && rawJson.tests !== undefined) {
+    declaredTests = parseDeclaredTests(rawJson.tests, options.file, deps.log);
+  }
+  const configOnly = isPlainObject(rawJson)
+    ? Object.fromEntries(Object.entries(rawJson).filter(([key]) => key !== "tests"))
+    : rawJson;
+
   if (!options.ingestKey) {
     throw new CliError("Missing SOLV_INGEST_KEY environment variable");
   }
 
   const endpoint = normalizeEndpoint(options.endpoint);
-  const configUrl = `${endpoint}/v1/ingest/${encodeURIComponent(options.assistant)}/config`;
+  const assistantBase = `${endpoint}/v1/ingest/${encodeURIComponent(options.assistant)}`;
+  const configUrl = `${assistantBase}/config`;
   const authHeader = `Bearer ${options.ingestKey}`;
   assertValidHeaderValue("Authorization", authHeader, "SOLV_INGEST_KEY");
   const authHeaders = { Authorization: authHeader };
@@ -114,10 +131,30 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
         ...authHeaders,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(rawJson),
+      body: JSON.stringify(configOnly),
     },
     "SOLV_INGEST_KEY",
   );
 
   deps.log(`Draft updated from ${options.file}. Publish in the admin when ready.`);
+
+  if (declaredTests !== null) {
+    deps.log(
+      `Replacing the assistant's tests with ${declaredTests.length} from ${options.file} (any test not in this file will be removed).`,
+    );
+    const synced = await requestJson<{ created: number; removed: number }>(
+      deps.fetchImpl,
+      `${assistantBase}/tests`,
+      {
+        method: "PUT",
+        headers: {
+          ...authHeaders,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ tests: declaredTests }),
+      },
+      "SOLV_INGEST_KEY",
+    );
+    deps.log(`Tests: ${synced.created} declared, ${synced.removed} removed.`);
+  }
 }

@@ -82,6 +82,13 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
   not support with an `error` event, and clients ignore event types they do not
   know. Responds with server-sent events: `token`, `citation`, `tool`, `done`,
   `error` (and `action` from phase 2).
+
+  An answer that needs a page action pauses rather than waiting on the open
+  stream: the engine emits `action` events and then `done` with
+  `awaitingActions`, and the widget runs them and sends a second request with
+  the same conversation id, `resumeMessageId` and `actionResults`, and no
+  `message`. A held-open stream would not survive `navigate`, which replaces
+  the page the stream belongs to.
 - `POST /v1/feedback` — thumbs up or down on a message.
 - `GET /v1/assistants/:publicKey` — published widget config (title, colours, greeting,
   suggested questions). No secrets, no prompts.
@@ -165,6 +172,31 @@ environment variables (`vars` in `wrangler.jsonc`):
 
 An unrecognised value falls back to its default and is logged once.
 
+### Provider settings
+
+An owner can also configure the instance's answering provider, tier or OpenRouter
+model id, embeddings provider, and API keys per organisation in the admin under
+**Settings → Providers** (there is still no per-assistant model picker, and no
+custom base URL or endpoint field).
+
+- **Precedence**: stored setting beats environment variable beats built-in
+  default; stored key beats Worker secret. Removing a stored value falls back.
+- **Keys**: stored keys are sealed with `SOLV_SECRET_KEY` (`secretBox`),
+  write-only (never returned by any API or logged), and opened only at call
+  time inside the Worker. Storing a key without `SOLV_SECRET_KEY` is refused.
+  If a stored key cannot be opened (for example, `SOLV_SECRET_KEY` was
+  rotated), answering fails with the configuration-error path, the admin says
+  which key must be re-entered, and the Worker secret is not silently used
+  instead.
+- **Embeddings**: switching between `openai` and `openrouter` uses the same
+  model (`text-embedding-3-small`, 1536 dimensions) and does not invalidate the
+  index.
+- **Key test**: an owner-only, rate-limited test action checks the effective
+  key with one minimal provider request and reports success or the error
+  category without echoing the provider's response body.
+- **Managed keys**: when `KeyProvider.managed` is true (in the cloud layer),
+  the admin hides the key-entry fields.
+
 ### OpenRouter
 
 A third `LlmProvider`, `openrouter`, lets an instance answer with any chat model
@@ -193,7 +225,8 @@ built-in providers; the tiers above stay the default.
 
 Owners add an MCP server by URL (Streamable HTTP). The Worker lists its tools and
 stores them with `allowed = false`. Nothing is callable until the owner switches
-a tool on.
+a tool on (`allowed = true`) **and** publishes a version whose `allowedTools`
+includes it (the "Try it" pane uses the draft's `allowedTools`).
 
 Every visitor is anonymous, and every tool call runs with the owner's
 credential. The rules that follow from that:
@@ -209,12 +242,10 @@ credential. The rules that follow from that:
 - Per-conversation caps on the number of tool calls and on wall time.
 - Server URLs must be https and must not resolve to private or loopback ranges.
 
-Phase 2 note on OpenAI: the phase 1 provider calls Chat Completions. Per the
-model pages checked on 2026-11-14 (https://developers.openai.com/api/docs/models),
-`gpt-6.1-sol` supports tool calling only through the Responses API, and
-`gpt-6-luna` supports function calling on Chat Completions only with reasoning
-effort `none`. The task that adds tools re-reads those pages and moves the
-OpenAI provider to the Responses API if that is still the case.
+Phase 2 note on OpenAI: the phase 1 provider called Chat Completions. Per the
+model pages checked on 2026-11-15 (https://developers.openai.com/api/docs/models),
+both `gpt-6.1-sol` and `gpt-6-luna` support tool calling through the Responses
+API (`/v1/responses`), so `openaiProvider` uses the Responses API.
 
 The MCP client loop is provider-independent. A provider-native MCP connector may
 be added later behind the same interface.
@@ -232,10 +263,29 @@ credential is involved, which makes them safer than MCP tools.
 Built in:
 
 - `navigate` — go to a URL on the same site (same origin, or an origin the owner
-  listed), optionally to a section. The conversation continues on the new page.
+  listed), optionally to a section:
+  - Same-document target (only the fragment differs, or the current URL with a
+    section): scrolls to the section and continues the conversation in place.
+  - Same-origin target: persists the pending continuation in per-origin
+    `sessionStorage` and calls `location.assign`; the next page's widget resumes
+    the conversation on connect (dropped as "the visitor moved on" if the
+    visitor sends a new message first or after 2 minutes).
+  - Listed other origin: keeps the conversation on the current page and renders
+    a button ("Open <host> in a new tab") that opens the owner's URL with
+    `target="_blank"` and `rel="noopener noreferrer"` on click, without passing
+    any transcript, ids, or extra parameters.
+  - Any other origin: refused.
 - `highlight` — scroll to an element and point at it with a short note.
 - `fill` — put values into form fields the owner has marked as fillable. It never
   submits.
+
+The owner marks what the built-ins may touch with two attributes:
+`data-solv-target="<name>"` on anything `highlight` may point at, and
+`data-solv-fill="<name>"` on each field `fill` may set; `data-solv-no-fill` on
+a form or any ancestor takes everything inside it out of scope. The model is
+given these names, never a selector, so what it can reach is exactly what the
+markup offers. Password, payment and one-time-code fields are refused even
+when marked.
 
 Custom: the site registers its own actions in code,
 
@@ -320,7 +370,7 @@ React, served by the Worker. One screen per item:
 
 ```
 [assistant switcher]
-Overview · Conversations · Gaps
+Overview · Reports · Conversations · Gaps
 Sources · Tools · Behaviour · Widget · Tests
 Install
 ```
@@ -332,12 +382,59 @@ Install
   an entry source), "Add to tests".
 - Plain words on every control. No model, temperature or chunking settings.
 
+### Extending the admin
+
+`@solvchat/admin` publishes both the prebuilt static app (`dist/`, served by the
+open engine) and an ESM library entry (`mountAdmin(root, options)`). The open
+static entry imports the stylesheet for you; the library entry does not import
+CSS, so a consumer embedding `mountAdmin` must also import
+`@solvchat/admin/styles.css`:
+
+```tsx
+import "@solvchat/admin/styles.css";
+import { mountAdmin } from "@solvchat/admin";
+
+const root = document.getElementById("root");
+if (root) {
+  mountAdmin(root, {
+    extraNavItems: [
+      { id: "billing", label: "Billing", path: "/admin/billing", section: "Account" },
+    ],
+    extraScreens: {
+      billing: ({ assistant }) => <p>Billing for {assistant?.name ?? "assistant"}</p>,
+    },
+  });
+}
+```
+
+Options accepted by `mountAdmin`:
+
+- `extraNavItems` — items appended to the sidebar (`id`, `label`, `path` under
+  `/admin/…`, and an optional `section` heading such as `"Settings"` or `"Account"`).
+- `extraScreens` — map from those ids to React components rendered in the main
+  area with `{ assistant, assistantId, api }` (the same-origin API helpers used
+  by built-in screens).
+- `signIn` — optional component replacing the built-in password form when the API
+  answers `401`.
+- `onSignOut` — optional sign-out handler replacing the default `/api/admin/logout`
+  request.
+- `hideScreens` — built-in screen ids to omit from navigation and routing (for
+  example, when keys are fully managed).
+
+This extension point is for **adding** screens and replacing sign-in, not for
+changing or shadowing engine screens. Built-in ids and routes cannot be
+overridden: any clash throws synchronously at mount time, and extra screens
+receive no capabilities beyond the same-origin API helpers (no remote code
+loading).
+
 ## Config as code
 
 `solv.config.json` in a site's repository describes an assistant's behaviour,
 widget and tests. `solv apply` writes the draft with the ingest key
 (`SOLV_INGEST_KEY`); publishing always happens in the admin. `solv push` sends
 content; `solv test` runs the tests. The admin and the file edit the same draft.
+A `tests` array in `solv.config.json` **replaces** the assistant's stored tests
+rather than merging with them.
 Because an ingest key can change an assistant's draft behaviour as well as its
 content, it must be kept as a secret.
 
@@ -349,7 +446,8 @@ The cloud layer replaces these and nothing else:
   build ships a single-owner provider: an admin password set as a Worker secret,
   exchanged for a signed, HttpOnly session cookie.
 - `KeyProvider` — returns the model and embedding keys for an org. The open build
-  reads Worker secrets.
+  reads stored keys (sealed with `SOLV_SECRET_KEY`), then Worker secrets; when
+  `managed` is true, the admin hides key-entry fields.
 - `UsageSink` — receives usage events. The open build writes `usage_daily`.
 - `Limits` — answers "may this org do this?". The open build enforces only the
   per-assistant spend cap and rate limits.
@@ -359,7 +457,8 @@ with the open implementations.
 
 ## Phases
 
-1. Engine, widget and admin without tools: sources, behaviour, widget, draft and
-   publish, conversations, gaps. First install: propr.dev.
-2. MCP tools, page actions, tests, reports. Second install: mcptest.io.
+1. Done. Engine, widget and admin without tools: sources, behaviour, widget,
+   draft and publish, conversations, gaps. First install: propr.dev.
+2. Done. MCP tools, page actions, answer tests, reports. Second install:
+   mcptest.io.
 3. Cloud layer in the closed repo.

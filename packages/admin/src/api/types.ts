@@ -1,4 +1,4 @@
-import type { SourceKind, VersionConfig } from "@solvchat/core";
+import type { SourceKind, TestExpectation, VersionConfig } from "@solvchat/core";
 
 export interface Assistant {
   id: string;
@@ -73,11 +73,20 @@ export interface Citation {
   title: string;
 }
 
+export interface ConversationToolCall {
+  callId: string;
+  name: string;
+  kind: "mcp" | "action";
+  ok: boolean;
+  pending?: boolean;
+}
+
 export interface ConversationTurn {
   id: string;
   role: "user" | "assistant";
   content: string;
   citations: Citation[];
+  toolCalls?: ConversationToolCall[] | null;
   answered: boolean;
   createdAt: number;
   feedback: ConversationFeedback[];
@@ -119,6 +128,28 @@ export interface TopQuestion {
   count: number;
 }
 
+export interface SourceCitationCount {
+  url: string;
+  title: string;
+  count: number;
+}
+
+export interface AssistantReport {
+  days: 7 | 30 | 90;
+  from: string;
+  to: string;
+  questions: number;
+  replies: number;
+  answeredShare: number;
+  thumbsDownShare: number;
+  costMicros: number;
+  topQuestions: TopQuestion[];
+  topGaps: TopQuestion[];
+  topSources: SourceCitationCount[];
+  uncitedSources: Array<{ url: string; title: string }>;
+  uncitedTotal: number;
+}
+
 export interface AssistantOverview {
   messages: number;
   answeredShare: number;
@@ -135,4 +166,97 @@ export interface InstallInfo {
   publicKey: string;
   allowedOrigins: string[];
   snippet: string;
+}
+
+export type McpAuthKind = "none" | "static_header";
+
+export interface McpServerSummary {
+  id: string;
+  assistantId: string;
+  label: string;
+  url: string;
+  authKind: McpAuthKind;
+  headerName: string | null;
+  hasSecret: boolean;
+  enabled: boolean;
+  createdAt: number;
+  toolCount: number;
+  allowedCount: number;
+}
+
+export interface McpToolView {
+  id: string;
+  serverId: string;
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  allowed: boolean;
+}
+
+export type TestOutcome = "passed" | "failed" | "not_run";
+
+export interface TestResult {
+  testId: string;
+  question: string;
+  expectation: TestExpectation;
+  outcome: TestOutcome;
+  reason: string;
+  excerpt: string;
+}
+
+export interface AnswerTest {
+  id: string;
+  orgId: string;
+  assistantId: string;
+  question: string;
+  expectation: TestExpectation;
+  createdAt: number;
+  latestResult?: TestResult | null;
+}
+
+export interface TestRunSummary {
+  id: string;
+  results: TestResult[];
+  stopped?: string | null;
+}
+
+export interface TestRunResponse {
+  runId: string;
+  passed: boolean;
+  results: TestResult[];
+  stopped?: string | undefined;
+}
+
+export type LlmProviderName = "anthropic" | "openai" | "openrouter";
+export type EmbeddingsProviderName = "openai" | "openrouter";
+export type LlmTier = "fast" | "balanced";
+export type SettingSource = "stored" | "environment" | "none";
+
+export interface ResolvedSetting<T> {
+  value: T;
+  source: SettingSource;
+}
+
+export interface ProviderKeyStatus {
+  source: SettingSource;
+  updatedAt: number | null;
+  unreadable: boolean;
+}
+
+export interface ProviderSettingsView {
+  settings: {
+    llmProvider: ResolvedSetting<LlmProviderName>;
+    llmTier: ResolvedSetting<LlmTier>;
+    llmModel: ResolvedSetting<string | null>;
+    embeddingsProvider: ResolvedSetting<EmbeddingsProviderName>;
+  };
+  keysManaged: boolean;
+  keys: Record<LlmProviderName, ProviderKeyStatus>;
+  configError: string | null;
+}
+
+export interface KeyTestResult {
+  ok: boolean;
+  category: "ok" | "unauthorised" | "rate_limited" | "unreachable" | "missing" | "unreadable";
+  message: string;
 }

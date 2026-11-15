@@ -5,16 +5,51 @@ import { isPlainObject, parseUrl, readTrimmedString } from "./shared.js";
  * The chat wire protocol version. The widget sends it on every request; the
  * engine refuses a version it does not support with a plain `error` event.
  *
- * Why now: "Page actions" (phase 2) will add request fields and event types. A
- * widget cached on a visitor's machine must keep working when the engine sends
- * an event type it has never heard of, and the engine must be able to say a
- * widget is too old. Adding the field later means a release where neither side
- * can tell. Phase 1 adds the field and the check, nothing else.
+ * Version 2 adds page actions to the request and `action` events plus tool
+ * detail to the stream. Version 1 stays supported: a widget cached on a
+ * visitor's machine must keep answering questions after the engine is
+ * deployed, and an owner who has not re-pasted the script tag has not agreed
+ * to anything breaking.
  */
-export const CHAT_PROTOCOL_VERSION = 1;
-export const SUPPORTED_CHAT_PROTOCOLS: readonly number[] = [1];
+export const CHAT_PROTOCOL_VERSION = 2;
+export const SUPPORTED_CHAT_PROTOCOLS: readonly number[] = [1, 2];
 export const MAX_CHAT_MESSAGE_LENGTH = 4000;
 export const MAX_CHAT_HISTORY_TURNS = 6;
+
+// Caps on what the page may put in front of the model. The specification sets
+// none, so these are chosen: enough for the three built-ins and a handful of
+// custom actions, small enough that a hostile page cannot inflate a prompt or
+// a stored message. Exported so the engine and widget cannot disagree.
+export const MAX_PAGE_ACTIONS = 16;
+export const MAX_ACTION_NAME_LENGTH = 64;
+export const MAX_ACTION_DESCRIPTION_LENGTH = 200;
+/**
+ * Maximum serialised size in bytes for a single input schema, shared by page
+ * actions and MCP tools so one cap governs every schema shown to the model.
+ */
+export const MAX_ACTION_SCHEMA_BYTES = 16 * 1024;
+export const MAX_ACTION_RESULT_BYTES = 8192;
+
+/** The name pattern actions must match, so a name can never look like prose. */
+const ACTION_NAME_RE = /^[a-z][a-z0-9_]*$/;
+
+export interface PageAction {
+  name: string;
+  description: string;
+  /** JSON Schema object, passed to the model as data and never executed. */
+  inputSchema: Record<string, unknown>;
+  /** The page asked for the visitor's confirmation before this one runs. */
+  confirm: boolean;
+}
+
+export interface ActionResult {
+  callId: string;
+  ok: boolean;
+  /** Present when ok; already capped at MAX_ACTION_RESULT_BYTES. */
+  result?: string;
+  /** Present when not ok; a plain sentence, never a stack. */
+  error?: string;
+}
 
 export interface ChatHistoryTurn {
   role: "user" | "assistant";
@@ -25,7 +60,11 @@ export interface ChatRequest {
   protocol: number;
   assistant: string;
   visitorId: string;
-  message: string;
+  /**
+   * Absent only on a request that continues an answer, which carries
+   * `actionResults` instead. One endpoint, one parser.
+   */
+  message?: string;
   conversationId?: string;
   pageUrl?: string;
   /** The admin "Try it" pane asks for the draft. The engine honours it only
@@ -35,18 +74,153 @@ export interface ChatRequest {
   /** Prior turns resent by the admin "Try it" pane. Ignored except on an
    *  authenticated owner-preview request. */
   history?: ChatHistoryTurn[];
+  /** What this page can do, sent on every request; the model sees them as tools. */
+  pageActions?: PageAction[];
+  /** Results of the actions the engine asked for, continuing a paused answer. */
+  actionResults?: ActionResult[];
+  /** The assistant message to continue; required with `actionResults`. */
+  resumeMessageId?: string;
 }
 
 export type ChatEvent =
   | { type: "token"; text: string }
   | { type: "citation"; url: string; title: string }
-  // Declared and never emitted in phase 1: there are no tools yet. Reserving
-  // the name means adding them is not a protocol change.
-  | { type: "tool"; name: string; state: "running" | "done" }
-  | { type: "done"; messageId: string; conversationId: string }
+  // `name` and `state` stay required and first: a v1 widget reads exactly
+  // those two and ignores the rest, with no change on its side.
+  | {
+      type: "tool";
+      name: string;
+      state: "running" | "done";
+      callId?: string;
+      kind?: "mcp" | "action";
+      ok?: boolean;
+    }
+  // What the widget must run in the page. The engine never sends a selector or
+  // a script: only a registered action name and its validated input.
+  | {
+      type: "action";
+      callId: string;
+      name: string;
+      input: Record<string, unknown>;
+      confirm: boolean;
+    }
+  | {
+      type: "done";
+      messageId: string;
+      conversationId: string;
+      /** Call ids the engine is waiting on: the answer paused, not finished. */
+      awaitingActions?: string[];
+    }
   | { type: "error"; message: string };
 
 export type UnknownChatEvent = { type: "unknown"; name: string };
+
+const encoder = new TextEncoder();
+
+function parsePageActions(raw: unknown, errors: Errors): PageAction[] {
+  if (!Array.isArray(raw)) {
+    errors.add("pageActions", "must be an array");
+    return [];
+  }
+  if (raw.length > MAX_PAGE_ACTIONS) {
+    errors.add("pageActions", `must have at most ${MAX_PAGE_ACTIONS} items`);
+  }
+  const out: PageAction[] = [];
+  const seen = new Set<string>();
+  raw.slice(0, MAX_PAGE_ACTIONS).forEach((item, i) => {
+    if (!isPlainObject(item)) {
+      errors.add(`pageActions[${i}]`, "must be an object");
+      return;
+    }
+    const name = readTrimmedString(item.name, 1, MAX_ACTION_NAME_LENGTH);
+    if (name === null || !ACTION_NAME_RE.test(name)) {
+      // A constrained name is what lets the prompt list actions without a
+      // page being able to write instructions into the tool list.
+      errors.add(`pageActions[${i}].name`, "must be lower-case letters, digits and underscores");
+      return;
+    }
+    const description = readTrimmedString(item.description, 0, MAX_ACTION_DESCRIPTION_LENGTH);
+    if (description === null) {
+      errors.add(
+        `pageActions[${i}].description`,
+        `must be at most ${MAX_ACTION_DESCRIPTION_LENGTH} characters`,
+      );
+      return;
+    }
+    if (!isPlainObject(item.inputSchema)) {
+      errors.add(`pageActions[${i}].inputSchema`, "must be a JSON Schema object");
+      return;
+    }
+    // Bound by serialised size rather than by walking the schema: the schema
+    // is handed to the provider as data, so its shape is the provider's
+    // business, but its size is ours because it lands in every prompt.
+    if (encoder.encode(JSON.stringify(item.inputSchema)).byteLength > MAX_ACTION_SCHEMA_BYTES) {
+      errors.add(
+        `pageActions[${i}].inputSchema`,
+        `must be at most ${MAX_ACTION_SCHEMA_BYTES} bytes`,
+      );
+      return;
+    }
+    // First registration of a name wins. Two tools with one name would make
+    // the engine guess which the model meant, and guessing is how an action
+    // ends up running something the page did not offer.
+    if (seen.has(name)) return;
+    seen.add(name);
+    out.push({
+      name,
+      description,
+      inputSchema: item.inputSchema,
+      confirm: item.confirm === true,
+    });
+  });
+  return out;
+}
+
+function parseActionResults(raw: unknown, errors: Errors): ActionResult[] {
+  if (!Array.isArray(raw)) {
+    errors.add("actionResults", "must be an array");
+    return [];
+  }
+  if (raw.length > MAX_PAGE_ACTIONS) {
+    errors.add("actionResults", `must have at most ${MAX_PAGE_ACTIONS} items`);
+  }
+  const out: ActionResult[] = [];
+  raw.slice(0, MAX_PAGE_ACTIONS).forEach((item, i) => {
+    if (!isPlainObject(item)) {
+      errors.add(`actionResults[${i}]`, "must be an object");
+      return;
+    }
+    const callId = readTrimmedString(item.callId, 1, 128);
+    if (callId === null) {
+      errors.add(`actionResults[${i}].callId`, "must be 1 to 128 characters");
+      return;
+    }
+    const ok = item.ok === true;
+    const entry: ActionResult = { callId, ok };
+    if (ok) {
+      // A string, not arbitrary JSON: the result is read by the model as
+      // untrusted data, and a string is the only shape whose size we can cap
+      // without walking a structure the page controls.
+      if (typeof item.result !== "string") {
+        errors.add(`actionResults[${i}].result`, "must be a string");
+        return;
+      }
+      if (encoder.encode(item.result).byteLength > MAX_ACTION_RESULT_BYTES) {
+        errors.add(
+          `actionResults[${i}].result`,
+          `must be at most ${MAX_ACTION_RESULT_BYTES} bytes`,
+        );
+        return;
+      }
+      entry.result = item.result;
+    } else {
+      const error = readTrimmedString(item.error, 0, 500);
+      entry.error = error ?? "The page could not complete that action.";
+    }
+    out.push(entry);
+  });
+  return out;
+}
 
 /** Validates an incoming public chat request. */
 export function parseChatRequest(value: unknown): Result<ChatRequest> {
@@ -76,9 +250,35 @@ export function parseChatRequest(value: unknown): Result<ChatRequest> {
   const visitorId = readTrimmedString(value.visitorId, 1, 128);
   if (visitorId === null) errors.add("visitorId", "must be 1 to 128 characters");
 
-  const message = readTrimmedString(value.message, 1, MAX_CHAT_MESSAGE_LENGTH);
-  if (message === null) {
-    errors.add("message", `must be 1 to ${MAX_CHAT_MESSAGE_LENGTH} characters`);
+  let actionResults: ActionResult[] | undefined;
+  if (value.actionResults !== undefined) {
+    actionResults = parseActionResults(value.actionResults, errors);
+  }
+
+  // A continuing request carries results instead of a question.
+  let message: string | null = null;
+  if (value.message !== undefined || actionResults === undefined) {
+    message = readTrimmedString(value.message, 1, MAX_CHAT_MESSAGE_LENGTH);
+    if (message === null) {
+      errors.add("message", `must be 1 to ${MAX_CHAT_MESSAGE_LENGTH} characters`);
+    }
+  }
+
+  let resumeMessageId: string | undefined;
+  if (value.resumeMessageId !== undefined) {
+    const parsed = readTrimmedString(value.resumeMessageId, 1, 128);
+    if (parsed === null) errors.add("resumeMessageId", "must be 1 to 128 characters");
+    else resumeMessageId = parsed;
+  }
+  if (actionResults !== undefined && resumeMessageId === undefined) {
+    // Without it the engine would have to guess which answer to continue, and
+    // two requests in one conversation can interleave.
+    errors.add("resumeMessageId", "is required with actionResults");
+  }
+
+  let pageActions: PageAction[] | undefined;
+  if (value.pageActions !== undefined) {
+    pageActions = parsePageActions(value.pageActions, errors);
   }
 
   let conversationId: string | undefined;
@@ -134,21 +334,19 @@ export function parseChatRequest(value: unknown): Result<ChatRequest> {
     }
   }
 
-  if (
-    errors.failed ||
-    protocol === null ||
-    assistant === null ||
-    visitorId === null ||
-    message === null
-  ) {
+  if (errors.failed || protocol === null || assistant === null || visitorId === null) {
     return fail(...errors.list);
   }
 
-  const result: ChatRequest = { protocol, assistant, visitorId, message };
+  const result: ChatRequest = { protocol, assistant, visitorId };
+  if (message !== null) result.message = message;
   if (conversationId !== undefined) result.conversationId = conversationId;
   if (pageUrl !== undefined) result.pageUrl = pageUrl;
   if (target !== undefined) result.target = target;
   if (history !== undefined) result.history = history;
+  if (pageActions !== undefined) result.pageActions = pageActions;
+  if (actionResults !== undefined) result.actionResults = actionResults;
+  if (resumeMessageId !== undefined) result.resumeMessageId = resumeMessageId;
   return ok(result);
 }
 
@@ -167,14 +365,48 @@ function isKnownChatEvent(name: string, payload: Record<string, unknown>): ChatE
         ? { type: "citation", url: payload.url, title: payload.title }
         : null;
     case "tool":
-      return typeof payload.name === "string" &&
-        (payload.state === "running" || payload.state === "done")
-        ? { type: "tool", name: payload.name, state: payload.state }
+      if (
+        typeof payload.name !== "string" ||
+        (payload.state !== "running" && payload.state !== "done")
+      ) {
+        return null;
+      }
+      return {
+        type: "tool",
+        name: payload.name,
+        state: payload.state,
+        ...(typeof payload.callId === "string" ? { callId: payload.callId } : {}),
+        ...(payload.kind === "mcp" || payload.kind === "action" ? { kind: payload.kind } : {}),
+        ...(typeof payload.ok === "boolean" ? { ok: payload.ok } : {}),
+      };
+    case "action":
+      return typeof payload.callId === "string" &&
+        typeof payload.name === "string" &&
+        isPlainObject(payload.input)
+        ? {
+            type: "action",
+            callId: payload.callId,
+            name: payload.name,
+            input: payload.input,
+            confirm: payload.confirm === true,
+          }
         : null;
     case "done":
-      return typeof payload.messageId === "string" && typeof payload.conversationId === "string"
-        ? { type: "done", messageId: payload.messageId, conversationId: payload.conversationId }
-        : null;
+      if (typeof payload.messageId !== "string" || typeof payload.conversationId !== "string") {
+        return null;
+      }
+      return {
+        type: "done",
+        messageId: payload.messageId,
+        conversationId: payload.conversationId,
+        ...(Array.isArray(payload.awaitingActions)
+          ? {
+              awaitingActions: payload.awaitingActions.filter(
+                (id): id is string => typeof id === "string",
+              ),
+            }
+          : {}),
+      };
     case "error":
       return typeof payload.message === "string"
         ? { type: "error", message: payload.message }

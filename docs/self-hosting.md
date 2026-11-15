@@ -25,17 +25,26 @@ The metadata indexes (`org_id` and `assistant_id`) must exist before the first `
 
 ## 2. Set secrets
 
-Four secrets. Run `npx wrangler secret put <name>` inside `packages/engine` for each one:
+Two secrets are required for the admin and encrypted storage, plus keys for the providers you use. Provider keys and provider/model choices can also be entered in `/admin` under **Settings → Providers** instead of setting provider secrets and `vars` (stored settings and keys take precedence over environment variables and secrets; `SOLV_SECRET_KEY` is required to store keys in the admin).
 
-| Secret                | What it is                                                                                       | Where it comes from                                              |
-| --------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
-| `SOLV_ADMIN_PASSWORD` | The one password that signs you in to `/admin`.                                                  | You choose it (or generate one with `openssl rand -base64 24`).  |
-| `SOLV_SECRET_KEY`     | Signs session cookies today; will also encrypt stored MCP tool credentials in phase 2 (planned). | `openssl rand -base64 32`. Changing it signs you out everywhere. |
-| `SOLV_ANTHROPIC_KEY`  | Your Anthropic key, if the instance uses Anthropic.                                              | console.anthropic.com                                            |
-| `SOLV_OPENAI_KEY`     | Your OpenAI key. Needed for embeddings by default even when answers come from Anthropic.         | platform.openai.com                                              |
-| `SOLV_OPENROUTER_KEY` | Your OpenRouter key, if `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`.     | openrouter.ai                                                    |
+Run `npx wrangler secret put <name>` inside `packages/engine` for each secret you set via Worker secrets:
 
-By default, `packages/engine/wrangler.jsonc` sets `SOLV_LLM_PROVIDER` to `"anthropic"` and `SOLV_LLM_TIER` to `"fast"`. To answer with OpenAI or switch tiers (`"fast"` or `"balanced"`), edit those two values under `vars` in `packages/engine/wrangler.jsonc`.
+| Secret                | What it is                                                                                   | Where it comes from                                                                                               |
+| --------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `SOLV_ADMIN_PASSWORD` | The one password that signs you in to `/admin`.                                              | You choose it (or generate one with `openssl rand -base64 24`).                                                   |
+| `SOLV_SECRET_KEY`     | Signs session cookies and encrypts stored MCP server credentials and provider API keys.      | `openssl rand -base64 32`. Changing it signs you out everywhere and makes stored credentials and keys unreadable. |
+| `SOLV_ANTHROPIC_KEY`  | Your Anthropic key, if the instance uses Anthropic (or enter in **Settings → Providers**).   | console.anthropic.com                                                                                             |
+| `SOLV_OPENAI_KEY`     | Your OpenAI key. Needed for embeddings by default (or enter in **Settings → Providers**).    | platform.openai.com                                                                                               |
+| `SOLV_OPENROUTER_KEY` | Your OpenRouter key, if `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`. | openrouter.ai                                                                                                     |
+
+### Provider settings in the admin and OpenRouter
+
+You can configure the answering provider (`anthropic`, `openai`, or `openrouter`), tier or OpenRouter model ID, embeddings provider (`openai` or `openrouter`), and API keys in `/admin` under **Settings → Providers** (and test the effective key from that screen):
+
+- **Precedence**: stored settings beat `vars` in `wrangler.jsonc`, which beat built-in defaults; stored keys beat Worker secrets. Removing a stored value falls back to the environment variable or default.
+- **Encrypted keys**: keys entered in **Settings → Providers** are encrypted with `SOLV_SECRET_KEY`, write-only, and never returned by any API. `SOLV_SECRET_KEY` must be set before storing a key in the admin. If a stored key cannot be decrypted (for example after rotating `SOLV_SECRET_KEY`), answering fails rather than silently falling back to a Worker secret.
+
+By default, `packages/engine/wrangler.jsonc` sets `SOLV_LLM_PROVIDER` to `"anthropic"` and `SOLV_LLM_TIER` to `"fast"`. To answer with OpenAI or switch tiers (`"fast"` or `"balanced"`), edit those two values under `vars` in `packages/engine/wrangler.jsonc` (or choose them in **Settings → Providers**). Built-in model IDs, prices and token limits are listed in `packages/engine/src/models.ts`.
 
 To answer with any model on OpenRouter instead, set `SOLV_LLM_PROVIDER` to `"openrouter"` and `SOLV_LLM_MODEL` to the OpenRouter model slug (`SOLV_LLM_TIER` is ignored). You can also set `SOLV_EMBEDDINGS_PROVIDER` to `"openrouter"` to embed with `openai/text-embedding-3-small` (1536 dimensions) using `SOLV_OPENROUTER_KEY` so no OpenAI key is needed:
 
@@ -47,7 +56,7 @@ To answer with any model on OpenRouter instead, set `SOLV_LLM_PROVIDER` to `"ope
 }
 ```
 
-For OpenRouter, the daily spend cap is counted in OpenRouter credits.
+For OpenRouter, the daily spend cap is counted in OpenRouter credits (if OpenRouter omits cost on a response, cost is stored as unknown and the spend cap cannot protect the instance). Tool calling and page actions depend on whether the chosen OpenRouter model supports tools.
 
 ## 3. Build and deploy
 
@@ -72,18 +81,82 @@ SOLV_INGEST_KEY=<the key> npx solv push ./content \
 
 `solv push` sends 10 documents per request so each request fits the Workers Free limit of 50 subrequests (calls to R2 and D1 count; see [Cloudflare's limits page](https://developers.cloudflare.com/workers/platform/limits/)). If you call the ingest API yourself, keep batches that small on Free; batches up to the API's cap of 100 need the Paid plan.
 
-5. In `/admin`, open **Behaviour** (or **Widget**) and click **Publish** so the assistant goes live.
+5. In `/admin`, open **Behaviour** (or **Widget**) and click **Publish** so the assistant goes live (Publish promotes your draft — behaviour, widget settings, and any enabled tools — to visitors).
 6. Open **Install**, copy the `<script>` tag, paste it into your site, and ask a question.
+
+## 5. Tools (optional)
+
+Open **Tools** and add an MCP server by URL (Streamable HTTP over `https:`). Every tool on a newly added server starts off, because every tool call runs with the credential you give — a visitor asking a question is what triggers it. **Use a token that can only read.**
+
+A tool runs for visitors only when both are true: you switched it on under **Tools**, **and** you clicked **Publish** afterwards. Switching a tool on updates your draft (so you can try it in the "Try it" pane); **Publish** is what reaches visitors.
+
+If the server needs a key, enter the header name it expects and the key value. It is stored encrypted with `SOLV_SECRET_KEY` and never shown again, so keep your own copy. If you rotate `SOLV_SECRET_KEY`, stored tool credentials become unreadable until you re-enter them on the **Tools** screen.
+
+Tool runs are capped at 4 iterations per turn, 20 tool calls per conversation, 15 seconds of wall time per answer, 10 seconds per MCP request, and 8192 bytes per tool result.
+
+## 6. Page actions (optional)
+
+Open **Widget**, turn on **Let the assistant help on the page**, and click **Publish** to enable the three built-in actions (`navigate`, `highlight`, and `fill`).
+
+Mark what the assistant may touch in your HTML with two attributes:
+
+- `data-solv-fill="<name>"` on form fields `fill` may set
+- `data-solv-target="<name>"` on elements `highlight` may point at
+- `data-solv-no-fill` on a form or any ancestor to take everything inside it out of scope
+
+`fill` always asks the visitor to accept before changing a field and never submits. Password, payment and one-time-code fields are never filled or read, even if marked.
+
+**Other sites it may send visitors to** is a different list from **Allowed origins**: the first lists extra origins `navigate` may open in a new tab, while the second lists which sites may embed and chat with the assistant at all. At most 16 page actions are sent per chat request.
+
+A page action times out after 5 seconds so it does not hold the answer indefinitely. Timing out does not cancel the underlying call, so an action that timed out may still complete in the page.
+
+## 7. Tests (optional)
+
+Open **Tests** to write questions your assistant must keep getting right (up to 25 tests per assistant). Each test is a question plus one expectation: `cites` a URL, `contains` a phrase, `notContains` a phrase, or `declines` (uses the fallback).
+
+Clicking **Publish** runs the tests against the draft first (at most 25 tests per run, within 60 seconds). If any fail, you are shown which and why, and can fix the draft or click **Publish anyway**.
+
+From CI, run tests with the same ingest key you use for content:
+
+```sh
+SOLV_INGEST_KEY=<the key> npx solv test \
+  --endpoint https://<your-worker> --assistant ast_…
+```
+
+`solv test` exits non-zero if any test fails or does not run. If you declare a `tests` array in `solv.config.json` (and pass `--file solv.config.json` to `solv test`, or run `solv apply`), it **replaces** the assistant's stored tests, including any you added in the admin; `solv test --dry-run` previews what would change first.
+
+## 8. Reports
+
+Open **Reports** and pick **7**, **30**, or **90** days to see questions asked, share answered, share marked unhelpful (thumbs down), cost, most asked questions, most frequent unanswered questions, and which sources were cited most and never. Click **Download CSV** to save the report on screen.
 
 ## Rotating a secret
 
-- `SOLV_SECRET_KEY` — every session is signed out; sign in again.
+- `SOLV_SECRET_KEY` — every session is signed out, so sign in again, and every
+  MCP server credential and provider API key stored with the old key can no
+  longer be read. Open **Tools** to re-enter MCP server credentials, and open
+  **Settings → Providers** to re-enter any stored provider keys; until you do,
+  those servers' tools cannot be called and answering with a stored provider key
+  will fail rather than falling back to a Worker secret.
 
 Signing out clears the session cookie in that browser only. The engine keeps no list of sessions, so a copy of the cookie stays valid until it expires after 30 days. If you think a session cookie was copied, rotate `SOLV_SECRET_KEY`.
 
 - An ingest key — rotate it on the **Install** screen in `/admin` and replace it in CI; the old one stops working at once.
 - A provider key — takes effect on the next request; nothing else changes.
 
+## Upgrading an existing instance
+
+From the repository root, apply the new D1 migrations, rebuild, and redeploy:
+
+```sh
+npm ci
+npm run migrations:apply -w @solvchat/engine
+npm run build
+cd packages/engine && npx wrangler deploy
+```
+
+No environment variable needs to change. Upgrading to this version signs existing admin sessions out once because session cookies are now signed with a key derived from `SOLV_SECRET_KEY`; sign in again after deploying.
+
 ## Not here yet
 
-MCP tools, answer tests and reports are phase 2, so the admin has no Tools or Tests screen.
+- The cloud layer: public sign-up, teams and roles, billing, managed model keys, and scheduled email digests. Those live in a separate, closed repository; nothing here needs them.
+- A crawler. Content is pushed with `solv push`, imported once from a sitemap, or written by hand under **Sources**.

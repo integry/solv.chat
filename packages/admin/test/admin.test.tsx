@@ -3,11 +3,12 @@ import {
   defaultVersionConfig,
   MAX_CHAT_MESSAGE_LENGTH,
   parseChatRequest,
+  parseVersionConfig,
 } from "@solvchat/core";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
-import type { Assistant, VersionRow } from "../src/api/types.js";
+import type { Assistant, TestResult, VersionRow } from "../src/api/types.js";
 
 function makeAssistant(id: string, name: string, allowedOrigins: string[] = []): Assistant {
   return {
@@ -77,6 +78,7 @@ function createControlledSseResponse() {
 interface FakeServerOptions {
   signedIn?: boolean;
   assistants?: Assistant[];
+  failingTests?: TestResult[];
 }
 
 function createDeferred<T = void>() {
@@ -120,6 +122,7 @@ function installFakeServer(options: FakeServerOptions = {}) {
     | null = null;
   const chatBodies: Array<Record<string, unknown>> = [];
   const calls: Array<{ method: string; path: string }> = [];
+  const publishes: Array<{ force: boolean; runId?: string }> = [];
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -241,13 +244,15 @@ function installFakeServer(options: FakeServerOptions = {}) {
           pendingDraftSave = null;
           await wait;
         }
-        const body = JSON.parse(String(init?.body ?? "{}")) as Partial<VersionRow["config"]>;
-        if (body.behaviour) {
-          draft.config = { ...draft.config, behaviour: body.behaviour };
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        const parsed = parseVersionConfig(body, draft.config);
+        if (!parsed.ok) {
+          return Response.json(
+            { error: parsed.errors[0] ?? "Invalid config.", fields: parsed.errors },
+            { status: 400 },
+          );
         }
-        if (body.widget) {
-          draft.config = { ...draft.config, widget: body.widget };
-        }
+        draft.config = parsed.value;
         return Response.json({ draft });
       }
     }
@@ -262,6 +267,21 @@ function installFakeServer(options: FakeServerOptions = {}) {
       const id = publishMatch[1];
       const draft = drafts.get(id);
       if (!draft) return Response.json({ error: "Not found." }, { status: 404 });
+      const rawBody = init?.body
+        ? (JSON.parse(String(init.body)) as { force?: unknown; runId?: unknown })
+        : {};
+      const force = rawBody.force === true;
+      const runId = typeof rawBody.runId === "string" ? rawBody.runId : undefined;
+      publishes.push(runId !== undefined ? { force, runId } : { force });
+      if (options.failingTests && options.failingTests.length > 0 && !force) {
+        return Response.json(
+          {
+            error: "Some tests did not pass.",
+            run: { id: "run_1", results: options.failingTests, stopped: null },
+          },
+          { status: 409 },
+        );
+      }
       const list = versions.get(id) ?? [];
       for (const v of list) {
         if (v.state === "published") v.state = "archived";
@@ -341,6 +361,7 @@ function installFakeServer(options: FakeServerOptions = {}) {
     fetchMock,
     calls,
     chatBodies,
+    publishes,
     triggerNext401() {
       forceNext401 = true;
     },
@@ -495,6 +516,35 @@ describe("admin app", () => {
     ).toBeTruthy();
   });
 
+  it("saves Widget actions.builtins and actions.allowedOrigins and maps field errors", async () => {
+    installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/widget");
+    render(<App />);
+
+    const toggle = (await screen.findByLabelText(
+      "Let the assistant help on the page",
+    )) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    expect(screen.getByText("Take a visitor to another page on your site.")).toBeTruthy();
+
+    const actionOrigins = screen.getByLabelText(
+      "Other sites it may send visitors to",
+    ) as HTMLTextAreaElement;
+
+    // Invalid action origin maps actions.allowedOrigins[0] field error.
+    fireEvent.change(actionOrigins, { target: { value: "https://bad.example/path" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("must be an origin only, with no path")).toBeTruthy();
+
+    // Valid values save cleanly.
+    fireEvent.click(toggle);
+    fireEvent.change(actionOrigins, { target: { value: "https://shop.example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Draft saved.")).toBeTruthy();
+    expect(toggle.checked).toBe(true);
+    expect(actionOrigins.value).toBe("https://shop.example.com");
+  });
+
   it("keeps the Try it transcript across screen navigation and sends target: draft and protocol version", async () => {
     const server = installFakeServer({ signedIn: true });
     window.history.replaceState(null, "", "/admin/behaviour");
@@ -585,7 +635,7 @@ describe("admin app", () => {
     expect(screen.queryByText("Bad link")).toBeNull();
   });
 
-  it("exposes accessible navigation without phase 2 items or model/key settings", async () => {
+  it("exposes accessible navigation with the specification's nine items and no model/key settings", async () => {
     installFakeServer({ signedIn: true });
     render(<App />);
 
@@ -593,12 +643,16 @@ describe("admin app", () => {
     const links = Array.from(nav.querySelectorAll("a"));
     expect(links.map((l) => l.textContent)).toEqual([
       "Overview",
+      "Reports",
       "Conversations",
       "Gaps",
       "Sources",
+      "Tools",
       "Behaviour",
       "Widget",
+      "Tests",
       "Install",
+      "Providers",
     ]);
 
     for (const link of links) {
@@ -1309,5 +1363,75 @@ describe("admin app", () => {
 
     expect(server.chatBodies[1]).toMatchObject({ message: "Fresh question" });
     expect(server.chatBodies[1]?.history).toBeUndefined();
+  });
+
+  it("publishes with passing tests on the unchanged path", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    expect(await screen.findByText(/^Published \(/)).toBeTruthy();
+    expect(server.publishes).toEqual([{ force: false }]);
+  });
+
+  it("does not publish when a test fails, shows why, and publishes on Publish anyway", async () => {
+    const failingResult: TestResult = {
+      testId: "tst_1",
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+      outcome: "failed",
+      reason: 'Did not say "$29".',
+      excerpt: "Contact sales for pricing.",
+    };
+    const server = installFakeServer({ signedIn: true, failingTests: [failingResult] });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+
+    expect(
+      await screen.findByText("Some tests did not pass, so nothing was published."),
+    ).toBeTruthy();
+    expect(screen.getByText("What does Pro cost?")).toBeTruthy();
+    expect(screen.getByText('Did not say "$29".')).toBeTruthy();
+    expect(server.publishes).toEqual([{ force: false }]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Publish anyway" }));
+    expect(await screen.findByText(/^Published \(/)).toBeTruthy();
+    expect(server.publishes).toEqual([{ force: false }, { force: true, runId: "run_1" }]);
+  });
+
+  it("lets the owner go back and fix a failing test from Widget without publishing", async () => {
+    const failingResult: TestResult = {
+      testId: "tst_1",
+      question: "Where is the refund policy?",
+      expectation: { kind: "cites", url: "https://example.com/refunds" },
+      outcome: "failed",
+      reason: "Did not cite https://example.com/refunds. Cited: nothing.",
+      excerpt: "",
+    };
+    const server = installFakeServer({ signedIn: true, failingTests: [failingResult] });
+    window.history.replaceState(null, "", "/admin/widget");
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    expect(
+      await screen.findByText("Some tests did not pass, so nothing was published."),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Go back and fix it" }));
+    expect(screen.queryByText("Some tests did not pass, so nothing was published.")).toBeNull();
+    expect(server.publishes).toEqual([{ force: false }]);
+  });
+
+  it("makes no test run request when the assistant has no tests", async () => {
+    const server = installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/behaviour");
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    expect(await screen.findByText(/^Published \(/)).toBeTruthy();
+    expect(server.calls.some((call) => call.path.endsWith("/test-runs"))).toBe(false);
   });
 });

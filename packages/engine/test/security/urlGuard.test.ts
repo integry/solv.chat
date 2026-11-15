@@ -179,4 +179,37 @@ describe("urlGuard", () => {
       }),
     ).rejects.toThrow(UnsafeUrlError);
   });
+
+  it("sends a POST body and the given headers on a non-GET request", async () => {
+    let seen: RequestInit | undefined;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      seen = init;
+      return new Response("ok", { status: 200 });
+    };
+    await followCheckingEachHop(new URL("https://api.example.com/rpc"), fetchImpl, {
+      maxRedirects: 0,
+      timeoutMs: 1000,
+      method: "POST",
+      body: '{"jsonrpc":"2.0"}',
+      headers: { "x-api-key": "k" },
+      resolveHost: async () => ["93.184.216.34"],
+    });
+    expect(seen?.method).toBe("POST");
+    expect(seen?.body).toBe('{"jsonrpc":"2.0"}');
+    expect(new Headers(seen?.headers).get("x-api-key")).toBe("k");
+  });
+
+  it("refuses to follow a redirect for a non-GET request", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(null, { status: 307, headers: { location: "https://other.example.com/rpc" } });
+    await expect(
+      followCheckingEachHop(new URL("https://api.example.com/rpc"), fetchImpl, {
+        maxRedirects: 3,
+        timeoutMs: 1000,
+        method: "POST",
+        body: "{}",
+        resolveHost: async () => ["93.184.216.34"],
+      }),
+    ).rejects.toThrow(UnsafeUrlError);
+  });
 });

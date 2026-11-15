@@ -1,12 +1,13 @@
+import { type RunDeps, replaceTests, runAnswerTests } from "../admin/answerTests.js";
 import { BadRequest, Conflict, NotFound, readJsonBody } from "../admin/errors.js";
 import { getDraft, updateDraft } from "../admin/versions.js";
-import { forIngestScope } from "../db/tenant.js";
+import { forIngestScope, type Tenant } from "../db/tenant.js";
 import type { Retriever } from "../providers/retrieval.js";
 import type { AuthProvider, Limits } from "../seams/types.js";
 import { ingestScopeFor } from "./auth.js";
 import { deleteDocuments, type IngestQueueMessage, pushDocuments, TooLarge } from "./documents.js";
 
-export type IngestResource = "documents" | "config";
+export type IngestResource = "documents" | "config" | "tests" | "test-runs";
 
 export interface IngestRouteDeps {
   db: D1Database;
@@ -15,9 +16,10 @@ export interface IngestRouteDeps {
   retriever: Pick<Retriever, "remove">;
   limits: Limits;
   auth: Pick<AuthProvider, "resolveOrg">;
+  resolveRunDeps: (orgId: string, tenant: Tenant) => Promise<RunDeps>;
 }
 
-/** Handles `/v1/ingest/:assistantId/documents` and `/v1/ingest/:assistantId/config`. */
+/** Handles `/v1/ingest/:assistantId/{documents,config,tests,test-runs}`. */
 export async function ingestRoutes(
   request: Request,
   assistantId: string,
@@ -28,7 +30,11 @@ export async function ingestRoutes(
     if (request.method !== "PUT" && request.method !== "DELETE") {
       return Response.json({ error: "Not found." }, { status: 404 });
     }
-  } else if (request.method !== "GET" && request.method !== "PUT") {
+  } else if (resource === "config" || resource === "tests") {
+    if (request.method !== "GET" && request.method !== "PUT") {
+      return Response.json({ error: "Not found." }, { status: 404 });
+    }
+  } else if (request.method !== "POST") {
     return Response.json({ error: "Not found." }, { status: 404 });
   }
 
@@ -53,6 +59,27 @@ export async function ingestRoutes(
       const body = await readJsonBody(request);
       const draft = await updateDraft(tenant, scope.assistantId, body);
       return Response.json({ config: draft.config });
+    }
+
+    if (resource === "tests") {
+      if (request.method === "GET") {
+        return Response.json({ tests: await tenant.tests.list(scope.assistantId) });
+      }
+      // Replace, not merge: the file is a full declaration. Merging by
+      // question text would resurrect a test the owner deleted in the admin,
+      // with nothing to explain why it came back.
+      const result = await replaceTests(tenant, scope.assistantId, await readJsonBody(request));
+      return Response.json(result);
+    }
+
+    if (resource === "test-runs") {
+      // The same runner the admin's "Run now" uses, so CI and the screen
+      // cannot disagree about whether a draft passes.
+      const { draft: _draft, ...run } = await runAnswerTests(
+        await deps.resolveRunDeps(scope.orgId, tenant),
+        scope.assistantId,
+      );
+      return Response.json(run);
     }
 
     const body = await readJsonBody(request);

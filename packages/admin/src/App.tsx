@@ -1,15 +1,25 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ApiError } from "./api/client.js";
 import type { Assistant } from "./api/types.js";
 import { useResource } from "./api/useResource.js";
-import { type ScreenId, useRoute } from "./routing.js";
+import {
+  ADMIN_API_HELPERS,
+  type MountAdminOptions,
+  type ResolvedAdminConfig,
+  resolveAdminConfig,
+} from "./extension.js";
+import { type BuiltinScreenId, useRoute } from "./routing.js";
 import { Behaviour } from "./screens/Behaviour.js";
 import { Conversations } from "./screens/Conversations.js";
 import { Gaps } from "./screens/Gaps.js";
 import { Install } from "./screens/Install.js";
 import { Login } from "./screens/Login.js";
 import { Overview } from "./screens/Overview.js";
+import { Providers } from "./screens/Providers.js";
+import { Reports } from "./screens/Reports.js";
 import { Sources } from "./screens/Sources.js";
+import { Tests } from "./screens/Tests.js";
+import { Tools } from "./screens/Tools.js";
 import { Widget } from "./screens/Widget.js";
 import { AssistantSwitcher } from "./shell/AssistantSwitcher.js";
 import { Navigation } from "./shell/Navigation.js";
@@ -17,27 +27,41 @@ import { TryItPane } from "./shell/TryItPane.js";
 import { AssistantMutationsProvider } from "./shell/useAssistantMutations.js";
 import { useSession } from "./shell/useSession.js";
 
-function renderScreen(screen: ScreenId, assistantId: string) {
+function renderBuiltinScreen(screen: BuiltinScreenId, assistantId: string) {
   switch (screen) {
     case "overview":
       return <Overview key={assistantId} assistantId={assistantId} />;
+    case "reports":
+      return <Reports key={assistantId} assistantId={assistantId} />;
     case "conversations":
       return <Conversations key={assistantId} assistantId={assistantId} />;
     case "gaps":
       return <Gaps key={assistantId} assistantId={assistantId} />;
     case "sources":
       return <Sources key={assistantId} assistantId={assistantId} />;
+    case "tools":
+      return <Tools key={assistantId} assistantId={assistantId} />;
     case "behaviour":
       return <Behaviour key={assistantId} assistantId={assistantId} />;
     case "widget":
       return <Widget key={assistantId} assistantId={assistantId} />;
+    case "tests":
+      return <Tests key={assistantId} assistantId={assistantId} />;
     case "install":
       return <Install key={assistantId} assistantId={assistantId} />;
+    case "providers":
+      return <Providers />;
   }
 }
 
-function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
-  const { screen, navigate } = useRoute();
+function AdminShell({
+  config,
+  onSignOut,
+}: {
+  config: ResolvedAdminConfig;
+  onSignOut: () => Promise<void>;
+}) {
+  const { screen, navigate } = useRoute(config.navItems);
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -62,6 +86,8 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
       ? selectedId
       : (assistants[0]?.id ?? null);
   const selectedAssistant = assistants.find((a) => a.id === effectiveSelectedId) ?? null;
+  const ExtraScreen =
+    screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
 
   return (
     <div className="shell">
@@ -92,11 +118,23 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
       )}
 
       <div className="shell-body">
-        <Navigation current={screen} onNavigate={navigate} />
+        <Navigation current={screen} onNavigate={navigate} items={config.navItems} />
 
         <AssistantMutationsProvider>
           <main className="shell-main">
-            {assistantsRes.status === "loading" && assistants.length === 0 ? (
+            {ExtraScreen ? (
+              <ExtraScreen
+                assistant={selectedAssistant}
+                assistantId={selectedAssistant?.id ?? null}
+                api={ADMIN_API_HELPERS}
+              />
+            ) : screen === null ? (
+              <div className="screen">
+                <p className="muted">No screens available.</p>
+              </div>
+            ) : screen === "providers" ? (
+              <Providers />
+            ) : assistantsRes.status === "loading" && assistants.length === 0 ? (
               <p className="muted">Loading assistants…</p>
             ) : assistantsRes.status === "error" ? (
               <p className="error-text" role="alert">
@@ -107,7 +145,7 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
                 <p className="muted">Create an assistant to begin.</p>
               </div>
             ) : (
-              renderScreen(screen, selectedAssistant.id)
+              renderBuiltinScreen(screen as BuiltinScreenId, selectedAssistant.id)
             )}
           </main>
         </AssistantMutationsProvider>
@@ -119,15 +157,26 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
   );
 }
 
-export function App() {
-  const session = useSession();
+export interface AppProps {
+  options?: MountAdminOptions;
+  /** @internal Pre-resolved config passed by `mountAdmin`. */
+  config?: ResolvedAdminConfig;
+}
+
+export function App({ options, config: preResolved }: AppProps = {}) {
+  const resolved = useMemo(
+    () => preResolved ?? resolveAdminConfig(options),
+    [preResolved, options],
+  );
+  const session = useSession(resolved.onSignOut);
 
   if (session.state === "loading") {
     return <p className="loading-screen">Loading…</p>;
   }
 
   if (session.state === "signed-out") {
-    return <Login onSignedIn={session.refresh} />;
+    const SignIn = resolved.signIn ?? Login;
+    return <SignIn onSignedIn={session.refresh} />;
   }
 
   if (session.state === "unavailable") {
@@ -141,5 +190,5 @@ export function App() {
     );
   }
 
-  return <AdminShell onSignOut={session.signOut} />;
+  return <AdminShell config={resolved} onSignOut={session.signOut} />;
 }

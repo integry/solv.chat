@@ -1,7 +1,19 @@
 {
   "name": "@solvchat/widget",
   "version": "0.0.0",
+  "description": "Dependency-free embeddable chat web component for solv.chat.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/integry/solv.chat.git",
+    "directory": "packages/widget"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/widget.js",
   "types": "./dist/widget.d.ts",

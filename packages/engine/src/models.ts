@@ -43,8 +43,8 @@ export const ANTHROPIC_MODELS: Record<Tier, ModelInfo> = {
   },
 };
 
-// Both models are served by /v1/chat/completions and bill prompts >272,000 input tokens at 2x input, 1.5x output.
-// Source: https://developers.openai.com/api/docs/models and https://developers.openai.com/api/docs/pricing — checked 2026-11-14
+// Both models support tool calling via /v1/responses and bill prompts >272,000 input tokens at 2x input, 1.5x output.
+// Source: https://developers.openai.com/api/docs/models and https://developers.openai.com/api/docs/pricing — checked 2026-11-15
 export const OPENAI_MODELS: Record<Tier, ModelInfo> = {
   fast: {
     id: "gpt-6-luna",

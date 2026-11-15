@@ -1,13 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProviderError } from "../../src/providers/error.js";
 import { openaiProvider } from "../../src/providers/openai.js";
-import type { LlmChunk, LlmRequest } from "../../src/providers/types.js";
+import type { LlmChunk, LlmRequest, ToolDefinition } from "../../src/providers/types.js";
 
 const SAMPLE_REQUEST: LlmRequest = {
   system: "You are helpful.",
   messages: [{ role: "user", content: "Hi" }],
   maxTokens: 256,
 };
+
+const SAMPLE_TOOL: ToolDefinition = {
+  name: "lookup_order",
+  description: "Look up an order by id.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string" } },
+    required: ["id"],
+  },
+};
+
+const COMPLETE_TEXT_STREAM = [
+  'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hello"}\n\n',
+  'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":" world"}\n\n',
+  'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":11,"output_tokens":5}}}\n\n',
+].join("");
 
 function sseResponse(bodyText: string, status = 200): Response {
   const bytes = new TextEncoder().encode(bodyText);
@@ -70,19 +86,11 @@ describe("openaiProvider", () => {
 
     const provider = openaiProvider({
       apiKey: fakeKey,
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async (input, init) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         capturedInit = init;
-        return sseResponse(
-          [
-            'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n',
-            'data: {"choices":[{"delta":{"content":" world"},"finish_reason":null}]}\n\n',
-            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
-            'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":5}}\n\n',
-            "data: [DONE]\n\n",
-          ].join(""),
-        );
+        return sseResponse(COMPLETE_TEXT_STREAM);
       },
     });
 
@@ -91,28 +99,35 @@ describe("openaiProvider", () => {
     expect(chunks).toEqual([
       { kind: "text", text: "Hello" },
       { kind: "text", text: " world" },
-      { kind: "usage", tokensIn: 11, tokensOut: 5 },
+      { kind: "usage", tokensIn: 11, tokensOut: 5, stopReason: "end" },
     ]);
 
+    expect(capturedUrl).toBe("https://api.openai.com/v1/responses");
     expect(capturedUrl).not.toContain(fakeKey);
     const headers = new Headers(capturedInit?.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${fakeKey}`);
 
     const body = JSON.parse(String(capturedInit?.body)) as Record<string, unknown>;
-    expect(body.stream).toBe(true);
-    expect(body.stream_options).toEqual({ include_usage: true });
-    expect(body.model).toBe("gpt-5-mini");
+    expect(body).toEqual({
+      model: "gpt-6-luna",
+      instructions: "You are helpful.",
+      input: [{ role: "user", content: "Hi" }],
+      max_output_tokens: 256,
+      stream: true,
+      store: false,
+    });
+    expect("tools" in body).toBe(false);
   });
 
   it("throws ProviderError on mid-stream error event", async () => {
     const provider = openaiProvider({
       apiKey: "test-key",
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async () =>
         sseResponse(
           [
-            'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
-            'data: {"error":{"type":"server_error","message":"boom"}}\n\n',
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+            'event: error\ndata: {"type":"error","code":"server_error"}\n\n',
           ].join(""),
         ),
     });
@@ -128,7 +143,7 @@ describe("openaiProvider", () => {
 
     const p429 = openaiProvider({
       apiKey: secret,
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async () => new Response("rate limited", { status: 429 }),
     });
     await expect(collect(p429.stream(SAMPLE_REQUEST))).rejects.toMatchObject({
@@ -139,7 +154,7 @@ describe("openaiProvider", () => {
 
     const p400 = openaiProvider({
       apiKey: secret,
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async () => new Response("bad request", { status: 400 }),
     });
     await expect(collect(p400.stream(SAMPLE_REQUEST))).rejects.toMatchObject({
@@ -150,7 +165,7 @@ describe("openaiProvider", () => {
 
     const p401 = openaiProvider({
       apiKey: secret,
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async () => new Response(`invalid key: ${secret}`, { status: 401 }),
     });
     let caught: unknown;
@@ -165,12 +180,14 @@ describe("openaiProvider", () => {
     expect((caught as ProviderError).message).not.toContain(secret);
   });
 
-  it("throws when stream ends without finish_reason", async () => {
+  it("throws when stream ends without response.completed", async () => {
     const provider = openaiProvider({
       apiKey: "test-key",
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async () =>
-        sseResponse('data: {"choices":[{"delta":{"content":"half"},"finish_reason":null}]}\n\n'),
+        sseResponse(
+          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"half"}\n\n',
+        ),
     });
 
     await expect(collect(provider.stream(SAMPLE_REQUEST))).rejects.toBeInstanceOf(ProviderError);
@@ -183,7 +200,7 @@ describe("openaiProvider", () => {
       start(controller) {
         controller.enqueue(
           encoder.encode(
-            'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n',
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hello"}\n\n',
           ),
         );
       },
@@ -192,7 +209,7 @@ describe("openaiProvider", () => {
 
     const provider = openaiProvider({
       apiKey: "test-key",
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async () =>
         new Response(stream, {
           status: 200,
@@ -210,15 +227,15 @@ describe("openaiProvider", () => {
     expect(cancelSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("throws ProviderError on EOF after finish_reason but before usage", async () => {
+  it("throws ProviderError when response.completed arrives without usage", async () => {
     const provider = openaiProvider({
       apiKey: "test-key",
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async () =>
         sseResponse(
           [
-            'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n',
-            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hello"}\n\n',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
           ].join(""),
         ),
     });
@@ -233,7 +250,7 @@ describe("openaiProvider", () => {
     const secret = "sk-openai-fetch-secret";
     const rejecting = openaiProvider({
       apiKey: secret,
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async () => {
         throw new TypeError(`connection reset for ${secret}`);
       },
@@ -252,7 +269,7 @@ describe("openaiProvider", () => {
     const existing = new ProviderError("custom non-retryable", false, 403);
     const preserving = openaiProvider({
       apiKey: secret,
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async () => {
         throw existing;
       },
@@ -266,7 +283,7 @@ describe("openaiProvider", () => {
       start(controller) {
         controller.enqueue(
           encoder.encode(
-            'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n',
           ),
         );
       },
@@ -277,7 +294,7 @@ describe("openaiProvider", () => {
 
     const provider = openaiProvider({
       apiKey: "test-key",
-      model: "gpt-5-mini",
+      model: "gpt-6-luna",
       fetchImpl: async () =>
         new Response(stream, {
           status: 200,
@@ -290,42 +307,354 @@ describe("openaiProvider", () => {
       retryable: true,
     });
   });
+
   describe("usage already reported when the stream then fails", () => {
-    const TEXT = 'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}\n\n';
-    const STOP = 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n';
-    const USAGE = 'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":5}}\n\n';
+    const TEXT =
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hi"}\n\n';
+    const COMPLETED =
+      'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":11,"output_tokens":5}}}\n\n';
+    const FAILED_WITH_USAGE =
+      'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"code":"server_error"},"usage":{"input_tokens":11,"output_tokens":5}}}\n\n';
 
     const cases: Array<[string, () => Response]> = [
-      ["read fails after the usage payload", () => failingAfter([TEXT, STOP, USAGE])],
-      ["usage arrives but no finish_reason", () => sseResponse([TEXT, USAGE].join(""))],
-      [
-        "error payload after usage",
-        () => sseResponse([TEXT, USAGE, 'data: {"error":{"type":"server_error"}}\n\n'].join("")),
-      ],
+      ["read fails after response.completed", () => failingAfter([TEXT, COMPLETED])],
+      ["response.failed carrying usage", () => sseResponse([TEXT, FAILED_WITH_USAGE].join(""))],
     ];
 
     it.each(cases)("%s: yields one usage chunk, then throws", async (_name, respond) => {
       const provider = openaiProvider({
         apiKey: "test-key",
-        model: "gpt-5-mini",
+        model: "gpt-6-luna",
         fetchImpl: async () => respond(),
       });
       const { chunks, error } = await collectUntilThrow(provider.stream(SAMPLE_REQUEST));
       expect(error).toBeInstanceOf(ProviderError);
       expect(chunks.filter((c) => c.kind === "usage")).toEqual([
-        { kind: "usage", tokensIn: 11, tokensOut: 5 },
+        {
+          kind: "usage",
+          tokensIn: 11,
+          tokensOut: 5,
+          ...(chunks.find((c) => c.kind === "usage")?.stopReason ? { stopReason: "end" } : {}),
+        },
       ]);
     });
 
     it("yields no usage chunk when nothing was reported", async () => {
       const provider = openaiProvider({
         apiKey: "test-key",
-        model: "gpt-5-mini",
-        fetchImpl: async () => failingAfter([TEXT, STOP]),
+        model: "gpt-6-luna",
+        fetchImpl: async () => failingAfter([TEXT]),
       });
       const { chunks, error } = await collectUntilThrow(provider.stream(SAMPLE_REQUEST));
       expect(error).toBeInstanceOf(ProviderError);
       expect(chunks).toEqual([{ kind: "text", text: "Hi" }]);
+    });
+  });
+
+  describe("tool calling (Responses API)", () => {
+    it("serializes Responses API tools and tool-exchange input items", async () => {
+      let body: Record<string, unknown> = {};
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async (_input, init) => {
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return sseResponse(COMPLETE_TEXT_STREAM);
+        },
+      });
+
+      await collect(
+        provider.stream({
+          system: "You are helpful.",
+          maxTokens: 256,
+          tools: [SAMPLE_TOOL],
+          messages: [
+            { role: "user", content: "Check order A-1" },
+            {
+              role: "assistant",
+              content: "Checking.",
+              toolCalls: [{ callId: "call_1", name: "lookup_order", input: { id: "A-1" } }],
+            },
+            {
+              role: "tool_results",
+              results: [{ callId: "call_1", content: "shipped", isError: false }],
+            },
+          ],
+        }),
+      );
+
+      expect(body).toEqual({
+        model: "gpt-6.1-sol",
+        instructions: "You are helpful.",
+        max_output_tokens: 256,
+        stream: true,
+        store: false,
+        tools: [
+          {
+            type: "function",
+            name: "lookup_order",
+            description: "Look up an order by id.",
+            parameters: SAMPLE_TOOL.inputSchema,
+            strict: false,
+          },
+        ],
+        input: [
+          { role: "user", content: "Check order A-1" },
+          { role: "assistant", content: "Checking." },
+          {
+            type: "function_call",
+            call_id: "call_1",
+            name: "lookup_order",
+            arguments: '{"id":"A-1"}',
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_1",
+            output: "shipped",
+          },
+        ],
+      });
+    });
+
+    it("preserves optional tool parameters by setting strict: false on Responses tools", async () => {
+      let body: Record<string, unknown> = {};
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async (_input, init) => {
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return sseResponse(COMPLETE_TEXT_STREAM);
+        },
+      });
+
+      const toolWithOptionalParam: ToolDefinition = {
+        name: "search_orders",
+        description: "Search orders.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            limit: { type: "integer" },
+          },
+          required: ["query"],
+        },
+      };
+
+      await collect(
+        provider.stream({
+          ...SAMPLE_REQUEST,
+          tools: [toolWithOptionalParam],
+        }),
+      );
+
+      expect(body.tools).toEqual([
+        {
+          type: "function",
+          name: "search_orders",
+          description: "Search orders.",
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+              limit: { type: "integer" },
+            },
+            required: ["query"],
+          },
+          strict: false,
+        },
+      ]);
+    });
+
+    it("distinguishes failed tool results from successful ones with identical content", async () => {
+      const bodies: Array<Record<string, unknown>> = [];
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async (_input, init) => {
+          bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return sseResponse(COMPLETE_TEXT_STREAM);
+        },
+      });
+
+      for (const isError of [false, true]) {
+        await collect(
+          provider.stream({
+            system: "You are helpful.",
+            maxTokens: 256,
+            tools: [SAMPLE_TOOL],
+            messages: [
+              { role: "user", content: "Check order A-1" },
+              {
+                role: "assistant",
+                content: "",
+                toolCalls: [{ callId: "call_1", name: "lookup_order", input: { id: "A-1" } }],
+              },
+              {
+                role: "tool_results",
+                results: [
+                  { callId: "call_1", content: "Unavailable", isError },
+                  { callId: "call_2", content: "", isError },
+                ],
+              },
+            ],
+          }),
+        );
+      }
+
+      const okInputs = bodies[0]?.input as Array<{ type?: string; output?: string }>;
+      const errInputs = bodies[1]?.input as Array<{ type?: string; output?: string }>;
+      const okOutputs = okInputs.filter((item) => item.type === "function_call_output");
+      const errOutputs = errInputs.filter((item) => item.type === "function_call_output");
+
+      expect(okOutputs).toEqual([
+        { type: "function_call_output", call_id: "call_1", output: "Unavailable" },
+        { type: "function_call_output", call_id: "call_2", output: "" },
+      ]);
+      expect(errOutputs).toEqual([
+        { type: "function_call_output", call_id: "call_1", output: "[error] Unavailable" },
+        { type: "function_call_output", call_id: "call_2", output: "[error]" },
+      ]);
+      expect(errOutputs[0]?.output).not.toBe(okOutputs[0]?.output);
+      expect(errOutputs[1]?.output).not.toBe(okOutputs[1]?.output);
+    });
+
+    it("reassembles a tool call split across function_call_arguments.delta fragments and surfaces tools stopReason", async () => {
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async () =>
+          sseResponse(
+            [
+              'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup_order","arguments":""}}\n\n',
+              'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\\"id\\":"}\n\n',
+              'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\\"A-1\\"}"}\n\n',
+              'event: response.function_call_arguments.done\ndata: {"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\\"id\\":\\"A-1\\"}"}\n\n',
+              'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call"}],"usage":{"input_tokens":12,"output_tokens":4}}}\n\n',
+            ].join(""),
+          ),
+      });
+
+      const chunks = await collect(provider.stream({ ...SAMPLE_REQUEST, tools: [SAMPLE_TOOL] }));
+      expect(chunks).toEqual([
+        {
+          kind: "tool_call",
+          call: { callId: "call_1", name: "lookup_order", input: { id: "A-1" } },
+        },
+        { kind: "usage", tokensIn: 12, tokensOut: 4, stopReason: "tools" },
+      ]);
+    });
+
+    it("yields text and tool_call chunks in arrival order", async () => {
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6-luna",
+        fetchImpl: async () =>
+          sseResponse(
+            [
+              'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Checking "}\n\n',
+              'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"lookup_order","arguments":""}}\n\n',
+              'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_2","delta":"{\\"id\\":\\"B-2\\"}"}\n\n',
+              'event: response.function_call_arguments.done\ndata: {"type":"response.function_call_arguments.done","item_id":"fc_2","arguments":"{\\"id\\":\\"B-2\\"}"}\n\n',
+              'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call"}],"usage":{"input_tokens":15,"output_tokens":6}}}\n\n',
+            ].join(""),
+          ),
+      });
+
+      const chunks = await collect(provider.stream({ ...SAMPLE_REQUEST, tools: [SAMPLE_TOOL] }));
+      expect(chunks).toEqual([
+        { kind: "text", text: "Checking " },
+        {
+          kind: "tool_call",
+          call: { callId: "call_2", name: "lookup_order", input: { id: "B-2" } },
+        },
+        { kind: "usage", tokensIn: 15, tokensOut: 6, stopReason: "tools" },
+      ]);
+    });
+
+    it("surfaces length stopReason on response.incomplete with max_output_tokens", async () => {
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6-luna",
+        fetchImpl: async () =>
+          sseResponse(
+            [
+              'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Cut"}\n\n',
+              'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":9,"output_tokens":256}}}\n\n',
+            ].join(""),
+          ),
+      });
+
+      const chunks = await collect(provider.stream(SAMPLE_REQUEST));
+      expect(chunks).toEqual([
+        { kind: "text", text: "Cut" },
+        { kind: "usage", tokensIn: 9, tokensOut: 256, stopReason: "length" },
+      ]);
+    });
+
+    it("turns malformed tool input JSON into a non-retryable ProviderError", async () => {
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async () =>
+          sseResponse(
+            [
+              'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_bad","call_id":"call_bad","name":"lookup_order","arguments":""}}\n\n',
+              'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_bad","delta":"{not-json"}\n\n',
+              'event: response.function_call_arguments.done\ndata: {"type":"response.function_call_arguments.done","item_id":"fc_bad","arguments":"{not-json"}\n\n',
+            ].join(""),
+          ),
+      });
+
+      const { chunks, error } = await collectUntilThrow(
+        provider.stream({ ...SAMPLE_REQUEST, tools: [SAMPLE_TOOL] }),
+      );
+      expect(error).toBeInstanceOf(ProviderError);
+      expect((error as ProviderError).retryable).toBe(false);
+      expect(chunks).toEqual([]);
+    });
+
+    it("suppresses truncated tool calls and preserves usage and length stopReason on max_output_tokens", async () => {
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async () =>
+          sseResponse(
+            [
+              'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_cut","call_id":"call_cut","name":"lookup_order","arguments":""}}\n\n',
+              'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_cut","delta":"{\\"id\\":\\"A"}\n\n',
+              'event: response.function_call_arguments.done\ndata: {"type":"response.function_call_arguments.done","item_id":"fc_cut","arguments":"{\\"id\\":\\"A"}\n\n',
+              'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":14,"output_tokens":256}}}\n\n',
+            ].join(""),
+          ),
+      });
+
+      const chunks = await collect(provider.stream({ ...SAMPLE_REQUEST, tools: [SAMPLE_TOOL] }));
+      expect(chunks).toEqual([
+        { kind: "usage", tokensIn: 14, tokensOut: 256, stopReason: "length" },
+      ]);
+    });
+
+    it("reports final usage before throwing on a completed malformed tool call", async () => {
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async () =>
+          sseResponse(
+            [
+              'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_bad","call_id":"call_bad","name":"lookup_order","arguments":""}}\n\n',
+              'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_bad","delta":"{not-json"}\n\n',
+              'event: response.function_call_arguments.done\ndata: {"type":"response.function_call_arguments.done","item_id":"fc_bad","arguments":"{not-json"}\n\n',
+              'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call"}],"usage":{"input_tokens":14,"output_tokens":9}}}\n\n',
+            ].join(""),
+          ),
+      });
+
+      const { chunks, error } = await collectUntilThrow(
+        provider.stream({ ...SAMPLE_REQUEST, tools: [SAMPLE_TOOL] }),
+      );
+      expect(error).toBeInstanceOf(ProviderError);
+      expect((error as ProviderError).retryable).toBe(false);
+      expect(chunks).toEqual([{ kind: "usage", tokensIn: 14, tokensOut: 9, stopReason: "tools" }]);
     });
   });
 });
