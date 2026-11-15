@@ -3,6 +3,11 @@ export interface SavedCitation {
   title: string;
 }
 
+export interface SavedAction {
+  name: string;
+  ok: boolean;
+}
+
 export interface SavedTurn {
   role: "user" | "assistant";
   text: string;
@@ -10,6 +15,10 @@ export interface SavedTurn {
   citations?: SavedCitation[];
   feedback?: "up" | "down";
   error?: string;
+  /** Call ids the engine is waiting on; a reload marks the turn interrupted. */
+  awaiting?: string[];
+  /** Actions that ran during this turn, so the transcript survives a reload. */
+  actions?: SavedAction[];
 }
 
 export interface SavedConversation {

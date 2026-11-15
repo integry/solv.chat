@@ -240,6 +240,23 @@ textarea:focus-visible {
   text-decoration: underline;
 }
 
+.solv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.solv-action {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  border: 1px solid var(--solv-border);
+  background: var(--solv-bg);
+  color: var(--solv-muted);
+  font-size: 12px;
+}
+
 .solv-feedback {
   display: flex;
   align-items: center;

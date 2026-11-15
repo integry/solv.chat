@@ -35,6 +35,23 @@ Required Worker secrets (set with `wrangler secret put` or `.dev.vars` locally):
 - `SOLV_ANTHROPIC_KEY` — Anthropic API key
 - `SOLV_OPENAI_KEY` — OpenAI API key (models and embeddings)
 
+### Page actions (widget)
+
+Sites can register custom client-side actions for the assistant to call:
+
+```js
+solv.actions.register({
+  name: "open_invoice",
+  description: "Open one of the visitor's invoices",
+  input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  confirm: false,
+  run: async ({ id }) => {
+    router.push(`/invoices/${id}`);
+    return { opened: id };
+  },
+});
+```
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
