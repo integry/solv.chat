@@ -455,4 +455,223 @@ describe("mcp client", () => {
     expect(String((caught as Error).message)).not.toContain(SECRET);
     expect(String((caught as Error).message)).not.toContain("boom");
   });
+
+  it("follows nextCursor across pages within the same session", async () => {
+    const server = mcpServer(
+      (method, id, params) => {
+        expect(method).toBe("tools/list");
+        if (params?.cursor === undefined) {
+          return Response.json({
+            jsonrpc: "2.0",
+            id,
+            result: {
+              tools: [
+                {
+                  name: "first_tool",
+                  description: "First",
+                  inputSchema: { type: "object" },
+                },
+              ],
+              nextCursor: "page-2",
+            },
+          });
+        }
+        expect(params).toEqual({ cursor: "page-2" });
+        return Response.json({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            tools: [
+              {
+                name: "second_tool",
+                description: "Second",
+                inputSchema: { type: "object" },
+              },
+            ],
+          },
+        });
+      },
+      { sessionId: "sess-paged" },
+    );
+
+    const tools = await listTools(
+      { url: "https://tools.example.com/mcp", authKind: "none" },
+      { fetchImpl: server.impl, resolveHost: PUBLIC_HOST },
+    );
+
+    expect(tools).toEqual([
+      { name: "first_tool", description: "First", inputSchema: { type: "object" } },
+      { name: "second_tool", description: "Second", inputSchema: { type: "object" } },
+    ]);
+    // initialize, notifications/initialized, tools/list (page 1), tools/list (page 2)
+    expect(server.calls).toHaveLength(4);
+    expect(new Headers(server.calls[3]?.init?.headers).get("mcp-session-id")).toBe("sess-paged");
+  });
+
+  it("rejects when aggregate tools across pages exceed MCP_MAX_TOOLS", async () => {
+    const page1Count = 40;
+    const page2Count = MCP_MAX_TOOLS - page1Count + 1;
+    const makePage = (offset: number, count: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        name: `tool_${offset + i}`,
+        description: "d",
+        inputSchema: { type: "object" },
+      }));
+
+    const server = mcpServer((_method, id, params) => {
+      if (params?.cursor === undefined) {
+        return Response.json({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            tools: makePage(0, page1Count),
+            nextCursor: "page-2",
+          },
+        });
+      }
+      return Response.json({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          tools: makePage(page1Count, page2Count),
+        },
+      });
+    });
+
+    await expect(
+      listTools(
+        { url: "https://tools.example.com/mcp", authKind: "none" },
+        { fetchImpl: server.impl, resolveHost: PUBLIC_HOST },
+      ),
+    ).rejects.toSatisfy((err: unknown) => {
+      return (
+        err instanceof McpError &&
+        err.failure === "protocol" &&
+        err.message.includes(String(MCP_MAX_TOOLS + 1))
+      );
+    });
+  });
+
+  it("rejects JSON responses with mismatched id, missing id, or invalid jsonrpc envelope", async () => {
+    const mismatchedIdServer = mcpServer(() =>
+      Response.json({
+        jsonrpc: "2.0",
+        id: "another-request",
+        result: { content: [{ type: "text", text: "Completed" }] },
+      }),
+    );
+    await expect(
+      callTool(
+        { url: "https://tools.example.com/mcp", authKind: "none" },
+        "lookup_order",
+        { id: "42" },
+        { fetchImpl: mismatchedIdServer.impl, resolveHost: PUBLIC_HOST },
+      ),
+    ).rejects.toMatchObject({ name: "McpError", failure: "protocol" });
+
+    const missingIdServer = mcpServer(() =>
+      Response.json({
+        jsonrpc: "2.0",
+        result: { content: [{ type: "text", text: "Completed" }] },
+      }),
+    );
+    await expect(
+      callTool(
+        { url: "https://tools.example.com/mcp", authKind: "none" },
+        "lookup_order",
+        { id: "42" },
+        { fetchImpl: missingIdServer.impl, resolveHost: PUBLIC_HOST },
+      ),
+    ).rejects.toMatchObject({ name: "McpError", failure: "protocol" });
+
+    const badVersionServer = mcpServer((_method, id) =>
+      Response.json({
+        jsonrpc: "1.0",
+        id,
+        result: { content: [{ type: "text", text: "Completed" }] },
+      }),
+    );
+    await expect(
+      callTool(
+        { url: "https://tools.example.com/mcp", authKind: "none" },
+        "lookup_order",
+        { id: "42" },
+        { fetchImpl: badVersionServer.impl, resolveHost: PUBLIC_HOST },
+      ),
+    ).rejects.toMatchObject({ name: "McpError", failure: "protocol" });
+  });
+
+  it("ignores SSE notifications and mismatched/missing ids, and rejects if no matching response arrives", async () => {
+    const onlyUnmatchedSse = mcpServer(() =>
+      sseResponse([
+        {
+          event: "message",
+          data: { jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } },
+        },
+        {
+          event: "message",
+          data: {
+            jsonrpc: "2.0",
+            id: "another-request",
+            result: { content: [{ type: "text", text: "Wrong" }] },
+          },
+        },
+        {
+          event: "message",
+          data: {
+            jsonrpc: "2.0",
+            result: { content: [{ type: "text", text: "No id" }] },
+          },
+        },
+      ]),
+    );
+    await expect(
+      callTool(
+        { url: "https://tools.example.com/mcp", authKind: "none" },
+        "lookup_order",
+        { id: "42" },
+        { fetchImpl: onlyUnmatchedSse.impl, resolveHost: PUBLIC_HOST },
+      ),
+    ).rejects.toMatchObject({ name: "McpError", failure: "protocol" });
+
+    const matchedAfterNoiseSse = mcpServer((_method, id) =>
+      sseResponse([
+        {
+          event: "message",
+          data: { jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } },
+        },
+        {
+          event: "message",
+          data: {
+            jsonrpc: "2.0",
+            id: "another-request",
+            result: { content: [{ type: "text", text: "Wrong" }] },
+          },
+        },
+        {
+          event: "message",
+          data: {
+            jsonrpc: "2.0",
+            result: { content: [{ type: "text", text: "No id" }] },
+          },
+        },
+        {
+          event: "message",
+          data: {
+            jsonrpc: "2.0",
+            id,
+            result: { content: [{ type: "text", text: "Matched" }] },
+          },
+        },
+      ]),
+    );
+    await expect(
+      callTool(
+        { url: "https://tools.example.com/mcp", authKind: "none" },
+        "lookup_order",
+        { id: "42" },
+        { fetchImpl: matchedAfterNoiseSse.impl, resolveHost: PUBLIC_HOST },
+      ),
+    ).resolves.toEqual({ content: "Matched", isError: false });
+  });
 });

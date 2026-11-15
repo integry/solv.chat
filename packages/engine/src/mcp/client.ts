@@ -113,6 +113,16 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isMatchingJsonRpcResponse(
+  value: unknown,
+  requestId: string,
+): value is Record<string, unknown> {
+  if (!isPlainRecord(value)) return false;
+  if (value.jsonrpc !== JSON_RPC_VERSION) return false;
+  if (value.id !== requestId) return false;
+  return (value.result !== undefined) !== (value.error !== undefined);
+}
+
 async function readJsonRpcResponse(
   response: Response,
   requestId: string,
@@ -143,9 +153,7 @@ async function readJsonRpcResponse(
       } catch {
         continue;
       }
-      if (!isPlainRecord(parsed)) continue;
-      if (parsed.id !== undefined && parsed.id !== requestId) continue;
-      if (parsed.result !== undefined || parsed.error !== undefined) {
+      if (isMatchingJsonRpcResponse(parsed, requestId)) {
         return parsed;
       }
     }
@@ -168,7 +176,7 @@ async function readJsonRpcResponse(
   } catch {
     throw new McpError("protocol", "That server sent a response this engine could not read.");
   }
-  if (!isPlainRecord(parsed)) {
+  if (!isMatchingJsonRpcResponse(parsed, requestId)) {
     throw new McpError("protocol", "That server sent a response this engine could not read.");
   }
   return parsed;
@@ -306,37 +314,60 @@ export async function listTools(
   options: McpClientOptions = {},
 ): Promise<McpToolSpec[]> {
   return withSession(target, options, async (ctx) => {
-    const { result } = await rpc(ctx, "tools/list", {}, true);
-    const raw = Array.isArray(result.tools) ? result.tools : null;
-    if (raw === null) {
-      throw new McpError("protocol", "That server did not return a tool list.");
-    }
-    if (raw.length > MCP_MAX_TOOLS) {
-      // All or nothing: silently keeping the first 64 would make which tools
-      // exist depend on the server's ordering.
-      throw new McpError(
-        "protocol",
-        `That server offers ${raw.length} tools, which exceeds the limit of ${MCP_MAX_TOOLS}.`,
-      );
+    const tools: McpToolSpec[] = [];
+    const seenCursors = new Set<string>();
+    let totalRawCount = 0;
+    let cursor: string | undefined;
+
+    for (;;) {
+      const params = cursor === undefined ? {} : { cursor };
+      const { result } = await rpc(ctx, "tools/list", params, true);
+      const raw = Array.isArray(result.tools) ? result.tools : null;
+      if (raw === null) {
+        throw new McpError("protocol", "That server did not return a tool list.");
+      }
+
+      totalRawCount += raw.length;
+      if (totalRawCount > MCP_MAX_TOOLS) {
+        // All or nothing: silently keeping the first 64 would make which tools
+        // exist depend on the server's ordering.
+        throw new McpError(
+          "protocol",
+          `That server offers ${totalRawCount} tools, which exceeds the limit of ${MCP_MAX_TOOLS}.`,
+        );
+      }
+
+      for (const item of raw) {
+        if (!isPlainRecord(item)) continue;
+        const name = typeof item.name === "string" ? item.name.trim() : "";
+        // Same name rule as a page action: a name that could read as prose would
+        // let a server write into the tool list the model sees.
+        if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(name)) continue;
+        const schema = isPlainRecord(item.inputSchema) ? item.inputSchema : {};
+        // One oversized schema skips that tool rather than failing the refresh:
+        // the owner can still switch on the tools that fit.
+        if (encoder.encode(JSON.stringify(schema)).byteLength > MAX_ACTION_SCHEMA_BYTES) continue;
+        tools.push({
+          name,
+          description: typeof item.description === "string" ? item.description.slice(0, 500) : "",
+          inputSchema: schema,
+        });
+      }
+
+      if (
+        result.nextCursor === undefined ||
+        result.nextCursor === null ||
+        result.nextCursor === ""
+      ) {
+        break;
+      }
+      if (typeof result.nextCursor !== "string" || seenCursors.has(result.nextCursor)) {
+        throw new McpError("protocol", "That server sent a response this engine could not read.");
+      }
+      seenCursors.add(result.nextCursor);
+      cursor = result.nextCursor;
     }
 
-    const tools: McpToolSpec[] = [];
-    for (const item of raw) {
-      if (!isPlainRecord(item)) continue;
-      const name = typeof item.name === "string" ? item.name.trim() : "";
-      // Same name rule as a page action: a name that could read as prose would
-      // let a server write into the tool list the model sees.
-      if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(name)) continue;
-      const schema = isPlainRecord(item.inputSchema) ? item.inputSchema : {};
-      // One oversized schema skips that tool rather than failing the refresh:
-      // the owner can still switch on the tools that fit.
-      if (encoder.encode(JSON.stringify(schema)).byteLength > MAX_ACTION_SCHEMA_BYTES) continue;
-      tools.push({
-        name,
-        description: typeof item.description === "string" ? item.description.slice(0, 500) : "",
-        inputSchema: schema,
-      });
-    }
     return tools;
   });
 }
