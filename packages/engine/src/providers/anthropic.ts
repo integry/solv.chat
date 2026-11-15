@@ -1,6 +1,7 @@
 import { isRetryableStatus, ProviderError, toProviderError } from "./error.js";
 import { readEventStream } from "./sse.js";
-import type { LlmProvider } from "./types.js";
+import { parseToolInput } from "./toolInput.js";
+import type { LlmMessage, LlmProvider, StopReason, ToolDefinition } from "./types.js";
 
 export interface AnthropicOptions {
   apiKey: string;
@@ -8,20 +9,29 @@ export interface AnthropicOptions {
   fetchImpl?: typeof fetch | undefined;
 }
 
-// Source: https://platform.claude.com/docs/en/api/messages-streaming — checked 2026-11-14
+// Source: https://platform.claude.com/docs/en/api/messages-streaming and
+// https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview — checked 2026-11-15
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2026-10-21";
 
 interface AnthropicEventPayload {
   type?: string;
+  index?: number;
   message?: {
     usage?: {
       input_tokens?: number;
     };
   };
+  content_block?: {
+    type?: string;
+    id?: string;
+    name?: string;
+  };
   delta?: {
     type?: string;
     text?: string;
+    partial_json?: string;
+    stop_reason?: string;
   };
   usage?: {
     output_tokens?: number;
@@ -63,9 +73,14 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
           body: JSON.stringify({
             model: options.model,
             system: request.system,
-            messages: request.messages,
+            messages: toAnthropicMessages(request.messages),
             max_tokens: request.maxTokens,
             stream: true,
+            // Absent when no tool is allowed, so the body stays byte-identical
+            // to phase 1 and the existing request-shape test still holds.
+            ...(request.tools && request.tools.length > 0
+              ? { tools: request.tools.map(toAnthropicTool) }
+              : {}),
           }),
         });
       } catch (err) {
@@ -86,6 +101,12 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
       let tokensOut: number | undefined;
       let sawTerminal = false;
       let failure: ProviderError | undefined;
+      let stopReason: StopReason | undefined;
+      // Tool input arrives as a stream of JSON fragments, keyed by the
+      // content block index. Buffer per block and parse once at the block
+      // boundary: half an object cannot be validated, and handing fragments
+      // to the caller would leak provider framing into the tool loop.
+      const pending = new Map<number, { callId: string; name: string; json: string }>();
 
       try {
         for await (const event of readEventStream(response.body)) {
@@ -108,9 +129,46 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
             continue;
           }
 
+          if (eventType === "content_block_start") {
+            const block = payload.content_block;
+            if (
+              block?.type === "tool_use" &&
+              typeof block.id === "string" &&
+              typeof block.name === "string" &&
+              payload.index !== undefined
+            ) {
+              pending.set(payload.index, { callId: block.id, name: block.name, json: "" });
+            }
+            continue;
+          }
+
           if (eventType === "content_block_delta") {
             if (payload.delta?.type === "text_delta" && typeof payload.delta.text === "string") {
               yield { kind: "text", text: payload.delta.text };
+            }
+            if (
+              payload.delta?.type === "input_json_delta" &&
+              typeof payload.delta.partial_json === "string" &&
+              payload.index !== undefined
+            ) {
+              const open = pending.get(payload.index);
+              if (open) open.json += payload.delta.partial_json;
+            }
+            continue;
+          }
+
+          if (eventType === "content_block_stop" && payload.index !== undefined) {
+            const open = pending.get(payload.index);
+            if (open) {
+              pending.delete(payload.index);
+              yield {
+                kind: "tool_call",
+                call: {
+                  callId: open.callId,
+                  name: open.name,
+                  input: parseToolInput("anthropic", open.json),
+                },
+              };
             }
             continue;
           }
@@ -120,6 +178,9 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
             if (typeof outputTokens === "number" && Number.isFinite(outputTokens)) {
               tokensOut = outputTokens;
             }
+            if (payload.delta?.stop_reason === "tool_use") stopReason = "tools";
+            else if (payload.delta?.stop_reason === "max_tokens") stopReason = "length";
+            else if (typeof payload.delta?.stop_reason === "string") stopReason = "end";
             continue;
           }
 
@@ -147,9 +208,62 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
       // propagates. Exactly one usage chunk per stream; a count never reported
       // is 0, the only figure that is not a guess.
       if (tokensIn !== undefined || tokensOut !== undefined) {
-        yield { kind: "usage", tokensIn: tokensIn ?? 0, tokensOut: tokensOut ?? 0 };
+        yield {
+          kind: "usage",
+          tokensIn: tokensIn ?? 0,
+          tokensOut: tokensOut ?? 0,
+          ...(stopReason !== undefined ? { stopReason } : {}),
+        };
       }
       if (failure !== undefined) throw failure;
     },
   };
+}
+
+// Source: https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview — checked 2026-11-15
+function toAnthropicTool(tool: ToolDefinition) {
+  return {
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema,
+  };
+}
+
+/**
+ * Translates the shared message list into Anthropic content blocks. Phase 1
+ * messages pass through as plain strings, so a conversation with no tool
+ * exchange serialises exactly as before.
+ */
+function toAnthropicMessages(messages: readonly LlmMessage[]) {
+  return messages.map((message) => {
+    if (message.role === "tool_results") {
+      // Results travel in a user-role turn, as the API requires, but as
+      // tool_result blocks rather than prose: a result is data to read, never
+      // instructions.
+      return {
+        role: "user" as const,
+        content: message.results.map((result) => ({
+          type: "tool_result",
+          tool_use_id: result.callId,
+          content: result.content,
+          ...(result.isError ? { is_error: true } : {}),
+        })),
+      };
+    }
+    if ("toolCalls" in message) {
+      return {
+        role: "assistant" as const,
+        content: [
+          ...(message.content === "" ? [] : [{ type: "text", text: message.content }]),
+          ...message.toolCalls.map((call) => ({
+            type: "tool_use",
+            id: call.callId,
+            name: call.name,
+            input: call.input,
+          })),
+        ],
+      };
+    }
+    return { role: message.role, content: message.content };
+  });
 }
