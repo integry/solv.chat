@@ -485,6 +485,43 @@ describe("Admin layout regressions (Chromium)", () => {
     for (const card of mobileCards) {
       expect(card.actionsRect.top).toBeGreaterThanOrEqual(card.firstRect.bottom - 1);
       expect(Math.abs(card.actionsRect.left - card.firstRect.left)).toBeLessThanOrEqual(1);
+      expect(card.actionsRect.right).toBeLessThanOrEqual(card.headerRect.right + 1);
+      expect(card.firstScrollWidth).toBeLessThanOrEqual(card.firstClientWidth + 1);
+    }
+
+    await cdp.evaluate<void>(`(() => {
+      const card = document.querySelector("ul.source-list > li.source-card");
+      const editBtn = Array.from(card.querySelectorAll(".actions button")).find(
+        (btn) => btn.textContent?.trim() === "Edit",
+      );
+      editBtn?.click();
+    })()`);
+    await cdp.evaluate<void>(`new Promise((resolve, reject) => {
+      const deadline = Date.now() + 5000;
+      const check = () => {
+        const card = document.querySelector("ul.source-list > li.source-card");
+        const hasCloseEdit = Array.from(card?.querySelectorAll(".actions button") ?? []).some(
+          (btn) => btn.textContent?.trim() === "Close edit",
+        );
+        if (hasCloseEdit) {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          return;
+        }
+        if (Date.now() >= deadline) {
+          reject(new Error("Timed out waiting for Close edit button"));
+          return;
+        }
+        setTimeout(check, 20);
+      };
+      check();
+    })`);
+
+    const mobileCardsWithEditor = await measureCards();
+    expect(mobileCardsWithEditor).toHaveLength(2);
+    for (const card of mobileCardsWithEditor) {
+      expect(card.actionsRect.top).toBeGreaterThanOrEqual(card.firstRect.bottom - 1);
+      expect(Math.abs(card.actionsRect.left - card.firstRect.left)).toBeLessThanOrEqual(1);
+      expect(card.actionsRect.right).toBeLessThanOrEqual(card.headerRect.right + 1);
       expect(card.firstScrollWidth).toBeLessThanOrEqual(card.firstClientWidth + 1);
     }
   }, 15_000);
