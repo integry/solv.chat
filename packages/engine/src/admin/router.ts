@@ -27,6 +27,7 @@ import {
   updateMcpServer,
 } from "./mcp.js";
 import { overviewFor } from "./overview.js";
+import { parseReportDays, reportFor } from "./reports.js";
 import { importSitemapUrls, previewSitemap } from "./sitemap.js";
 import {
   createSource,
@@ -217,6 +218,11 @@ async function assistantRoutes(
           costUnit: deps.costUnit,
           checkConfigError: deps.checkConfigError,
         }),
+      );
+    }
+    if (action === "report" && method === "GET") {
+      return Response.json(
+        await reportFor(tenant, assistantId, parseReportDays(url.searchParams.get("days"))),
       );
     }
     if (action === "install" && method === "GET") {
