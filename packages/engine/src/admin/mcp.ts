@@ -238,30 +238,60 @@ export async function updateMcpServer(
   if (existing === null) throw new NotFound("mcp server");
   const input = readServerInput(body, false);
 
-  const authKind = input.authKind ?? existing.authKind;
-  const headerName =
-    authKind === "none"
+  const secretCiphertext =
+    input.headerValue === null
       ? null
-      : input.headerName !== undefined
-        ? input.headerName
-        : existing.headerName;
+      : input.headerValue !== undefined
+        ? await sealSecret(deps.secretKey, input.headerValue)
+        : undefined;
 
-  if (input.headerValue === null) {
-    await deps.tenant.mcp.setSecretCiphertext(serverId, null);
-  } else if (input.headerValue !== undefined) {
-    const ciphertext = await sealSecret(deps.secretKey, input.headerValue);
-    await deps.tenant.mcp.setSecretCiphertext(serverId, ciphertext);
+  const needsAuthKindCheck = input.authKind === undefined && input.headerName !== undefined;
+  const hasAnyUpdate =
+    input.label !== undefined ||
+    input.url !== undefined ||
+    input.enabled !== undefined ||
+    input.authKind !== undefined ||
+    input.headerName !== undefined ||
+    secretCiphertext !== undefined;
+
+  if (!hasAnyUpdate) {
+    return { server: await getServerSummary(deps, serverId) };
   }
 
-  await deps.tenant.mcp.updateServer(serverId, {
-    label: input.label ?? existing.label,
-    url: input.url ?? existing.url,
-    enabled: input.enabled ?? existing.enabled,
-    authKind,
-    headerName,
-  });
+  if (!needsAuthKindCheck) {
+    const headerName = input.authKind === "none" ? null : input.headerName;
+    const updated = await deps.tenant.mcp.updateServer(serverId, {
+      label: input.label,
+      url: input.url,
+      enabled: input.enabled,
+      authKind: input.authKind,
+      headerName,
+      secretCiphertext,
+    });
+    if (!updated) throw new NotFound("mcp server");
+    return { server: await getServerSummary(deps, serverId) };
+  }
 
-  return { server: await getServerSummary(deps, serverId) };
+  let current = existing;
+  for (let attempt = 0; attempt < MAX_DRAFT_UPDATE_ATTEMPTS; attempt++) {
+    const headerName = current.authKind === "none" ? null : input.headerName;
+    const updated = await deps.tenant.mcp.updateServer(serverId, {
+      label: input.label,
+      url: input.url,
+      enabled: input.enabled,
+      headerName,
+      secretCiphertext,
+      expectedAuthKind: current.authKind,
+    });
+    if (updated) {
+      return { server: await getServerSummary(deps, serverId) };
+    }
+    const fresh = await deps.tenant.mcp.getServer(serverId);
+    if (fresh === null) throw new NotFound("mcp server");
+    current = fresh;
+  }
+
+  throw new Conflict("The server changed while you were saving. Please try again.");
 }
 
 const MAX_DRAFT_UPDATE_ATTEMPTS = 5;
@@ -343,19 +373,16 @@ export async function listMcpTools(tenant: Tenant, serverId: string): Promise<Mc
  * survives for tools that are still there.
  */
 export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<McpToolView[]> {
-  const server = await deps.tenant.mcp.getServer(serverId);
-  if (server === null) throw new NotFound("mcp server");
+  const snapshot = await deps.tenant.mcp.readTargetWithSecretCiphertext(serverId);
+  if (snapshot === null) throw new NotFound("mcp server");
 
   const target: McpTarget = {
-    url: server.url,
-    authKind: server.authKind,
-    headerName: server.headerName ?? undefined,
+    url: snapshot.url,
+    authKind: snapshot.authKind,
+    headerName: snapshot.headerName ?? undefined,
   };
-  if (server.authKind === "static_header") {
-    const ciphertext = await deps.tenant.mcp.readSecretCiphertext(serverId);
-    if (ciphertext !== null) {
-      target.headerValue = await openSecret(deps.secretKey, ciphertext);
-    }
+  if (snapshot.authKind === "static_header" && snapshot.secretCiphertext !== null) {
+    target.headerValue = await openSecret(deps.secretKey, snapshot.secretCiphertext);
   }
 
   const remote = await listRemoteTools(target, { fetchImpl: deps.fetchImpl });

@@ -1,7 +1,12 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Conflict } from "../../src/admin/errors.js";
-import { setMcpToolAllowed } from "../../src/admin/mcp.js";
+import {
+  deleteMcpServer,
+  refreshMcpTools,
+  setMcpToolAllowed,
+  updateMcpServer,
+} from "../../src/admin/mcp.js";
 import { createApp } from "../../src/app.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { openSecret } from "../../src/security/secretBox.js";
@@ -814,5 +819,255 @@ describe("admin MCP servers and tools API", () => {
     const finalTool = await tenant.mcp.getToolByName(created.server.id, "lookup_order");
     const finalDraft = await tenant.versions.draft(assistantId);
     expect(finalDraft?.config.allowedTools.includes("lookup_order")).toBe(finalTool?.allowed);
+  });
+
+  it("revalidates counterpart tools on concurrent server deletions and refresh prunes (F4)", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch([{ name: "lookup_order", description: "Lookup", inputSchema: { type: "object" } }]),
+    );
+    const assistantId = await createAssistant(app);
+    const s1 = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 1",
+        url: "https://one.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string }; tools: Array<{ id: string }> };
+    const s2 = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 2",
+        url: "https://two.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string }; tools: Array<{ id: string }> };
+
+    const t1 = s1.tools[0]?.id ?? "";
+    const t2 = s2.tools[0]?.id ?? "";
+    await call(app, "PATCH", `/api/admin/mcp-servers/${s1.server.id}/tools/${t1}`, {
+      allowed: true,
+    });
+    await call(app, "PATCH", `/api/admin/mcp-servers/${s2.server.id}/tools/${t2}`, {
+      allowed: true,
+    });
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+
+    // Force both concurrent refreshes to read listOtherAllowedToolNames before either prunes.
+    let releaseFirstRefreshBarrier!: () => void;
+    let refreshReads = 0;
+    const refreshBarrier = new Promise<void>((resolve) => {
+      releaseFirstRefreshBarrier = resolve;
+    });
+    const barrierRefreshTenant = {
+      ...tenant,
+      mcp: {
+        ...tenant.mcp,
+        async listOtherAllowedToolNames(astId: string, excludeId: string) {
+          const res = await tenant.mcp.listOtherAllowedToolNames(astId, excludeId);
+          refreshReads++;
+          if (refreshReads === 1) {
+            await refreshBarrier;
+          } else if (refreshReads === 2) {
+            releaseFirstRefreshBarrier();
+          }
+          return res;
+        },
+      },
+    };
+
+    const emptyFetch = mcpFetch([]);
+    await Promise.all([
+      refreshMcpTools(
+        { tenant: barrierRefreshTenant, secretKey: TEST_SECRET_KEY, fetchImpl: emptyFetch },
+        s1.server.id,
+      ),
+      refreshMcpTools(
+        { tenant: barrierRefreshTenant, secretKey: TEST_SECRET_KEY, fetchImpl: emptyFetch },
+        s2.server.id,
+      ),
+    ]);
+
+    expect(await tenant.mcp.listAllowedTools(assistantId)).toEqual([]);
+    expect((await tenant.versions.draft(assistantId))?.config.allowedTools).toEqual([]);
+
+    // Re-add lookup_order on both servers and test concurrent deleteMcpServer with the same barrier.
+    const oneToolFetch = mcpFetch([
+      { name: "lookup_order", description: "Lookup", inputSchema: { type: "object" } },
+    ]);
+    const refreshed1 = await refreshMcpTools(
+      { tenant, secretKey: TEST_SECRET_KEY, fetchImpl: oneToolFetch },
+      s1.server.id,
+    );
+    const refreshed2 = await refreshMcpTools(
+      { tenant, secretKey: TEST_SECRET_KEY, fetchImpl: oneToolFetch },
+      s2.server.id,
+    );
+    await setMcpToolAllowed(tenant, s1.server.id, refreshed1[0]?.id ?? "", { allowed: true });
+    await setMcpToolAllowed(tenant, s2.server.id, refreshed2[0]?.id ?? "", { allowed: true });
+
+    let releaseDeleteBarrier!: () => void;
+    let deleteReads = 0;
+    const deleteBarrier = new Promise<void>((resolve) => {
+      releaseDeleteBarrier = resolve;
+    });
+    const barrierDeleteTenant = {
+      ...tenant,
+      mcp: {
+        ...tenant.mcp,
+        async listOtherAllowedToolNames(astId: string, excludeId: string) {
+          const res = await tenant.mcp.listOtherAllowedToolNames(astId, excludeId);
+          deleteReads++;
+          if (deleteReads === 1) {
+            await deleteBarrier;
+          } else if (deleteReads === 2) {
+            releaseDeleteBarrier();
+          }
+          return res;
+        },
+      },
+    };
+
+    await Promise.all([
+      deleteMcpServer(barrierDeleteTenant, s1.server.id),
+      deleteMcpServer(barrierDeleteTenant, s2.server.id),
+    ]);
+
+    expect(await tenant.mcp.listServers(assistantId)).toEqual([]);
+    expect((await tenant.versions.draft(assistantId))?.config.allowedTools).toEqual([]);
+  });
+
+  it("reads target URL and credential from one snapshot and updates them atomically (F5)", async () => {
+    const app = appForOrg(ORG_A, mcpFetch([]));
+    const assistantId = await createAssistant(app);
+    const created = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 1",
+        url: "https://one.example.com/mcp",
+        authKind: "static_header",
+        headerName: "Authorization",
+        headerValue: "Bearer cred-A",
+      })
+    ).json()) as { server: { id: string } };
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const observedPairs: Array<{ url: string; auth: string | null }> = [];
+    const recordingFetch: typeof fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const auth = new Headers(init?.headers).get("Authorization");
+      observedPairs.push({ url, auth });
+      return mcpFetch([])(input, init);
+    };
+
+    await Promise.all([
+      updateMcpServer({ tenant, secretKey: TEST_SECRET_KEY }, created.server.id, {
+        url: "https://two.example.com/mcp",
+        headerValue: "Bearer cred-B",
+      }),
+      refreshMcpTools(
+        { tenant, secretKey: TEST_SECRET_KEY, fetchImpl: recordingFetch },
+        created.server.id,
+      ),
+    ]);
+
+    expect(observedPairs.length).toBeGreaterThan(0);
+    for (const pair of observedPairs) {
+      expect(
+        (pair.url === "https://one.example.com/mcp" && pair.auth === "Bearer cred-A") ||
+          (pair.url === "https://two.example.com/mcp" && pair.auth === "Bearer cred-B"),
+      ).toBe(true);
+    }
+  });
+
+  it("preserves omitted fields on concurrent partial PATCH updates (F6)", async () => {
+    const app = appForOrg(ORG_A, mcpFetch([]));
+    const assistantId = await createAssistant(app);
+    const created = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Original",
+        url: "https://one.example.com/mcp",
+        authKind: "static_header",
+        headerName: "Authorization",
+        headerValue: "Bearer cred-A",
+      })
+    ).json()) as { server: { id: string } };
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+
+    // Force both concurrent PATCHes to read the initial server row before either writes.
+    let releaseGetBarrier!: () => void;
+    let getCalls = 0;
+    const getBarrier = new Promise<void>((resolve) => {
+      releaseGetBarrier = resolve;
+    });
+    const barrierTenant = {
+      ...tenant,
+      mcp: {
+        ...tenant.mcp,
+        async getServer(id: string) {
+          const row = await tenant.mcp.getServer(id);
+          getCalls++;
+          if (getCalls === 1) {
+            await getBarrier;
+          } else if (getCalls === 2) {
+            releaseGetBarrier();
+          }
+          return row;
+        },
+      },
+    };
+
+    await Promise.all([
+      updateMcpServer({ tenant: barrierTenant, secretKey: TEST_SECRET_KEY }, created.server.id, {
+        enabled: false,
+      }),
+      updateMcpServer({ tenant: barrierTenant, secretKey: TEST_SECRET_KEY }, created.server.id, {
+        label: "Renamed",
+      }),
+    ]);
+
+    const afterDisjoint = await tenant.mcp.getServer(created.server.id);
+    expect(afterDisjoint?.enabled).toBe(false);
+    expect(afterDisjoint?.label).toBe("Renamed");
+
+    // Concurrent authKind -> "none" and headerName update must not leave a headerName on authKind = "none".
+    let releaseAuthBarrier!: () => void;
+    let authGetCalls = 0;
+    const authBarrier = new Promise<void>((resolve) => {
+      releaseAuthBarrier = resolve;
+    });
+    const authBarrierTenant = {
+      ...tenant,
+      mcp: {
+        ...tenant.mcp,
+        async getServer(id: string) {
+          const row = await tenant.mcp.getServer(id);
+          authGetCalls++;
+          if (authGetCalls === 1) {
+            await authBarrier;
+          } else if (authGetCalls === 2) {
+            releaseAuthBarrier();
+          }
+          return row;
+        },
+      },
+    };
+
+    await Promise.all([
+      updateMcpServer(
+        { tenant: authBarrierTenant, secretKey: TEST_SECRET_KEY },
+        created.server.id,
+        { authKind: "none" },
+      ),
+      updateMcpServer(
+        { tenant: authBarrierTenant, secretKey: TEST_SECRET_KEY },
+        created.server.id,
+        { headerName: "X-Api-Key" },
+      ),
+    ]);
+
+    const afterAuth = await tenant.mcp.getServer(created.server.id);
+    expect(afterAuth?.authKind).toBe("none");
+    expect(afterAuth?.headerName).toBeNull();
   });
 });
