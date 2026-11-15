@@ -5,6 +5,15 @@ import { McpError } from "../mcp/types.js";
 import type { Retriever } from "../providers/retrieval.js";
 import { writeTheRightAnswer } from "./answers.js";
 import {
+  createTest,
+  deleteTest,
+  listTestRuns,
+  listTests,
+  type RunDeps,
+  runAnswerTests,
+  updateTest,
+} from "./answerTests.js";
+import {
   createAssistant,
   getAssistant,
   listAssistants,
@@ -52,6 +61,8 @@ export interface AdminRouteDeps {
    * and createApp(seams) must not depend on the open build.
    */
   secretKey?: string | undefined;
+  /** Lazily resolves provider/embedder/seams dependencies when running answer tests. */
+  resolveRunDeps?: (() => Promise<RunDeps>) | undefined;
 }
 
 function mcpDeps(deps: AdminRouteDeps): McpDeps {
@@ -222,6 +233,23 @@ async function assistantRoutes(
       const result = await createMcpServer(mcpDeps(deps), assistantId, await readJsonBody(request));
       return Response.json(result, { status: 201 });
     }
+    if (action === "tests" && method === "GET") {
+      return Response.json({ tests: await listTests(tenant, assistantId) });
+    }
+    if (action === "tests" && method === "POST") {
+      const test = await createTest(tenant, assistantId, await readJsonBody(request));
+      return Response.json({ test }, { status: 201 });
+    }
+    if (action === "test-runs" && method === "GET") {
+      return Response.json({ runs: await listTestRuns(tenant, assistantId) });
+    }
+    if (action === "test-runs" && method === "POST") {
+      if (!deps.resolveRunDeps) {
+        throw new Error("Answer test runner is not configured.");
+      }
+      const run = await runAnswerTests(await deps.resolveRunDeps(), assistantId);
+      return Response.json(run, { status: 201 });
+    }
     throw new NotFound();
   }
 
@@ -360,6 +388,25 @@ async function mcpServerRoutes(
   throw new NotFound();
 }
 
+async function testRoutes(
+  request: Request,
+  segments: string[],
+  deps: AdminRouteDeps,
+): Promise<Response> {
+  const method = request.method;
+  const testId = segments[1];
+  if (!testId || segments.length !== 2) throw new NotFound();
+
+  if (method === "PATCH") {
+    const test = await updateTest(deps.tenant, testId, await readJsonBody(request));
+    return Response.json({ test });
+  }
+  if (method === "DELETE") {
+    return Response.json(await deleteTest(deps.tenant, testId));
+  }
+  throw new NotFound();
+}
+
 /** Dispatches authenticated `/api/admin/*` requests with a tenant-scoped handle. */
 export async function adminRoutes(
   request: Request,
@@ -372,6 +419,7 @@ export async function adminRoutes(
     if (segments[0] === "sources") return await sourceRoutes(request, url, segments, deps);
     if (segments[0] === "conversations") return await conversationRoutes(request, segments, deps);
     if (segments[0] === "mcp-servers") return await mcpServerRoutes(request, segments, deps);
+    if (segments[0] === "tests") return await testRoutes(request, segments, deps);
     return Response.json({ error: "Not found." }, { status: 404 });
   } catch (error) {
     // Mapped here, once: a handler building its own responses would eventually

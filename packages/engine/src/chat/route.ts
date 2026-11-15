@@ -199,6 +199,34 @@ interface StreamResumeParams {
   origin: string | null;
 }
 
+/** Resolves the embedder, retriever, LLM provider, and model for chat or test runs. */
+export async function resolveChatProviders(
+  env: ChatEnv,
+  seams: Seams,
+  orgId: string,
+  overrides?: ChatRouteOverrides,
+): Promise<{
+  embedder: Embedder;
+  retriever: Retriever;
+  provider: LlmProvider;
+  model: ModelInfo;
+}> {
+  const providerKind = overrides?.providerKind ?? resolveProvider(env.SOLV_LLM_PROVIDER);
+  const tier = overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER);
+  const model =
+    overrides?.model ??
+    (providerKind === "anthropic" ? ANTHROPIC_MODELS[tier] : OPENAI_MODELS[tier]);
+
+  const embedder =
+    overrides?.embedder ?? openAIEmbedder({ apiKey: await seams.keys.embeddingKey(orgId) });
+  const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
+  const provider =
+    overrides?.provider ??
+    (await llmProviderFor({ orgId, provider: providerKind, tier }, seams.keys));
+
+  return { embedder, retriever, provider, model };
+}
+
 async function resolveAnswerDeps(params: {
   env: ChatEnv;
   seams: Seams;
@@ -212,18 +240,12 @@ async function resolveAnswerDeps(params: {
   preview: boolean;
 }) {
   const { env, seams, overrides } = params;
-  const providerKind = overrides?.providerKind ?? resolveProvider(env.SOLV_LLM_PROVIDER);
-  const tier = overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER);
-  const model =
-    overrides?.model ??
-    (providerKind === "anthropic" ? ANTHROPIC_MODELS[tier] : OPENAI_MODELS[tier]);
-
-  const embedder =
-    overrides?.embedder ?? openAIEmbedder({ apiKey: await seams.keys.embeddingKey(params.orgId) });
-  const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
-  const provider =
-    overrides?.provider ??
-    (await llmProviderFor({ orgId: params.orgId, provider: providerKind, tier }, seams.keys));
+  const { embedder, retriever, provider, model } = await resolveChatProviders(
+    env,
+    seams,
+    params.orgId,
+    overrides,
+  );
 
   const actionRunner = params.preview
     ? null

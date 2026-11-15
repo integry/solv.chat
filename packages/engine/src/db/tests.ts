@@ -16,6 +16,7 @@ interface TestRunDbRow {
   started_at: number;
   results: string;
   passed: number;
+  published_anyway: number;
 }
 
 export interface TestRow {
@@ -27,6 +28,10 @@ export interface TestRow {
   createdAt: number;
 }
 
+export interface TestWithLatestResult extends TestRow {
+  latestResult: unknown | null;
+}
+
 export interface TestRunRow {
   id: string;
   orgId: string;
@@ -34,6 +39,7 @@ export interface TestRunRow {
   startedAt: number;
   results: unknown[];
   passed: boolean;
+  publishedAnyway: boolean;
 }
 
 export interface CreateTestInput {
@@ -53,7 +59,7 @@ export interface CreateTestRunInput {
 }
 
 const TEST_COLUMNS = "id, org_id, assistant_id, question, expectation, created_at";
-const RUN_COLUMNS = "id, org_id, version_id, started_at, results, passed";
+const RUN_COLUMNS = "id, org_id, version_id, started_at, results, passed, published_anyway";
 
 const mapTest = (row: TestDbRow): TestRow => ({
   id: row.id,
@@ -71,6 +77,7 @@ const mapRun = (row: TestRunDbRow): TestRunRow => ({
   startedAt: row.started_at,
   results: safeJsonArray<unknown>(row.results),
   passed: row.passed === 1,
+  publishedAnyway: row.published_anyway === 1,
 });
 
 /** Tenant-scoped data access for `tests` and `test_runs`. */
@@ -84,6 +91,40 @@ export function testsFor(db: D1Database, orgId: string) {
         .bind(orgId, assistantId)
         .all<TestDbRow>();
       return res.results.map(mapTest);
+    },
+
+    async listWithLatestResult(assistantId: string): Promise<TestWithLatestResult[]> {
+      const [tests, latest] = await Promise.all([
+        this.list(assistantId),
+        this.latestRun(assistantId),
+      ]);
+      const byTestId = new Map<string, unknown>();
+      if (latest !== null) {
+        for (const entry of latest.results) {
+          if (
+            typeof entry === "object" &&
+            entry !== null &&
+            "testId" in entry &&
+            typeof (entry as { testId: unknown }).testId === "string"
+          ) {
+            byTestId.set((entry as { testId: string }).testId, entry);
+          }
+        }
+      }
+      return tests.map((test) => ({
+        ...test,
+        latestResult: byTestId.get(test.id) ?? null,
+      }));
+    },
+
+    async countFor(assistantId: string): Promise<number> {
+      const row = await prepare(
+        db,
+        "SELECT COUNT(*) AS n FROM tests WHERE org_id = ?1 AND assistant_id = ?2",
+      )
+        .bind(orgId, assistantId)
+        .first<{ n: number }>();
+      return row?.n ?? 0;
     },
 
     async get(id: string): Promise<TestRow | null> {
@@ -129,6 +170,19 @@ export function testsFor(db: D1Database, orgId: string) {
       return (res.meta.changes ?? 0) > 0;
     },
 
+    async updateTest(
+      id: string,
+      input: { question: string; expectation: Record<string, unknown> },
+    ): Promise<boolean> {
+      const res = await prepare(
+        db,
+        "UPDATE tests SET question = ?3, expectation = ?4 WHERE org_id = ?1 AND id = ?2",
+      )
+        .bind(orgId, id, input.question, JSON.stringify(input.expectation))
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
     async remove(id: string): Promise<boolean> {
       const res = await prepare(db, "DELETE FROM tests WHERE org_id = ?1 AND id = ?2")
         .bind(orgId, id)
@@ -144,6 +198,26 @@ export function testsFor(db: D1Database, orgId: string) {
         .bind(orgId, versionId)
         .all<TestRunDbRow>();
       return res.results.map(mapRun);
+    },
+
+    async listRunsForAssistant(assistantId: string, limit = 20): Promise<TestRunRow[]> {
+      const res = await prepare(
+        db,
+        `SELECT r.id, r.org_id, r.version_id, r.started_at, r.results, r.passed, r.published_anyway
+         FROM test_runs r
+         JOIN assistant_versions v ON v.org_id = r.org_id AND v.id = r.version_id
+         WHERE r.org_id = ?1 AND v.assistant_id = ?2
+         ORDER BY r.started_at DESC
+         LIMIT ?3`,
+      )
+        .bind(orgId, assistantId, limit)
+        .all<TestRunDbRow>();
+      return res.results.map(mapRun);
+    },
+
+    async latestRun(assistantId: string): Promise<TestRunRow | null> {
+      const rows = await this.listRunsForAssistant(assistantId, 1);
+      return rows[0] ?? null;
     },
 
     async createRun(input: CreateTestRunInput): Promise<TestRunRow> {
@@ -169,6 +243,7 @@ export function testsFor(db: D1Database, orgId: string) {
         startedAt: input.startedAt,
         results: [...input.results],
         passed: input.passed,
+        publishedAnyway: false,
       };
     },
   };
