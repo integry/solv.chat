@@ -267,6 +267,44 @@ describe("Markdown rendering", () => {
     expect(container.textContent).toContain("<script>alert(1)</script>");
   });
 
+  it("preserves Markdown delimiters inside unsupported image and raw HTML constructs literally", () => {
+    const container = document.createElement("div");
+    renderMarkdown(
+      container,
+      [
+        "![**diagram**](https://example.com/image.png)",
+        "![*alt* and `code`](https://example.com/a*b*.png)",
+        '<img alt="**diagram**" src=x>',
+        '<span data-note="*hint*">ok</span>',
+        "<!-- **comment** -->",
+        '<script>const s = "**x**";</script>',
+        '**wrap <img alt="a**b" src=x> and ![c**d](https://example.com/x.png) end**',
+        "1 < 2 and **still bold** > 0",
+      ].join("\n\n"),
+    );
+
+    expect(container.querySelectorAll("img, a, span, script")).toHaveLength(0);
+    expect(container.querySelectorAll("em, code")).toHaveLength(0);
+
+    const paragraphs = container.querySelectorAll("p");
+    expect(paragraphs).toHaveLength(8);
+    expect(paragraphs[0]?.querySelector("strong")).toBeNull();
+    expect(paragraphs[0]?.textContent).toBe("![**diagram**](https://example.com/image.png)");
+    expect(paragraphs[1]?.textContent).toBe("![*alt* and `code`](https://example.com/a*b*.png)");
+    expect(paragraphs[2]?.querySelector("strong")).toBeNull();
+    expect(paragraphs[2]?.textContent).toBe('<img alt="**diagram**" src=x>');
+    expect(paragraphs[3]?.querySelector("em")).toBeNull();
+    expect(paragraphs[3]?.textContent).toBe('<span data-note="*hint*">ok</span>');
+    expect(paragraphs[4]?.querySelector("strong")).toBeNull();
+    expect(paragraphs[4]?.textContent).toBe("<!-- **comment** -->");
+    expect(paragraphs[5]?.querySelector("strong")).toBeNull();
+    expect(paragraphs[5]?.textContent).toBe('<script>const s = "**x**";</script>');
+    expect(paragraphs[6]?.querySelector("strong")?.textContent).toBe(
+      'wrap <img alt="a**b" src=x> and ![c**d](https://example.com/x.png) end',
+    );
+    expect(paragraphs[7]?.querySelector("strong")?.textContent).toBe("still bold");
+  });
+
   it("renders unterminated constructs as plain text mid-stream until closed and preserves existing DOM nodes", () => {
     const container = document.createElement("div");
 
@@ -307,6 +345,65 @@ describe("Markdown rendering", () => {
     // Once closed, it transitions to a code block with the exact raw contents.
     renderMarkdown(container, `Intro\n\`\`\`md\n${body}\n\`\`\``);
     expect(container.querySelector(".solv-code-block code")?.textContent).toBe(body);
+  });
+
+  it("updates literal class when a streaming paragraph transitions into or out of an unfinished fence", () => {
+    const container = document.createElement("div");
+
+    renderMarkdown(container, "`");
+    const para = container.querySelector("p");
+    expect(para?.classList.contains("solv-md-literal")).toBe(false);
+
+    renderMarkdown(container, "```ts\n  const x = 1;");
+    expect(container.querySelector("p")).toBe(para);
+    expect(para?.classList.contains("solv-md-literal")).toBe(true);
+
+    renderMarkdown(container, "```ts`");
+    expect(container.querySelector("p")).toBe(para);
+    expect(para?.classList.contains("solv-md-literal")).toBe(false);
+  });
+
+  it("preserves newlines and indentation for unterminated fences inside an assistant bubble during streaming and after restore", async () => {
+    const unfinishedFence = "```ts\nfunction demo() {\n  return 1;\n}";
+    const chunks = [
+      `event: token\ndata: ${JSON.stringify({ text: "```ts\nfunction demo() {\n" })}\n\n`,
+      `event: token\ndata: ${JSON.stringify({ text: "  return 1;\n}" })}\n\n`,
+      'event: done\ndata: {"messageId":"m_fence","conversationId":"c_fence"}\n\n',
+    ];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        return new Response(sseStream(chunks), { status: 200 });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const liveEl = mountWidget("pk_md_unfinished");
+    await flushAsync();
+    const liveRoot = shadow(liveEl);
+    mustQuery<HTMLButtonElement>(liveRoot, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(liveRoot, "#solv-input").value = "Show code";
+    mustQuery<HTMLFormElement>(liveRoot, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    const liveLiteral = mustQuery<HTMLParagraphElement>(
+      liveRoot,
+      ".solv-bubble--assistant .solv-bubble-text p.solv-md-literal",
+    );
+    expect(liveLiteral.textContent).toBe(unfinishedFence);
+    expect(getComputedStyle(liveLiteral).whiteSpace).toBe("pre-wrap");
+
+    liveEl.remove();
+    const restoredEl = mountWidget("pk_md_unfinished");
+    await flushAsync();
+    const restoredRoot = shadow(restoredEl);
+    const restoredLiteral = mustQuery<HTMLParagraphElement>(
+      restoredRoot,
+      ".solv-bubble--assistant .solv-bubble-text p.solv-md-literal",
+    );
+    expect(restoredLiteral.textContent).toBe(unfinishedFence);
+    expect(getComputedStyle(restoredLiteral).whiteSpace).toBe("pre-wrap");
   });
 
   it("keeps user bubbles as plain text and produces identical output for streamed and restored assistant transcripts", async () => {

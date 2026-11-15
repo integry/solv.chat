@@ -202,6 +202,10 @@ textarea:focus-visible {
   margin: 0 0 8px;
 }
 
+.solv-bubble-text p.solv-md-literal {
+  white-space: pre-wrap;
+}
+
 .solv-bubble-text p:last-child {
   margin-bottom: 0;
 }

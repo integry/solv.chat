@@ -196,9 +196,57 @@ function parseBlocks(markdown: string): ParsedBlock[] {
   return blocks;
 }
 
+const HTML_CLOSE_TAG_RE = /<\/[A-Za-z][A-Za-z0-9-]*\s*>/y;
+const HTML_OPEN_TAG_RE =
+  /<([A-Za-z][A-Za-z0-9-]*)(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/y;
+
+function findOpaqueLiteralSpanEnd(text: string, pos: number): number {
+  const ch = text[pos];
+  if (ch === "!" && text[pos + 1] === "[") {
+    const imgBounds = findLinkEnd(text, pos + 1);
+    if (imgBounds) {
+      return imgBounds.closeParen + 1;
+    }
+    return -1;
+  }
+
+  if (ch === "<") {
+    if (text.startsWith("<!--", pos)) {
+      const commentEnd = text.indexOf("-->", pos + 4);
+      return commentEnd !== -1 ? commentEnd + 3 : -1;
+    }
+    HTML_CLOSE_TAG_RE.lastIndex = pos;
+    const closeMatch = HTML_CLOSE_TAG_RE.exec(text);
+    if (closeMatch) {
+      return closeMatch.index + closeMatch[0].length;
+    }
+    HTML_OPEN_TAG_RE.lastIndex = pos;
+    const openMatch = HTML_OPEN_TAG_RE.exec(text);
+    if (openMatch) {
+      const tagEnd = openMatch.index + openMatch[0].length;
+      const tagName = openMatch[1]?.toLowerCase();
+      if ((tagName === "script" || tagName === "style") && !openMatch[0].endsWith("/>")) {
+        const closeTagRe = new RegExp(`</${tagName}\\s*>`, "i");
+        const restClose = closeTagRe.exec(text.slice(tagEnd));
+        if (restClose) {
+          return tagEnd + restClose.index + restClose[0].length;
+        }
+      }
+      return tagEnd;
+    }
+  }
+
+  return -1;
+}
+
 function findInlineClose(text: string, from: number, marker: "**" | "*"): number {
   let i = from;
   while (i < text.length) {
+    const opaqueEnd = findOpaqueLiteralSpanEnd(text, i);
+    if (opaqueEnd !== -1) {
+      i = opaqueEnd;
+      continue;
+    }
     const ch = text[i];
     if (ch === "`") {
       const codeClose = text.indexOf("`", i + 1);
@@ -277,6 +325,13 @@ function renderInline(parent: Node, text: string, allowLinks = true): void {
       flush();
       parent.appendChild(document.createElement("br"));
       pos++;
+      continue;
+    }
+
+    const opaqueEnd = findOpaqueLiteralSpanEnd(text, pos);
+    if (opaqueEnd !== -1) {
+      buf += text.slice(pos, opaqueEnd);
+      pos = opaqueEnd;
       continue;
     }
 
@@ -435,6 +490,7 @@ function buildBlockElement(block: ParsedBlock): HTMLElement {
   }
   const p = document.createElement("p");
   if (block.literal) {
+    p.className = "solv-md-literal";
     p.textContent = block.text;
   } else {
     renderInline(p, block.text);
@@ -460,6 +516,9 @@ function nodesEqual(a: Node, b: Node): boolean {
 }
 
 function reconcileParagraph(prevEl: HTMLElement, nextEl: HTMLElement): void {
+  if (prevEl.className !== nextEl.className) {
+    prevEl.className = nextEl.className;
+  }
   let k = 0;
   while (k < prevEl.childNodes.length && k < nextEl.childNodes.length) {
     const oldChild = prevEl.childNodes[k];
