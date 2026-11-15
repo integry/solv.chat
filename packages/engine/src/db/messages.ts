@@ -38,6 +38,11 @@ export interface MessageRow {
   replyTo: string | null;
 }
 
+export interface PendingReplyRow extends MessageRow {
+  resumeContext: unknown | null;
+  resumeRevision: number;
+}
+
 export interface CreateMessageInput {
   id: string;
   conversationId: string;
@@ -55,6 +60,8 @@ export interface CreateMessageInput {
    * rather than inferred from timestamps.
    */
   replyTo?: string | null | undefined;
+  /** Transient model continuation state for paused page-action replies. */
+  resumeContext?: unknown | null | undefined;
 }
 
 /** One group of unanswered questions sharing a normalised text. */
@@ -127,6 +134,28 @@ const map = (row: Row): MessageRow => ({
   replyTo: row.reply_to,
 });
 
+interface PendingRow extends Row {
+  resume_context: string | null;
+  resume_revision: number;
+}
+
+function parseResumeContextJson(raw: string | null): unknown | null {
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function hasPendingCalls(toolCalls: unknown[] | null): boolean {
+  if (!Array.isArray(toolCalls)) return false;
+  return toolCalls.some(
+    (call) =>
+      typeof call === "object" && call !== null && (call as { pending?: unknown }).pending === true,
+  );
+}
+
 /** Tenant-scoped data access for `messages`. */
 export function messagesFor(db: D1Database, orgId: string) {
   return {
@@ -161,6 +190,169 @@ export function messagesFor(db: D1Database, orgId: string) {
       return row ? map(row) : null;
     },
 
+    /**
+     * The assistant reply a resume is continuing, scoped to one conversation.
+     * Returns null unless it is in this org, in this conversation, and still has
+     * pending calls — so a stale, foreign or already-finished id is indistinguishable
+     * from an unknown one.
+     */
+    async getPendingReply(conversationId: string, id: string): Promise<PendingReplyRow | null> {
+      const row = await prepare(
+        db,
+        `SELECT ${COLUMNS}, resume_context, resume_revision FROM messages
+          WHERE org_id = ?1 AND id = ?2 AND conversation_id = ?3 AND role = 'assistant'`,
+      )
+        .bind(orgId, id, conversationId)
+        .first<PendingRow>();
+      if (!row) return null;
+      const mapped = map(row);
+      if (!hasPendingCalls(mapped.toolCalls)) return null;
+      return {
+        ...mapped,
+        resumeContext: parseResumeContextJson(row.resume_context),
+        resumeRevision: row.resume_revision,
+      };
+    },
+
+    /**
+     * Atomically claims a specific revision of a paused reply for one active
+     * continuation. A stale lease older than `ttlMs` can be reclaimed so an
+     * interrupted worker does not permanently strand the reply.
+     */
+    async claimPendingReply(params: {
+      conversationId: string;
+      id: string;
+      claimToken: string;
+      revision: number;
+      now: number;
+      ttlMs: number;
+    }): Promise<boolean> {
+      const res = await prepare(
+        db,
+        `UPDATE messages
+            SET resume_claim = ?3,
+                resume_claimed_at = ?4
+          WHERE org_id = ?1
+            AND id = ?2
+            AND conversation_id = ?5
+            AND role = 'assistant'
+            AND resume_revision = ?6
+            AND (resume_claim IS NULL OR resume_claimed_at <= ?7)`,
+      )
+        .bind(
+          orgId,
+          params.id,
+          params.claimToken,
+          params.now,
+          params.conversationId,
+          params.revision,
+          params.now - params.ttlMs,
+        )
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Extends an active, unexpired resume lease only if the caller still owns
+     * the claimed revision. Returns false if the lease expired or was reclaimed.
+     */
+    async renewReplyClaim(params: {
+      conversationId: string;
+      id: string;
+      claimToken: string;
+      revision: number;
+      now: number;
+      ttlMs: number;
+    }): Promise<boolean> {
+      const res = await prepare(
+        db,
+        `UPDATE messages
+            SET resume_claimed_at = ?3
+          WHERE org_id = ?1
+            AND id = ?2
+            AND conversation_id = ?4
+            AND role = 'assistant'
+            AND resume_claim = ?5
+            AND resume_revision = ?6
+            AND resume_claimed_at > ?7`,
+      )
+        .bind(
+          orgId,
+          params.id,
+          params.now,
+          params.conversationId,
+          params.claimToken,
+          params.revision,
+          params.now - params.ttlMs,
+        )
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
+    /** Releases an active resume claim if the continuation fails before completing. */
+    async releaseReplyClaim(id: string, claimToken: string): Promise<boolean> {
+      const res = await prepare(
+        db,
+        `UPDATE messages
+            SET resume_claim = NULL,
+                resume_claimed_at = NULL
+          WHERE org_id = ?1 AND id = ?2 AND resume_claim = ?3`,
+      )
+        .bind(orgId, id, claimToken)
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Persists the next state of a resumed reply only if the caller still owns
+     * the claimed revision, then releases the claim and advances the revision.
+     */
+    async completeReply(params: {
+      id: string;
+      claimToken: string;
+      revision: number;
+      content: string;
+      citations: Citation[];
+      toolCalls: unknown[];
+      resumeContext: unknown | null;
+      tokensIn: number;
+      tokensOut: number;
+    }): Promise<boolean> {
+      const res = await prepare(
+        db,
+        `UPDATE messages
+            SET content = ?3,
+                citations = ?4,
+                tool_calls = ?5,
+                resume_context = ?6,
+                tokens_in = tokens_in + ?7,
+                tokens_out = tokens_out + ?8,
+                resume_claim = NULL,
+                resume_claimed_at = NULL,
+                resume_revision = resume_revision + 1
+          WHERE org_id = ?1
+            AND id = ?2
+            AND resume_claim = ?9
+            AND resume_revision = ?10`,
+      )
+        // Token counts accumulate: the pause and the resume are two model calls on
+        // one message, and the owner's cost figure must include both.
+        .bind(
+          orgId,
+          params.id,
+          params.content,
+          JSON.stringify(params.citations),
+          JSON.stringify(params.toolCalls),
+          params.resumeContext == null ? null : JSON.stringify(params.resumeContext),
+          params.tokensIn,
+          params.tokensOut,
+          params.claimToken,
+          params.revision,
+        )
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
     async unanswered(assistantId: string, limit = 50): Promise<MessageRow[]> {
       const res = await prepare(
         db,
@@ -181,8 +373,8 @@ export function messagesFor(db: D1Database, orgId: string) {
       const questionKey = input.role === "user" ? normalizeQuestionText(input.content) : null;
       await prepareInsert(
         db,
-        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at, reply_to, question_key)
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at, reply_to, question_key, resume_context)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
       )
         .bind(
           orgId,
@@ -198,6 +390,7 @@ export function messagesFor(db: D1Database, orgId: string) {
           input.createdAt,
           replyTo,
           questionKey,
+          input.resumeContext == null ? null : JSON.stringify(input.resumeContext),
         )
         .run();
 

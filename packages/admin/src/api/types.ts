@@ -73,11 +73,20 @@ export interface Citation {
   title: string;
 }
 
+export interface ConversationToolCall {
+  callId: string;
+  name: string;
+  kind: "mcp" | "action";
+  ok: boolean;
+  pending?: boolean;
+}
+
 export interface ConversationTurn {
   id: string;
   role: "user" | "assistant";
   content: string;
   citations: Citation[];
+  toolCalls?: ConversationToolCall[] | null;
   answered: boolean;
   createdAt: number;
   feedback: ConversationFeedback[];

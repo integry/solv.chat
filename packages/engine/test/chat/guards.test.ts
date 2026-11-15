@@ -73,6 +73,7 @@ describe("chat/guards", () => {
         },
         limits: { dailyCostCapMicros: 2_000_000 },
         allowedTools: [],
+        actions: { builtins: false, allowedOrigins: [] },
       },
       createdAt: 1000,
     });
@@ -489,7 +490,7 @@ describe("chat/guards", () => {
       expect(publicRes.status, `public ${testCase.name}`).toBe(200);
       expect(publicRes.headers.get("access-control-allow-origin")).toBe("https://site.example");
       expect(parseSseBody(await publicRes.text())).toEqual([
-        { type: "error", message: "Resuming actions is not supported yet." },
+        { type: "error", message: "This answer can no longer be continued." },
       ]);
 
       // Admin preview route (/api/admin/chat)

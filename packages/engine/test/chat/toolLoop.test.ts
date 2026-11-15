@@ -10,6 +10,7 @@ import {
   runToolLoop,
   type StoredToolCall,
   TOOL_WALL_TIME_MS,
+  type ToolLoopOutcome,
   type ToolRunner,
 } from "../../src/chat/toolLoop.js";
 import { forPrincipal } from "../../src/db/tenant.js";
@@ -1186,5 +1187,55 @@ describe("chat/toolLoop", () => {
         expect(resultText.endsWith(expectedMarker)).toBe(true);
       }
     }
+  });
+
+  it("F6: records already-reported model usage even when the lease is lost before completion", async () => {
+    let leaseOwned = true;
+    const usageEvents: Array<{ tokensIn: number; tokensOut: number; costMicros: number }> = [];
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        yield { kind: "usage", tokensIn: 42, tokensOut: 18, stopReason: "end" };
+        // Lease is lost after the provider already reported usage.
+        leaseOwned = false;
+        yield { kind: "text", text: "Stale text that must not emit." };
+      },
+    };
+
+    const loop = runToolLoop(
+      {
+        provider,
+        model: ANTHROPIC_MODELS.fast,
+        runners: [],
+        priorCalls: 0,
+        ensureLease: async () => leaseOwned,
+        onModelUsage: async (tokensIn, tokensOut, cost) => {
+          usageEvents.push({ tokensIn, tokensOut, costMicros: cost });
+        },
+      },
+      { system: "sys", messages: [{ role: "user", content: "hi" }], maxTokens: 100 },
+    );
+
+    const emitted: unknown[] = [];
+    let outcome: ToolLoopOutcome | undefined;
+    for (;;) {
+      const step = await loop.next();
+      if (step.done) {
+        outcome = step.value;
+        break;
+      }
+      emitted.push(step.value);
+    }
+
+    expect(emitted).toEqual([]);
+    expect(outcome?.abortedByLease).toBe(true);
+    expect(usageEvents).toEqual([
+      {
+        tokensIn: 42,
+        tokensOut: 18,
+        costMicros: costMicros(ANTHROPIC_MODELS.fast, 42, 18),
+      },
+    ]);
   });
 });

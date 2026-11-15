@@ -11,6 +11,8 @@ import type {
 } from "../providers/types.js";
 
 // Chosen here because the specification names caps but no numbers.
+// Per S6, the iteration and wall-time budgets are per request, and the
+// per-conversation call budget is what bounds repeated pauses.
 // Four iterations: enough for "look it up, then look up what that referenced",
 // short of a model that asks for the same tool forever.
 export const MAX_TOOL_ITERATIONS = 4;
@@ -32,7 +34,20 @@ const decoder = new TextDecoder();
 export interface ToolRunResult {
   content: string;
   isError: boolean;
+  /** Set by a runner that cannot run the call here. */
+  pause?: boolean;
 }
+
+/**
+ * A runner's answer meaning "this call belongs to the client". The loop stops
+ * and returns the pending calls; the caller emits `action` events and waits
+ * for a follow-up request carrying the results.
+ */
+export const PAUSE_FOR_CLIENT: ToolRunResult = {
+  content: "",
+  isError: false,
+  pause: true,
+};
 
 /** What a tool source provides: the definitions and a way to run one. */
 export interface ToolRunner {
@@ -47,6 +62,8 @@ export interface StoredToolCall {
   name: string;
   kind: "mcp" | "action";
   ok: boolean;
+  /** True while awaiting client execution on a paused action reply. */
+  pending?: boolean;
   ms: number;
   input: Record<string, unknown>;
   resultBytes: number;
@@ -77,12 +94,38 @@ export interface ToolLoopDeps {
   reserveCalls?: ((count: number) => Promise<boolean>) | undefined;
   /** Recorded per model call so the spend cap sees real spend, not one event. */
   onModelUsage: (tokensIn: number, tokensOut: number, costMicros: number) => Promise<void>;
+  /**
+   * Optional lease/ownership check called before model/tool work and before
+   * emitting output. Returning false stops the loop without suppressing
+   * already-reported model usage.
+   */
+  ensureLease?: (() => Promise<boolean>) | undefined;
   now?: (() => number) | undefined;
+}
+
+export interface PendingToolTurn {
+  assistantText: string;
+  asked: ToolCall[];
+  /** Server-side tool results from the same round that paused on a client action. */
+  completedResults: LlmToolResult[];
+}
+
+export interface ToolLoopContinuation {
+  /** Completed tool-exchange messages (assistant + tool_results) within this answer. */
+  messages: LlmMessage[];
+  /** The in-flight round that paused for client action(s). */
+  pendingTurn: PendingToolTurn;
 }
 
 export interface ToolLoopOutcome {
   text: string;
   calls: StoredToolCall[];
+  /** Calls the client must run. Empty when the answer finished. */
+  pending: ToolCall[];
+  /** Present only when `pending.length > 0`, to restore model context on resume. */
+  continuation?: ToolLoopContinuation | undefined;
+  /** True when the loop stopped early because the caller lost its resume lease. */
+  abortedByLease?: boolean | undefined;
 }
 
 /** Truncates on a UTF-8 boundary and says so, so the model is not misled. */
@@ -142,9 +185,81 @@ async function runWithDeadline(
  * a cap is reached. Provider-independent and tool-source-independent: the only
  * things it knows are the LlmProvider interface and the ToolRunner list.
  */
-export async function* runToolLoop(
+export function runToolLoop(
   deps: ToolLoopDeps,
   request: LlmRequest,
+): AsyncGenerator<ToolLoopEvent, ToolLoopOutcome, undefined> {
+  return runLoopFrom(deps, request, [], "");
+}
+
+/**
+ * Continues a paused answer. Same loop, entered with prior completed tool
+ * exchanges and the results the client produced, so resumption is not a second
+ * code path.
+ */
+export function resumeToolLoop(
+  deps: ToolLoopDeps,
+  request: LlmRequest,
+  priorText: string,
+  pendingCalls: readonly ToolCall[],
+  results: readonly LlmToolResult[],
+  continuation?: ToolLoopContinuation | undefined,
+): AsyncGenerator<ToolLoopEvent, ToolLoopOutcome, undefined> {
+  const cappedById = new Map<string, LlmToolResult>();
+  for (const r of results) {
+    const capped = capResult(r.content);
+    cappedById.set(r.callId, { callId: r.callId, content: capped.content, isError: r.isError });
+  }
+
+  let continuationMessages: LlmMessage[];
+  if (continuation) {
+    for (const r of continuation.pendingTurn.completedResults) {
+      if (!cappedById.has(r.callId)) {
+        cappedById.set(r.callId, r);
+      }
+    }
+    const turnResults: LlmToolResult[] = continuation.pendingTurn.asked.map(
+      (call) =>
+        cappedById.get(call.callId) ?? {
+          callId: call.callId,
+          content: "The tool did not return a result.",
+          isError: true,
+        },
+    );
+    continuationMessages = [
+      ...continuation.messages,
+      {
+        role: "assistant",
+        content: continuation.pendingTurn.assistantText,
+        toolCalls: [...continuation.pendingTurn.asked],
+      },
+      { role: "tool_results", results: turnResults },
+    ];
+  } else {
+    continuationMessages = [
+      { role: "assistant", content: priorText, toolCalls: [...pendingCalls] },
+      {
+        role: "tool_results",
+        results: pendingCalls.map(
+          (call) =>
+            cappedById.get(call.callId) ?? {
+              callId: call.callId,
+              content: "The tool did not return a result.",
+              isError: true,
+            },
+        ),
+      },
+    ];
+  }
+
+  return runLoopFrom(deps, request, continuationMessages, priorText);
+}
+
+async function* runLoopFrom(
+  deps: ToolLoopDeps,
+  request: LlmRequest,
+  initialContinuationMessages: readonly LlmMessage[],
+  initialText: string,
 ): AsyncGenerator<ToolLoopEvent, ToolLoopOutcome, undefined> {
   const clock = deps.now ?? Date.now;
   const startedAt = clock();
@@ -165,13 +280,25 @@ export async function* runToolLoop(
   // Strip any caller-supplied `tools` so disabling tools truly omits `tools`
   // from subsequent provider requests and only offered runner definitions apply.
   const { tools: _ignoredTools, ...baseRequest } = request;
-  const messages: LlmMessage[] = [...request.messages];
+  const continuationMessages: LlmMessage[] = [...initialContinuationMessages];
+  const messages: LlmMessage[] = [...request.messages, ...continuationMessages];
   const calls: StoredToolCall[] = [];
-  let text = "";
+  let text = initialText;
   let toolsOffered = definitions.length > 0;
   let budgetNoticeSent = false;
+  let leaseLost = false;
+  const checkLease = async (): Promise<boolean> => {
+    if (leaseLost) return false;
+    if (!deps.ensureLease) return true;
+    const ok = await deps.ensureLease();
+    if (!ok) leaseLost = true;
+    return ok;
+  };
 
   for (let iteration = 0; ; iteration++) {
+    if (!(await checkLease())) {
+      return { text, calls, pending: [], abortedByLease: true };
+    }
     const stream = deps.provider.stream({
       ...baseRequest,
       messages: [...messages],
@@ -190,6 +317,9 @@ export async function* runToolLoop(
     try {
       for await (const chunk of stream as AsyncIterable<LlmChunk>) {
         if (chunk.kind === "text") {
+          if (!(await checkLease())) {
+            break;
+          }
           assistantText += chunk.text;
           text += chunk.text;
           // Forwarded as it arrives: the visible difference between this and a
@@ -197,6 +327,9 @@ export async function* runToolLoop(
           // take that away.
           yield { kind: "text", text: chunk.text };
         } else if (chunk.kind === "tool_call") {
+          if (!(await checkLease())) {
+            break;
+          }
           asked.push(chunk.call);
         } else {
           tokensIn = chunk.tokensIn;
@@ -204,18 +337,23 @@ export async function* runToolLoop(
           usageReported = true;
         }
       }
-      completed = true;
+      completed = !leaseLost;
     } finally {
       // Per model call, so three calls bill three times. Recorded in `finally`
       // for the same reason phase 1 records before persisting: tokens the
-      // provider reported are owed whether or not the rest of the turn works.
+      // provider reported are owed whether or not the rest of the turn works,
+      // even if the resume lease was lost before the stream finished.
       if (usageReported || completed) {
         await deps.onModelUsage(tokensIn, tokensOut, costMicros(deps.model, tokensIn, tokensOut));
       }
     }
 
+    if (leaseLost) {
+      return { text, calls, pending: [], abortedByLease: true };
+    }
+
     if (asked.length === 0) {
-      return { text, calls };
+      return { text, calls, pending: [] };
     }
 
     // Caps are checked after the model asked, not before: the model is allowed
@@ -227,28 +365,35 @@ export async function* runToolLoop(
       : deps.priorCalls + calls.length + asked.length > MAX_TOOL_CALLS_PER_CONVERSATION;
 
     if (!overIterations && !overTime && !overConversation && deps.reserveCalls) {
+      if (!(await checkLease())) {
+        return { text, calls, pending: [], abortedByLease: true };
+      }
       overConversation = !(await deps.reserveCalls(asked.length));
     }
 
     if (overIterations || overConversation || overTime) {
-      if (budgetNoticeSent) return { text, calls };
+      if (budgetNoticeSent) return { text, calls, pending: [] };
       budgetNoticeSent = true;
       toolsOffered = false;
-      messages.push(
-        { role: "assistant", content: assistantText, toolCalls: asked },
-        {
-          role: "tool_results",
-          results: asked.map((call) => ({
-            callId: call.callId,
-            // Said once, as a result rather than a system instruction: the
-            // model then answers from what it has instead of apologising for
-            // an internal budget the visitor cannot see.
-            content:
-              "No more tools are available for this answer. Answer from what you already have.",
-            isError: true,
-          })),
-        },
-      );
+      const budgetAssistant: LlmMessage = {
+        role: "assistant",
+        content: assistantText,
+        toolCalls: asked,
+      };
+      const budgetResults: LlmMessage = {
+        role: "tool_results",
+        results: asked.map((call) => ({
+          callId: call.callId,
+          // Said once, as a result rather than a system instruction: the
+          // model then answers from what it has instead of apologising for
+          // an internal budget the visitor cannot see.
+          content:
+            "No more tools are available for this answer. Answer from what you already have.",
+          isError: true,
+        })),
+      };
+      continuationMessages.push(budgetAssistant, budgetResults);
+      messages.push(budgetAssistant, budgetResults);
       continue;
     }
 
@@ -261,9 +406,13 @@ export async function* runToolLoop(
       timer = setTimeout(() => controller.abort(), remaining);
     }
     const results: LlmToolResult[] = [];
+    const pending: ToolCall[] = [];
 
     try {
       for (const call of asked) {
+        if (!(await checkLease())) {
+          return { text, calls, pending: [], abortedByLease: true };
+        }
         const runner = byName.get(call.name);
         const timedOutBeforeStart =
           controller.signal.aborted || clock() - startedAt >= TOOL_WALL_TIME_MS;
@@ -293,6 +442,21 @@ export async function* runToolLoop(
             isError: true,
           };
         }
+        if (outcome.pause) {
+          pending.push(call);
+          calls.push({
+            callId: call.callId,
+            name: call.name,
+            kind: runner?.kind ?? "action",
+            ok: false,
+            pending: true,
+            ms: 0,
+            input: call.input,
+            resultBytes: 0,
+            resultPreview: "",
+          });
+          continue;
+        }
         const capped = capResult(outcome.content);
         results.push({ callId: call.callId, content: capped.content, isError: outcome.isError });
         calls.push({
@@ -307,6 +471,9 @@ export async function* runToolLoop(
           // a third party's payload is not theirs to keep.
           resultPreview: outcome.content.slice(0, RESULT_PREVIEW_CHARS),
         });
+        if (!(await checkLease())) {
+          return { text, calls, pending: [], abortedByLease: true };
+        }
         yield {
           kind: "tool",
           call,
@@ -321,9 +488,29 @@ export async function* runToolLoop(
       }
     }
 
-    messages.push(
-      { role: "assistant", content: assistantText, toolCalls: asked },
-      { role: "tool_results", results },
-    );
+    if (pending.length > 0) {
+      return {
+        text,
+        calls,
+        pending,
+        continuation: {
+          messages: continuationMessages,
+          pendingTurn: {
+            assistantText,
+            asked,
+            completedResults: results,
+          },
+        },
+      };
+    }
+
+    const assistantTurn: LlmMessage = {
+      role: "assistant",
+      content: assistantText,
+      toolCalls: asked,
+    };
+    const resultsTurn: LlmMessage = { role: "tool_results", results };
+    continuationMessages.push(assistantTurn, resultsTurn);
+    messages.push(assistantTurn, resultsTurn);
   }
 }

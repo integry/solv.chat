@@ -179,17 +179,33 @@ describe("parseVersionConfig", () => {
     }
   });
 
-  it("parses actions.builtins boolean and rejects invalid actions config", () => {
-    const enabled = parseVersionConfig({ actions: { builtins: true } });
-    expect(enabled.ok).toBe(true);
-    if (enabled.ok) {
-      expect(enabled.value.actions).toEqual({ builtins: true });
+  it("parses actions section with origin normalisation and rejects invalid origins", () => {
+    const valid = parseVersionConfig({
+      actions: {
+        builtins: true,
+        allowedOrigins: ["https://shop.example.com/", "https://shop.example.com"],
+      },
+    });
+    expect(valid.ok).toBe(true);
+    if (valid.ok) {
+      expect(valid.value.actions).toEqual({
+        builtins: true,
+        allowedOrigins: ["https://shop.example.com"],
+      });
     }
 
-    const bad = parseVersionConfig({ actions: { builtins: "yes" } });
-    expect(bad.ok).toBe(false);
-    if (!bad.ok) {
-      expect(bad.errors.some((e) => e.startsWith("actions.builtins:"))).toBe(true);
+    const invalid = parseVersionConfig({
+      actions: {
+        builtins: "yes",
+        allowedOrigins: ["https://example.com/path", "https://*.example.com", "ftp://example.com"],
+      },
+    });
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) {
+      expect(invalid.errors.some((e) => e.startsWith("actions.builtins:"))).toBe(true);
+      expect(invalid.errors.some((e) => e.startsWith("actions.allowedOrigins[0]:"))).toBe(true);
+      expect(invalid.errors.some((e) => e.startsWith("actions.allowedOrigins[1]:"))).toBe(true);
+      expect(invalid.errors.some((e) => e.startsWith("actions.allowedOrigins[2]:"))).toBe(true);
     }
   });
 });

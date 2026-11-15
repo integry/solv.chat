@@ -90,6 +90,20 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                   </ul>
                 )}
 
+                {turn.toolCalls && turn.toolCalls.length > 0 && (
+                  <ul className="turn-citations" aria-label="What the assistant did">
+                    {turn.toolCalls.map((call) => (
+                      <li key={call.callId}>
+                        {/* Name and outcome only: the stored row holds no result body, by
+                            design — a third party's payload is not the owner's to keep. */}
+                        {call.kind === "action" ? "On the page: " : "Tool: "}
+                        {call.name}
+                        {call.pending ? " — waiting" : call.ok ? "" : " — did not work"}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
                 {turn.feedback.length > 0 && (
                   <div className="source-meta">
                     {turn.feedback.map((fb) => (

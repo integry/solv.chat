@@ -1,4 +1,5 @@
 import { Errors, fail, ok, type Result } from "../result.js";
+import { parseOriginValue } from "./assistant.js";
 import { isPlainObject, readTrimmedString } from "./shared.js";
 
 export type WidgetPosition = "left" | "right";
@@ -21,7 +22,15 @@ export interface LimitsConfig {
 }
 
 export interface ActionsConfig {
+  /** navigate, highlight and fill. Off until the owner turns them on. */
   builtins: boolean;
+  /**
+   * Extra origins `navigate` may send a visitor to. The page's own origin is
+   * always allowed and is not listed here. Separate from the assistant's
+   * allowedOrigins, which says who may embed the widget: that is a different
+   * question with a different answer.
+   */
+  allowedOrigins: string[];
 }
 
 export interface VersionConfig {
@@ -29,7 +38,7 @@ export interface VersionConfig {
   widget: WidgetConfig;
   limits: LimitsConfig;
   allowedTools: string[];
-  actions?: ActionsConfig;
+  actions: ActionsConfig;
 }
 
 const MAX_SUGGESTED_QUESTIONS = 6;
@@ -53,7 +62,8 @@ export const defaultVersionConfig = (): VersionConfig => ({
   // Phase 1 never reads this; it exists so the stored shape does not change
   // when phase 2 adds MCP tools.
   allowedTools: [],
-  actions: { builtins: false },
+  // Off by default, like every tool: the owner opts in.
+  actions: { builtins: false, allowedOrigins: [] },
 });
 
 function parseBehaviourSection(raw: unknown, target: BehaviourConfig, errors: Errors): void {
@@ -150,11 +160,22 @@ function parseActionsSection(raw: unknown, target: ActionsConfig, errors: Errors
     return;
   }
   if (raw.builtins !== undefined) {
-    if (typeof raw.builtins !== "boolean") {
-      errors.add("actions.builtins", "must be a boolean");
-    } else {
-      target.builtins = raw.builtins;
+    if (typeof raw.builtins !== "boolean") errors.add("actions.builtins", "must be true or false");
+    else target.builtins = raw.builtins;
+  }
+  if (raw.allowedOrigins !== undefined) {
+    if (!Array.isArray(raw.allowedOrigins)) {
+      errors.add("actions.allowedOrigins", "must be an array");
+      return;
     }
+    const origins: string[] = [];
+    raw.allowedOrigins.forEach((item, i) => {
+      // One definition of an origin for the whole product: byte-for-byte
+      // comparable, no path, no wildcard, http(s) only.
+      const origin = parseOriginValue(item, `actions.allowedOrigins[${i}]`, errors);
+      if (origin !== null && !origins.includes(origin)) origins.push(origin);
+    });
+    target.allowedOrigins = origins;
   }
 }
 
@@ -167,7 +188,10 @@ function cloneVersionConfig(config: VersionConfig): VersionConfig {
     widget: { ...config.widget },
     limits: { ...config.limits },
     allowedTools: [...config.allowedTools],
-    actions: { builtins: config.actions?.builtins === true },
+    actions: {
+      builtins: config.actions.builtins,
+      allowedOrigins: [...config.actions.allowedOrigins],
+    },
   };
 }
 
@@ -187,10 +211,7 @@ export function parseVersionConfig(value: unknown, base?: VersionConfig): Result
     parseBehaviourSection(value.behaviour, config.behaviour, errors);
   if (value.widget !== undefined) parseWidgetSection(value.widget, config.widget, errors);
   if (value.limits !== undefined) parseLimitsSection(value.limits, config.limits, errors);
-  if (value.actions !== undefined) {
-    config.actions ??= { builtins: false };
-    parseActionsSection(value.actions, config.actions, errors);
-  }
+  if (value.actions !== undefined) parseActionsSection(value.actions, config.actions, errors);
 
   if (value.allowedTools !== undefined) {
     if (!Array.isArray(value.allowedTools)) {

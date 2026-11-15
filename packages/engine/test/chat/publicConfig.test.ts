@@ -72,6 +72,10 @@ describe("chat/publicConfig", () => {
       fallbackText: "Secret fallback",
       suggestedQuestions: ["How do I start?"],
     };
+    base.actions = {
+      builtins: true,
+      allowedOrigins: ["https://shop.example"],
+    };
 
     const draft = await tenant.versions.createDraft({
       id: "ver_1",
@@ -84,6 +88,10 @@ describe("chat/publicConfig", () => {
     // Update draft only — should not appear on public config yet.
     const updatedDraft = defaultVersionConfig();
     updatedDraft.widget.title = "Draft Only Title";
+    updatedDraft.actions = {
+      builtins: false,
+      allowedOrigins: ["https://draft-only.example"],
+    };
     await tenant.versions.updateDraft("ast_1", updatedDraft);
 
     const app = createTestApp();
@@ -116,46 +124,13 @@ describe("chat/publicConfig", () => {
       greeting: "Published greeting",
       suggestedQuestions: ["How do I start?"],
       actions: {
-        builtins: false,
-        allowedOrigins: ["https://site.example"],
+        builtins: true,
+        allowedOrigins: ["https://shop.example"],
       },
     });
 
-    // Draft-only actions.builtins: true stays invisible until publish.
-    updatedDraft.actions = { builtins: true };
-    await tenant.versions.updateDraft("ast_1", updatedDraft);
-    const beforePubCtx = createExecutionContext();
-    const beforePubRes = await app.fetch(
-      new Request("https://engine.example/v1/assistants/pk_pub_1", {
-        headers: { origin: "https://site.example" },
-      }),
-      env,
-      beforePubCtx,
-    );
-    await waitOnExecutionContext(beforePubCtx);
-    const beforePubBody = (await beforePubRes.json()) as {
-      actions: { builtins: boolean; allowedOrigins: string[] };
-    };
-    expect(beforePubBody.actions.builtins).toBe(false);
-
     // Publish the draft change and verify it becomes visible.
     await tenant.versions.publishDraft("ast_1", "ver_2", "ver_3", 3000);
-    const afterPubCtx = createExecutionContext();
-    const afterPubRes = await app.fetch(
-      new Request("https://engine.example/v1/assistants/pk_pub_1", {
-        headers: { origin: "https://site.example" },
-      }),
-      env,
-      afterPubCtx,
-    );
-    await waitOnExecutionContext(afterPubCtx);
-    const afterPubBody = (await afterPubRes.json()) as {
-      actions: { builtins: boolean; allowedOrigins: string[] };
-    };
-    expect(afterPubBody.actions).toEqual({
-      builtins: true,
-      allowedOrigins: ["https://site.example"],
-    });
     const ctx2 = createExecutionContext();
     const res2 = await app.fetch(
       new Request("https://engine.example/v1/assistants/pk_pub_1", {
@@ -168,6 +143,10 @@ describe("chat/publicConfig", () => {
 
     const body2 = (await res2.json()) as Record<string, unknown>;
     expect(body2.title).toBe("Draft Only Title");
+    expect(body2.actions).toEqual({
+      builtins: false,
+      allowedOrigins: ["https://draft-only.example"],
+    });
   });
 
   it("rejects missing or unlisted Origin with 403 before checking limits", async () => {

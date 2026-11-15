@@ -11,17 +11,44 @@ export interface ConversationFeedback {
   createdAt: number;
 }
 
+export interface ConversationToolCall {
+  callId: string;
+  name: string;
+  kind: "mcp" | "action";
+  ok: boolean;
+  pending?: boolean;
+}
+
 export interface ConversationTurn {
   id: string;
   role: MessageRole;
   content: string;
   citations: Citation[];
+  toolCalls: ConversationToolCall[] | null;
   answered: boolean;
   createdAt: number;
   feedback: ConversationFeedback[];
   answerDocumentId: string | null;
   /** For a reply, the question it answered; null for questions and older rows. */
   replyTo: string | null;
+}
+
+function mapToolCalls(raw: unknown[] | null): ConversationToolCall[] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const out: ConversationToolCall[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const obj = item as Record<string, unknown>;
+    if (typeof obj.callId !== "string" || typeof obj.name !== "string") continue;
+    out.push({
+      callId: obj.callId,
+      name: obj.name,
+      kind: obj.kind === "action" ? "action" : "mcp",
+      ok: obj.ok === true,
+      ...(obj.pending === true ? { pending: true } : {}),
+    });
+  }
+  return out.length > 0 ? out : null;
 }
 
 export interface ConversationsPage {
@@ -99,6 +126,7 @@ export async function getConversation(
       role: msg.role,
       content: msg.content,
       citations: msg.citations,
+      toolCalls: msg.role === "assistant" ? mapToolCalls(msg.toolCalls) : null,
       answered: msg.answered,
       createdAt: msg.createdAt,
       feedback: feedbackByMessage.get(msg.id) ?? [],

@@ -3,6 +3,7 @@ import {
   defaultVersionConfig,
   MAX_CHAT_MESSAGE_LENGTH,
   parseChatRequest,
+  parseVersionConfig,
 } from "@solvchat/core";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -241,13 +242,15 @@ function installFakeServer(options: FakeServerOptions = {}) {
           pendingDraftSave = null;
           await wait;
         }
-        const body = JSON.parse(String(init?.body ?? "{}")) as Partial<VersionRow["config"]>;
-        if (body.behaviour) {
-          draft.config = { ...draft.config, behaviour: body.behaviour };
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        const parsed = parseVersionConfig(body, draft.config);
+        if (!parsed.ok) {
+          return Response.json(
+            { error: parsed.errors[0] ?? "Invalid config.", fields: parsed.errors },
+            { status: 400 },
+          );
         }
-        if (body.widget) {
-          draft.config = { ...draft.config, widget: body.widget };
-        }
+        draft.config = parsed.value;
         return Response.json({ draft });
       }
     }
@@ -493,6 +496,35 @@ describe("admin app", () => {
     expect(
       await screen.findByText("must be an absolute URL such as https://example.com"),
     ).toBeTruthy();
+  });
+
+  it("saves Widget actions.builtins and actions.allowedOrigins and maps field errors", async () => {
+    installFakeServer({ signedIn: true });
+    window.history.replaceState(null, "", "/admin/widget");
+    render(<App />);
+
+    const toggle = (await screen.findByLabelText(
+      "Let the assistant help on the page",
+    )) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    expect(screen.getByText("Take a visitor to another page on your site.")).toBeTruthy();
+
+    const actionOrigins = screen.getByLabelText(
+      "Other sites it may send visitors to",
+    ) as HTMLTextAreaElement;
+
+    // Invalid action origin maps actions.allowedOrigins[0] field error.
+    fireEvent.change(actionOrigins, { target: { value: "https://bad.example/path" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("must be an origin only, with no path")).toBeTruthy();
+
+    // Valid values save cleanly.
+    fireEvent.click(toggle);
+    fireEvent.change(actionOrigins, { target: { value: "https://shop.example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Draft saved.")).toBeTruthy();
+    expect(toggle.checked).toBe(true);
+    expect(actionOrigins.value).toBe("https://shop.example.com");
   });
 
   it("keeps the Try it transcript across screen navigation and sends target: draft and protocol version", async () => {
