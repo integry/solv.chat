@@ -28,6 +28,7 @@ function installFakeServer(options?: {
   runResponse?: TestRunResponse | (() => Promise<TestRunResponse>);
   onPostTest?: () => Promise<void>;
   onPatchTest?: () => Promise<void>;
+  onDeleteTest?: () => Promise<void>;
 }) {
   const assistant = makeAssistant();
   const tests: AnswerTest[] = options?.tests ? [...options.tests] : [];
@@ -99,7 +100,10 @@ function installFakeServer(options?: {
       }
 
       if (method === "DELETE") {
-        tests.splice(idx, 1);
+        if (options?.onDeleteTest) await options.onDeleteTest();
+        const currentIdx = tests.findIndex((t) => t.id === testId);
+        if (currentIdx === -1) return Response.json({ error: "Not found." }, { status: 404 });
+        tests.splice(currentIdx, 1);
         return Response.json({ deleted: true });
       }
     }
@@ -588,5 +592,114 @@ describe("Tests screen", () => {
     firstPost.resolve();
     expect(await screen.findByText("First question?")).toBeTruthy();
     expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Second draft?");
+  });
+
+  it("preserves edits completed on another test while a delete is in flight", async () => {
+    const deleteDeferred = createDeferred<void>();
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Question A?",
+          expectation: { kind: "contains", phrase: "alpha" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+        {
+          id: "tst_2",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Question B?",
+          expectation: { kind: "contains", phrase: "beta" },
+          createdAt: 1_700_000_000_100,
+          latestResult: null,
+        },
+      ],
+      onDeleteTest: async () => {
+        await deleteDeferred.promise;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    await screen.findByText("Question A?");
+    const [deleteA] = screen.getAllByRole("button", { name: "Delete" });
+    if (!deleteA) throw new Error("Expected Delete button for Question A");
+    fireEvent.click(deleteA);
+
+    // While A's delete is pending, edit and save B.
+    const [, editB] = screen.getAllByRole("button", { name: "Edit" });
+    if (!editB) throw new Error("Expected Edit button for Question B");
+    fireEvent.click(editB);
+    fireEvent.change(screen.getByLabelText("Question"), {
+      target: { value: "Question B updated?" },
+    });
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "beta-updated" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    expect(await screen.findByText("Question B updated?")).toBeTruthy();
+    expect(screen.getByText('It must mention "beta-updated"')).toBeTruthy();
+
+    // Now let A's delete complete; B's saved changes must remain intact.
+    deleteDeferred.resolve();
+    await waitFor(() => {
+      expect(screen.queryByText("Question A?")).toBeNull();
+    });
+    expect(screen.getByText("Question B updated?")).toBeTruthy();
+    expect(screen.getByText('It must mention "beta-updated"')).toBeTruthy();
+  });
+
+  it("preserves unsaved input when reopening the same test while an earlier save finishes", async () => {
+    const firstPatch = createDeferred<void>();
+    let patchCount = 0;
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Question A?",
+          expectation: { kind: "contains", phrase: "alpha" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+      ],
+      onPatchTest: async () => {
+        patchCount++;
+        if (patchCount === 1) await firstPatch.promise;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    await screen.findByText("Question A?");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "alpha-updated" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save test" }));
+
+    // Leave the editor via Add test, then reopen the same test and enter new unsaved input.
+    fireEvent.click(screen.getByRole("button", { name: "Add test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Question"), {
+      target: { value: "Question A newer draft?" },
+    });
+    fireEvent.change(screen.getByLabelText("What the answer must do"), {
+      target: { value: "notContains" },
+    });
+    fireEvent.change(screen.getByLabelText("Words"), { target: { value: "alpha-newer-draft" } });
+
+    firstPatch.resolve();
+    expect(await screen.findByText("Test saved.")).toBeTruthy();
+
+    // The newer session for the same test must still be open with its unsaved input.
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe(
+      "Question A newer draft?",
+    );
+    expect((screen.getByLabelText("What the answer must do") as HTMLSelectElement).value).toBe(
+      "notContains",
+    );
+    expect((screen.getByLabelText("Words") as HTMLInputElement).value).toBe("alpha-newer-draft");
   });
 });

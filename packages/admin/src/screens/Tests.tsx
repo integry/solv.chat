@@ -94,7 +94,10 @@ export function Tests({ assistantId }: TestsProps) {
         next.delete(testId);
         return next;
       });
-      testsRes.setValue({ tests: tests.filter((t) => t.id !== testId) });
+      testsRes.setValue((prev) => ({
+        tests: (prev?.tests ?? []).filter((t) => t.id !== testId),
+      }));
+      testsRes.reload();
       setStatusMessage("Test deleted.");
     } catch (err) {
       setRunError(err instanceof ApiError ? err.message : "Could not delete test.");
@@ -163,7 +166,12 @@ export function Tests({ assistantId }: TestsProps) {
           onSaved={(created) => {
             setAddingSessionId((current) => (current === addingSessionId ? null : current));
             setStatusMessage("Test saved.");
-            testsRes.setValue({ tests: [...tests, created] });
+            testsRes.setValue((prev) => {
+              const current = prev?.tests ?? [];
+              return {
+                tests: current.some((t) => t.id === created.id) ? current : [...current, created],
+              };
+            });
             testsRes.reload();
           }}
           onCancel={() => setAddingSessionId(null)}
@@ -208,8 +216,8 @@ export function Tests({ assistantId }: TestsProps) {
                             next.delete(updated.id);
                             return next;
                           });
-                          testsRes.setValue({
-                            tests: tests.map((item) =>
+                          testsRes.setValue((prev) => ({
+                            tests: (prev?.tests ?? []).map((item) =>
                               item.id === updated.id
                                 ? {
                                     ...updated,
@@ -221,7 +229,7 @@ export function Tests({ assistantId }: TestsProps) {
                                   }
                                 : item,
                             ),
-                          });
+                          }));
                           testsRes.reload();
                         }}
                         onCancel={() => setEditingSession(null)}

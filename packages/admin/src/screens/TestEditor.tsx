@@ -79,27 +79,37 @@ export function TestEditor(props: TestEditorProps) {
   const [formError, setFormError] = useState<string | null>(null);
   const sessionRef = useRef(0);
 
-  const initialQuestion = props.initialQuestion ?? "";
-  const initialExpectationKind = props.initialExpectation?.kind ?? "contains";
-  const initialExpectationDetail = detailOf(props.initialExpectation);
+  const latestInitialRef = useRef({
+    question: props.initialQuestion ?? "",
+    kind: props.initialExpectation?.kind ?? ("contains" as const),
+    detail: detailOf(props.initialExpectation),
+  });
+  latestInitialRef.current = {
+    question: props.initialQuestion ?? "",
+    kind: props.initialExpectation?.kind ?? ("contains" as const),
+    detail: detailOf(props.initialExpectation),
+  };
+  const identityRef = useRef({ assistantId: props.assistantId, testId: props.testId });
 
+  // Reset only when the edited target (assistant/test) changes, not when
+  // initialQuestion/initialExpectation props update mid-session from an
+  // earlier save completing.
   useEffect(() => {
-    void props.assistantId;
-    void props.testId;
+    if (
+      identityRef.current.assistantId === props.assistantId &&
+      identityRef.current.testId === props.testId
+    ) {
+      return;
+    }
+    identityRef.current = { assistantId: props.assistantId, testId: props.testId };
     sessionRef.current++;
-    setQuestion(initialQuestion);
-    setKind(initialExpectationKind);
-    setDetail(initialExpectationDetail);
+    setQuestion(latestInitialRef.current.question);
+    setKind(latestInitialRef.current.kind);
+    setDetail(latestInitialRef.current.detail);
     setBusy(false);
     setFieldErrors({});
     setFormError(null);
-  }, [
-    props.assistantId,
-    props.testId,
-    initialQuestion,
-    initialExpectationKind,
-    initialExpectationDetail,
-  ]);
+  }, [props.assistantId, props.testId]);
 
   const chosen = EXPECTATIONS.find((option) => option.kind === kind) ?? EXPECTATIONS[0];
 
