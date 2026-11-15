@@ -1,8 +1,8 @@
-import { MAX_PAGE_ACTIONS } from "@solvchat/core";
+import { MAX_ACTION_SCHEMA_BYTES, MAX_PAGE_ACTIONS } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearRegistry, listForRequest, lookup, register, runAction } from "../src/actions.js";
 import { HIGHLIGHT_DURATION_MS, installBuiltins } from "../src/builtins.js";
-import { parsePublicConfig } from "../src/element.js";
+import { NAVIGATION_RECOVERY_MS, parsePublicConfig } from "../src/element.js";
 import "../src/widget.js";
 
 function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
@@ -127,7 +127,7 @@ describe("built-in page actions", () => {
       expect(assign).toHaveBeenCalledWith(new URL("/pricing", location.href).href);
     });
 
-    it("navigates to a listed allowed origin", async () => {
+    it("refuses cross-origin navigation even for a listed origin when continuation cannot be preserved", async () => {
       const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
       installBuiltins({ enabled: true, allowedOrigins: ["https://shop.example.com"] });
 
@@ -138,8 +138,8 @@ describe("built-in page actions", () => {
         confirm: false,
       });
 
-      expect(result.ok).toBe(true);
-      expect(assign).toHaveBeenCalledWith("https://shop.example.com/cart");
+      expect(result.ok).toBe(false);
+      expect(assign).not.toHaveBeenCalled();
     });
 
     it.each([
@@ -641,6 +641,307 @@ describe("built-in page actions", () => {
       currentRect = { top: 20, bottom: 60, left: 10, right: 80, width: 70, height: 40 };
       window.dispatchEvent(new Event("scroll"));
       expect(note.style.top).toBe("148px");
+    });
+  });
+
+  describe("F6: cross-origin navigation refusal in widget flow", () => {
+    it("refuses allowed cross-origin navigation without calling assign or stranding the answer", async () => {
+      const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
+      const chatBodies: Array<Record<string, unknown>> = [];
+      let chatStep = 0;
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_cross_origin")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: ["https://shop.example.com"] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatStep++;
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (chatStep === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Checking shop"}\n\n',
+                'event: action\ndata: {"callId":"call_x","name":"navigate","input":{"url":"https://shop.example.com/cart"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_x1","conversationId":"conv_x","awaitingActions":["call_x"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":" — please open it directly."}\n\n',
+              'event: done\ndata: {"messageId":"msg_x2","conversationId":"conv_x"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_cross_origin");
+      document.body.append(el);
+      await flushAsync();
+
+      const root = el.shadowRoot as ShadowRoot;
+      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open shop";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await flushAsync();
+
+      expect(assign).not.toHaveBeenCalled();
+      expect(chatBodies).toHaveLength(2);
+      expect(chatBodies[1]?.actionResults).toEqual([
+        {
+          callId: "call_x",
+          ok: false,
+          error: "That action did not finish.",
+        },
+      ]);
+      const bubbles = root.querySelectorAll(".solv-bubble--assistant");
+      expect(bubbles[1]?.querySelector(".solv-bubble-text")?.textContent).toBe(
+        "Checking shop — please open it directly.",
+      );
+      expect(bubbles[1]?.querySelector(".solv-feedback")).not.toBeNull();
+    });
+  });
+
+  describe("F7: serialized schema byte budgeting with JSON escaping", () => {
+    it("excludes escaped markers that would exceed MAX_ACTION_SCHEMA_BYTES on install and refresh", () => {
+      const encoder = new TextEncoder();
+      // 9,000 backslashes are 9,000 UTF-8 bytes raw, but 18,002 bytes JSON-serialized.
+      const escapedHeavy = "\\".repeat(9000);
+
+      document.body.innerHTML = `
+        <button data-solv-target="${escapedHeavy}">Heavy</button>
+        <button data-solv-target="save_btn">Save</button>
+      `;
+
+      installBuiltins({ enabled: true, allowedOrigins: [] });
+      const onInstall = listForRequest().find((a) => a.name === "highlight");
+      expect(onInstall).toBeDefined();
+      expect(encoder.encode(JSON.stringify(onInstall?.inputSchema)).byteLength).toBeLessThanOrEqual(
+        MAX_ACTION_SCHEMA_BYTES,
+      );
+      const installProps = (onInstall?.inputSchema.properties ?? {}) as Record<
+        string,
+        { enum?: string[] }
+      >;
+      expect(installProps.target?.enum).toEqual(["save_btn"]);
+
+      // Now add another escaped-heavy marker after install and refresh via listForRequest().
+      const extra = document.createElement("input");
+      extra.setAttribute("data-solv-fill", "\\".repeat(9000));
+      document.body.append(extra);
+      const validInput = document.createElement("input");
+      validInput.setAttribute("data-solv-fill", "work_email");
+      document.body.append(validInput);
+
+      const refreshed = listForRequest();
+      const fillAction = refreshed.find((a) => a.name === "fill");
+      expect(fillAction).toBeDefined();
+      expect(
+        encoder.encode(JSON.stringify(fillAction?.inputSchema)).byteLength,
+      ).toBeLessThanOrEqual(MAX_ACTION_SCHEMA_BYTES);
+      const fillProps = (fillAction?.inputSchema.properties ?? {}) as Record<
+        string,
+        { items?: { properties?: Record<string, { enum?: string[] }> } }
+      >;
+      expect(fillProps.fields?.items?.properties?.name?.enum).toEqual(["work_email"]);
+    });
+
+    it("caps cumulative serialized schema size including structural overhead", () => {
+      const encoder = new TextEncoder();
+      // Five 4,000-byte markers = 20,000+ bytes total; only a subset can fit within 16 KiB.
+      for (let i = 0; i < 5; i++) {
+        const el = document.createElement("button");
+        el.setAttribute("data-solv-target", `${i}_${"a".repeat(3998)}`);
+        document.body.append(el);
+      }
+
+      installBuiltins({ enabled: true, allowedOrigins: [] });
+      const highlight = listForRequest().find((a) => a.name === "highlight");
+      const bytes = encoder.encode(JSON.stringify(highlight?.inputSchema)).byteLength;
+      expect(bytes).toBeLessThanOrEqual(MAX_ACTION_SCHEMA_BYTES);
+      const props = (highlight?.inputSchema.properties ?? {}) as Record<
+        string,
+        { enum?: string[] }
+      >;
+      expect((props.target?.enum ?? []).length).toBe(4);
+    });
+  });
+
+  describe("F8: canceled or failed navigation recovery", () => {
+    it("clears pendingResume and continues the answer when document remains active after canceled navigation", async () => {
+      vi.useFakeTimers();
+      const assign = vi.spyOn(location, "assign").mockImplementation(() => {
+        // Simulate beforeunload confirmation canceled by visitor: document stays mounted, no pagehide.
+      });
+      const chatBodies: Array<Record<string, unknown>> = [];
+      let chatStep = 0;
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_nav_cancel")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatStep++;
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (chatStep === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Opening pricing"}\n\n',
+                'event: action\ndata: {"callId":"call_cancel","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_c1","conversationId":"conv_c","awaitingActions":["call_cancel"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":" — stayed on this page."}\n\n',
+              'event: done\ndata: {"messageId":"msg_c2","conversationId":"conv_c"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_nav_cancel");
+      document.body.append(el);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const root = el.shadowRoot as ShadowRoot;
+      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Go to pricing";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(assign).toHaveBeenCalledTimes(1);
+      // Pre-navigation persistence occurred.
+      const preSaved = JSON.parse(
+        sessionStorage.getItem("solv-chat-open:pk_nav_cancel") ?? "{}",
+      ) as { pendingResume?: { resumeMessageId: string } };
+      expect(preSaved.pendingResume?.resumeMessageId).toBe("msg_c1");
+
+      // Document remains active past recovery window: widget recovers and continues answer.
+      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS);
+
+      expect(assign).toHaveBeenCalledTimes(1);
+      expect(chatBodies).toHaveLength(2);
+      expect(chatBodies[1]?.resumeMessageId).toBe("msg_c1");
+      expect(chatBodies[1]?.actionResults).toEqual([
+        {
+          callId: "call_cancel",
+          ok: false,
+          error: "Navigation was canceled.",
+        },
+      ]);
+
+      const postSaved = JSON.parse(
+        sessionStorage.getItem("solv-chat-open:pk_nav_cancel") ?? "{}",
+      ) as { pendingResume?: unknown };
+      expect(postSaved.pendingResume).toBeUndefined();
+
+      const bubbles = root.querySelectorAll(".solv-bubble--assistant");
+      const activeBubble = bubbles[1];
+      expect(activeBubble?.querySelector(".solv-bubble-text")?.textContent).toBe(
+        "Opening pricing — stayed on this page.",
+      );
+      expect(activeBubble?.querySelector(".solv-action")?.textContent).toBe(
+        "Could not run navigate",
+      );
+      expect(activeBubble?.querySelector(".solv-feedback")).not.toBeNull();
+    });
+
+    it("recovers immediately when location.assign throws synchronously", async () => {
+      const assign = vi.spyOn(location, "assign").mockImplementation(() => {
+        throw new Error("Navigation blocked");
+      });
+      const chatBodies: Array<Record<string, unknown>> = [];
+      let chatStep = 0;
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_nav_throw")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatStep++;
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (chatStep === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Trying"}\n\n',
+                'event: action\ndata: {"callId":"call_throw","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_t1","conversationId":"conv_t","awaitingActions":["call_throw"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":" — could not open."}\n\n',
+              'event: done\ndata: {"messageId":"msg_t2","conversationId":"conv_t"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_nav_throw");
+      document.body.append(el);
+      await flushAsync();
+
+      const root = el.shadowRoot as ShadowRoot;
+      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Go to pricing";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await flushAsync();
+
+      expect(assign).toHaveBeenCalledTimes(1);
+      expect(chatBodies).toHaveLength(2);
+      expect(chatBodies[1]?.actionResults).toEqual([
+        {
+          callId: "call_throw",
+          ok: false,
+          error: "That action did not finish.",
+        },
+      ]);
+      const postSaved = JSON.parse(
+        sessionStorage.getItem("solv-chat-open:pk_nav_throw") ?? "{}",
+      ) as { pendingResume?: unknown };
+      expect(postSaved.pendingResume).toBeUndefined();
+      const bubbles = root.querySelectorAll(".solv-bubble--assistant");
+      expect(bubbles[1]?.querySelector(".solv-action")?.textContent).toBe("Could not run navigate");
+      expect(bubbles[1]?.querySelector(".solv-feedback")).not.toBeNull();
     });
   });
 });

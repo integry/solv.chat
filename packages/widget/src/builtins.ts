@@ -1,3 +1,4 @@
+import { MAX_ACTION_SCHEMA_BYTES } from "@solvchat/core";
 import { lookup, type RegisteredAction, register, setBeforeList, unregister } from "./actions.js";
 
 /** Marker attributes. Documented in docs/architecture.md under Page actions. */
@@ -8,7 +9,6 @@ export const NO_FILL_ATTRIBUTE = "data-solv-no-fill";
 
 export const HIGHLIGHT_DURATION_MS = 5000;
 const MAX_MARKER_NAMES = 50;
-const MAX_MARKER_SCHEMA_BYTES = 12 * 1024;
 const VIEWPORT_MARGIN_PX = 8;
 
 /**
@@ -143,8 +143,13 @@ function resolveNavigation(raw: string, allowedOrigins: Set<string>): URL | stri
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     return "only web addresses can be opened";
   }
-  if (url.origin !== location.origin && !allowedOrigins.has(url.origin)) {
-    return "that address is not on this site";
+  if (url.origin !== location.origin) {
+    if (!allowedOrigins.has(url.origin)) {
+      return "that address is not on this site";
+    }
+    // Same-tab sessionStorage is origin-scoped and no cross-origin handoff
+    // exists yet, so cross-origin navigation cannot preserve the conversation.
+    return "that address is on another origin where this conversation cannot continue";
   }
   return url;
 }
@@ -259,56 +264,71 @@ function decodeFragmentId(raw: string): string {
   }
 }
 
-function collectMarkerNames(attribute: string, filter?: (element: Element) => boolean): string[] {
-  if (typeof document === "undefined") return [];
+function buildBoundedInputSchema(
+  attribute: string,
+  buildSchema: (names: string[]) => Record<string, unknown>,
+  filter?: (element: Element) => boolean,
+): Record<string, unknown> {
+  let currentSchema = buildSchema([]);
+  if (typeof document === "undefined") return currentSchema;
+
   const names: string[] = [];
   const seen = new Set<string>();
-  let totalBytes = 0;
   for (const element of document.querySelectorAll(`[${attribute}]`)) {
     if (names.length >= MAX_MARKER_NAMES) break;
     const raw = element.getAttribute(attribute);
     if (!raw || seen.has(raw)) continue;
     if (filter && !filter(element)) continue;
-    const bytes = schemaEncoder.encode(raw).byteLength + 4;
-    if (totalBytes + bytes > MAX_MARKER_SCHEMA_BYTES) break;
     seen.add(raw);
+    if (schemaEncoder.encode(JSON.stringify(raw)).byteLength > MAX_ACTION_SCHEMA_BYTES) {
+      continue;
+    }
+    const candidateNames = [...names, raw];
+    const candidateSchema = buildSchema(candidateNames);
+    if (
+      schemaEncoder.encode(JSON.stringify(candidateSchema)).byteLength > MAX_ACTION_SCHEMA_BYTES
+    ) {
+      continue;
+    }
     names.push(raw);
-    totalBytes += bytes;
+    currentSchema = candidateSchema;
   }
-  return names;
+  return currentSchema;
 }
 
 function highlightInputSchema(): Record<string, unknown> {
-  const targets = collectMarkerNames(TARGET_ATTRIBUTE);
-  return {
+  return buildBoundedInputSchema(TARGET_ATTRIBUTE, (targets) => ({
     type: "object",
     properties: {
       target: targets.length > 0 ? { type: "string", enum: targets } : { type: "string" },
       note: { type: "string" },
     },
     required: ["target"],
-  };
+  }));
 }
 
 function fillInputSchema(): Record<string, unknown> {
-  const fillables = collectMarkerNames(FILL_ATTRIBUTE, (el) => isRefusedField(el) === null);
-  return {
-    type: "object",
-    properties: {
-      fields: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            name: fillables.length > 0 ? { type: "string", enum: fillables } : { type: "string" },
-            value: { type: "string" },
+  return buildBoundedInputSchema(
+    FILL_ATTRIBUTE,
+    (fillables) => ({
+      type: "object",
+      properties: {
+        fields: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              name: fillables.length > 0 ? { type: "string", enum: fillables } : { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["name", "value"],
           },
-          required: ["name", "value"],
         },
       },
-    },
-    required: ["fields"],
-  };
+      required: ["fields"],
+    }),
+    (el) => isRefusedField(el) === null,
+  );
 }
 
 function refreshBuiltinSchemas(): void {

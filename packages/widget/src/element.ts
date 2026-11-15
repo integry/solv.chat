@@ -42,6 +42,7 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+export const NAVIGATION_RECOVERY_MS = 1000;
 
 const SCRIPT_ORIGIN = (() => {
   const current = typeof document !== "undefined" ? document.currentScript : null;
@@ -938,6 +939,31 @@ export class SolvChat extends HTMLElement {
     });
   }
 
+  #waitForNavigationDeparture(signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted || !this.isConnected) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (stayed: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (typeof window !== "undefined") {
+          window.removeEventListener("pagehide", onLeave);
+        }
+        signal.removeEventListener("abort", onLeave);
+        resolve(stayed);
+      };
+      const onLeave = () => finish(false);
+      const timer = setTimeout(() => {
+        finish(!signal.aborted && this.isConnected);
+      }, NAVIGATION_RECOVERY_MS);
+      if (typeof window !== "undefined") {
+        window.addEventListener("pagehide", onLeave, { once: true });
+      }
+      signal.addEventListener("abort", onLeave, { once: true });
+    });
+  }
+
   /**
    * Runs the queued actions and sends their results back so the answer can
    * continue. A second request rather than a held stream: `navigate` replaces
@@ -980,31 +1006,47 @@ export class SolvChat extends HTMLElement {
               error: "Page navigated before action could run.",
             })),
           ];
-          if (request.name) {
-            if (!assistantTurn.actions) assistantTurn.actions = [];
-            assistantTurn.actions.push({ name: request.name, ok: true });
-            this.#appendActionNote(bubble, request.name, true);
-            this.#scrollToBottom();
-          }
           this.#pendingResume = {
             conversationId: done.conversationId,
             resumeMessageId: done.messageId,
             actionResults: pendingResults,
             depth,
           };
-          this.#persist();
+          if (request.name) {
+            if (!assistantTurn.actions) assistantTurn.actions = [];
+            assistantTurn.actions.push({ name: request.name, ok: true });
+            this.#persist();
+            assistantTurn.actions.pop();
+          } else {
+            this.#persist();
+          }
         });
-        const result = await runAction(request);
+        let result = await runAction(request);
         setBeforeNavigate(null);
-        if (navigated || signal.aborted) return;
+        if (signal.aborted) return;
+        if (navigated) {
+          navigated = false;
+          if (result.ok) {
+            const stayedOnPage = await this.#waitForNavigationDeparture(signal);
+            if (!stayedOnPage || signal.aborted) return;
+            result = {
+              callId: request.callId,
+              ok: false,
+              error: "Navigation was canceled.",
+            };
+          }
+          // Navigation failed or was canceled while the document stayed active:
+          // clear the pending handoff so this widget resumes the answer.
+          this.#pendingResume = null;
+        }
         results.push(result);
         if (request.name) {
           if (!assistantTurn.actions) assistantTurn.actions = [];
           assistantTurn.actions.push({ name: request.name, ok: result.ok });
           this.#appendActionNote(bubble, request.name, result.ok);
           this.#scrollToBottom();
-          this.#persist();
         }
+        this.#persist();
       }
     } finally {
       setBeforeNavigate(null);
