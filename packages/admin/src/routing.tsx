@@ -8,12 +8,14 @@ export type ScreenId =
   | "tools"
   | "behaviour"
   | "widget"
-  | "install";
+  | "install"
+  | "providers";
 
 export interface NavItem {
   id: ScreenId;
   label: string;
   path: string;
+  section?: string;
 }
 
 export const NAV_ITEMS: readonly NavItem[] = [
@@ -27,6 +29,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "behaviour", label: "Behaviour", path: "/admin/behaviour" },
   { id: "widget", label: "Widget", path: "/admin/widget" },
   { id: "install", label: "Install", path: "/admin/install" },
+  { id: "providers", label: "Providers", path: "/admin/providers", section: "Settings" },
 ];
 
 export function matchScreen(pathname: string): ScreenId {

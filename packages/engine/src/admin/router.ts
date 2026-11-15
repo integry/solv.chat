@@ -2,7 +2,9 @@ import { isPlainObject } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
 import { McpError } from "../mcp/types.js";
+import type { EffectiveProviderSettings } from "../providers/config.js";
 import type { Retriever } from "../providers/retrieval.js";
+import type { KeyProvider, LlmProviderName } from "../seams/types.js";
 import { writeTheRightAnswer } from "./answers.js";
 import {
   createAssistant,
@@ -27,6 +29,15 @@ import {
   updateMcpServer,
 } from "./mcp.js";
 import { overviewFor } from "./overview.js";
+import {
+  getProviderSettingsView,
+  parseProviderName,
+  type ProviderAdminDeps,
+  removeProviderKey,
+  setProviderKey,
+  testProviderKey,
+  updateProviderSettings,
+} from "./providers.js";
 import { importSitemapUrls, previewSitemap } from "./sitemap.js";
 import {
   createSource,
@@ -47,7 +58,12 @@ export interface AdminRouteDeps {
   publicBaseUrl: string;
   fetchImpl?: typeof fetch | undefined;
   costUnit?: "usd" | "credits" | undefined;
-  checkConfigError?: (() => Promise<string | null>) | undefined;
+  resolveSettings?: (() => Promise<EffectiveProviderSettings>) | undefined;
+  checkConfigError?:
+    | ((resolved?: EffectiveProviderSettings) => Promise<string | null>)
+    | undefined;
+  keys?: KeyProvider | undefined;
+  envSecretPresence?: Record<LlmProviderName, boolean> | undefined;
   /**
    * SOLV_SECRET_KEY, passed down from app.ts. Not read through a seam: the
    * Biome rule in biome.json forbids importing seams/open outside worker.ts,
@@ -215,6 +231,7 @@ async function assistantRoutes(
       return Response.json(
         await overviewFor(tenant, assistantId, {
           costUnit: deps.costUnit,
+          resolveSettings: deps.resolveSettings,
           checkConfigError: deps.checkConfigError,
         }),
       );
@@ -367,6 +384,66 @@ async function mcpServerRoutes(
   throw new NotFound();
 }
 
+function providerAdminDeps(deps: AdminRouteDeps): ProviderAdminDeps {
+  if (!deps.keys || !deps.resolveSettings || !deps.checkConfigError) {
+    throw new NotFound();
+  }
+  return {
+    tenant: deps.tenant,
+    orgId: deps.orgId,
+    keys: deps.keys,
+    secretKey: deps.secretKey ?? "",
+    envSecretPresence: deps.envSecretPresence ?? {
+      anthropic: false,
+      openai: false,
+      openrouter: false,
+    },
+    fetchImpl: deps.fetchImpl,
+    resolveSettings: deps.resolveSettings,
+    checkConfigError: deps.checkConfigError,
+  };
+}
+
+async function providerRoutes(
+  request: Request,
+  segments: string[],
+  deps: AdminRouteDeps,
+): Promise<Response> {
+  const method = request.method;
+  const pDeps = providerAdminDeps(deps);
+
+  if (segments.length === 1) {
+    if (method === "GET") {
+      return Response.json(await getProviderSettingsView(pDeps));
+    }
+    if (method === "PUT") {
+      return Response.json(await updateProviderSettings(pDeps, await readJsonBody(request)));
+    }
+    throw new NotFound();
+  }
+
+  if (segments[1] === "keys") {
+    const provider = parseProviderName(segments[2]);
+    if (!provider) throw new NotFound();
+
+    if (segments.length === 3) {
+      if (method === "PUT") {
+        return Response.json(await setProviderKey(pDeps, provider, await readJsonBody(request)));
+      }
+      if (method === "DELETE") {
+        return Response.json(await removeProviderKey(pDeps, provider));
+      }
+      throw new NotFound();
+    }
+
+    if (segments.length === 4 && segments[3] === "test" && method === "POST") {
+      return testProviderKey(pDeps, provider);
+    }
+  }
+
+  throw new NotFound();
+}
+
 /** Dispatches authenticated `/api/admin/*` requests with a tenant-scoped handle. */
 export async function adminRoutes(
   request: Request,
@@ -379,6 +456,7 @@ export async function adminRoutes(
     if (segments[0] === "sources") return await sourceRoutes(request, url, segments, deps);
     if (segments[0] === "conversations") return await conversationRoutes(request, segments, deps);
     if (segments[0] === "mcp-servers") return await mcpServerRoutes(request, segments, deps);
+    if (segments[0] === "providers") return await providerRoutes(request, segments, deps);
     return Response.json({ error: "Not found." }, { status: 404 });
   } catch (error) {
     // Mapped here, once: a handler building its own responses would eventually

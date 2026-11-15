@@ -10,7 +10,7 @@ export type WorkerEnv = Env & PasswordAuthEnv & SecretKeyEnv;
 function buildApp(env: WorkerEnv) {
   return createApp({
     auth: passwordAuth(env, env.DB),
-    keys: secretKeys(env),
+    keys: secretKeys(env, env.DB),
     usage: usageDaily(env.DB),
     // The cap is the owner's own setting, stored on the published version.
     // Reading it here keeps the Limits seam free of any knowledge of version

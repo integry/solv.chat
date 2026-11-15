@@ -15,9 +15,7 @@ import { ANTHROPIC_MODELS, type ModelInfo, OPENAI_MODELS, type Tier } from "../m
 import {
   embedderFor,
   type ProviderEnv,
-  resolveEmbeddingsProvider,
-  resolveLlmProvider,
-  resolveTier,
+  resolveProviderSettings,
 } from "../providers/config.js";
 import { ProviderError } from "../providers/error.js";
 import { llmProviderFor } from "../providers/factory.js";
@@ -184,9 +182,10 @@ async function resolveAnswerDeps(params: {
   preview: boolean;
 }) {
   const { env, seams, overrides } = params;
-  const providerKind = overrides?.providerKind ?? resolveLlmProvider(env.SOLV_LLM_PROVIDER);
+  const resolved = await resolveProviderSettings(env.DB, env, params.orgId);
+  const providerKind = overrides?.providerKind ?? resolved.llmProvider.value;
   const tier =
-    providerKind === "openrouter" ? "fast" : (overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER));
+    providerKind === "openrouter" ? "fast" : (overrides?.tier ?? resolved.llmTier.value);
   const model =
     overrides?.model ??
     (providerKind === "anthropic"
@@ -194,15 +193,22 @@ async function resolveAnswerDeps(params: {
       : providerKind === "openai"
         ? OPENAI_MODELS[tier]
         : undefined);
-  const embeddingsProvider = resolveEmbeddingsProvider(env.SOLV_EMBEDDINGS_PROVIDER);
+  const embeddingsProvider = resolved.embeddingsProvider.value;
 
   const embedder =
-    overrides?.embedder ?? (await embedderFor(params.orgId, embeddingsProvider, seams.keys));
+    overrides?.embedder ??
+    (await embedderFor(params.orgId, embeddingsProvider, seams.keys, overrides?.fetch));
   const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
   const provider =
     overrides?.provider ??
     (await llmProviderFor(
-      { orgId: params.orgId, provider: providerKind, tier, model: env.SOLV_LLM_MODEL },
+      {
+        orgId: params.orgId,
+        provider: providerKind,
+        tier,
+        model: resolved.llmModel.value ?? undefined,
+        fetchImpl: overrides?.fetch,
+      },
       seams.keys,
     ));
 
