@@ -591,57 +591,171 @@ function isInsideOpaqueHtmlSpan(fullText: string, start: number, end: number): b
   return false;
 }
 
-function findInlineClose(text: string, from: number, marker: "**" | "*"): number {
-  let i = from;
-  while (i < text.length) {
-    const opaqueEnd = findOpaqueLiteralSpanEnd(text, i);
-    if (opaqueEnd !== -1) {
-      i = opaqueEnd;
-      continue;
-    }
-    const ch = text[i];
-    if (ch === "`") {
-      const codeClose = text.indexOf("`", i + 1);
-      if (codeClose !== -1 && !text.slice(i + 1, codeClose).includes("\n")) {
-        i = codeClose + 1;
-        continue;
+const MAX_INLINE_DEPTH = 64;
+const PRESERVED_WHITESPACE_RE = /[\r\n\t\f]| {2,}/;
+
+interface InlineScanFrame {
+  marker: "**" | "*";
+  from: number;
+  i: number;
+  visited: number[];
+  pendingCloseLen: 1 | 2;
+  pendingRunEnd: number;
+}
+
+function createInlineCloseFinder(text: string): (from: number, marker: "**" | "*") => number {
+  const len = text.length;
+  // Memoize scan outcomes for positions strictly past `from` (-2 = uncomputed).
+  let boldMemo: Int32Array | null = null;
+  let italicMemo: Int32Array | null = null;
+  let cachedRunStart = -1;
+  let cachedRunEnd = -1;
+
+  const getMemo = (marker: "**" | "*"): Int32Array => {
+    if (marker === "**") {
+      if (!boldMemo) {
+        boldMemo = new Int32Array(len + 1).fill(-2);
       }
+      return boldMemo;
     }
-    if (ch === "*") {
-      let runEnd = i + 1;
-      while (text[runEnd] === "*") {
-        runEnd++;
-      }
-      const runLen = runEnd - i;
-      if (marker === "**") {
-        if (runLen >= 2 && i > from && !/\s/.test(text[i - 1] ?? "")) {
-          return i;
+    if (!italicMemo) {
+      italicMemo = new Int32Array(len + 1).fill(-2);
+    }
+    return italicMemo;
+  };
+
+  const starRunEnd = (start: number): number => {
+    if (start >= cachedRunStart && start < cachedRunEnd) {
+      return cachedRunEnd;
+    }
+    let end = start + 1;
+    while (end < len && text[end] === "*") {
+      end++;
+    }
+    cachedRunStart = start;
+    cachedRunEnd = end;
+    return end;
+  };
+
+  return (initialFrom: number, initialMarker: "**" | "*"): number => {
+    const stack: InlineScanFrame[] = [
+      {
+        marker: initialMarker,
+        from: initialFrom,
+        i: initialFrom,
+        visited: [],
+        pendingCloseLen: 1,
+        pendingRunEnd: 0,
+      },
+    ];
+    let resolvedResult = -1;
+
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      if (!frame) break;
+      const memo = getMemo(frame.marker);
+
+      const finishFrame = (result: number): void => {
+        for (const pos of frame.visited) {
+          memo[pos] = result;
         }
-        if (runLen === 1 && runEnd < text.length && !/\s/.test(text[runEnd] ?? "")) {
-          const nestedClose = findInlineClose(text, runEnd, "*");
-          if (nestedClose !== -1) {
-            i = nestedClose + 1;
+        stack.pop();
+        const parent = stack[stack.length - 1];
+        if (!parent) {
+          resolvedResult = result;
+        } else if (result !== -1) {
+          parent.i = result + parent.pendingCloseLen;
+        } else {
+          parent.i = parent.pendingRunEnd;
+        }
+      };
+
+      let suspended = false;
+      while (frame.i < len) {
+        const i = frame.i;
+        if (i > frame.from) {
+          const cached = memo[i];
+          if (cached !== undefined && cached !== -2) {
+            finishFrame(cached);
+            suspended = true;
+            break;
+          }
+          frame.visited.push(i);
+        }
+
+        const opaqueEnd = findOpaqueLiteralSpanEnd(text, i);
+        if (opaqueEnd !== -1) {
+          frame.i = opaqueEnd;
+          continue;
+        }
+
+        const ch = text[i];
+        if (ch === "`") {
+          const codeClose = text.indexOf("`", i + 1);
+          if (codeClose !== -1 && !text.slice(i + 1, codeClose).includes("\n")) {
+            frame.i = codeClose + 1;
             continue;
           }
         }
-      } else {
-        if (runLen === 2 && runEnd < text.length && !/\s/.test(text[runEnd] ?? "")) {
-          const nestedClose = findInlineClose(text, runEnd, "**");
-          if (nestedClose !== -1) {
-            i = nestedClose + 2;
-            continue;
+
+        if (ch === "*") {
+          const runEnd = starRunEnd(i);
+          const runLen = runEnd - i;
+          if (frame.marker === "**") {
+            if (runLen >= 2 && i > frame.from && !/\s/.test(text[i - 1] ?? "")) {
+              finishFrame(i);
+              suspended = true;
+              break;
+            }
+            if (runLen === 1 && runEnd < len && !/\s/.test(text[runEnd] ?? "")) {
+              frame.pendingCloseLen = 1;
+              frame.pendingRunEnd = runEnd;
+              stack.push({
+                marker: "*",
+                from: runEnd,
+                i: runEnd,
+                visited: [],
+                pendingCloseLen: 1,
+                pendingRunEnd: 0,
+              });
+              suspended = true;
+              break;
+            }
+          } else {
+            if (runLen === 2 && runEnd < len && !/\s/.test(text[runEnd] ?? "")) {
+              frame.pendingCloseLen = 2;
+              frame.pendingRunEnd = runEnd;
+              stack.push({
+                marker: "**",
+                from: runEnd,
+                i: runEnd,
+                visited: [],
+                pendingCloseLen: 1,
+                pendingRunEnd: 0,
+              });
+              suspended = true;
+              break;
+            }
+            if ((runLen === 1 || runLen >= 3) && i > frame.from && !/\s/.test(text[i - 1] ?? "")) {
+              finishFrame(i);
+              suspended = true;
+              break;
+            }
           }
+          frame.i = runEnd;
+          continue;
         }
-        if ((runLen === 1 || runLen >= 3) && i > from && !/\s/.test(text[i - 1] ?? "")) {
-          return i;
-        }
+
+        frame.i = i + 1;
       }
-      i = runEnd;
-      continue;
+
+      if (!suspended) {
+        finishFrame(-1);
+      }
     }
-    i++;
-  }
-  return -1;
+
+    return resolvedResult;
+  };
 }
 
 function findLinkEnd(
@@ -675,13 +789,21 @@ function findLinkEnd(
   return null;
 }
 
-function renderInline(parent: Node, text: string, allowLinks = true): void {
+function renderInline(parent: Node, text: string, allowLinks = true, depth = 0): void {
   let buf = "";
   const flush = () => {
     if (buf) {
       parent.appendChild(document.createTextNode(buf));
       buf = "";
     }
+  };
+
+  let findClose: ((from: number, marker: "**" | "*") => number) | undefined;
+  const getClose = (from: number, marker: "**" | "*"): number => {
+    if (!findClose) {
+      findClose = createInlineCloseFinder(text);
+    }
+    return findClose(from, marker);
   };
 
   let pos = 0;
@@ -702,7 +824,16 @@ function renderInline(parent: Node, text: string, allowLinks = true): void {
 
     const opaqueEnd = findOpaqueLiteralSpanEnd(text, pos);
     if (opaqueEnd !== -1) {
-      buf += text.slice(pos, opaqueEnd);
+      const opaque = text.slice(pos, opaqueEnd);
+      if (PRESERVED_WHITESPACE_RE.test(opaque)) {
+        flush();
+        const literalSpan = document.createElement("span");
+        literalSpan.className = "solv-md-literal";
+        literalSpan.textContent = opaque;
+        parent.appendChild(literalSpan);
+      } else {
+        buf += opaque;
+      }
       pos = opaqueEnd;
       continue;
     }
@@ -719,12 +850,17 @@ function renderInline(parent: Node, text: string, allowLinks = true): void {
       }
     }
 
-    if (text.startsWith("**", pos) && pos + 2 < text.length && !/\s/.test(text[pos + 2] ?? "")) {
-      const close = findInlineClose(text, pos + 2, "**");
+    if (
+      depth < MAX_INLINE_DEPTH &&
+      text.startsWith("**", pos) &&
+      pos + 2 < text.length &&
+      !/\s/.test(text[pos + 2] ?? "")
+    ) {
+      const close = getClose(pos + 2, "**");
       if (close !== -1) {
         flush();
         const strong = document.createElement("strong");
-        renderInline(strong, text.slice(pos + 2, close), allowLinks);
+        renderInline(strong, text.slice(pos + 2, close), allowLinks, depth + 1);
         parent.appendChild(strong);
         pos = close + 2;
         continue;
@@ -732,23 +868,29 @@ function renderInline(parent: Node, text: string, allowLinks = true): void {
     }
 
     if (
+      depth < MAX_INLINE_DEPTH &&
       ch === "*" &&
       !text.startsWith("**", pos) &&
       pos + 1 < text.length &&
       !/\s/.test(text[pos + 1] ?? "")
     ) {
-      const close = findInlineClose(text, pos + 1, "*");
+      const close = getClose(pos + 1, "*");
       if (close !== -1) {
         flush();
         const em = document.createElement("em");
-        renderInline(em, text.slice(pos + 1, close), allowLinks);
+        renderInline(em, text.slice(pos + 1, close), allowLinks, depth + 1);
         parent.appendChild(em);
         pos = close + 1;
         continue;
       }
     }
 
-    if (allowLinks && ch === "[" && (pos === 0 || text[pos - 1] !== "!")) {
+    if (
+      depth < MAX_INLINE_DEPTH &&
+      allowLinks &&
+      ch === "[" &&
+      (pos === 0 || text[pos - 1] !== "!")
+    ) {
       const linkBounds = findLinkEnd(text, pos);
       if (linkBounds) {
         const label = text.slice(pos + 1, linkBounds.closeBracket);
@@ -761,7 +903,7 @@ function renderInline(parent: Node, text: string, allowLinks = true): void {
           a.href = parsed.href;
           a.target = "_blank";
           a.rel = "noopener noreferrer nofollow";
-          renderInline(a, label, false);
+          renderInline(a, label, false, depth + 1);
           parent.appendChild(a);
           pos = linkBounds.closeParen + 1;
           continue;
@@ -875,6 +1017,7 @@ function nodesEqual(a: Node, b: Node): boolean {
   if (a.nodeType === Node.TEXT_NODE) return a.textContent === b.textContent;
   if (a instanceof Element && b instanceof Element) {
     if (a.tagName !== b.tagName) return false;
+    if (a.className !== b.className) return false;
     if (a.getAttribute("href") !== b.getAttribute("href")) return false;
     if (a.childNodes.length !== b.childNodes.length) return false;
     for (let i = 0; i < a.childNodes.length; i++) {

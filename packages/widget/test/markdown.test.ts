@@ -697,6 +697,121 @@ describe("Markdown rendering", () => {
     assertBubble(shadow(restoredEl));
   });
 
+  it("preserves visible whitespace for standalone and embedded opaque literal spans in assistant bubbles", async () => {
+    const scriptSpan = "<script>\n  first\n  second\n</script>";
+    const styleSpan = "<style>\n  .box {\n    color: red;\n  }\n</style>";
+    const commentSpan = "<!--\n  line one\n  line two\n-->";
+    const listCommentSpan = "<!--  two  spaces  -->";
+    const answer = [
+      scriptSpan,
+      "",
+      `Before **bold** ${scriptSpan} and ${commentSpan} after *italic*.`,
+      "",
+      `**wrap ${styleSpan} end**`,
+      "",
+      `- Item with ${listCommentSpan}`,
+    ].join("\n");
+
+    const chunks =
+      answer
+        .match(/.{1,11}/gs)
+        ?.map((part) => `event: token\ndata: ${JSON.stringify({ text: part })}\n\n`) ?? [];
+    chunks.push(
+      'event: done\ndata: {"messageId":"m_opaque_ws","conversationId":"c_opaque_ws"}\n\n',
+    );
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        return new Response(sseStream(chunks), { status: 200 });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const liveEl = mountWidget("pk_md_opaque_ws");
+    await flushAsync();
+    const liveRoot = shadow(liveEl);
+    mustQuery<HTMLButtonElement>(liveRoot, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(liveRoot, "#solv-input").value = "Show raw HTML";
+    mustQuery<HTMLFormElement>(liveRoot, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    const assertOpaqueBubble = (root: ShadowRoot) => {
+      const bubbleText = mustQuery<HTMLDivElement>(
+        root,
+        ".solv-bubble--assistant .solv-bubble-text",
+      );
+      expect(getComputedStyle(bubbleText).whiteSpace).toBe("normal");
+      expect(bubbleText.querySelector("script, style")).toBeNull();
+
+      const opaqueLiterals = bubbleText.querySelectorAll<HTMLSpanElement>("span.solv-md-literal");
+      expect(opaqueLiterals).toHaveLength(5);
+      expect(opaqueLiterals[0]?.textContent).toBe(scriptSpan);
+      expect(opaqueLiterals[1]?.textContent).toBe(scriptSpan);
+      expect(opaqueLiterals[2]?.textContent).toBe(commentSpan);
+      expect(opaqueLiterals[3]?.textContent).toBe(styleSpan);
+      expect(opaqueLiterals[4]?.textContent).toBe(listCommentSpan);
+      for (const span of opaqueLiterals) {
+        expect(getComputedStyle(span).whiteSpace).toBe("pre-wrap");
+      }
+
+      const strongs = bubbleText.querySelectorAll("strong");
+      expect(strongs).toHaveLength(2);
+      expect(strongs[0]?.textContent).toBe("bold");
+      expect(strongs[1]?.querySelector("span.solv-md-literal")?.textContent).toBe(styleSpan);
+      expect(bubbleText.querySelector("em")?.textContent).toBe("italic");
+      expect(bubbleText.querySelector("ul > li > span.solv-md-literal")?.textContent).toBe(
+        listCommentSpan,
+      );
+    };
+
+    assertOpaqueBubble(liveRoot);
+    const liveTree = serializeDom(mustQuery(liveRoot, ".solv-bubble--assistant .solv-bubble-text"));
+
+    liveEl.remove();
+    const restoredEl = mountWidget("pk_md_opaque_ws");
+    await flushAsync();
+    const restoredRoot = shadow(restoredEl);
+    assertOpaqueBubble(restoredRoot);
+    expect(
+      serializeDom(mustQuery(restoredRoot, ".solv-bubble--assistant .solv-bubble-text")),
+    ).toEqual(liveTree);
+  });
+
+  it("bounds emphasis delimiter scanning on long alternating sequences of unmatched openers", () => {
+    const unmatched = "**a *a ".repeat(400);
+    const container = document.createElement("div");
+
+    const start = performance.now();
+    renderMarkdown(container, unmatched);
+    const elapsedMs = performance.now() - start;
+
+    expect(elapsedMs).toBeLessThan(250);
+    expect(container.querySelector("strong, em")).toBeNull();
+    expect(container.textContent).toBe(unmatched);
+
+    // Also ensure streaming incremental prefixes and trailing closes stay bounded and consistent.
+    const withTrailingClose = `${"**a *a ".repeat(200)}end*`;
+    const streamContainer = document.createElement("div");
+    const streamStart = performance.now();
+    for (let len = 50; len <= withTrailingClose.length; len += 50) {
+      renderMarkdown(streamContainer, withTrailingClose.slice(0, len));
+    }
+    renderMarkdown(streamContainer, withTrailingClose);
+    const streamElapsedMs = performance.now() - streamStart;
+
+    expect(streamElapsedMs).toBeLessThan(500);
+    expect(streamContainer.querySelectorAll("strong")).toHaveLength(0);
+    expect(streamContainer.querySelectorAll("em")).toHaveLength(1);
+
+    // Deeply nested matched delimiters fall back to literal text beyond the nesting bound without overflowing.
+    const deepNested = `${"**".repeat(120)}core${"**".repeat(120)}`;
+    const deepContainer = document.createElement("div");
+    renderMarkdown(deepContainer, deepNested);
+    expect(deepContainer.textContent).toContain("core");
+    expect(deepContainer.querySelectorAll("strong").length).toBeLessThanOrEqual(64);
+  });
+
   it("keeps user bubbles as plain text and produces identical output for streamed and restored assistant transcripts", async () => {
     const markdownAnswer = [
       "Here is **bold**, *italic*, `code`, and [a link](https://example.com).",
