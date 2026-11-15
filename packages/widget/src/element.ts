@@ -1,4 +1,5 @@
 import { CHAT_PROTOCOL_VERSION, MAX_CHAT_MESSAGE_LENGTH, parseChatEventLine } from "@solvchat/core";
+import { parseSafeHttpUrl, renderMarkdown } from "./markdown.js";
 import { readEventLines } from "./sse.js";
 import {
   claimConversation,
@@ -359,8 +360,8 @@ export class SolvChat extends HTMLElement {
     let restoredUnfinished = false;
     for (const turn of this.#turns) {
       const { bubble, textEl } = this.#appendBubble(turn.role);
-      textEl.textContent = turn.text;
       if (turn.role === "assistant") {
+        renderMarkdown(textEl, turn.text);
         if (turn.citations) {
           for (const citation of turn.citations) {
             this.#appendCitationLink(bubble, citation.url, citation.title);
@@ -376,6 +377,8 @@ export class SolvChat extends HTMLElement {
         if (turn.messageId) {
           this.#appendFeedbackControls(bubble, turn);
         }
+      } else {
+        textEl.textContent = turn.text;
       }
     }
     this.#renderSuggestions();
@@ -430,15 +433,10 @@ export class SolvChat extends HTMLElement {
     url: string,
     title: string,
   ): HTMLAnchorElement | null {
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      return null;
-    }
     // Scheme allow-list: a citation URL ultimately comes from pushed content,
     // so `javascript:` or `data:` must never reach an href.
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    const parsed = parseSafeHttpUrl(url);
+    if (!parsed) {
       return null;
     }
 
@@ -653,11 +651,11 @@ export class SolvChat extends HTMLElement {
         if (event.type === "unknown") continue;
 
         if (event.type === "token") {
-          // textContent, never innerHTML: the text comes from a model that can be
-          // talked into emitting markup, and a chat bubble is the last place that
-          // should execute anything.
+          // DOM nodes and textContent only, never raw HTML assignment: the text
+          // comes from a model that can be talked into emitting markup, and a
+          // chat bubble is the last place that should execute anything.
           assistantTurn.text += event.text;
-          textEl.textContent = assistantTurn.text;
+          renderMarkdown(textEl, assistantTurn.text);
           this.#scrollToBottom();
           this.#persist();
         } else if (event.type === "citation") {

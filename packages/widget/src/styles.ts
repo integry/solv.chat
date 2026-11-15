@@ -172,6 +172,7 @@ textarea:focus-visible {
 
 .solv-bubble {
   max-width: 86%;
+  min-width: 0;
   padding: 10px 12px;
   border-radius: 12px;
   white-space: pre-wrap;
@@ -191,6 +192,101 @@ textarea:focus-visible {
   color: var(--solv-text);
   border: 1px solid var(--solv-border);
   border-bottom-left-radius: 4px;
+}
+
+.solv-bubble--assistant .solv-bubble-text {
+  white-space: normal;
+}
+
+.solv-bubble-text p {
+  margin: 0 0 8px;
+}
+
+.solv-bubble-text p:last-child {
+  margin-bottom: 0;
+}
+
+.solv-bubble-text ul,
+.solv-bubble-text ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.solv-bubble-text ul:last-child,
+.solv-bubble-text ol:last-child {
+  margin-bottom: 0;
+}
+
+.solv-bubble-text li {
+  margin: 2px 0;
+}
+
+.solv-bubble-text li > ul,
+.solv-bubble-text li > ol {
+  margin: 4px 0 0;
+}
+
+.solv-bubble-text :not(pre) > code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--solv-border);
+}
+
+.solv-md-link {
+  color: var(--solv-accent);
+  text-decoration: underline;
+}
+
+.solv-code-block {
+  margin: 0 0 8px;
+  border: 1px solid var(--solv-border);
+  border-radius: 8px;
+  background: var(--solv-bg);
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.solv-code-block:last-child {
+  margin-bottom: 0;
+}
+
+.solv-code-header {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--solv-border);
+  background: var(--solv-surface);
+}
+
+.solv-copy-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--solv-border);
+  border-radius: 6px;
+  background: var(--solv-bg);
+  color: var(--solv-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.solv-copy-btn:hover {
+  color: var(--solv-text);
+  border-color: var(--solv-accent);
+}
+
+.solv-code-pre {
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  max-width: 100%;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.45;
 }
 
 .solv-bubble-text:empty {
