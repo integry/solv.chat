@@ -229,6 +229,7 @@ describe("Tools screen", () => {
     const links = Array.from(nav.querySelectorAll("a"));
     expect(links.map((l) => l.textContent)).toEqual([
       "Overview",
+      "Reports",
       "Conversations",
       "Gaps",
       "Sources",
