@@ -703,4 +703,44 @@ describe("Tools screen", () => {
     await screen.findByText("https://tools.example.com/v2");
     expect(screen.getByText("Credential: not set")).toBeTruthy();
   });
+
+  it("uses identical card header and actions markup regardless of enabled or credential state", async () => {
+    installFakeServer({
+      servers: [
+        makeServer({
+          id: "mcp_1",
+          label: "Server Enabled",
+          url: "https://a.example.com/mcp",
+          enabled: true,
+          hasSecret: true,
+          authKind: "static_header",
+          headerName: "Authorization",
+        }),
+        makeServer({
+          id: "mcp_2",
+          label: "Server Disabled",
+          url: "https://very-long-server-hostname.example.com/some/path/mcp",
+          enabled: false,
+          hasSecret: false,
+          authKind: "none",
+        }),
+      ],
+    });
+
+    const { container } = render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Tools" }));
+    await screen.findByText("Server Enabled");
+    await screen.findByText("Server Disabled");
+
+    const cards = Array.from(container.querySelectorAll("ul.source-list > li.source-card"));
+    expect(cards).toHaveLength(2);
+    for (const card of cards) {
+      const header = card.querySelector(".source-row-header");
+      expect(header).toBeTruthy();
+      expect(header?.children).toHaveLength(2);
+      const actions = header?.querySelector(".actions");
+      expect(actions).toBeTruthy();
+      expect(actions?.querySelectorAll("button")).toHaveLength(4);
+    }
+  });
 });

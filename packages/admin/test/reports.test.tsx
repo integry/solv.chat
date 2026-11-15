@@ -364,4 +364,27 @@ describe("Reports screen", () => {
       URL.revokeObjectURL = origRevokeObjectURL;
     }
   });
+
+  it("renders count pills as .badge elements inside .history-item rows", async () => {
+    installFakeServer({
+      report: {
+        ...SEEDED_REPORT,
+        topQuestions: [
+          {
+            question:
+              "Can you explain in great detail how enterprise billing, invoicing, and annual renewals work?",
+            count: 9,
+          },
+        ],
+      },
+    });
+    const { container } = render(<App />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+    const pill = await screen.findByText("9 times");
+    expect(pill.classList.contains("badge")).toBe(true);
+    expect(pill.closest(".history-item")).toBeTruthy();
+    const badges = container.querySelectorAll(".history-item > .badge");
+    expect(badges.length).toBeGreaterThanOrEqual(3);
+  });
 });
