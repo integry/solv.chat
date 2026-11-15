@@ -498,6 +498,7 @@ describe("<solv-chat>", () => {
         ".solv-chip",
         ".solv-send",
         ".solv-fb-btn",
+        ".solv-confirm",
       ]) {
         const match = reducedRules.find((rule) => rule.selectorText.includes(selector));
         expect(match?.style.transition).toBe("none");
@@ -1615,7 +1616,7 @@ describe("<solv-chat>", () => {
       );
     });
 
-    it("refuses confirmation-required actions in round trips when no confirmation handler exists", async () => {
+    it("prompts for confirmation-required actions in round trips and refuses when visitor declines", async () => {
       const chatBodies: Array<Record<string, unknown>> = [];
       const regConfirmSpy = vi.fn(async () => ({ ok: true }));
       const eventConfirmSpy = vi.fn(async () => ({ ok: true }));
@@ -1676,12 +1677,20 @@ describe("<solv-chat>", () => {
       mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
       await flushAsync();
 
+      // First prompt: open_invoice (confirm: true on registration).
+      mustQuery<HTMLButtonElement>(root, ".solv-confirm .solv-fb-btn").click();
+      await flushAsync();
+
+      // Second prompt: highlight_section (confirm: true on event).
+      mustQuery<HTMLButtonElement>(root, ".solv-confirm .solv-fb-btn").click();
+      await flushAsync();
+
       expect(regConfirmSpy).not.toHaveBeenCalled();
       expect(eventConfirmSpy).not.toHaveBeenCalled();
       expect(chatBodies).toHaveLength(2);
       expect(chatBodies[1]?.actionResults).toEqual([
-        { callId: "c_reg", ok: false, error: "That action requires confirmation." },
-        { callId: "c_evt", ok: false, error: "That action requires confirmation." },
+        { callId: "c_reg", ok: false, error: "The visitor did not confirm." },
+        { callId: "c_evt", ok: false, error: "The visitor did not confirm." },
       ]);
       const notes = [...root.querySelectorAll(".solv-action")].map((n) => n.textContent);
       expect(notes).toEqual(["Could not run open_invoice", "Could not run highlight_section"]);
