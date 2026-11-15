@@ -146,7 +146,7 @@ numbers, install snippet.
 
 ## Providers
 
-`LlmProvider` has two implementations: Anthropic and OpenAI. `Embedder` has one:
+`LlmProvider` has three implementations: Anthropic, OpenAI and OpenRouter. `Embedder` has one:
 OpenAI embeddings. `Retriever` has one: Vectorize; the interface exists so
 Cloudflare AI Search can be added as a second backend.
 
@@ -159,10 +159,34 @@ The admin does not expose model or temperature pickers per assistant. The
 instance picks a provider and a model tier in configuration via plain Worker
 environment variables (`vars` in `wrangler.jsonc`):
 
-- `SOLV_LLM_PROVIDER` — `anthropic` or `openai` (default `anthropic`).
+- `SOLV_LLM_PROVIDER` — `anthropic`, `openai` or `openrouter` (default `anthropic`).
 - `SOLV_LLM_TIER` — `fast` or `balanced` (default `fast`).
 
 An unrecognised value falls back to its default and is logged once.
+
+### OpenRouter
+
+A third `LlmProvider`, `openrouter`, lets an instance answer with any chat model
+OpenRouter offers. It is for self-hosters who want a model outside the two
+built-in providers; the tiers above stay the default.
+
+- `SOLV_LLM_PROVIDER=openrouter`, `SOLV_LLM_MODEL=<OpenRouter model id>` (for
+  example a `vendor/model` slug), and the secret `SOLV_OPENROUTER_KEY`.
+  `SOLV_LLM_TIER` is ignored for this provider. A missing model id or key is a
+  configuration error shown in the admin, not a silent fallback.
+- The model id is not validated against a list in the code: OpenRouter's
+  catalogue changes, so `models.ts` holds no table for it.
+- Cost: prices are not hard-coded. The provider takes the cost of each request
+  from what OpenRouter reports for that request, so the daily spend cap and
+  `usage_daily` keep working for any model. If a response carries no cost, the
+  message is stored with cost unknown and the admin says so; the spend cap then
+  cannot protect that instance, and the admin states this next to the cap.
+- Embeddings stay on the `Embedder` (OpenAI) unless OpenRouter's current
+  documentation shows an embeddings endpoint that can serve the same model and
+  dimensions; that is checked when the provider is built, not assumed.
+- Tool calling (phase 2) depends on the chosen model. If the model does not
+  support tools, tools and page actions are switched off for the instance and
+  the admin says why.
 
 ## MCP tools
 
