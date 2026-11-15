@@ -95,7 +95,10 @@ export function Reports({ assistantId }: ReportsProps) {
   const reportRes = useResource<AssistantReport>(
     `/api/admin/assistants/${assistantId}/report?days=${days}`,
   );
-  const report = reportRes.value;
+  // Ignore a retained report from another period (or while a refetch is in
+  // flight) so stale figures and CSV exports are never shown for the new range.
+  const report =
+    reportRes.status !== "loading" && reportRes.value?.days === days ? reportRes.value : undefined;
 
   function download(): void {
     if (!report) return;
@@ -153,12 +156,12 @@ export function Reports({ assistantId }: ReportsProps) {
         </div>
       </div>
 
-      {reportRes.status === "loading" && !report ? (
-        <p className="muted">Loading report…</p>
-      ) : reportRes.status === "error" ? (
+      {reportRes.status === "error" ? (
         <p className="error-text" role="alert">
           {reportRes.error}
         </p>
+      ) : !report ? (
+        <p className="muted">Loading report…</p>
       ) : empty ? (
         <p className="muted">
           Nothing yet for this period. Once visitors ask questions, their answers show up here.

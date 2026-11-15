@@ -302,4 +302,66 @@ describe("Reports screen", () => {
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.getByText("Report failed")).toBeTruthy();
   });
+
+  it("hides stale report and prevents CSV export while a period change is pending", async () => {
+    let resolveSevenDay!: (res: Response) => void;
+    installFakeServer({
+      report: (days) => {
+        if (days === 7) {
+          return new Promise<Response>((resolve) => {
+            resolveSevenDay = resolve;
+          });
+        }
+        return SEEDED_REPORT;
+      },
+    });
+    const blobs: Blob[] = [];
+    const origCreateObjectURL = URL.createObjectURL;
+    const origRevokeObjectURL = URL.revokeObjectURL;
+    URL.createObjectURL = (blob: Blob) => {
+      blobs.push(blob);
+      return "blob:report-transition";
+    };
+    URL.revokeObjectURL = () => {};
+
+    try {
+      render(<App />);
+      fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+      expect(
+        await screen.findByText("How your assistant did from 2026-10-16 to 2026-11-15."),
+      ).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Download CSV" })).toBeTruthy();
+
+      fireEvent.change(screen.getByLabelText("Period"), { target: { value: "7" } });
+
+      expect(await screen.findByText("Loading report…")).toBeTruthy();
+      expect(screen.getByText("How your assistant did over time.")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Download CSV" })).toBeNull();
+      expect(blobs).toHaveLength(0);
+
+      resolveSevenDay(
+        Response.json({
+          ...SEEDED_REPORT,
+          days: 7,
+          from: "2026-11-08",
+          to: "2026-11-15",
+          questions: 11,
+        }),
+      );
+
+      expect(
+        await screen.findByText("How your assistant did from 2026-11-08 to 2026-11-15."),
+      ).toBeTruthy();
+      expect(screen.getByText("11")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+      expect(blobs).toHaveLength(1);
+      const text = await blobs[0]?.text();
+      expect(text).toContain("Report 2026-11-08 to 2026-11-15");
+      expect(text).toContain(`"Questions asked","11"`);
+    } finally {
+      URL.createObjectURL = origCreateObjectURL;
+      URL.revokeObjectURL = origRevokeObjectURL;
+    }
+  });
 });
