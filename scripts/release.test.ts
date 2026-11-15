@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { checkAllPackages, checkPackagePack } from "./pack-check.mjs";
-import { parseReleaseTag, setPublishableVersions } from "./set-version.mjs";
+import { getDistTag, parseReleaseTag, setPublishableVersions } from "./set-version.mjs";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 const tempDirs: string[] = [];
@@ -57,7 +57,16 @@ describe("set-version", () => {
   it("rejects invalid tags", () => {
     for (const bad of ["", "1.2.3", "v1.2", "v01.2.3", "v1.2.3 ", "latest", undefined]) {
       expect(() => parseReleaseTag(bad as string)).toThrow(/Invalid release tag/);
+      expect(() => getDistTag(bad as string)).toThrow(/Invalid release tag/);
     }
+  });
+
+  it("selects latest for stable tags and next for prerelease tags", () => {
+    expect(getDistTag("v1.2.3")).toBe("latest");
+    expect(getDistTag("v2.0.0+build.5")).toBe("latest");
+    expect(getDistTag("v0.1.0-beta.1")).toBe("next");
+    expect(getDistTag("v0.0.0-dryrun")).toBe("next");
+    expect(getDistTag("v1.0.0-rc.1+build.2")).toBe("next");
   });
 
   it("sets version and pins internal dependencies across all publishable packages", () => {

@@ -20,11 +20,22 @@ const DEPENDENCY_FIELDS = [
   "optionalDependencies",
 ];
 
-export function parseReleaseTag(tag) {
-  if (typeof tag !== "string" || !SEMVER_TAG_RE.test(tag)) {
+function matchReleaseTag(tag) {
+  const match = typeof tag === "string" ? SEMVER_TAG_RE.exec(tag) : null;
+  if (!match) {
     throw new Error(`Invalid release tag "${String(tag)}": expected v<semver> (e.g. v1.2.3)`);
   }
+  return match;
+}
+
+export function parseReleaseTag(tag) {
+  matchReleaseTag(tag);
   return tag.slice(1);
+}
+
+export function getDistTag(tag) {
+  const match = matchReleaseTag(tag);
+  return match[4] !== undefined ? "next" : "latest";
 }
 
 export function applyVersionToManifest(manifest, version, internalNames) {
