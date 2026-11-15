@@ -386,7 +386,26 @@ Install
 
 `@solvchat/admin` publishes both the prebuilt static app (`dist/`, served by the
 open engine) and an ESM library entry (`mountAdmin(root, options)`). The open
-entry point calls `mountAdmin(root)` with no options.
+static entry imports the stylesheet for you; the library entry does not import
+CSS, so a consumer embedding `mountAdmin` must also import
+`@solvchat/admin/styles.css`:
+
+```tsx
+import "@solvchat/admin/styles.css";
+import { mountAdmin } from "@solvchat/admin";
+
+const root = document.getElementById("root");
+if (root) {
+  mountAdmin(root, {
+    extraNavItems: [
+      { id: "billing", label: "Billing", path: "/admin/billing", section: "Account" },
+    ],
+    extraScreens: {
+      billing: ({ assistant }) => <p>Billing for {assistant?.name ?? "assistant"}</p>,
+    },
+  });
+}
+```
 
 Options accepted by `mountAdmin`:
 
