@@ -11,6 +11,8 @@ import type {
 } from "../providers/types.js";
 
 // Chosen here because the specification names caps but no numbers.
+// Per S6, the iteration and wall-time budgets are per request, and the
+// per-conversation call budget is what bounds repeated pauses.
 // Four iterations: enough for "look it up, then look up what that referenced",
 // short of a model that asks for the same tool forever.
 export const MAX_TOOL_ITERATIONS = 4;

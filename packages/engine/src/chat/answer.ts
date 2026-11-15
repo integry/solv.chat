@@ -30,7 +30,7 @@ export const SCORE_FLOOR = 0.3;
 export const TOP_K = 6;
 /** Lease duration for an active resume claim before a stalled worker's lock expires. */
 export const RESUME_CLAIM_TTL_MS = 60_000;
-const RESUME_CLAIM_RENEW_INTERVAL_MS = Math.floor(RESUME_CLAIM_TTL_MS / 3);
+const RESUME_CLAIM_RENEW_INTERVAL_MS = Math.floor(RESUME_CLAIM_TTL_MS / 4);
 
 export interface AnswerDeps {
   tenant: Tenant;
@@ -565,33 +565,33 @@ export async function* answerWithActionResults(
 
   let completed = false;
   let leaseLost = false;
-  let renewInFlight = false;
-  const ensureLease = async (): Promise<boolean> => {
+  let lastRenewedAt: number | null = null;
+  // Keep only the throttled checkpoint check (removing the background
+  // setInterval heartbeat) so there is a single renewal mechanism: the engine
+  // already checks at natural checkpoints (post-embed, model/tool steps, and
+  // streamed chunks), throttling D1 writes to once per interval while always
+  // forcing a real awaited renewal immediately before persisting.
+  const ensureLease = async (force = false): Promise<boolean> => {
     if (leaseLost) return false;
+    const now = clock();
+    if (!force && lastRenewedAt !== null && now - lastRenewedAt < RESUME_CLAIM_RENEW_INTERVAL_MS) {
+      return true;
+    }
     const ok = await deps.tenant.messages.renewReplyClaim({
       conversationId: conversation.id,
       id: pendingReply.id,
       claimToken,
       revision: pendingReply.resumeRevision,
-      now: clock(),
+      now,
       ttlMs: RESUME_CLAIM_TTL_MS,
     });
     if (!ok) {
       leaseLost = true;
+    } else {
+      lastRenewedAt = now;
     }
     return ok;
   };
-  const heartbeat = setInterval(() => {
-    if (leaseLost || renewInFlight) return;
-    renewInFlight = true;
-    void ensureLease()
-      .catch(() => {
-        // Best-effort background renewal; awaited checkpoints also fence.
-      })
-      .finally(() => {
-        renewInFlight = false;
-      });
-  }, RESUME_CLAIM_RENEW_INTERVAL_MS);
 
   try {
     const history: LlmMessage[] = allMessages
@@ -681,7 +681,7 @@ export async function* answerWithActionResults(
             // continues the same message, so `messages` stays 0.
             await recordMessageUsage(deps, input, clock(), callTokensIn, callTokensOut, cost, 0);
           },
-          ensureLease,
+          ensureLease: () => ensureLease(),
           now: deps.now,
         },
         request,
@@ -733,6 +733,10 @@ export async function* answerWithActionResults(
     const citations = mergeCitations(pendingReply.citations, resumedCitations);
 
     const mergedCalls = [...resolvedPriorCalls, ...newCalls];
+    if (!(await ensureLease(true))) {
+      yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+      return;
+    }
     const saved = await deps.tenant.messages.completeReply({
       id: pendingReply.id,
       claimToken,
@@ -775,7 +779,6 @@ export async function* answerWithActionResults(
 
     yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
   } finally {
-    clearInterval(heartbeat);
     if (!completed) {
       try {
         await deps.tenant.messages.releaseReplyClaim(pendingReply.id, claimToken);

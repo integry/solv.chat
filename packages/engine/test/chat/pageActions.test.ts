@@ -6,7 +6,7 @@ import {
   type PageAction,
   parseChatEventLine,
 } from "@solvchat/core";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getConversation } from "../../src/admin/conversations.js";
 import { createApp } from "../../src/app.js";
 import { RESUME_CLAIM_TTL_MS } from "../../src/chat/answer.js";
@@ -1067,36 +1067,42 @@ describe("chat/pageActions", () => {
     if (firstDone?.type !== "done") throw new Error("expected done");
 
     // Start Resume A and wait until it is inside provider.stream().
-    const resumeAPromise = postChat(app, {
-      conversationId: firstDone.conversationId,
-      resumeMessageId: firstDone.messageId,
-      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
-    });
-    await enteredStreamA;
+    const baseNow = Date.now();
+    let clockOffsetMs = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => baseNow + clockOffsetMs);
+    try {
+      const resumeAPromise = postChat(app, {
+        conversationId: firstDone.conversationId,
+        resumeMessageId: firstDone.messageId,
+        actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+      });
+      await enteredStreamA;
 
-    // Expire A's lease and let Resume B reclaim and complete the reply.
-    await env.DB.prepare("UPDATE messages SET resume_claimed_at = ?1 WHERE id = ?2")
-      .bind(Date.now() - RESUME_CLAIM_TTL_MS - 1000, firstDone.messageId)
-      .run();
+      // Advance the clock past lease expiry so Resume B can reclaim and Resume A's
+      // throttled lease check sees that the renewal interval has elapsed.
+      clockOffsetMs = RESUME_CLAIM_TTL_MS + 1000;
 
-    const resumeB = await postChat(app, {
-      conversationId: firstDone.conversationId,
-      resumeMessageId: firstDone.messageId,
-      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
-    });
-    expect(
-      resumeB.filter((e): e is Extract<ChatEvent, { type: "token" }> => e.type === "token"),
-    ).toEqual([{ type: "token", text: "From B." }]);
-    expect(resumeB.some((e) => e.type === "done")).toBe(true);
+      const resumeB = await postChat(app, {
+        conversationId: firstDone.conversationId,
+        resumeMessageId: firstDone.messageId,
+        actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+      });
+      expect(
+        resumeB.filter((e): e is Extract<ChatEvent, { type: "token" }> => e.type === "token"),
+      ).toEqual([{ type: "token", text: "From B." }]);
+      expect(resumeB.some((e) => e.type === "done")).toBe(true);
 
-    // Release A's stream; A must stop without emitting tokens or recording usage.
-    releaseStreamA();
-    const resumeA = await resumeAPromise;
-    expect(resumeA.some((e) => e.type === "token")).toBe(false);
-    expect(resumeA.some((e) => e.type === "done")).toBe(false);
-    expect(resumeA).toEqual([
-      { type: "error", message: "This answer can no longer be continued." },
-    ]);
+      // Release A's stream; A must stop without emitting tokens or recording usage.
+      releaseStreamA();
+      const resumeA = await resumeAPromise;
+      expect(resumeA.some((e) => e.type === "token")).toBe(false);
+      expect(resumeA.some((e) => e.type === "done")).toBe(false);
+      expect(resumeA).toEqual([
+        { type: "error", message: "This answer can no longer be continued." },
+      ]);
+    } finally {
+      nowSpy.mockRestore();
+    }
 
     const stored = await tenant.messages.get(firstDone.messageId);
     expect(stored?.content).toBe("Opening. From B.");
@@ -1425,5 +1431,101 @@ describe("chat/pageActions", () => {
       costMicros: embeddingCostMicros(120),
       messages: 0,
     });
+  });
+
+  it("throttles lease renewals across 200 streamed chunks and still blocks persistence when the lease is lost", async () => {
+    await publishConfig(true);
+    let renewCount = 0;
+    const origPrepare = env.DB.prepare.bind(env.DB);
+    const prepareSpy = vi.spyOn(env.DB, "prepare").mockImplementation((sql: string) => {
+      if (sql.includes("SET resume_claimed_at =")) {
+        renewCount += 1;
+      }
+      return origPrepare(sql);
+    });
+
+    let callCount = 0;
+    let stealLeaseOnStream = false;
+    let pendingMessageId = "";
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        callCount += 1;
+        if (callCount === 1 || callCount === 3) {
+          yield { kind: "text", text: "Opening. " };
+          yield { kind: "tool_call", call: NAVIGATE_CALL };
+          yield { kind: "usage", tokensIn: 20, tokensOut: 5, stopReason: "tools" };
+          return;
+        }
+        for (let i = 0; i < 200; i += 1) {
+          if (stealLeaseOnStream && i === 100) {
+            await env.DB.prepare(
+              "UPDATE messages SET resume_claim = 'other-worker', resume_claimed_at = ?1 WHERE id = ?2",
+            )
+              .bind(Date.now(), pendingMessageId)
+              .run();
+          }
+          yield { kind: "text", text: "x" };
+        }
+        yield { kind: "usage", tokensIn: 30, tokensOut: 200, stopReason: "end" };
+      },
+    };
+
+    const app = createApp(fakeSeams(), {
+      chat: { embedder, retriever, provider, model: ANTHROPIC_MODELS.fast },
+    });
+
+    try {
+      // 1. 200 streamed chunks perform a small, bounded number of D1 lease renewals.
+      const first = await postChat(app, {
+        message: "How do I change my plan?",
+        pageActions: [NAVIGATE_ACTION],
+      });
+      const firstDone = first.find((e) => e.type === "done");
+      if (firstDone?.type !== "done") throw new Error("expected done");
+
+      renewCount = 0;
+      const resumed = await postChat(app, {
+        conversationId: firstDone.conversationId,
+        resumeMessageId: firstDone.messageId,
+        actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+      });
+      expect(resumed.filter((e) => e.type !== "token")).toContainEqual(
+        expect.objectContaining({ type: "done" }),
+      );
+      expect(resumed.filter((e) => e.type === "token")).toHaveLength(200);
+      expect(renewCount).toBeGreaterThanOrEqual(1);
+      expect(renewCount).toBeLessThanOrEqual(4);
+
+      const completedRow = await tenant.messages.get(firstDone.messageId);
+      expect(completedRow?.content).toBe(`Opening. ${"x".repeat(200)}`);
+
+      // 2. A lease lost during the throttled window still stops persistence before completeReply.
+      const second = await postChat(app, {
+        message: "How do I change my plan?",
+        pageActions: [NAVIGATE_ACTION],
+      });
+      const secondDone = second.find((e) => e.type === "done");
+      if (secondDone?.type !== "done") throw new Error("expected done");
+
+      pendingMessageId = secondDone.messageId;
+      stealLeaseOnStream = true;
+      const lostResumed = await postChat(app, {
+        conversationId: secondDone.conversationId,
+        resumeMessageId: secondDone.messageId,
+        actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+      });
+      expect(lostResumed.some((e) => e.type === "done")).toBe(false);
+      expect(lostResumed.at(-1)).toEqual({
+        type: "error",
+        message: "This answer can no longer be continued.",
+      });
+
+      const unpersistedRow = await tenant.messages.get(secondDone.messageId);
+      expect(unpersistedRow?.content).toBe("Opening. ");
+    } finally {
+      prepareSpy.mockRestore();
+    }
   });
 });
