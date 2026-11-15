@@ -143,6 +143,8 @@ export class SolvChat extends HTMLElement {
   #abortController: AbortController | null = null;
   /** Open confirmation prompts, refused if the panel closes or we unmount. */
   #openConfirms = new Set<ConfirmHandle>();
+  /** Turn controller whose remaining confirmations were dismissed by closing the panel. */
+  #dismissedTurn: AbortController | null = null;
   #conversationId: string | null = null;
   #turns: SavedTurn[] = [];
   #pendingResume: PendingResume | null = null;
@@ -204,6 +206,7 @@ export class SolvChat extends HTMLElement {
     // means the visitor did not say yes.
     for (const handle of this.#openConfirms) handle.dismiss();
     this.#openConfirms.clear();
+    this.#dismissedTurn = null;
     clearHighlight();
     setBeforeNavigate(null);
     setOnExternalNavigate(null);
@@ -422,6 +425,7 @@ export class SolvChat extends HTMLElement {
   }
 
   #openPanel(moveFocus: boolean): void {
+    this.#dismissedTurn = null;
     this.#open = true;
     this.#panel.hidden = false;
     this.#launcher.setAttribute("aria-expanded", "true");
@@ -435,6 +439,7 @@ export class SolvChat extends HTMLElement {
   #closePanel(restoreFocus: boolean): void {
     for (const handle of this.#openConfirms) handle.dismiss();
     this.#openConfirms.clear();
+    this.#dismissedTurn = this.#abortController;
     this.#open = false;
     this.#panel.hidden = true;
     this.#launcher.setAttribute("aria-expanded", "false");
@@ -593,6 +598,9 @@ export class SolvChat extends HTMLElement {
    * without losing `this`.
    */
   #confirmAction = async (request: RunRequest, action: RegisteredAction): Promise<boolean> => {
+    if (this.#dismissedTurn && this.#dismissedTurn === this.#abortController) {
+      return false;
+    }
     // Opening the panel first: a prompt the visitor cannot see is not consent.
     if (!this.#open) this.#openPanel(false);
     const handle = askToConfirm(this.#messagesEl, request, action, () => this.#inputEl.focus());
@@ -836,6 +844,9 @@ export class SolvChat extends HTMLElement {
         this.#sending = false;
         this.#sendBtn.disabled = false;
       }
+      if (this.#dismissedTurn === controller) {
+        this.#dismissedTurn = null;
+      }
       if (!signal.aborted) {
         this.#persist();
       }
@@ -1010,6 +1021,9 @@ export class SolvChat extends HTMLElement {
         this.#abortController = null;
         this.#sending = false;
         this.#sendBtn.disabled = false;
+      }
+      if (this.#dismissedTurn === controller) {
+        this.#dismissedTurn = null;
       }
       if (!signal.aborted) {
         this.#persist();

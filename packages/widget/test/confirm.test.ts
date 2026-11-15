@@ -523,4 +523,49 @@ describe("action confirmation", () => {
       { callId: "c2", ok: true, result: '{"second":true}' },
     ]);
   });
+
+  it("refuses remaining queued confirmations without reopening when the panel closes", async () => {
+    const firstRun = vi.fn(() => ({ first: true }));
+    const secondRun = vi.fn(() => ({ second: true }));
+    register({
+      name: "first_action",
+      description: "First action",
+      input: { type: "object", properties: {}, required: [] },
+      confirm: true,
+      run: firstRun,
+    });
+    register({
+      name: "second_action",
+      description: "Second action",
+      input: { type: "object", properties: {}, required: [] },
+      confirm: true,
+      run: secondRun,
+    });
+
+    const chatBodies = mockChatFetch([
+      { callId: "c1", name: "first_action", input: {}, confirm: true },
+      { callId: "c2", name: "second_action", input: {}, confirm: true },
+    ]);
+
+    const el = mountWidget("pk_close_two_prompts");
+    await flushAsync();
+    const root = shadow(el);
+
+    await sendMessage(root);
+    expect(root.querySelectorAll(".solv-confirm")).toHaveLength(1);
+    expect(mustQuery<HTMLDivElement>(root, ".solv-panel").hidden).toBe(false);
+
+    mustQuery<HTMLButtonElement>(root, ".solv-close").click();
+    await flushAsync();
+
+    expect(mustQuery<HTMLDivElement>(root, ".solv-panel").hidden).toBe(true);
+    expect(root.querySelector(".solv-confirm")).toBeNull();
+    expect(firstRun).not.toHaveBeenCalled();
+    expect(secondRun).not.toHaveBeenCalled();
+    expect(chatBodies).toHaveLength(2);
+    expect(chatBodies[1]?.actionResults).toEqual([
+      { callId: "c1", ok: false, error: "The visitor did not confirm." },
+      { callId: "c2", ok: false, error: "The visitor did not confirm." },
+    ]);
+  });
 });
