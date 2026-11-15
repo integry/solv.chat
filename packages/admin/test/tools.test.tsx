@@ -545,4 +545,77 @@ describe("Tools screen", () => {
       ).value,
     ).toBe("Server B still unsaved");
   });
+
+  it("preserves a reopened editor for the same server when an earlier save or credential removal completes", async () => {
+    let releasePatch!: () => void;
+    let patchPending = new Promise<void>((resolve) => {
+      releasePatch = resolve;
+    });
+    let holdNextPatch = true;
+
+    const server = installFakeServer({
+      servers: [
+        makeServer({ id: "mcp_1", label: "Server A", hasSecret: true, authKind: "static_header" }),
+      ],
+      onRequest: async (method, path) => {
+        if (method === "PATCH" && path === "/api/admin/mcp-servers/mcp_1" && holdNextPatch) {
+          await patchPending;
+        }
+      },
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Tools" }));
+    await screen.findByText("Server A");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("What this is", { selector: "#edit-mcp_1-label" }), {
+      target: { value: "Server A first save" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // Close and reopen the same server's editor while the first PATCH is pending.
+    fireEvent.click(screen.getByRole("button", { name: "Close edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("What this is", { selector: "#edit-mcp_1-label" }), {
+      target: { value: "Server A reopened unsaved" },
+    });
+
+    releasePatch();
+    await waitFor(() => expect(server.patches).toHaveLength(1));
+    await screen.findByText("Server A first save");
+
+    expect(
+      (
+        screen.getByLabelText("What this is", {
+          selector: "#edit-mcp_1-label",
+        }) as HTMLInputElement
+      ).value,
+    ).toBe("Server A reopened unsaved");
+
+    // Now test the Remove credential completion path for the same server.
+    patchPending = new Promise<void>((resolve) => {
+      releasePatch = resolve;
+    });
+    holdNextPatch = true;
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove credential" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("What this is", { selector: "#edit-mcp_1-label" }), {
+      target: { value: "Server A reopened after remove" },
+    });
+
+    releasePatch();
+    await waitFor(() => expect(server.patches).toHaveLength(2));
+    await screen.findByText("Credential: not set");
+
+    expect(
+      (
+        screen.getByLabelText("What this is", {
+          selector: "#edit-mcp_1-label",
+        }) as HTMLInputElement
+      ).value,
+    ).toBe("Server A reopened after remove");
+  });
 });

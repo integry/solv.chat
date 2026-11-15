@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useRef, useState } from "react";
 import { ApiError, deleteJson, patchJson, postJson } from "../api/client.js";
 import type { McpServerSummary, McpToolView } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
@@ -221,12 +221,14 @@ function ServerForm({
 
 function EditServerForm({
   server,
+  sessionId,
   onSaved,
   onCancel,
 }: {
   server: McpServerSummary;
-  onSaved: () => void;
-  onCancel: () => void;
+  sessionId: number;
+  onSaved: (sessionId: number) => void;
+  onCancel: (sessionId: number) => void;
 }) {
   const [label, setLabel] = useState(server.label);
   const [url, setUrl] = useState(server.url);
@@ -256,7 +258,7 @@ function EditServerForm({
           ? { headerName, ...(submittedValue !== "" ? { headerValue: submittedValue } : {}) }
           : { headerValue: "" }),
       });
-      onSaved();
+      onSaved(sessionId);
     } catch (err) {
       if (err instanceof ApiError) {
         setFieldErrors(err.fields);
@@ -277,7 +279,7 @@ function EditServerForm({
     setHeaderValue("");
     try {
       await patchJson(`/api/admin/mcp-servers/${server.id}`, { headerValue: "" });
-      onSaved();
+      onSaved(sessionId);
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : "Could not remove the key.");
     } finally {
@@ -360,7 +362,7 @@ function EditServerForm({
           type="button"
           className="btn btn-secondary btn-sm"
           disabled={busy}
-          onClick={onCancel}
+          onClick={() => onCancel(sessionId)}
         >
           Cancel
         </button>
@@ -470,11 +472,31 @@ export function Tools({ assistantId }: ToolsProps) {
   );
   const servers = serversRes.value?.servers ?? [];
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingSession, setEditingSession] = useState<{
+    serverId: string;
+    sessionId: number;
+  } | null>(null);
+  const nextEditSessionRef = useRef(0);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [refreshCounts, setRefreshCounts] = useState<Record<string, number>>({});
+
+  function toggleEditor(serverId: string) {
+    setConfirmDeleteId(null);
+    if (editingSession?.serverId === serverId) {
+      setEditingSession(null);
+      return;
+    }
+    nextEditSessionRef.current += 1;
+    setEditingSession({ serverId, sessionId: nextEditSessionRef.current });
+  }
+
+  function closeEditorIfSessionMatches(serverId: string, sessionId: number) {
+    setEditingSession((current) =>
+      current?.serverId === serverId && current.sessionId === sessionId ? null : current,
+    );
+  }
 
   async function refresh(serverId: string) {
     if (busyId !== null) return;
@@ -500,7 +522,7 @@ export function Tools({ assistantId }: ToolsProps) {
     try {
       await deleteJson(`/api/admin/mcp-servers/${serverId}`);
       setExpandedId((current) => (current === serverId ? null : current));
-      setEditingId((current) => (current === serverId ? null : current));
+      setEditingSession((current) => (current?.serverId === serverId ? null : current));
       setConfirmDeleteId(null);
       serversRes.reload();
     } catch (err) {
@@ -580,19 +602,16 @@ export function Tools({ assistantId }: ToolsProps) {
                     type="button"
                     className="btn btn-secondary btn-sm"
                     disabled={busyId === server.id}
-                    onClick={() => {
-                      setConfirmDeleteId(null);
-                      setEditingId(editingId === server.id ? null : server.id);
-                    }}
+                    onClick={() => toggleEditor(server.id)}
                   >
-                    {editingId === server.id ? "Close edit" : "Edit"}
+                    {editingSession?.serverId === server.id ? "Close edit" : "Edit"}
                   </button>
                   <button
                     type="button"
                     className="btn btn-secondary btn-sm"
                     disabled={busyId === server.id}
                     onClick={() => {
-                      setEditingId(null);
+                      setEditingSession(null);
                       setConfirmDeleteId(confirmDeleteId === server.id ? null : server.id);
                     }}
                   >
@@ -625,15 +644,17 @@ export function Tools({ assistantId }: ToolsProps) {
                 </section>
               )}
 
-              {editingId === server.id && (
+              {editingSession?.serverId === server.id && (
                 <EditServerForm
+                  key={`${server.id}-${editingSession.sessionId}`}
                   server={server}
-                  onSaved={() => {
-                    setEditingId((current) => (current === server.id ? null : current));
+                  sessionId={editingSession.sessionId}
+                  onSaved={(completedSessionId) => {
+                    closeEditorIfSessionMatches(server.id, completedSessionId);
                     serversRes.reload();
                   }}
-                  onCancel={() =>
-                    setEditingId((current) => (current === server.id ? null : current))
+                  onCancel={(cancelledSessionId) =>
+                    closeEditorIfSessionMatches(server.id, cancelledSessionId)
                   }
                 />
               )}
