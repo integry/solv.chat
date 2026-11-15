@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 export type ScreenId =
   | "overview"
+  | "reports"
   | "conversations"
   | "gaps"
   | "sources"
@@ -18,6 +19,7 @@ export interface NavItem {
 
 export const NAV_ITEMS: readonly NavItem[] = [
   { id: "overview", label: "Overview", path: "/admin/overview" },
+  { id: "reports", label: "Reports", path: "/admin/reports" },
   { id: "conversations", label: "Conversations", path: "/admin/conversations" },
   { id: "gaps", label: "Gaps", path: "/admin/gaps" },
   { id: "sources", label: "Sources", path: "/admin/sources" },

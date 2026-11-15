@@ -128,6 +128,28 @@ export interface TopQuestion {
   count: number;
 }
 
+export interface SourceCitationCount {
+  url: string;
+  title: string;
+  count: number;
+}
+
+export interface AssistantReport {
+  days: 7 | 30 | 90;
+  from: string;
+  to: string;
+  questions: number;
+  replies: number;
+  answeredShare: number;
+  thumbsDownShare: number;
+  costMicros: number;
+  topQuestions: TopQuestion[];
+  topGaps: TopQuestion[];
+  topSources: SourceCitationCount[];
+  uncitedSources: Array<{ url: string; title: string }>;
+  uncitedTotal: number;
+}
+
 export interface AssistantOverview {
   messages: number;
   answeredShare: number;
