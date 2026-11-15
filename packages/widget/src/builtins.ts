@@ -17,7 +17,17 @@ const VIEWPORT_MARGIN_PX = 8;
  * `file`, `submit` and `image` are here because filling them is either
  * meaningless or a click.
  */
-const REFUSED_TYPES = new Set(["password", "hidden", "file", "submit", "image", "button", "reset"]);
+const REFUSED_TYPES = new Set([
+  "password",
+  "hidden",
+  "file",
+  "submit",
+  "image",
+  "button",
+  "reset",
+  "checkbox",
+  "radio",
+]);
 
 /**
  * autocomplete purposes that mark a field as payment or one-time code.
@@ -95,7 +105,7 @@ function isRefusedField(element: Element): string | null {
   // whole payment form should not have to mark each field.
   if (element.closest(`[${NO_FILL_ATTRIBUTE}]`) !== null) return "that field is not fillable";
   if (!isFillTarget(element)) return "that field is not fillable";
-  const type = (element.getAttribute("type") ?? "text").toLowerCase();
+  const type = (element.getAttribute("type") ?? "text").trim().toLowerCase();
   if (REFUSED_TYPES.has(type)) return "that kind of field is never filled";
   const tokens = (element.getAttribute("autocomplete") ?? "")
     .toLowerCase()

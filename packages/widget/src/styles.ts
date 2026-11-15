@@ -247,6 +247,10 @@ textarea:focus-visible {
   margin-top: 8px;
 }
 
+.solv-nav-recovery {
+  margin-top: 8px;
+}
+
 .solv-action {
   display: inline-block;
   padding: 2px 8px;

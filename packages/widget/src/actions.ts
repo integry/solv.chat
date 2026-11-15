@@ -281,7 +281,7 @@ function checkValue(schema: Record<string, unknown>, value: unknown, path: strin
 }
 
 /** Serialises a return value for the wire, capped and marked when truncated. */
-function serialiseResult(value: unknown): string {
+export function serialiseResult(value: unknown): string {
   let text: string;
   try {
     text = value === undefined ? "null" : (JSON.stringify(value) ?? "null");

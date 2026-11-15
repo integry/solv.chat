@@ -4,7 +4,7 @@ import {
   MAX_CHAT_MESSAGE_LENGTH,
   parseChatEventLine,
 } from "@solvchat/core";
-import { listForRequest, type RunRequest, runAction } from "./actions.js";
+import { listForRequest, type RunRequest, runAction, serialiseResult } from "./actions.js";
 import {
   type BuiltinSettings,
   clearHighlight,
@@ -939,23 +939,41 @@ export class SolvChat extends HTMLElement {
     });
   }
 
-  #waitForNavigationDeparture(signal: AbortSignal): Promise<boolean> {
+  #waitForNavigationDeparture(bubble: HTMLDivElement, signal: AbortSignal): Promise<boolean> {
     if (signal.aborted || !this.isConnected) return Promise.resolve(false);
     return new Promise((resolve) => {
       let settled = false;
-      const finish = (stayed: boolean) => {
+      let recoveryEl: HTMLDivElement | null = null;
+      const finish = (canceled: boolean) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        recoveryEl?.remove();
         if (typeof window !== "undefined") {
           window.removeEventListener("pagehide", onLeave);
         }
         signal.removeEventListener("abort", onLeave);
-        resolve(stayed);
+        resolve(canceled);
       };
       const onLeave = () => finish(false);
       const timer = setTimeout(() => {
-        finish(!signal.aborted && this.isConnected);
+        if (settled || signal.aborted || !this.isConnected) {
+          finish(false);
+          return;
+        }
+        // Elapsed time alone cannot distinguish a slow destination from a
+        // canceled navigation. Keep pendingResume intact until departure, and
+        // offer an explicit recovery control if the visitor stayed on this page.
+        recoveryEl = document.createElement("div");
+        recoveryEl.className = "solv-nav-recovery";
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "solv-fb-btn solv-nav-recover";
+        btn.textContent = "Continue here";
+        btn.addEventListener("click", () => finish(true), { once: true });
+        recoveryEl.append(btn);
+        bubble.append(recoveryEl);
+        this.#scrollToBottom();
       }, NAVIGATION_RECOVERY_MS);
       if (typeof window !== "undefined") {
         window.addEventListener("pagehide", onLeave, { once: true });
@@ -998,7 +1016,7 @@ export class SolvChat extends HTMLElement {
             {
               callId: request.callId,
               ok: true,
-              result: JSON.stringify({ opened: targetHref }),
+              result: serialiseResult({ opened: targetHref }),
             },
             ...toRun.slice(i + 1).map((rem) => ({
               callId: rem.callId,
@@ -1027,8 +1045,8 @@ export class SolvChat extends HTMLElement {
         if (navigated) {
           navigated = false;
           if (result.ok) {
-            const stayedOnPage = await this.#waitForNavigationDeparture(signal);
-            if (!stayedOnPage || signal.aborted) return;
+            const canceled = await this.#waitForNavigationDeparture(bubble, signal);
+            if (!canceled || signal.aborted) return;
             result = {
               callId: request.callId,
               ok: false,

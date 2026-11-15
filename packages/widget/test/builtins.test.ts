@@ -1,4 +1,9 @@
-import { MAX_ACTION_SCHEMA_BYTES, MAX_PAGE_ACTIONS } from "@solvchat/core";
+import {
+  MAX_ACTION_RESULT_BYTES,
+  MAX_ACTION_SCHEMA_BYTES,
+  MAX_PAGE_ACTIONS,
+  parseChatRequest,
+} from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearRegistry, listForRequest, lookup, register, runAction } from "../src/actions.js";
 import { HIGHLIGHT_DURATION_MS, installBuiltins } from "../src/builtins.js";
@@ -376,6 +381,57 @@ describe("built-in page actions", () => {
       expect(parsed.refused).toHaveLength(1);
       expect(field.getAttribute("value")).toBe(before);
     });
+
+    it.each([
+      ["checkbox", `<input id="f" data-solv-fill="agree" type="checkbox" value="yes" />`],
+      ["radio", `<input id="f" data-solv-fill="plan" type="radio" value="pro" />`],
+    ])(
+      "excludes and refuses %s selection control without changing checked or value",
+      async (_label, html) => {
+        document.body.innerHTML = `${html}<input id="email" data-solv-fill="email" type="email" />`;
+        const control = document.getElementById("f") as HTMLInputElement;
+        const name = control.getAttribute("data-solv-fill") ?? "";
+        const initialValue = control.value;
+        const onInput = vi.fn();
+        const onChange = vi.fn();
+        control.addEventListener("input", onInput);
+        control.addEventListener("change", onChange);
+
+        installBuiltins({ enabled: true, allowedOrigins: [] });
+        const fillAction = listForRequest().find((a) => a.name === "fill");
+        const items = (
+          fillAction?.inputSchema.properties as {
+            fields?: { items?: { properties?: { name?: { enum?: string[] } } } };
+          }
+        )?.fields?.items?.properties?.name?.enum;
+        expect(items).toEqual(["email"]);
+
+        // Also verify execution-time refusal when fill.run is reached directly.
+        document.getElementById("email")?.remove();
+        installBuiltins({ enabled: true, allowedOrigins: [] });
+
+        const result = await runAction(
+          {
+            callId: "c1",
+            name: "fill",
+            input: { fields: [{ name, value: "true" }] },
+            confirm: false,
+          },
+          { confirm: async () => true },
+        );
+
+        expect(result.ok).toBe(true);
+        expect(JSON.parse(result.result ?? "{}")).toEqual({
+          filled: [],
+          refused: [{ name, why: "that kind of field is never filled" }],
+          submitted: false,
+        });
+        expect(control.checked).toBe(false);
+        expect(control.value).toBe(initialValue);
+        expect(onInput).not.toHaveBeenCalled();
+        expect(onChange).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it("lets a page's own action of the same name win over a built-in", () => {
@@ -517,6 +573,79 @@ describe("built-in page actions", () => {
       );
       expect(resumed?.querySelector(".solv-bubble-error")).toBeNull();
       expect(resumed?.querySelector(".solv-feedback")).not.toBeNull();
+    });
+
+    it("caps persisted navigation result at MAX_ACTION_RESULT_BYTES so long URLs pass request validation", async () => {
+      const longPath = `/pricing?q=${"a".repeat(MAX_ACTION_RESULT_BYTES + 500)}`;
+      const chatBodies: Array<Record<string, unknown>> = [];
+      vi.spyOn(location, "assign").mockImplementation(() => {});
+
+      let chatStep = 0;
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_nav_long")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatStep++;
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (chatStep === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Opening"}\n\n',
+                `event: action\ndata: ${JSON.stringify({ callId: "call_long", name: "navigate", input: { url: longPath }, confirm: false })}\n\n`,
+                'event: done\ndata: {"messageId":"msg_long1","conversationId":"conv_long","awaitingActions":["call_long"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":" — opened."}\n\n',
+              'event: done\ndata: {"messageId":"msg_long2","conversationId":"conv_long"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el1 = document.createElement("solv-chat");
+      el1.setAttribute("assistant", "pk_nav_long");
+      document.body.append(el1);
+      await flushAsync();
+
+      const root1 = el1.shadowRoot as ShadowRoot;
+      (root1.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root1.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open long URL";
+      (root1.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await flushAsync();
+
+      el1.remove();
+      clearRegistry();
+      const el2 = document.createElement("solv-chat");
+      el2.setAttribute("assistant", "pk_nav_long");
+      document.body.append(el2);
+      await flushAsync();
+
+      expect(chatBodies).toHaveLength(2);
+      const resumeBody = chatBodies[1] as {
+        actionResults?: Array<{ callId: string; ok: boolean; result?: string }>;
+      };
+      const navResult = resumeBody.actionResults?.[0];
+      expect(navResult?.ok).toBe(true);
+      expect(new TextEncoder().encode(navResult?.result ?? "").byteLength).toBeLessThanOrEqual(
+        MAX_ACTION_RESULT_BYTES,
+      );
+      expect(navResult?.result).toMatch(/\n\[truncated\]$/);
+      expect(parseChatRequest(chatBodies[1]).ok).toBe(true);
     });
   });
 
@@ -842,10 +971,22 @@ describe("built-in page actions", () => {
       ) as { pendingResume?: { resumeMessageId: string } };
       expect(preSaved.pendingResume?.resumeMessageId).toBe("msg_c1");
 
-      // Document remains active past recovery window: widget recovers and continues answer.
+      // Document remains active past recovery window: widget preserves handoff and offers recovery.
       await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS);
 
       expect(assign).toHaveBeenCalledTimes(1);
+      expect(chatBodies).toHaveLength(1);
+      const stillSaved = JSON.parse(
+        sessionStorage.getItem("solv-chat-open:pk_nav_cancel") ?? "{}",
+      ) as { pendingResume?: { resumeMessageId: string } };
+      expect(stillSaved.pendingResume?.resumeMessageId).toBe("msg_c1");
+
+      const recoverBtn = root.querySelector(".solv-nav-recover") as HTMLButtonElement | null;
+      expect(recoverBtn).not.toBeNull();
+      recoverBtn?.click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(root.querySelector(".solv-nav-recover")).toBeNull();
       expect(chatBodies).toHaveLength(2);
       expect(chatBodies[1]?.resumeMessageId).toBe("msg_c1");
       expect(chatBodies[1]?.actionResults).toEqual([
@@ -870,6 +1011,96 @@ describe("built-in page actions", () => {
         "Could not run navigate",
       );
       expect(activeBubble?.querySelector(".solv-feedback")).not.toBeNull();
+    });
+
+    it("preserves pendingResume when a slow navigation departs after NAVIGATION_RECOVERY_MS", async () => {
+      vi.useFakeTimers();
+      vi.spyOn(location, "assign").mockImplementation(() => {});
+      const chatBodies: Array<Record<string, unknown>> = [];
+      let chatStep = 0;
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_nav_slow")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatStep++;
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (chatStep === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Opening pricing"}\n\n',
+                'event: action\ndata: {"callId":"call_slow","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_s1","conversationId":"conv_s","awaitingActions":["call_slow"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":" — welcome to pricing."}\n\n',
+              'event: done\ndata: {"messageId":"msg_s2","conversationId":"conv_s"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el1 = document.createElement("solv-chat");
+      el1.setAttribute("assistant", "pk_nav_slow");
+      document.body.append(el1);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const root1 = el1.shadowRoot as ShadowRoot;
+      (root1.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root1.querySelector("#solv-input") as HTMLTextAreaElement).value = "Go to pricing";
+      (root1.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Slow destination takes longer than NAVIGATION_RECOVERY_MS.
+      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS * 3);
+      expect(chatBodies).toHaveLength(1);
+      expect(root1.querySelector(".solv-nav-recover")).not.toBeNull();
+      const midSaved = JSON.parse(sessionStorage.getItem("solv-chat-open:pk_nav_slow") ?? "{}") as {
+        pendingResume?: { resumeMessageId: string };
+      };
+      expect(midSaved.pendingResume?.resumeMessageId).toBe("msg_s1");
+
+      // Destination finally responds and replaces the document.
+      window.dispatchEvent(new Event("pagehide"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(chatBodies).toHaveLength(1);
+      expect(root1.querySelector(".solv-nav-recover")).toBeNull();
+
+      el1.remove();
+      clearRegistry();
+      const el2 = document.createElement("solv-chat");
+      el2.setAttribute("assistant", "pk_nav_slow");
+      document.body.append(el2);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(chatBodies).toHaveLength(2);
+      expect(chatBodies[1]?.resumeMessageId).toBe("msg_s1");
+      expect(chatBodies[1]?.actionResults).toEqual([
+        {
+          callId: "call_slow",
+          ok: true,
+          result: JSON.stringify({ opened: new URL("/pricing", location.href).href }),
+        },
+      ]);
+      const bubbles = (el2.shadowRoot as ShadowRoot).querySelectorAll(".solv-bubble--assistant");
+      expect(bubbles[1]?.querySelector(".solv-bubble-text")?.textContent).toBe(
+        "Opening pricing — welcome to pricing.",
+      );
     });
 
     it("recovers immediately when location.assign throws synchronously", async () => {
