@@ -95,11 +95,27 @@ export interface ToolLoopDeps {
   now?: (() => number) | undefined;
 }
 
+export interface PendingToolTurn {
+  assistantText: string;
+  asked: ToolCall[];
+  /** Server-side tool results from the same round that paused on a client action. */
+  completedResults: LlmToolResult[];
+}
+
+export interface ToolLoopContinuation {
+  /** Completed tool-exchange messages (assistant + tool_results) within this answer. */
+  messages: LlmMessage[];
+  /** The in-flight round that paused for client action(s). */
+  pendingTurn: PendingToolTurn;
+}
+
 export interface ToolLoopOutcome {
   text: string;
   calls: StoredToolCall[];
   /** Calls the client must run. Empty when the answer finished. */
   pending: ToolCall[];
+  /** Present only when `pending.length > 0`, to restore model context on resume. */
+  continuation?: ToolLoopContinuation | undefined;
 }
 
 /** Truncates on a UTF-8 boundary and says so, so the model is not misled. */
@@ -163,12 +179,13 @@ export function runToolLoop(
   deps: ToolLoopDeps,
   request: LlmRequest,
 ): AsyncGenerator<ToolLoopEvent, ToolLoopOutcome, undefined> {
-  return runLoopFrom(deps, request, [...request.messages], "");
+  return runLoopFrom(deps, request, [], "");
 }
 
 /**
- * Continues a paused answer. Same loop, entered with the results the client
- * produced already appended, so resumption is not a second code path.
+ * Continues a paused answer. Same loop, entered with prior completed tool
+ * exchanges and the results the client produced, so resumption is not a second
+ * code path.
  */
 export function resumeToolLoop(
   deps: ToolLoopDeps,
@@ -176,19 +193,62 @@ export function resumeToolLoop(
   priorText: string,
   pendingCalls: readonly ToolCall[],
   results: readonly LlmToolResult[],
+  continuation?: ToolLoopContinuation | undefined,
 ): AsyncGenerator<ToolLoopEvent, ToolLoopOutcome, undefined> {
-  const messages: LlmMessage[] = [
-    ...request.messages,
-    { role: "assistant", content: priorText, toolCalls: [...pendingCalls] },
-    { role: "tool_results", results: [...results] },
-  ];
-  return runLoopFrom(deps, request, messages, priorText);
+  const cappedById = new Map<string, LlmToolResult>();
+  for (const r of results) {
+    const capped = capResult(r.content);
+    cappedById.set(r.callId, { callId: r.callId, content: capped.content, isError: r.isError });
+  }
+
+  let continuationMessages: LlmMessage[];
+  if (continuation) {
+    for (const r of continuation.pendingTurn.completedResults) {
+      if (!cappedById.has(r.callId)) {
+        cappedById.set(r.callId, r);
+      }
+    }
+    const turnResults: LlmToolResult[] = continuation.pendingTurn.asked.map(
+      (call) =>
+        cappedById.get(call.callId) ?? {
+          callId: call.callId,
+          content: "The tool did not return a result.",
+          isError: true,
+        },
+    );
+    continuationMessages = [
+      ...continuation.messages,
+      {
+        role: "assistant",
+        content: continuation.pendingTurn.assistantText,
+        toolCalls: [...continuation.pendingTurn.asked],
+      },
+      { role: "tool_results", results: turnResults },
+    ];
+  } else {
+    continuationMessages = [
+      { role: "assistant", content: priorText, toolCalls: [...pendingCalls] },
+      {
+        role: "tool_results",
+        results: pendingCalls.map(
+          (call) =>
+            cappedById.get(call.callId) ?? {
+              callId: call.callId,
+              content: "The tool did not return a result.",
+              isError: true,
+            },
+        ),
+      },
+    ];
+  }
+
+  return runLoopFrom(deps, request, continuationMessages, priorText);
 }
 
 async function* runLoopFrom(
   deps: ToolLoopDeps,
   request: LlmRequest,
-  initialMessages: LlmMessage[],
+  initialContinuationMessages: readonly LlmMessage[],
   initialText: string,
 ): AsyncGenerator<ToolLoopEvent, ToolLoopOutcome, undefined> {
   const clock = deps.now ?? Date.now;
@@ -210,7 +270,8 @@ async function* runLoopFrom(
   // Strip any caller-supplied `tools` so disabling tools truly omits `tools`
   // from subsequent provider requests and only offered runner definitions apply.
   const { tools: _ignoredTools, ...baseRequest } = request;
-  const messages: LlmMessage[] = initialMessages;
+  const continuationMessages: LlmMessage[] = [...initialContinuationMessages];
+  const messages: LlmMessage[] = [...request.messages, ...continuationMessages];
   const calls: StoredToolCall[] = [];
   let text = initialText;
   let toolsOffered = definitions.length > 0;
@@ -279,21 +340,25 @@ async function* runLoopFrom(
       if (budgetNoticeSent) return { text, calls, pending: [] };
       budgetNoticeSent = true;
       toolsOffered = false;
-      messages.push(
-        { role: "assistant", content: assistantText, toolCalls: asked },
-        {
-          role: "tool_results",
-          results: asked.map((call) => ({
-            callId: call.callId,
-            // Said once, as a result rather than a system instruction: the
-            // model then answers from what it has instead of apologising for
-            // an internal budget the visitor cannot see.
-            content:
-              "No more tools are available for this answer. Answer from what you already have.",
-            isError: true,
-          })),
-        },
-      );
+      const budgetAssistant: LlmMessage = {
+        role: "assistant",
+        content: assistantText,
+        toolCalls: asked,
+      };
+      const budgetResults: LlmMessage = {
+        role: "tool_results",
+        results: asked.map((call) => ({
+          callId: call.callId,
+          // Said once, as a result rather than a system instruction: the
+          // model then answers from what it has instead of apologising for
+          // an internal budget the visitor cannot see.
+          content:
+            "No more tools are available for this answer. Answer from what you already have.",
+          isError: true,
+        })),
+      };
+      continuationMessages.push(budgetAssistant, budgetResults);
+      messages.push(budgetAssistant, budgetResults);
       continue;
     }
 
@@ -383,12 +448,28 @@ async function* runLoopFrom(
     }
 
     if (pending.length > 0) {
-      return { text, calls, pending };
+      return {
+        text,
+        calls,
+        pending,
+        continuation: {
+          messages: continuationMessages,
+          pendingTurn: {
+            assistantText,
+            asked,
+            completedResults: results,
+          },
+        },
+      };
     }
 
-    messages.push(
-      { role: "assistant", content: assistantText, toolCalls: asked },
-      { role: "tool_results", results },
-    );
+    const assistantTurn: LlmMessage = {
+      role: "assistant",
+      content: assistantText,
+      toolCalls: asked,
+    };
+    const resultsTurn: LlmMessage = { role: "tool_results", results };
+    continuationMessages.push(assistantTurn, resultsTurn);
+    messages.push(assistantTurn, resultsTurn);
   }
 }

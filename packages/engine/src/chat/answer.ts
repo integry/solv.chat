@@ -18,6 +18,7 @@ import {
   resumeToolLoop,
   runToolLoop,
   type StoredToolCall,
+  type ToolLoopContinuation,
   type ToolRunner,
 } from "./toolLoop.js";
 
@@ -26,6 +27,8 @@ import {
 // ours: the spec says "above a score floor" and stops.
 export const SCORE_FLOOR = 0.3;
 export const TOP_K = 6;
+/** Lease duration for an active resume claim before a stalled worker's lock expires. */
+export const RESUME_CLAIM_TTL_MS = 60_000;
 
 export interface AnswerDeps {
   tenant: Tenant;
@@ -279,6 +282,7 @@ export async function* answerMessage(
   let text = "";
   let toolCalls: StoredToolCall[] = [];
   let pending: ToolCall[] = [];
+  let continuation: ToolLoopContinuation | undefined;
   let tokensIn = 0;
   let tokensOut = 0;
   let modelCalls = 0;
@@ -319,6 +323,7 @@ export async function* answerMessage(
         text = step.value.text;
         toolCalls = step.value.calls;
         pending = step.value.pending;
+        continuation = step.value.continuation;
         break;
       }
       const event = step.value;
@@ -368,6 +373,7 @@ export async function* answerMessage(
         answered: true,
         createdAt: clock(),
         replyTo: questionId,
+        resumeContext: continuation ?? null,
       });
     }
     for (const call of pending) {
@@ -418,6 +424,29 @@ export async function* answerMessage(
 
 const RESUME_NOT_FOUND_MESSAGE = "This answer can no longer be continued.";
 
+function parseContinuation(raw: unknown): ToolLoopContinuation | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (!Array.isArray(obj.messages)) return undefined;
+  if (typeof obj.pendingTurn !== "object" || obj.pendingTurn === null) return undefined;
+  const pt = obj.pendingTurn as Record<string, unknown>;
+  if (
+    typeof pt.assistantText !== "string" ||
+    !Array.isArray(pt.asked) ||
+    !Array.isArray(pt.completedResults)
+  ) {
+    return undefined;
+  }
+  return {
+    messages: obj.messages as LlmMessage[],
+    pendingTurn: {
+      assistantText: pt.assistantText,
+      asked: pt.asked as ToolCall[],
+      completedResults: pt.completedResults as LlmToolResult[],
+    },
+  };
+}
+
 /**
  * Continues a paused assistant reply once the widget posts back the results of
  * the page actions it ran.
@@ -446,6 +475,34 @@ export async function* answerWithActionResults(
     return;
   }
 
+  const priorCalls = Array.isArray(pendingReply.toolCalls)
+    ? (pendingReply.toolCalls as StoredToolCall[])
+    : [];
+  const pendingCalls: ToolCall[] = [];
+  const pendingIds = new Set<string>();
+  for (const call of priorCalls) {
+    if (call.pending) {
+      pendingCalls.push({ callId: call.callId, name: call.name, input: call.input });
+      pendingIds.add(call.callId);
+    }
+  }
+
+  // Validate the submitted batch against the current pending batch before
+  // claiming, embedding, or calling the model: reject stale, unrelated,
+  // duplicate, or incomplete submissions without consuming pending calls.
+  const resultsByCallId = new Map<string, ActionResult>();
+  for (const r of input.actionResults) {
+    if (resultsByCallId.has(r.callId) || !pendingIds.has(r.callId)) {
+      yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+      return;
+    }
+    resultsByCallId.set(r.callId, r);
+  }
+  if (pendingIds.size === 0 || resultsByCallId.size !== pendingIds.size) {
+    yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+    return;
+  }
+
   const allMessages = await deps.tenant.messages.list(conversation.id);
   const replyIndex = allMessages.findIndex((m) => m.id === pendingReply.id);
   let questionIndex = -1;
@@ -467,157 +524,189 @@ export async function* answerWithActionResults(
     return;
   }
 
-  const history: LlmMessage[] = allMessages
-    .slice(0, questionIndex)
-    .map((m) => ({ role: m.role, content: m.content }));
-
-  const embedded = await deps.embedder.embed([questionMsg.content], (tokens) =>
-    recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
-  );
-  const [vector] = embedded.vectors;
-  if (!vector) {
-    yield { type: "error", message: "The assistant could not complete this response." };
+  // Atomically claim this pending revision so concurrent resumes cannot
+  // independently generate continuations or overwrite each other's writes.
+  const claimToken = crypto.randomUUID();
+  const claimed = await deps.tenant.messages.claimPendingReply({
+    conversationId: conversation.id,
+    id: pendingReply.id,
+    claimToken,
+    revision: pendingReply.resumeRevision,
+    now: clock(),
+    ttlMs: RESUME_CLAIM_TTL_MS,
+  });
+  if (!claimed) {
+    yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
     return;
   }
 
-  const hits = await deps.retriever.query({
-    vector,
-    orgId: input.orgId,
-    assistantId: input.assistantId,
-    topK: TOP_K,
-  });
-  const aboveFloor = hits.filter((hit) => hit.score >= SCORE_FLOOR);
-  const chunks = await resolveChunks(deps.tenant, input.assistantId, aboveFloor);
-
-  const request = buildPrompt({
-    behaviour: input.behaviour,
-    chunks,
-    history,
-    question: questionMsg.content,
-  });
-
-  const priorCalls = Array.isArray(pendingReply.toolCalls)
-    ? (pendingReply.toolCalls as StoredToolCall[])
-    : [];
-  const resultsByCallId = new Map<string, ActionResult>();
-  for (const r of input.actionResults) {
-    if (!resultsByCallId.has(r.callId)) {
-      resultsByCallId.set(r.callId, r);
-    }
-  }
-
-  const pendingCalls: ToolCall[] = [];
-  const llmResults: LlmToolResult[] = [];
-  const resolvedPriorCalls: StoredToolCall[] = priorCalls.map((call) => {
-    if (!call.pending) return call;
-    pendingCalls.push({ callId: call.callId, name: call.name, input: call.input });
-    const result = resultsByCallId.get(call.callId);
-    const content = result
-      ? result.ok
-        ? (result.result ?? "")
-        : (result.error ?? "The page could not complete that action.")
-      : "The page did not return a result for this action.";
-    const ok = result?.ok ?? false;
-    llmResults.push({ callId: call.callId, content, isError: !ok });
-    const { pending: _dropPending, ...rest } = call;
-    return {
-      ...rest,
-      ok,
-      resultBytes: encoder.encode(content).byteLength,
-      resultPreview: content.slice(0, 200),
-    };
-  });
-
-  const reserveCalls = (count: number) =>
-    deps.tenant.conversations.reserveToolCalls(
-      conversation.id,
-      count,
-      MAX_TOOL_CALLS_PER_CONVERSATION,
-    );
-
-  let text = pendingReply.content;
-  let newCalls: StoredToolCall[] = [];
-  let nextPending: ToolCall[] = [];
-  let tokensIn = 0;
-  let tokensOut = 0;
-
+  let completed = false;
   try {
-    const loop = resumeToolLoop(
-      {
-        provider: deps.provider,
-        model: deps.model,
-        runners: deps.runners ?? [],
-        priorCalls: 0,
-        reserveCalls,
-        onModelUsage: async (callTokensIn, callTokensOut, cost) => {
-          tokensIn += callTokensIn;
-          tokensOut += callTokensOut;
-          // The pause already counted this answer as 1 message; resuming
-          // continues the same message, so `messages` stays 0.
-          await recordMessageUsage(deps, input, clock(), callTokensIn, callTokensOut, cost, 0);
-        },
-        now: deps.now,
-      },
-      request,
-      pendingReply.content,
-      pendingCalls,
-      llmResults,
+    const history: LlmMessage[] = allMessages
+      .slice(0, questionIndex)
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    const embedded = await deps.embedder.embed([questionMsg.content], (tokens) =>
+      recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
     );
-    for (;;) {
-      const step = await loop.next();
-      if (step.done) {
-        text = step.value.text;
-        newCalls = step.value.calls;
-        nextPending = step.value.pending;
-        break;
-      }
-      const event = step.value;
-      if (event.kind === "text") {
-        yield { type: "token", text: event.text };
-      } else {
-        yield {
-          type: "tool",
-          name: event.call.name,
-          state: event.state,
-          callId: event.call.callId,
-          kind: event.source,
-          ...(event.ok === undefined ? {} : { ok: event.ok }),
-        };
-      }
-    }
-  } catch (err) {
-    if (err instanceof ProviderError) {
+    const [vector] = embedded.vectors;
+    if (!vector) {
       yield { type: "error", message: "The assistant could not complete this response." };
       return;
     }
-    throw err;
-  }
 
-  const mergedCalls = [...resolvedPriorCalls, ...newCalls];
-  await deps.tenant.messages.completeReply(pendingReply.id, text, mergedCalls, tokensIn, tokensOut);
+    const hits = await deps.retriever.query({
+      vector,
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      topK: TOP_K,
+    });
+    const aboveFloor = hits.filter((hit) => hit.score >= SCORE_FLOOR);
+    const chunks = await resolveChunks(deps.tenant, input.assistantId, aboveFloor);
 
-  if (nextPending.length > 0) {
-    for (const call of nextPending) {
-      yield {
-        type: "action",
-        callId: call.callId,
-        name: call.name,
-        input: call.input,
-        confirm: confirmFor(call.name, input.pageActions),
+    const request = buildPrompt({
+      behaviour: input.behaviour,
+      chunks,
+      history,
+      question: questionMsg.content,
+    });
+
+    const llmResults: LlmToolResult[] = [];
+    const resolvedPriorCalls: StoredToolCall[] = priorCalls.map((call) => {
+      if (!call.pending) return call;
+      const result = resultsByCallId.get(call.callId);
+      const content = result
+        ? result.ok
+          ? (result.result ?? "")
+          : (result.error ?? "The page could not complete that action.")
+        : "The page did not return a result for this action.";
+      const ok = result?.ok ?? false;
+      llmResults.push({ callId: call.callId, content, isError: !ok });
+      const { pending: _dropPending, ...rest } = call;
+      return {
+        ...rest,
+        ok,
+        resultBytes: encoder.encode(content).byteLength,
+        resultPreview: content.slice(0, 200),
       };
+    });
+
+    const reserveCalls = (count: number) =>
+      deps.tenant.conversations.reserveToolCalls(
+        conversation.id,
+        count,
+        MAX_TOOL_CALLS_PER_CONVERSATION,
+      );
+
+    let text = pendingReply.content;
+    let newCalls: StoredToolCall[] = [];
+    let nextPending: ToolCall[] = [];
+    let nextContinuation: ToolLoopContinuation | undefined;
+    let tokensIn = 0;
+    let tokensOut = 0;
+
+    try {
+      const loop = resumeToolLoop(
+        {
+          provider: deps.provider,
+          model: deps.model,
+          runners: deps.runners ?? [],
+          priorCalls: 0,
+          reserveCalls,
+          onModelUsage: async (callTokensIn, callTokensOut, cost) => {
+            tokensIn += callTokensIn;
+            tokensOut += callTokensOut;
+            // The pause already counted this answer as 1 message; resuming
+            // continues the same message, so `messages` stays 0.
+            await recordMessageUsage(deps, input, clock(), callTokensIn, callTokensOut, cost, 0);
+          },
+          now: deps.now,
+        },
+        request,
+        pendingReply.content,
+        pendingCalls,
+        llmResults,
+        parseContinuation(pendingReply.resumeContext),
+      );
+      for (;;) {
+        const step = await loop.next();
+        if (step.done) {
+          text = step.value.text;
+          newCalls = step.value.calls;
+          nextPending = step.value.pending;
+          nextContinuation = step.value.continuation;
+          break;
+        }
+        const event = step.value;
+        if (event.kind === "text") {
+          yield { type: "token", text: event.text };
+        } else {
+          yield {
+            type: "tool",
+            name: event.call.name,
+            state: event.state,
+            callId: event.call.callId,
+            kind: event.source,
+            ...(event.ok === undefined ? {} : { ok: event.ok }),
+          };
+        }
+      }
+    } catch (err) {
+      if (err instanceof ProviderError) {
+        yield { type: "error", message: "The assistant could not complete this response." };
+        return;
+      }
+      throw err;
     }
-    yield {
-      type: "done",
-      messageId: pendingReply.id,
-      conversationId: conversation.id,
-      awaitingActions: nextPending.map((call) => call.callId),
-    };
-    return;
-  }
 
-  for (const chunk of citableByUrl(chunks)) {
-    yield { type: "citation", url: chunk.url, title: chunk.title };
-  }
+    const mergedCalls = [...resolvedPriorCalls, ...newCalls];
+    const saved = await deps.tenant.messages.completeReply({
+      id: pendingReply.id,
+      claimToken,
+      revision: pendingReply.resumeRevision,
+      content: text,
+      toolCalls: mergedCalls,
+      resumeContext: nextPending.length > 0 ? (nextContinuation ?? null) : null,
+      tokensIn,
+      tokensOut,
+    });
+    if (!saved) {
+      yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
+      return;
+    }
+    completed = true;
 
-  yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
+    if (nextPending.length > 0) {
+      for (const call of nextPending) {
+        yield {
+          type: "action",
+          callId: call.callId,
+          name: call.name,
+          input: call.input,
+          confirm: confirmFor(call.name, input.pageActions),
+        };
+      }
+      yield {
+        type: "done",
+        messageId: pendingReply.id,
+        conversationId: conversation.id,
+        awaitingActions: nextPending.map((call) => call.callId),
+      };
+      return;
+    }
+
+    for (const chunk of citableByUrl(chunks)) {
+      yield { type: "citation", url: chunk.url, title: chunk.title };
+    }
+
+    yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
+  } finally {
+    if (!completed) {
+      try {
+        await deps.tenant.messages.releaseReplyClaim(pendingReply.id, claimToken);
+      } catch {
+        // Best-effort cleanup; expired claims also recover after RESUME_CLAIM_TTL_MS.
+      }
+    }
+  }
 }

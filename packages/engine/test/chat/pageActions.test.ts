@@ -8,10 +8,12 @@ import {
 } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../../src/app.js";
+import { RESUME_CLAIM_TTL_MS } from "../../src/chat/answer.js";
 import { SAFETY_FRAME } from "../../src/chat/prompt.js";
 import { MAX_TOOL_CALLS_PER_CONVERSATION } from "../../src/chat/toolLoop.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { ANTHROPIC_MODELS } from "../../src/models.js";
+import { ProviderError } from "../../src/providers/error.js";
 import type { LlmProvider, LlmRequest, ToolCall } from "../../src/providers/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
@@ -573,5 +575,298 @@ describe("chat/pageActions", () => {
 
     expect(events.some((e) => e.type === "done")).toBe(true);
     expect(seen[0]?.tools).toBeUndefined();
+  });
+
+  it("F1: claims a pending reply atomically, rejects concurrent resumes, and recovers on failure or expired lease", async () => {
+    await publishConfig(true);
+    let releaseSecondStream!: () => void;
+    const secondStreamGate = new Promise<void>((resolve) => {
+      releaseSecondStream = resolve;
+    });
+    let enterSecondStream!: () => void;
+    const enteredSecondStream = new Promise<void>((resolve) => {
+      enterSecondStream = resolve;
+    });
+
+    let callCount = 0;
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        callCount += 1;
+        if (callCount === 1) {
+          yield { kind: "text", text: "Opening. " };
+          yield { kind: "tool_call", call: NAVIGATE_CALL };
+          yield { kind: "usage", tokensIn: 50, tokensOut: 10, stopReason: "tools" };
+          return;
+        }
+        if (callCount === 2) {
+          enterSecondStream();
+          await secondStreamGate;
+          yield { kind: "text", text: "Completed once." };
+          yield { kind: "usage", tokensIn: 60, tokensOut: 15, stopReason: "end" };
+          return;
+        }
+        throw new Error("unexpected extra provider call");
+      },
+    };
+
+    const app = createApp(fakeSeams(), {
+      chat: { embedder, retriever, provider, model: ANTHROPIC_MODELS.fast },
+    });
+
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION],
+    });
+    const firstDone = first.find((e) => e.type === "done");
+    if (firstDone?.type !== "done") throw new Error("expected done");
+
+    // Start Resume A and wait until it is inside provider.stream().
+    const resumeAPromise = postChat(app, {
+      conversationId: firstDone.conversationId,
+      resumeMessageId: firstDone.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":true}' }],
+    });
+    await enteredSecondStream;
+
+    // Concurrent Resume B must be rejected without invoking the provider.
+    const resumeB = await postChat(app, {
+      conversationId: firstDone.conversationId,
+      resumeMessageId: firstDone.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: '{"ok":false}' }],
+    });
+    expect(resumeB).toEqual([
+      { type: "error", message: "This answer can no longer be continued." },
+    ]);
+    expect(callCount).toBe(2);
+
+    releaseSecondStream();
+    const resumeA = await resumeAPromise;
+    expect(resumeA.find((e) => e.type === "done")).toBeDefined();
+
+    const stored = await tenant.messages.get(firstDone.messageId);
+    expect(stored?.content).toBe("Opening. Completed once.");
+
+    // Failure recovery + TTL recovery on a second paused message.
+    let failNext = true;
+    let recoveryCalls = 0;
+    const recoveryProvider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        recoveryCalls += 1;
+        if (recoveryCalls === 1) {
+          yield { kind: "tool_call", call: NAVIGATE_CALL };
+          yield { kind: "usage", tokensIn: 10, tokensOut: 5, stopReason: "tools" };
+          return;
+        }
+        if (failNext) {
+          failNext = false;
+          throw new ProviderError("temporary failure", true);
+        }
+        yield { kind: "text", text: "Recovered." };
+        yield { kind: "usage", tokensIn: 20, tokensOut: 5, stopReason: "end" };
+      },
+    };
+    const appRecover = createApp(fakeSeams(), {
+      chat: { embedder, retriever, provider: recoveryProvider, model: ANTHROPIC_MODELS.fast },
+    });
+    const paused2 = await postChat(appRecover, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION],
+    });
+    const paused2Done = paused2.find((e) => e.type === "done");
+    if (paused2Done?.type !== "done") throw new Error("expected done");
+
+    // Failed resume releases its claim so a retry succeeds.
+    const failedResume = await postChat(appRecover, {
+      conversationId: paused2Done.conversationId,
+      resumeMessageId: paused2Done.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: "{}" }],
+    });
+    expect(failedResume.some((e) => e.type === "error")).toBe(true);
+
+    // Simulate a hard-crashed worker with an expired lease; next resume reclaims and succeeds.
+    await env.DB.prepare(
+      "UPDATE messages SET resume_claim = 'crashed', resume_claimed_at = ?1 WHERE id = ?2",
+    )
+      .bind(Date.now() - RESUME_CLAIM_TTL_MS - 1000, paused2Done.messageId)
+      .run();
+
+    const recovered = await postChat(appRecover, {
+      conversationId: paused2Done.conversationId,
+      resumeMessageId: paused2Done.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: "{}" }],
+    });
+    expect(recovered.find((e) => e.type === "done")).toBeDefined();
+    expect((await tenant.messages.get(paused2Done.messageId))?.content).toBe("Recovered.");
+  });
+
+  it("F2: preserves bounded tool-exchange context across multiple pauses while keeping audit summary trimmed", async () => {
+    await publishConfig(true);
+    const seen: LlmRequest[] = [];
+    const invoiceCall: ToolCall = {
+      callId: "call_inv_1",
+      name: "open_invoice",
+      input: { id: "inv_42" },
+    };
+    const highlightCall: ToolCall = {
+      callId: "call_hl_2",
+      name: "highlight",
+      input: { selector: "#pay" },
+    };
+
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder,
+        retriever,
+        provider: scriptedProvider(
+          [
+            { text: "Checking invoice. ", calls: [invoiceCall] },
+            { text: "Highlighting pay button. ", calls: [highlightCall] },
+            { text: "All set.", calls: [] },
+          ],
+          seen,
+        ),
+        model: ANTHROPIC_MODELS.fast,
+      },
+    });
+
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [CUSTOM_ACTION, HIGHLIGHT_ACTION],
+    });
+    const done1 = first.find((e) => e.type === "done");
+    if (done1?.type !== "done") throw new Error("expected done");
+
+    const longInvoiceResult = `${"A".repeat(220)}TAIL_TOKEN_INVOICE_991`;
+    const second = await postChat(app, {
+      conversationId: done1.conversationId,
+      resumeMessageId: done1.messageId,
+      pageActions: [CUSTOM_ACTION, HIGHLIGHT_ACTION],
+      actionResults: [{ callId: invoiceCall.callId, ok: true, result: longInvoiceResult }],
+    });
+    const done2 = second.find((e) => e.type === "done");
+    if (done2?.type !== "done") throw new Error("expected done");
+    expect(done2.awaitingActions).toEqual([highlightCall.callId]);
+
+    const third = await postChat(app, {
+      conversationId: done1.conversationId,
+      resumeMessageId: done1.messageId,
+      pageActions: [CUSTOM_ACTION, HIGHLIGHT_ACTION],
+      actionResults: [{ callId: highlightCall.callId, ok: true, result: '{"highlighted":true}' }],
+    });
+    const done3 = third.find((e) => e.type === "done");
+    if (done3?.type !== "done") throw new Error("expected done");
+    expect(done3.awaitingActions).toBeUndefined();
+
+    // Second resume's model request includes BOTH the full >200-char first result and the second result.
+    const secondResumeReq = seen[2];
+    expect(secondResumeReq).toBeDefined();
+    const toolResultMessages = (secondResumeReq?.messages ?? []).filter(
+      (m) => m.role === "tool_results",
+    );
+    expect(toolResultMessages).toHaveLength(2);
+    expect(toolResultMessages[0]).toEqual({
+      role: "tool_results",
+      results: [{ callId: invoiceCall.callId, content: longInvoiceResult, isError: false }],
+    });
+    expect(toolResultMessages[1]).toEqual({
+      role: "tool_results",
+      results: [{ callId: highlightCall.callId, content: '{"highlighted":true}', isError: false }],
+    });
+
+    // Audit summary keeps only the 200-char preview, and transient resume_context is cleared.
+    const stored = await tenant.messages.get(done1.messageId);
+    expect(stored?.toolCalls).toMatchObject([
+      {
+        callId: invoiceCall.callId,
+        resultPreview: longInvoiceResult.slice(0, 200),
+      },
+      { callId: highlightCall.callId, ok: true },
+    ]);
+    const rawRow = await env.DB.prepare("SELECT resume_context FROM messages WHERE id = ?1")
+      .bind(done1.messageId)
+      .first<{ resume_context: string | null }>();
+    expect(rawRow?.resume_context).toBeNull();
+  });
+
+  it("F3: rejects stale, unrelated, duplicate, or incomplete action batches without consuming pending calls", async () => {
+    await publishConfig(true);
+    const callA: ToolCall = { callId: "call_A", name: "navigate", input: { path: "/a" } };
+    const callB: ToolCall = { callId: "call_B", name: "highlight", input: { selector: "#b" } };
+    const seen: LlmRequest[] = [];
+
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder,
+        retriever,
+        provider: scriptedProvider(
+          [
+            { text: "Step A. ", calls: [callA] },
+            { text: "Step B. ", calls: [callB] },
+            { text: "Finished.", calls: [] },
+          ],
+          seen,
+        ),
+        model: ANTHROPIC_MODELS.fast,
+      },
+    });
+
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION, HIGHLIGHT_ACTION],
+    });
+    const done1 = first.find((e) => e.type === "done");
+    if (done1?.type !== "done") throw new Error("expected done");
+
+    // Advance from call_A to call_B.
+    const second = await postChat(app, {
+      conversationId: done1.conversationId,
+      resumeMessageId: done1.messageId,
+      pageActions: [NAVIGATE_ACTION, HIGHLIGHT_ACTION],
+      actionResults: [{ callId: "call_A", ok: true, result: '{"ok":true}' }],
+    });
+    const done2 = second.find((e) => e.type === "done");
+    if (done2?.type !== "done") throw new Error("expected done");
+    expect(done2.awaitingActions).toEqual(["call_B"]);
+    expect(seen).toHaveLength(2);
+
+    // 1. Stale delivery of call_A, 2. unrelated call_X, 3. duplicate call_B, 4. empty batch.
+    const badBatches = [
+      [{ callId: "call_A", ok: true, result: "{}" }],
+      [{ callId: "call_X", ok: true, result: "{}" }],
+      [
+        { callId: "call_B", ok: true, result: "{}" },
+        { callId: "call_B", ok: true, result: "{}" },
+      ],
+      [],
+    ];
+    for (const batch of badBatches) {
+      const res = await postChat(app, {
+        conversationId: done1.conversationId,
+        resumeMessageId: done1.messageId,
+        actionResults: batch,
+      });
+      expect(res).toEqual([{ type: "error", message: "This answer can no longer be continued." }]);
+    }
+
+    // Provider was never called and call_B is still pending in D1.
+    expect(seen).toHaveLength(2);
+    const mid = await tenant.messages.get(done1.messageId);
+    expect(mid?.toolCalls).toMatchObject([
+      { callId: "call_A", ok: true },
+      { callId: "call_B", ok: false, pending: true },
+    ]);
+
+    // Valid call_B resume still succeeds.
+    const final = await postChat(app, {
+      conversationId: done1.conversationId,
+      resumeMessageId: done1.messageId,
+      actionResults: [{ callId: "call_B", ok: true, result: '{"ok":true}' }],
+    });
+    expect(final.find((e) => e.type === "done")).toBeDefined();
+    expect((await tenant.messages.get(done1.messageId))?.content).toBe("Step A. Step B. Finished.");
   });
 });
