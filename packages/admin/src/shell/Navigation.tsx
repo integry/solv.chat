@@ -6,8 +6,8 @@ export interface NavigationProps {
 }
 
 /**
- * Primary admin navigation. Tools and Tests belong to phase 2 and are
- * intentionally omitted here.
+ * Primary admin navigation, built from NAV_ITEMS. Tests arrives with the
+ * answer-tests task; everything else in the specification's list is here.
  */
 export function Navigation({ current, onNavigate }: NavigationProps) {
   return (

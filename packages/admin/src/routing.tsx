@@ -5,6 +5,7 @@ export type ScreenId =
   | "conversations"
   | "gaps"
   | "sources"
+  | "tools"
   | "behaviour"
   | "widget"
   | "install";
@@ -20,6 +21,9 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "conversations", label: "Conversations", path: "/admin/conversations" },
   { id: "gaps", label: "Gaps", path: "/admin/gaps" },
   { id: "sources", label: "Sources", path: "/admin/sources" },
+  // Position taken from docs/architecture.md, "Admin": Sources · Tools ·
+  // Behaviour · Widget · Tests.
+  { id: "tools", label: "Tools", path: "/admin/tools" },
   { id: "behaviour", label: "Behaviour", path: "/admin/behaviour" },
   { id: "widget", label: "Widget", path: "/admin/widget" },
   { id: "install", label: "Install", path: "/admin/install" },

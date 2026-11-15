@@ -10,6 +10,7 @@ import { Install } from "./screens/Install.js";
 import { Login } from "./screens/Login.js";
 import { Overview } from "./screens/Overview.js";
 import { Sources } from "./screens/Sources.js";
+import { Tools } from "./screens/Tools.js";
 import { Widget } from "./screens/Widget.js";
 import { AssistantSwitcher } from "./shell/AssistantSwitcher.js";
 import { Navigation } from "./shell/Navigation.js";
@@ -27,6 +28,8 @@ function renderScreen(screen: ScreenId, assistantId: string) {
       return <Gaps key={assistantId} assistantId={assistantId} />;
     case "sources":
       return <Sources key={assistantId} assistantId={assistantId} />;
+    case "tools":
+      return <Tools key={assistantId} assistantId={assistantId} />;
     case "behaviour":
       return <Behaviour key={assistantId} assistantId={assistantId} />;
     case "widget":
