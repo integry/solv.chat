@@ -1614,5 +1614,198 @@ describe("<solv-chat>", () => {
         }),
       );
     });
+
+    it("refuses confirmation-required actions in round trips when no confirmation handler exists", async () => {
+      const chatBodies: Array<Record<string, unknown>> = [];
+      const regConfirmSpy = vi.fn(async () => ({ ok: true }));
+      const eventConfirmSpy = vi.fn(async () => ({ ok: true }));
+
+      getSolv().actions.register({
+        name: "open_invoice",
+        description: "Open invoice",
+        input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        confirm: true,
+        run: regConfirmSpy,
+      });
+      getSolv().actions.register({
+        name: "highlight_section",
+        description: "Highlight",
+        input: {
+          type: "object",
+          properties: { section: { type: "string" } },
+          required: ["section"],
+        },
+        confirm: false,
+        run: eventConfirmSpy,
+      });
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_confirm_rt")) {
+          return Response.json({ title: "Helper" });
+        }
+        if (url.endsWith("/v1/chat")) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          chatBodies.push(body);
+          if (chatBodies.length === 1) {
+            return new Response(
+              sseStream([
+                'event: action\ndata: {"callId":"c_reg","name":"open_invoice","input":{"id":"inv_1"},"confirm":false}\n\n',
+                'event: action\ndata: {"callId":"c_evt","name":"highlight_section","input":{"section":"billing"},"confirm":true}\n\n',
+                'event: done\ndata: {"messageId":"msg_p","conversationId":"conv_c","awaitingActions":["c_reg","c_evt"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"Skipped."}\n\n',
+              'event: done\ndata: {"messageId":"msg_f","conversationId":"conv_c"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = mountWidget("pk_confirm_rt");
+      await flushAsync();
+      const root = shadow(el);
+      mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+      mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Do confirmed actions";
+      mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+      await flushAsync();
+
+      expect(regConfirmSpy).not.toHaveBeenCalled();
+      expect(eventConfirmSpy).not.toHaveBeenCalled();
+      expect(chatBodies).toHaveLength(2);
+      expect(chatBodies[1]?.actionResults).toEqual([
+        { callId: "c_reg", ok: false, error: "That action requires confirmation." },
+        { callId: "c_evt", ok: false, error: "That action requires confirmation." },
+      ]);
+      const notes = [...root.querySelectorAll(".solv-action")].map((n) => n.textContent);
+      expect(notes).toEqual(["Could not run open_invoice", "Could not run highlight_section"]);
+    });
+
+    it("marks the turn interrupted and clears awaiting state when continuation fetch rejects", async () => {
+      let chatCalls = 0;
+
+      getSolv().actions.register({
+        name: "open_invoice",
+        description: "Open invoice",
+        input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        confirm: false,
+        run: async ({ id }: Record<string, unknown>) => ({ opened: id }),
+      });
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_netfail")) {
+          return Response.json({ title: "Helper" });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatCalls++;
+          if (chatCalls === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Working on it"}\n\n',
+                'event: action\ndata: {"callId":"call_1","name":"open_invoice","input":{"id":"inv_1"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_pause","conversationId":"conv_nf","awaitingActions":["call_1"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return Promise.reject(new TypeError("network failure"));
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = mountWidget("pk_netfail");
+      await flushAsync();
+      const root = shadow(el);
+      mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+      mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Open invoice";
+      mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+      await flushAsync();
+
+      const bubbles = root.querySelectorAll(".solv-bubble--assistant");
+      const turnBubble = bubbles[1];
+      expect(turnBubble?.classList.contains("solv-bubble--error")).toBe(true);
+      expect(turnBubble?.querySelector(".solv-bubble-error")?.textContent).toBe(
+        "Response interrupted. Please try again.",
+      );
+      expect(turnBubble?.querySelector(".solv-feedback")).toBeNull();
+      expect(mustQuery<HTMLButtonElement>(root, ".solv-send").disabled).toBe(false);
+
+      const saved = JSON.parse(sessionStorage.getItem("solv-chat-open:pk_netfail") ?? "{}") as {
+        turns: Array<{ awaiting?: string[]; error?: string }>;
+      };
+      expect(saved.turns[1]?.awaiting).toBeUndefined();
+      expect(saved.turns[1]?.error).toBe("Response interrupted. Please try again.");
+    });
+
+    it("marks the turn interrupted without feedback controls when a paused answer hits the round limit", async () => {
+      let chatCalls = 0;
+      const runSpy = vi.fn(async ({ id }: Record<string, unknown>) => ({ opened: id }));
+
+      getSolv().actions.register({
+        name: "open_invoice",
+        description: "Open invoice",
+        input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        confirm: false,
+        run: runSpy,
+      });
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_limit")) {
+          return Response.json({ title: "Helper" });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatCalls++;
+          const callId = `call_${chatCalls}`;
+          return new Response(
+            sseStream([
+              `event: token\ndata: {"text":"Step ${chatCalls} "}\n\n`,
+              `event: action\ndata: {"callId":"${callId}","name":"open_invoice","input":{"id":"inv_${chatCalls}"},"confirm":false}\n\n`,
+              `event: done\ndata: {"messageId":"msg_${chatCalls}","conversationId":"conv_lim","awaitingActions":["${callId}"]}\n\n`,
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el1 = mountWidget("pk_limit");
+      await flushAsync();
+      const root1 = shadow(el1);
+      mustQuery<HTMLButtonElement>(root1, ".solv-launcher").click();
+      mustQuery<HTMLTextAreaElement>(root1, "#solv-input").value = "Loop forever";
+      mustQuery<HTMLFormElement>(root1, ".solv-form").requestSubmit();
+      await flushAsync();
+
+      // Initial request (depth 0) + 5 continuations (depths 1..5) = 6 chat requests,
+      // and 5 action executions before hitting the depth-5 limit.
+      expect(chatCalls).toBe(6);
+      expect(runSpy).toHaveBeenCalledTimes(5);
+
+      const turnBubble = root1.querySelectorAll(".solv-bubble--assistant")[1];
+      expect(turnBubble?.classList.contains("solv-bubble--error")).toBe(true);
+      expect(turnBubble?.querySelector(".solv-bubble-error")?.textContent).toBe(
+        "Response interrupted. Please try again.",
+      );
+      expect(turnBubble?.querySelector(".solv-feedback")).toBeNull();
+
+      // Reload must preserve the interrupted state and not attach feedback controls.
+      el1.remove();
+      const el2 = mountWidget("pk_limit");
+      await flushAsync();
+      const root2 = shadow(el2);
+      const restoredBubble = root2.querySelectorAll(".solv-bubble--assistant")[1];
+      expect(restoredBubble?.querySelector(".solv-bubble-error")?.textContent).toBe(
+        "Response interrupted. Please try again.",
+      );
+      expect(restoredBubble?.querySelector(".solv-feedback")).toBeNull();
+    });
   });
 });

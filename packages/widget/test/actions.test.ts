@@ -82,6 +82,68 @@ describe("widget action registry", () => {
         }),
       ).toThrow(/too large/);
     });
+
+    it("rejects unsupported schema validation keywords recursively while allowing annotations", () => {
+      expect(() =>
+        register({
+          ...validAction,
+          input: {
+            type: "object",
+            properties: {
+              quantity: { type: "integer", minimum: 1, maximum: 10 },
+            },
+          },
+        }),
+      ).toThrow(/unsupported keyword minimum/);
+
+      expect(() =>
+        register({
+          ...validAction,
+          input: {
+            type: "object",
+            properties: {
+              nested: {
+                type: "object",
+                properties: {
+                  code: { type: "string", pattern: "^[A-Z]+$" },
+                },
+              },
+            },
+          },
+        }),
+      ).toThrow(/unsupported keyword pattern/);
+
+      expect(() =>
+        register({
+          ...validAction,
+          input: {
+            type: "object",
+            properties: {
+              tags: {
+                type: "array",
+                items: { type: "string", minLength: 2 },
+              },
+            },
+          },
+        }),
+      ).toThrow(/unsupported keyword minLength/);
+
+      expect(() =>
+        register({
+          ...validAction,
+          input: {
+            $schema: "https://json-schema.org/draft/2020-12/schema",
+            title: "InvoiceInput",
+            description: "Select an invoice",
+            type: "object",
+            properties: {
+              id: { type: "string", title: "ID", examples: ["inv_1"] },
+            },
+            required: ["id"],
+          },
+        }),
+      ).not.toThrow();
+    });
   });
 
   it("replaces an existing action on re-registration and supports unregister", () => {
@@ -192,7 +254,7 @@ describe("action schema validator", () => {
     );
   });
 
-  it("fails closed on non-object root schemas, missing types, and missing array item schemas", () => {
+  it("fails closed on non-object root schemas, missing types, missing array item schemas, and unsupported keywords", () => {
     expect(validate({ type: "string" }, "hello")).toBe("input schema must describe an object");
     expect(validate({ type: "object", properties: { x: {} } }, { x: 1 })).toBe(
       "x cannot be checked",
@@ -200,6 +262,24 @@ describe("action schema validator", () => {
     expect(validate({ type: "object", properties: { arr: { type: "array" } } }, { arr: [1] })).toBe(
       "arr has no item schema",
     );
+    expect(
+      validate(
+        {
+          type: "object",
+          properties: { quantity: { type: "integer", minimum: 1, maximum: 10 } },
+        },
+        { quantity: -1 },
+      ),
+    ).toBe("quantity uses unsupported keyword minimum");
+    expect(
+      validate(
+        {
+          type: "object",
+          properties: { tags: { type: "array", items: { type: "string" }, minItems: 1 } },
+        },
+        { tags: [] },
+      ),
+    ).toBe("tags uses unsupported keyword minItems");
   });
 });
 
@@ -233,6 +313,69 @@ describe("runAction", () => {
     expect(invalid.ok).toBe(false);
     expect(invalid.error).toContain("id must be a string");
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("refuses confirmation-required actions when no confirmation handler is available", async () => {
+    const run = vi.fn(async () => ({ ok: true }));
+    register({ ...validAction, confirm: true, run });
+    register({ ...validAction, name: "delete_invoice", confirm: false, run });
+
+    const regConfirm = await runAction({
+      callId: "call_reg_confirm",
+      name: "open_invoice",
+      input: { id: "inv_1" },
+      confirm: false,
+    });
+    expect(regConfirm).toEqual({
+      callId: "call_reg_confirm",
+      ok: false,
+      error: "That action requires confirmation.",
+    });
+
+    const eventConfirm = await runAction({
+      callId: "call_event_confirm",
+      name: "delete_invoice",
+      input: { id: "inv_1" },
+      confirm: true,
+    });
+    expect(eventConfirm).toEqual({
+      callId: "call_event_confirm",
+      ok: false,
+      error: "That action requires confirmation.",
+    });
+    expect(run).not.toHaveBeenCalled();
+
+    const rejected = await runAction(
+      {
+        callId: "call_reject",
+        name: "open_invoice",
+        input: { id: "inv_1" },
+        confirm: false,
+      },
+      { confirm: async () => false },
+    );
+    expect(rejected).toEqual({
+      callId: "call_reject",
+      ok: false,
+      error: "The visitor did not confirm.",
+    });
+    expect(run).not.toHaveBeenCalled();
+
+    const accepted = await runAction(
+      {
+        callId: "call_accept",
+        name: "open_invoice",
+        input: { id: "inv_1" },
+        confirm: false,
+      },
+      { confirm: async () => true },
+    );
+    expect(accepted).toEqual({
+      callId: "call_accept",
+      ok: true,
+      result: '{"ok":true}',
+    });
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   it("caps oversized results at MAX_ACTION_RESULT_BYTES and marks truncation", async () => {

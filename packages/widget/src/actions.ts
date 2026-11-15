@@ -10,6 +10,13 @@ import {
 
 const NAME_RE = /^[a-z][a-z0-9_]*$/;
 
+const ANNOTATION_KEYS = new Set(["title", "description", "$schema", "$comment", "examples"]);
+const OBJECT_KEYS = new Set(["type", "properties", "required", ...ANNOTATION_KEYS]);
+const ARRAY_KEYS = new Set(["type", "items", ...ANNOTATION_KEYS]);
+const PRIMITIVE_KEYS = new Set(["type", "enum", ...ANNOTATION_KEYS]);
+const ENUM_ONLY_KEYS = new Set(["enum", ...ANNOTATION_KEYS]);
+const PRIMITIVE_TYPES = new Set(["string", "number", "integer", "boolean"]);
+
 /** One action gets this long to finish before the answer continues without it. */
 export const ACTION_TIMEOUT_MS = 5000;
 
@@ -65,6 +72,12 @@ export function register(action: unknown): void {
   if (!isRecord(action.input)) {
     throw new TypeError(`solv.actions.register: ${name} needs an input schema object`);
   }
+  const schemaError = validateSchemaNode(action.input, "", true);
+  if (schemaError !== null) {
+    throw new TypeError(
+      `solv.actions.register: ${name} input schema is not supported (${schemaError})`,
+    );
+  }
   // Capped here as well as in the engine's parser: a page that exceeds it
   // should find out at registration, not have its request rejected later.
   if (encoder.encode(JSON.stringify(action.input)).byteLength > MAX_ACTION_SCHEMA_BYTES) {
@@ -107,6 +120,76 @@ export function lookup(name: string): RegisteredAction | undefined {
   return registry.get(name);
 }
 
+function checkAllowedKeys(
+  schema: Record<string, unknown>,
+  allowed: Set<string>,
+  path: string,
+): string | null {
+  for (const key of Object.keys(schema)) {
+    if (!allowed.has(key)) {
+      return `${path || "input"} uses unsupported keyword ${key}`;
+    }
+  }
+  return null;
+}
+
+function validateSchemaNode(
+  schema: Record<string, unknown>,
+  path: string,
+  requireObject: boolean,
+): string | null {
+  if (requireObject && schema.type !== "object") {
+    return "input schema must describe an object";
+  }
+  const label = path || "input";
+
+  if (schema.type === "object") {
+    const keyError = checkAllowedKeys(schema, OBJECT_KEYS, label);
+    if (keyError !== null) return keyError;
+
+    if (schema.properties !== undefined) {
+      if (!isRecord(schema.properties)) return `${label}.properties must be an object`;
+      for (const [key, prop] of Object.entries(schema.properties)) {
+        const childPath = path ? `${path}.${key}` : key;
+        if (!isRecord(prop)) return `${childPath} must be an object`;
+        const err = validateSchemaNode(prop, childPath, false);
+        if (err !== null) return err;
+      }
+    }
+    if (schema.required !== undefined) {
+      if (
+        !Array.isArray(schema.required) ||
+        schema.required.some((item) => typeof item !== "string")
+      ) {
+        return `${label}.required must be a list of strings`;
+      }
+    }
+    return null;
+  }
+
+  if (schema.type === "array") {
+    const keyError = checkAllowedKeys(schema, ARRAY_KEYS, label);
+    if (keyError !== null) return keyError;
+    if (!isRecord(schema.items)) return `${label} has no item schema`;
+    return validateSchemaNode(schema.items, `${label}.items`, false);
+  }
+
+  if (typeof schema.type === "string" && PRIMITIVE_TYPES.has(schema.type)) {
+    const keyError = checkAllowedKeys(schema, PRIMITIVE_KEYS, label);
+    if (keyError !== null) return keyError;
+    if (schema.enum !== undefined && !Array.isArray(schema.enum)) {
+      return `${label}.enum must be a list`;
+    }
+    return null;
+  }
+
+  if (schema.type === undefined && Array.isArray(schema.enum)) {
+    return checkAllowedKeys(schema, ENUM_ONLY_KEYS, label);
+  }
+
+  return `${label} cannot be checked`;
+}
+
 /**
  * Validates `value` against the subset of JSON Schema a page action input
  * needs: object with typed properties, required, enum, and nested objects or
@@ -117,7 +200,8 @@ export function lookup(name: string): RegisteredAction | undefined {
  * checked, and a real schema library is larger than this entire widget.
  */
 export function validate(schema: Record<string, unknown>, value: unknown): string | null {
-  if (schema.type !== "object") return "input schema must describe an object";
+  const schemaError = validateSchemaNode(schema, "", true);
+  if (schemaError !== null) return schemaError;
   if (!isRecord(value)) {
     return "input must be an object";
   }
@@ -141,8 +225,11 @@ export function validate(schema: Record<string, unknown>, value: unknown): strin
 }
 
 function checkValue(schema: Record<string, unknown>, value: unknown, path: string): string | null {
-  if (Array.isArray(schema.enum)) {
-    return schema.enum.includes(value as never) ? null : `${path} is not an allowed value`;
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value as never)) {
+    return `${path} is not an allowed value`;
+  }
+  if (schema.type === undefined && Array.isArray(schema.enum)) {
+    return null;
   }
   switch (schema.type) {
     case "string":
@@ -211,7 +298,14 @@ export async function runAction(
   if (problem !== null) {
     return { callId: request.callId, ok: false, error: `That action was not valid: ${problem}.` };
   }
-  if ((action.confirm || request.confirm) && options.confirm) {
+  if (action.confirm || request.confirm) {
+    if (!options.confirm) {
+      return {
+        callId: request.callId,
+        ok: false,
+        error: "That action requires confirmation.",
+      };
+    }
     const accepted = await options.confirm(request, action);
     if (!accepted) {
       return { callId: request.callId, ok: false, error: "The visitor did not confirm." };

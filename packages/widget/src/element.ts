@@ -385,7 +385,7 @@ export class SolvChat extends HTMLElement {
         if (turn.error) {
           this.#renderBubbleError(bubble, turn.error);
         }
-        if (turn.messageId && !unfinished) {
+        if (turn.messageId && !unfinished && !turn.error) {
           this.#appendFeedbackControls(bubble, turn);
         }
       }
@@ -702,6 +702,11 @@ export class SolvChat extends HTMLElement {
     }
 
     let terminated = false;
+    let resumeEvent: {
+      messageId: string;
+      conversationId: string;
+      awaitingActions: string[];
+    } | null = null;
     const pendingActions: RunRequest[] = [];
 
     try {
@@ -737,21 +742,25 @@ export class SolvChat extends HTMLElement {
           terminated = true;
           this.#conversationId = event.conversationId;
           assistantTurn.messageId = event.messageId;
-          if (event.awaitingActions && event.awaitingActions.length > 0 && depth < 5) {
-            // The answer paused, it did not finish: no feedback controls yet,
-            // and the pending calls are persisted so a reload mid-round-trip
-            // marks the turn interrupted rather than complete.
-            assistantTurn.awaiting = [...event.awaitingActions];
-            this.#persist();
-            await this.#resumeWithActionResults(
-              bubble,
-              textEl,
-              assistantTurn,
-              event,
-              pendingActions,
-              controller,
-              depth + 1,
-            );
+          if (event.awaitingActions && event.awaitingActions.length > 0) {
+            if (depth < 5) {
+              // The answer paused, it did not finish: no feedback controls yet,
+              // and the pending calls are persisted so a reload mid-round-trip
+              // marks the turn interrupted rather than complete.
+              assistantTurn.awaiting = [...event.awaitingActions];
+              this.#persist();
+              resumeEvent = {
+                messageId: event.messageId,
+                conversationId: event.conversationId,
+                awaitingActions: event.awaitingActions,
+              };
+            } else {
+              // Local round limit reached while the answer is still paused:
+              // never mark a paused response complete.
+              delete assistantTurn.awaiting;
+              this.#markTurnInterrupted(bubble, assistantTurn);
+              this.#persist();
+            }
           } else {
             delete assistantTurn.awaiting;
             this.#appendFeedbackControls(bubble, assistantTurn);
@@ -775,6 +784,18 @@ export class SolvChat extends HTMLElement {
         delete assistantTurn.awaiting;
         this.#markTurnInterrupted(bubble, assistantTurn);
       }
+    }
+
+    if (resumeEvent && !signal.aborted) {
+      await this.#resumeWithActionResults(
+        bubble,
+        textEl,
+        assistantTurn,
+        resumeEvent,
+        pendingActions,
+        controller,
+        depth + 1,
+      );
     }
   }
 
