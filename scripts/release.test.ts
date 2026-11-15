@@ -83,6 +83,13 @@ describe("set-version", () => {
         esbuild: "^0.25.0",
       },
     });
+    writeJson(path.join(root, "packages/admin/package.json"), {
+      name: "@solvchat/admin",
+      version: "0.0.0",
+      dependencies: {
+        "@solvchat/core": "^0.0.0",
+      },
+    });
     writeJson(path.join(root, "packages/cli/package.json"), {
       name: "@solvchat/cli",
       version: "0.0.0",
@@ -100,12 +107,13 @@ describe("set-version", () => {
 
     const result = setPublishableVersions(root, "v1.4.2");
     expect(result.version).toBe("1.4.2");
-    expect(result.updatedFiles).toHaveLength(4);
+    expect(result.updatedFiles).toHaveLength(5);
 
     const core = JSON.parse(readFileSync(path.join(root, "packages/core/package.json"), "utf8"));
     const widget = JSON.parse(
       readFileSync(path.join(root, "packages/widget/package.json"), "utf8"),
     );
+    const admin = JSON.parse(readFileSync(path.join(root, "packages/admin/package.json"), "utf8"));
     const cli = JSON.parse(readFileSync(path.join(root, "packages/cli/package.json"), "utf8"));
     const engine = JSON.parse(
       readFileSync(path.join(root, "packages/engine/package.json"), "utf8"),
@@ -115,6 +123,8 @@ describe("set-version", () => {
     expect(widget.version).toBe("1.4.2");
     expect(widget.devDependencies["@solvchat/core"]).toBe("1.4.2");
     expect(widget.devDependencies.esbuild).toBe("^0.25.0");
+    expect(admin.version).toBe("1.4.2");
+    expect(admin.dependencies["@solvchat/core"]).toBe("1.4.2");
     expect(cli.version).toBe("1.4.2");
     expect(cli.dependencies["@solvchat/core"]).toBe("1.4.2");
     expect(engine.version).toBe("1.4.2");
@@ -136,6 +146,7 @@ describe("pack-check", () => {
     expect(results.map((r) => r.name)).toEqual([
       "@solvchat/core",
       "@solvchat/widget",
+      "@solvchat/admin",
       "@solvchat/cli",
       "@solvchat/engine",
     ]);
@@ -186,6 +197,69 @@ describe("pack-check", () => {
     expect(res.errors).toContain("forbidden test file: dist/index.test.js");
     expect(res.errors).toContain(
       "source map dist/bad.js.map points outside package: ../../outside/src/bad.ts",
+    );
+  });
+
+  it("enforces admin required dist, lib, and stylesheet entries", () => {
+    const dir = makeTempDir("solv-pack-admin-");
+    writeJson(path.join(dir, "package.json"), {
+      name: "@solvchat/admin",
+      version: "1.0.0",
+      license: "Apache-2.0",
+      main: "./lib/index.js",
+      types: "./lib/index.d.ts",
+      exports: {
+        ".": { types: "./lib/index.d.ts", default: "./lib/index.js" },
+        "./styles.css": "./lib/styles.css",
+      },
+      files: ["dist", "lib"],
+    });
+    writeFileSync(path.join(dir, "LICENSE"), "Apache-2.0\n", "utf8");
+    mkdirSync(path.join(dir, "lib"), { recursive: true });
+    writeFileSync(path.join(dir, "lib/index.js"), "export {};\n", "utf8");
+    mkdirSync(path.join(dir, "dist"), { recursive: true });
+
+    const res = checkPackagePack(dir);
+    expect(res.errors).toContain("missing required file: lib/index.d.ts");
+    expect(res.errors).toContain("missing required file: lib/styles.css");
+    expect(res.errors).toContain("missing required file: dist/index.html");
+    expect(res.errors).toContain("missing required prebuilt asset: dist/assets/*.js");
+    expect(res.errors).toContain("missing required prebuilt asset: dist/assets/*.css");
+  });
+
+  it("fails when engine adminBundle.js drifts from packages/admin/dist", () => {
+    const root = makeTempDir("solv-pack-drift-");
+    const adminDist = path.join(root, "packages/admin/dist");
+    const engineDir = path.join(root, "packages/engine");
+    mkdirSync(path.join(adminDist, "assets"), { recursive: true });
+    writeFileSync(path.join(adminDist, "index.html"), "<html>new</html>", "utf8");
+    writeFileSync(path.join(adminDist, "assets/app.js"), "console.log(1);", "utf8");
+
+    writeJson(path.join(engineDir, "package.json"), {
+      name: "@solvchat/engine",
+      version: "1.0.0",
+      license: "Apache-2.0",
+      type: "module",
+      main: "./dist/index.js",
+      types: "./dist/index.d.ts",
+      files: ["dist", "migrations"],
+    });
+    writeFileSync(path.join(engineDir, "LICENSE"), "Apache-2.0\n", "utf8");
+    mkdirSync(path.join(engineDir, "migrations"), { recursive: true });
+    writeFileSync(path.join(engineDir, "migrations/0001.sql"), "SELECT 1;", "utf8");
+    mkdirSync(path.join(engineDir, "dist"), { recursive: true });
+    writeFileSync(path.join(engineDir, "dist/index.js"), "export {};\n", "utf8");
+    writeFileSync(path.join(engineDir, "dist/index.d.ts"), "export {};\n", "utf8");
+    writeFileSync(path.join(engineDir, "dist/widgetBundle.js"), "export const W = '';\n", "utf8");
+    writeFileSync(
+      path.join(engineDir, "dist/adminBundle.js"),
+      'export const ADMIN_HTML = "<html>stale</html>";\nexport const ADMIN_ASSETS = {};\n',
+      "utf8",
+    );
+
+    const res = checkPackagePack(engineDir);
+    expect(res.errors).toContain(
+      "engine dist/adminBundle.js is out of sync with packages/admin/dist (rebuild @solvchat/engine)",
     );
   });
 });

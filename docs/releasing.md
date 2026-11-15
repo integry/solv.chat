@@ -1,6 +1,8 @@
 # Releasing `@solvchat/*` packages
 
-All publishable packages (`@solvchat/core`, `@solvchat/widget`, `@solvchat/cli`, and `@solvchat/engine`) share a single version number and are published together from a `v<semver>` git tag on `main`. `@solvchat/admin` remains private and is bundled directly into `@solvchat/engine`.
+All publishable packages (`@solvchat/core`, `@solvchat/widget`, `@solvchat/admin`, `@solvchat/cli`, and `@solvchat/engine`) share a single version number and are published together from a `v<semver>` git tag on `main`.
+
+`@solvchat/engine` does not depend on `@solvchat/admin` at runtime; instead, it embeds `@solvchat/admin`'s built `dist/` assets into `dist/adminBundle.js` at build time. To ensure the two cannot drift, `npm run pack-check` asserts that `@solvchat/engine`'s bundled admin assets match `packages/admin/dist/` from the same build.
 
 ## Cutting a release
 
@@ -20,8 +22,8 @@ All publishable packages (`@solvchat/core`, `@solvchat/widget`, `@solvchat/cli`,
 
 1. Validates that the tag matches `v<semver>` and that the tagged commit is an ancestor of `origin/main` (failing before anything is published if either check fails).
 2. Installs dependencies (`npm ci`) and runs `npm run verify` (lint, typecheck, tests, build, and `pack-check`).
-3. Updates `version` and all internal `@solvchat/*` dependencies in the four publishable `package.json` manifests to the exact tag version (no `^`, `*`, or `workspace:`), then re-runs `npm run pack-check`.
-4. Publishes in dependency order (`@solvchat/core`, `@solvchat/widget`, `@solvchat/cli`, `@solvchat/engine`) with `--access public --provenance`.
+3. Updates `version` and all internal `@solvchat/*` dependencies in the five publishable `package.json` manifests to the exact tag version (no `^`, `*`, or `workspace:`), then re-runs `npm run pack-check`.
+4. Publishes in dependency order (`@solvchat/core`, `@solvchat/widget`, `@solvchat/admin`, `@solvchat/cli`, `@solvchat/engine`) with `--access public --provenance`.
 5. Skips any package whose `<name>@<version>` is already on npm, so re-running a partially failed release job is safe.
 
 ## Dry run

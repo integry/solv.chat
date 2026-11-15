@@ -382,6 +382,51 @@ Install
   an entry source), "Add to tests".
 - Plain words on every control. No model, temperature or chunking settings.
 
+### Extending the admin
+
+`@solvchat/admin` publishes both the prebuilt static app (`dist/`, served by the
+open engine) and an ESM library entry (`mountAdmin(root, options)`). The open
+static entry imports the stylesheet for you; the library entry does not import
+CSS, so a consumer embedding `mountAdmin` must also import
+`@solvchat/admin/styles.css`:
+
+```tsx
+import "@solvchat/admin/styles.css";
+import { mountAdmin } from "@solvchat/admin";
+
+const root = document.getElementById("root");
+if (root) {
+  mountAdmin(root, {
+    extraNavItems: [
+      { id: "billing", label: "Billing", path: "/admin/billing", section: "Account" },
+    ],
+    extraScreens: {
+      billing: ({ assistant }) => <p>Billing for {assistant?.name ?? "assistant"}</p>,
+    },
+  });
+}
+```
+
+Options accepted by `mountAdmin`:
+
+- `extraNavItems` — items appended to the sidebar (`id`, `label`, `path` under
+  `/admin/…`, and an optional `section` heading such as `"Settings"` or `"Account"`).
+- `extraScreens` — map from those ids to React components rendered in the main
+  area with `{ assistant, assistantId, api }` (the same-origin API helpers used
+  by built-in screens).
+- `signIn` — optional component replacing the built-in password form when the API
+  answers `401`.
+- `onSignOut` — optional sign-out handler replacing the default `/api/admin/logout`
+  request.
+- `hideScreens` — built-in screen ids to omit from navigation and routing (for
+  example, when keys are fully managed).
+
+This extension point is for **adding** screens and replacing sign-in, not for
+changing or shadowing engine screens. Built-in ids and routes cannot be
+overridden: any clash throws synchronously at mount time, and extra screens
+receive no capabilities beyond the same-origin API helpers (no remote code
+loading).
+
 ## Config as code
 
 `solv.config.json` in a site's repository describes an assistant's behaviour,

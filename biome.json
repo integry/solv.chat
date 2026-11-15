@@ -3,6 +3,7 @@
     "includes": [
       "**",
       "!**/dist",
+      "!**/lib",
       "!**/node_modules",
       "!**/.wrangler",
       "!**/widgetBundle.ts",

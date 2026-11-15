@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { PUBLISHABLE_PACKAGES } from "./set-version.mjs";
@@ -62,13 +62,18 @@ function collectRequiredEntries(manifest) {
     required.push(normalizeRelPath(manifest.types));
   }
 
-  const rootExport = manifest.exports?.["."];
-  if (typeof rootExport === "string") {
-    required.push(normalizeRelPath(rootExport));
-  } else if (rootExport && typeof rootExport === "object") {
-    for (const key of ["types", "default", "import"]) {
-      if (typeof rootExport[key] === "string") {
-        required.push(normalizeRelPath(rootExport[key]));
+  if (typeof manifest.exports === "string") {
+    required.push(normalizeRelPath(manifest.exports));
+  } else if (manifest.exports && typeof manifest.exports === "object") {
+    for (const target of Object.values(manifest.exports)) {
+      if (typeof target === "string") {
+        required.push(normalizeRelPath(target));
+      } else if (target && typeof target === "object") {
+        for (const key of ["types", "default", "import"]) {
+          if (typeof target[key] === "string") {
+            required.push(normalizeRelPath(target[key]));
+          }
+        }
       }
     }
   }
@@ -84,6 +89,84 @@ function collectRequiredEntries(manifest) {
   }
 
   return [...new Set(required)];
+}
+
+function collectFilesRecursive(dir) {
+  if (!existsSync(dir)) return [];
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...collectFilesRecursive(full));
+    } else if (entry.isFile()) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+function checkAdminBundleSync(enginePkgDir) {
+  const adminDistDir = path.resolve(enginePkgDir, "../admin/dist");
+  if (!existsSync(adminDistDir)) return [];
+
+  const indexHtmlPath = path.join(adminDistDir, "index.html");
+  if (!existsSync(indexHtmlPath)) {
+    return ["missing packages/admin/dist/index.html to verify engine adminBundle.js"];
+  }
+
+  const bundleUrl = pathToFileURL(path.join(enginePkgDir, "dist/adminBundle.js")).href;
+  const raw = execFileSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      "import(process.argv[1]).then((m) => process.stdout.write(JSON.stringify({ ADMIN_HTML: m.ADMIN_HTML, ADMIN_ASSETS: m.ADMIN_ASSETS })))",
+      bundleUrl,
+    ],
+    { encoding: "utf8" },
+  );
+  const { ADMIN_HTML, ADMIN_ASSETS } = JSON.parse(raw);
+
+  const expectedHtml = readFileSync(indexHtmlPath, "utf8");
+  if (ADMIN_HTML !== expectedHtml) {
+    return [
+      "engine dist/adminBundle.js is out of sync with packages/admin/dist (rebuild @solvchat/engine)",
+    ];
+  }
+
+  const distFiles = collectFilesRecursive(adminDistDir).filter((f) => f !== indexHtmlPath);
+  const expectedKeys = new Set();
+
+  for (const file of distFiles) {
+    const rel = path.relative(adminDistDir, file).split(path.sep).join("/");
+    const key = `/admin/${rel}`;
+    expectedKeys.add(key);
+    const asset = ADMIN_ASSETS?.[key];
+    if (!asset || typeof asset.body !== "string") {
+      return [
+        "engine dist/adminBundle.js is out of sync with packages/admin/dist (rebuild @solvchat/engine)",
+      ];
+    }
+    const actualBuf =
+      asset.encoding === "base64"
+        ? Buffer.from(asset.body, "base64")
+        : Buffer.from(asset.body, "utf8");
+    const expectedBuf = readFileSync(file);
+    if (!actualBuf.equals(expectedBuf)) {
+      return [
+        "engine dist/adminBundle.js is out of sync with packages/admin/dist (rebuild @solvchat/engine)",
+      ];
+    }
+  }
+
+  const actualKeys = Object.keys(ADMIN_ASSETS ?? {});
+  if (actualKeys.length !== expectedKeys.size || actualKeys.some((k) => !expectedKeys.has(k))) {
+    return [
+      "engine dist/adminBundle.js is out of sync with packages/admin/dist (rebuild @solvchat/engine)",
+    ];
+  }
+
+  return [];
 }
 
 export function checkPackagePack(pkgDir) {
@@ -104,6 +187,18 @@ export function checkPackagePack(pkgDir) {
     }
   }
 
+  if (manifest.name === "@solvchat/admin") {
+    if (!fileSet.has("dist/index.html")) {
+      errors.push("missing required file: dist/index.html");
+    }
+    if (!files.some((f) => f.startsWith("dist/assets/") && f.endsWith(".js"))) {
+      errors.push("missing required prebuilt asset: dist/assets/*.js");
+    }
+    if (!files.some((f) => f.startsWith("dist/assets/") && f.endsWith(".css"))) {
+      errors.push("missing required prebuilt asset: dist/assets/*.css");
+    }
+  }
+
   if (manifest.name === "@solvchat/engine") {
     const hasMigration = files.some((f) => f.startsWith("migrations/") && f.endsWith(".sql"));
     if (!hasMigration) {
@@ -113,6 +208,9 @@ export function checkPackagePack(pkgDir) {
       if (!fileSet.has(assetBundle)) {
         errors.push(`missing required asset bundle: ${assetBundle}`);
       }
+    }
+    if (fileSet.has("dist/adminBundle.js")) {
+      errors.push(...checkAdminBundleSync(pkgDir));
     }
   }
 

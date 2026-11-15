@@ -16,7 +16,7 @@ export interface UseSessionResult {
  * failure of the first request (a 500, a network error) is `"unavailable"`:
  * the session may be fine, so the owner is offered a retry, not the login.
  */
-export function useSession(): UseSessionResult {
+export function useSession(customSignOut?: () => void | Promise<void>): UseSessionResult {
   const [state, setState] = useState<SessionState>("loading");
   const [tick, setTick] = useState(0);
 
@@ -53,9 +53,13 @@ export function useSession(): UseSessionResult {
   }, []);
 
   const signOut = useCallback(async () => {
-    await logoutRequest();
+    if (customSignOut) {
+      await customSignOut();
+    } else {
+      await logoutRequest();
+    }
     setState("signed-out");
-  }, []);
+  }, [customSignOut]);
 
   return { state, refresh, signOut };
 }

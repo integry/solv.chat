@@ -1,11 +1,12 @@
-import { NAV_ITEMS, type NavItem, type ScreenId } from "../routing.js";
+import { NAV_ITEMS, type NavItem } from "../routing.js";
 
 export interface NavigationProps {
-  current: ScreenId;
+  current: string | null;
   onNavigate: (path: string) => void;
+  items?: readonly NavItem[];
 }
 
-function renderNavItem(item: NavItem, current: ScreenId, onNavigate: (path: string) => void) {
+function renderNavItem(item: NavItem, current: string | null, onNavigate: (path: string) => void) {
   const active = item.id === current;
   return (
     <li key={item.id}>
@@ -34,25 +35,37 @@ function renderNavItem(item: NavItem, current: ScreenId, onNavigate: (path: stri
 }
 
 /**
- * Primary admin navigation, built from NAV_ITEMS.
+ * Primary admin navigation, built from the resolved nav items.
  */
-export function Navigation({ current, onNavigate }: NavigationProps) {
-  const mainItems = NAV_ITEMS.filter((item) => !item.section);
-  const settingsItems = NAV_ITEMS.filter((item) => item.section === "Settings");
+export function Navigation({ current, onNavigate, items = NAV_ITEMS }: NavigationProps) {
+  const mainItems = items.filter((item) => !item.section);
+  const sections: Array<{ label: string; items: NavItem[] }> = [];
+  const sectionMap = new Map<string, NavItem[]>();
+
+  for (const item of items) {
+    if (!item.section) continue;
+    let list = sectionMap.get(item.section);
+    if (!list) {
+      list = [];
+      sectionMap.set(item.section, list);
+      sections.push({ label: item.section, items: list });
+    }
+    list.push(item);
+  }
 
   return (
     <nav className="nav" aria-label="Primary">
       <ul className="nav-list">
         {mainItems.map((item) => renderNavItem(item, current, onNavigate))}
       </ul>
-      {settingsItems.length > 0 && (
-        <div className="nav-section">
-          <div className="nav-section-label">Settings</div>
+      {sections.map((section) => (
+        <div key={section.label} className="nav-section">
+          <div className="nav-section-label">{section.label}</div>
           <ul className="nav-list">
-            {settingsItems.map((item) => renderNavItem(item, current, onNavigate))}
+            {section.items.map((item) => renderNavItem(item, current, onNavigate))}
           </ul>
         </div>
-      )}
+      ))}
     </nav>
   );
 }

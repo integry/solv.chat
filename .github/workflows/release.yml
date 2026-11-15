@@ -1,5 +1,5 @@
-# Release workflow: publishes @solvchat/core, @solvchat/widget, @solvchat/cli,
-# and @solvchat/engine to npm from a v<semver> tag on main.
+# Release workflow: publishes @solvchat/core, @solvchat/widget, @solvchat/admin,
+# @solvchat/cli, and @solvchat/engine to npm from a v<semver> tag on main.
 #
 # npm documentation references:
 # - Provenance (--provenance, id-token: write, repository field, GitHub-hosted runner):
@@ -127,7 +127,7 @@ jobs:
             echo ""
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          for pkg_dir in packages/core packages/widget packages/cli packages/engine; do
+          for pkg_dir in packages/core packages/widget packages/admin packages/cli packages/engine; do
             pkg_name=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).name)' "${pkg_dir}/package.json")
             echo "Dry-run publishing ${pkg_name}@${{ steps.meta.outputs.version }} (tag: ${{ steps.meta.outputs.dist_tag }})..."
             (cd "${pkg_dir}" && npm publish --dry-run --access public --tag "${{ steps.meta.outputs.dist_tag }}")
@@ -155,7 +155,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
-          for pkg_dir in packages/core packages/widget packages/cli packages/engine; do
+          for pkg_dir in packages/core packages/widget packages/admin packages/cli packages/engine; do
             pkg_name=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).name)' "${pkg_dir}/package.json")
             if npm view "${pkg_name}@${VERSION}" version >/dev/null 2>&1; then
               echo "${pkg_name}@${VERSION} is already published on npm; skipping."

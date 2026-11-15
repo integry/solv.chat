@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 export const PUBLISHABLE_PACKAGES = [
   "packages/core",
   "packages/widget",
+  "packages/admin",
   "packages/cli",
   "packages/engine",
 ];
