@@ -11,7 +11,7 @@ export interface UseResourceResult<T> {
   value: T | undefined;
   error: string | null;
   reload: () => void;
-  setValue: (next: T) => void;
+  setValue: (next: T | ((prev: T | undefined) => T)) => void;
 }
 
 /**
@@ -71,11 +71,15 @@ export function useResource<T>(path: string | null): UseResourceResult<T> {
     setTick((n) => n + 1);
   }, []);
 
-  const setValue = useCallback((next: T) => {
+  const setValue = useCallback((next: T | ((prev: T | undefined) => T)) => {
     generationRef.current += 1;
     controllerRef.current?.abort();
     controllerRef.current = null;
-    setState({ status: "ready", value: next, error: null });
+    setState((prev) => ({
+      status: "ready",
+      value: typeof next === "function" ? (next as (prev: T | undefined) => T)(prev.value) : next,
+      error: null,
+    }));
   }, []);
 
   return {

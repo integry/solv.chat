@@ -1,6 +1,6 @@
 import { newId, parseVersionConfig } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
-import type { VersionRow } from "../db/versions.js";
+import { expectedVersionConfig, type VersionRow } from "../db/versions.js";
 import { BadRequest, Conflict, NotFound } from "./errors.js";
 
 /** Lists version history for an assistant, newest first. */
@@ -49,6 +49,13 @@ export async function updateDraft(
   throw new Conflict("The draft changed while you were saving. Please try again.");
 }
 
+/** Returns a stable SHA-256 hex digest of a draft's exact stored config bytes. */
+export async function configRevision(draft: VersionRow): Promise<string> {
+  const bytes = new TextEncoder().encode(expectedVersionConfig(draft));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /**
  * Publishing promotes the current draft row to `published` (it keeps its id,
  * so a "Try it" conversation started against the draft still resolves) and
@@ -59,19 +66,49 @@ export async function updateDraft(
  * assistant with no published version or no draft. See
  * `versionsFor().publishDraft` for the guards.
  *
- * The spec says Publish runs the tests. Answer tests are phase 2; that step
- * slots in at the top of this function.
+ * When `expectedDraft` is supplied (from the publish test gate), promotion is
+ * atomically bound to that exact draft row and configuration revision.
+ * When `overrideRunId` is supplied, the failing test run's `published_anyway`
+ * flag is recorded in the same batch, conditioned on promotion succeeding.
  */
-export async function publishDraft(tenant: Tenant, assistantId: string): Promise<VersionRow> {
-  const draft = await tenant.versions.draft(assistantId);
+export async function publishDraft(
+  tenant: Tenant,
+  assistantId: string,
+  expectedDraft?: VersionRow,
+  overrideRunId?: string,
+): Promise<VersionRow> {
+  const draft = expectedDraft ?? (await tenant.versions.draft(assistantId));
   if (draft === null) throw new NotFound("assistant");
 
   const now = Date.now();
-  const published = await tenant.versions.publishDraft(assistantId, draft.id, newId("ver"), now);
+  const nextDraftId = newId("ver");
+  const extraStatements = overrideRunId
+    ? [
+        tenant.tests.statements.markPublishedAnyway({
+          runId: overrideRunId,
+          assistantId,
+          promotedVersionId: draft.id,
+          nextDraftId,
+          publishedAt: now,
+        }),
+      ]
+    : undefined;
+  const published = await tenant.versions.publishDraft(
+    assistantId,
+    draft.id,
+    nextDraftId,
+    now,
+    expectedDraft ? expectedVersionConfig(expectedDraft) : undefined,
+    extraStatements,
+  );
   if (published === null) {
     const assistant = await tenant.assistants.get(assistantId);
     if (assistant === null) throw new NotFound("assistant");
-    throw new Conflict("This draft was already published. Please try again.");
+    throw new Conflict(
+      expectedDraft
+        ? "The draft changed while tests were running. Please try again."
+        : "This draft was already published. Please try again.",
+    );
   }
   return published;
 }

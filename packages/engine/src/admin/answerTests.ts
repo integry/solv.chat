@@ -11,11 +11,13 @@ import { mcpRunnerFor } from "../chat/mcpRunner.js";
 import type { ToolRunner } from "../chat/toolLoop.js";
 import type { Tenant } from "../db/tenant.js";
 import type { TestRow, TestRunRow, TestWithLatestResult } from "../db/tests.js";
+import type { VersionRow } from "../db/versions.js";
 import type { ModelInfo } from "../models.js";
 import type { Embedder, Retriever } from "../providers/retrieval.js";
 import type { LlmProvider } from "../providers/types.js";
 import type { Limits, UsageSink } from "../seams/types.js";
 import { BadRequest, NotFound } from "./errors.js";
+import { configRevision } from "./versions.js";
 
 /** A run's whole budget. One click must not be able to spend without limit. */
 export const TEST_RUN_WALL_TIME_MS = 60_000;
@@ -294,9 +296,16 @@ export async function listTestRuns(tenant: Tenant, assistantId: string): Promise
 export async function runAnswerTests(
   deps: RunDeps,
   assistantId: string,
-): Promise<{ runId: string; passed: boolean; results: TestResult[]; stopped?: string }> {
+): Promise<{
+  runId: string;
+  draft: VersionRow;
+  passed: boolean;
+  results: TestResult[];
+  stopped?: string;
+}> {
   const draft = await deps.tenant.versions.draft(assistantId);
   if (draft === null) throw new NotFound("assistant");
+  const configHash = await configRevision(draft);
   const mcp = await mcpRunnerFor(
     {
       tenant: deps.tenant,
@@ -458,6 +467,7 @@ export async function runAnswerTests(
     startedAt,
     results,
     passed,
+    configHash,
   });
-  return { runId, passed, results, ...(stopped ? { stopped } : {}) };
+  return { runId, draft, passed, results, ...(stopped ? { stopped } : {}) };
 }

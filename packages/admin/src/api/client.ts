@@ -38,18 +38,26 @@ export class ApiError extends Error {
   readonly status: number;
   readonly fields: Record<string, string>;
   readonly rawFields: string[];
+  readonly body?: unknown;
 
-  constructor(status: number, message: string, rawFields: string[] = []) {
+  constructor(status: number, message: string, rawFields: string[] = [], body?: unknown) {
     super(message);
     this.status = status;
     this.rawFields = rawFields;
     this.fields = parseFieldErrors(rawFields);
+    if (body !== undefined) {
+      this.body = body;
+    }
   }
 }
 
-async function readErrorBody(response: Response): Promise<{ message: string; fields: string[] }> {
+async function readErrorBody(
+  response: Response,
+): Promise<{ message: string; fields: string[]; body?: unknown }> {
   try {
-    const data = (await response.json()) as { error?: unknown; fields?: unknown };
+    const raw = (await response.json()) as unknown;
+    const data =
+      typeof raw === "object" && raw !== null ? (raw as { error?: unknown; fields?: unknown }) : {};
     const message =
       typeof data.error === "string" && data.error.trim() !== ""
         ? data.error
@@ -57,7 +65,7 @@ async function readErrorBody(response: Response): Promise<{ message: string; fie
     const fields = Array.isArray(data.fields)
       ? data.fields.filter((f): f is string => typeof f === "string")
       : [];
-    return { message, fields };
+    return { message, fields, body: raw };
   } catch {
     return { message: `Request failed (${response.status}).`, fields: [] };
   }
@@ -85,8 +93,8 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   }
 
   if (!response.ok) {
-    const { message, fields } = await readErrorBody(response);
-    throw new ApiError(response.status, message, fields);
+    const { message, fields, body } = await readErrorBody(response);
+    throw new ApiError(response.status, message, fields, body);
   }
 
   return (await response.json()) as T;

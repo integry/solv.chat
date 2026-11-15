@@ -75,7 +75,7 @@ export async function ingestRoutes(
     if (resource === "test-runs") {
       // The same runner the admin's "Run now" uses, so CI and the screen
       // cannot disagree about whether a draft passes.
-      const run = await runAnswerTests(
+      const { draft: _draft, ...run } = await runAnswerTests(
         await deps.resolveRunDeps(scope.orgId, tenant),
         scope.assistantId,
       );

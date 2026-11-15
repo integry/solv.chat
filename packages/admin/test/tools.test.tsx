@@ -236,6 +236,7 @@ describe("Tools screen", () => {
       "Tools",
       "Behaviour",
       "Widget",
+      "Tests",
       "Install",
       "Providers",
     ]);

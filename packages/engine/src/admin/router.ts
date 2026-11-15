@@ -57,7 +57,14 @@ import {
   listSources,
   updateSource,
 } from "./sources.js";
-import { getDraft, listVersions, publishDraft, rollbackTo, updateDraft } from "./versions.js";
+import {
+  configRevision,
+  getDraft,
+  listVersions,
+  publishDraft,
+  rollbackTo,
+  updateDraft,
+} from "./versions.js";
 
 export interface AdminRouteDeps {
   tenant: Tenant;
@@ -126,6 +133,15 @@ function readPagingParams(url: URL): { limit?: number; offset?: number } {
   };
 }
 
+async function maybeRunTestsBeforePublish(deps: AdminRouteDeps, assistantId: string) {
+  const count = await deps.tenant.tests.countFor(assistantId);
+  if (count === 0) return null;
+  if (!deps.resolveRunDeps) {
+    throw new Error("Answer test runner is not configured.");
+  }
+  return runAnswerTests(await deps.resolveRunDeps(), assistantId);
+}
+
 async function assistantRoutes(
   request: Request,
   url: URL,
@@ -176,7 +192,70 @@ async function assistantRoutes(
       return Response.json({ draft });
     }
     if (action === "publish" && method === "POST") {
-      return Response.json({ version: await publishDraft(tenant, assistantId) });
+      const body =
+        request.headers.get("content-length") === "0"
+          ? {}
+          : await readJsonBody(request).catch(() => ({}));
+      const force = isPlainObject(body) && body.force === true;
+      const rawRunId = isPlainObject(body) ? body.runId : undefined;
+      if (rawRunId !== undefined && (typeof rawRunId !== "string" || rawRunId.trim() === "")) {
+        throw new BadRequest(["runId: must be a non-empty string"]);
+      }
+
+      if (force && typeof rawRunId === "string") {
+        const reviewedRun = await tenant.tests.getRunForAssistant(assistantId, rawRunId);
+        if (reviewedRun === null) {
+          throw new NotFound("test run");
+        }
+        const draft = await getDraft(tenant, assistantId);
+        const currentRevision = await configRevision(draft);
+        if (
+          reviewedRun.versionId !== draft.id ||
+          reviewedRun.configHash === null ||
+          reviewedRun.configHash !== currentRevision
+        ) {
+          throw new Conflict("The draft changed after those tests ran. Please try again.");
+        }
+        // The specification: "the choice is recorded on the run" — committed in
+        // the same batch as promotion so the two cannot diverge.
+        const version = await publishDraft(
+          tenant,
+          assistantId,
+          draft,
+          reviewedRun.passed ? undefined : reviewedRun.id,
+        );
+        return Response.json({
+          version,
+          run: { id: reviewedRun.id, passed: reviewedRun.passed },
+        });
+      }
+
+      // The specification's order: tests, then promote. A run only happens if
+      // the owner has tests; publishing with none is the phase 1 path exactly.
+      const run = await maybeRunTestsBeforePublish(deps, assistantId);
+      if (run !== null && !run.passed && !force) {
+        // 409, not 400: the request was well formed, and the reason it did not
+        // happen is a state the owner can inspect and then override.
+        return Response.json(
+          {
+            error: "Some tests did not pass.",
+            run: { id: run.runId, results: run.results, stopped: run.stopped ?? null },
+          },
+          { status: 409 },
+        );
+      }
+      // The specification: "the choice is recorded on the run" — committed in
+      // the same batch as promotion so the two cannot diverge.
+      const version = await publishDraft(
+        tenant,
+        assistantId,
+        run?.draft,
+        run !== null && !run.passed && force ? run.runId : undefined,
+      );
+      return Response.json({
+        version,
+        ...(run ? { run: { id: run.runId, passed: run.passed } } : {}),
+      });
     }
     if (action === "sources" && method === "GET") {
       return Response.json({ sources: await listSources(tenant, assistantId) });
@@ -275,7 +354,10 @@ async function assistantRoutes(
       if (!deps.resolveRunDeps) {
         throw new Error("Answer test runner is not configured.");
       }
-      const run = await runAnswerTests(await deps.resolveRunDeps(), assistantId);
+      const { draft: _draft, ...run } = await runAnswerTests(
+        await deps.resolveRunDeps(),
+        assistantId,
+      );
       return Response.json(run, { status: 201 });
     }
     throw new NotFound();

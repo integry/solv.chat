@@ -297,6 +297,7 @@ describe("admin answer tests", () => {
     };
     expect(run.runId).toMatch(/^run_/);
     expect(run.passed).toBe(false);
+    expect("draft" in run).toBe(false);
 
     const byId = new Map(run.results.map((r) => [r.testId, r]));
     expect(byId.get(idContainsPass)?.outcome).toBe("passed");

@@ -605,6 +605,12 @@ body {
   border-color: #fde68a;
 }
 
+.badge-danger {
+  background: #fee2e2;
+  color: #991b1b;
+  border-color: #fecaca;
+}
+
 .snippet-box {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.8125rem;

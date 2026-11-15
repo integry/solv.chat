@@ -1,4 +1,4 @@
-import type { SourceKind, VersionConfig } from "@solvchat/core";
+import type { SourceKind, TestExpectation, VersionConfig } from "@solvchat/core";
 
 export interface Assistant {
   id: string;
@@ -191,6 +191,40 @@ export interface McpToolView {
   description: string;
   inputSchema: Record<string, unknown>;
   allowed: boolean;
+}
+
+export type TestOutcome = "passed" | "failed" | "not_run";
+
+export interface TestResult {
+  testId: string;
+  question: string;
+  expectation: TestExpectation;
+  outcome: TestOutcome;
+  reason: string;
+  excerpt: string;
+}
+
+export interface AnswerTest {
+  id: string;
+  orgId: string;
+  assistantId: string;
+  question: string;
+  expectation: TestExpectation;
+  createdAt: number;
+  latestResult?: TestResult | null;
+}
+
+export interface TestRunSummary {
+  id: string;
+  results: TestResult[];
+  stopped?: string | null;
+}
+
+export interface TestRunResponse {
+  runId: string;
+  passed: boolean;
+  results: TestResult[];
+  stopped?: string | undefined;
 }
 
 export type LlmProviderName = "anthropic" | "openai" | "openrouter";

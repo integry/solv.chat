@@ -248,6 +248,8 @@ describe("ingest tests and test-runs", () => {
     expect(runBody.runId).toMatch(/^run_/);
     expect(runBody.passed).toBe(true);
     expect(runBody.results).toHaveLength(1);
+    expect("draft" in runBody).toBe(false);
+    expect(Object.keys(runBody).sort()).toEqual(["passed", "results", "runId"]);
     expect(runBody.results[0]?.outcome).toBe("passed");
     expect(runBody.results[0]?.reason).toContain("three days");
   });

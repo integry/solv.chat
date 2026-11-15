@@ -17,6 +17,7 @@ interface TestRunDbRow {
   results: string;
   passed: number;
   published_anyway: number;
+  config_hash: string | null;
 }
 
 export interface TestRow {
@@ -40,6 +41,7 @@ export interface TestRunRow {
   results: unknown[];
   passed: boolean;
   publishedAnyway: boolean;
+  configHash: string | null;
 }
 
 export interface CreateTestInput {
@@ -56,10 +58,12 @@ export interface CreateTestRunInput {
   startedAt: number;
   results: unknown[];
   passed: boolean;
+  configHash?: string | null | undefined;
 }
 
 const TEST_COLUMNS = "id, org_id, assistant_id, question, expectation, created_at";
-const RUN_COLUMNS = "id, org_id, version_id, started_at, results, passed, published_anyway";
+const RUN_COLUMNS =
+  "id, org_id, version_id, started_at, results, passed, published_anyway, config_hash";
 
 const mapTest = (row: TestDbRow): TestRow => ({
   id: row.id,
@@ -78,6 +82,7 @@ const mapRun = (row: TestRunDbRow): TestRunRow => ({
   results: safeJsonArray<unknown>(row.results),
   passed: row.passed === 1,
   publishedAnyway: row.published_anyway === 1,
+  configHash: row.config_hash ?? null,
 });
 
 /** Tenant-scoped data access for `tests` and `test_runs`. */
@@ -273,7 +278,7 @@ export function testsFor(db: D1Database, orgId: string) {
     async listRunsForAssistant(assistantId: string, limit = 20): Promise<TestRunRow[]> {
       const res = await prepare(
         db,
-        `SELECT r.id, r.org_id, r.version_id, r.started_at, r.results, r.passed, r.published_anyway
+        `SELECT r.id, r.org_id, r.version_id, r.started_at, r.results, r.passed, r.published_anyway, r.config_hash
          FROM test_runs r
          JOIN assistant_versions v ON v.org_id = r.org_id AND v.id = r.version_id
          WHERE r.org_id = ?1 AND v.assistant_id = ?2
@@ -285,16 +290,30 @@ export function testsFor(db: D1Database, orgId: string) {
       return res.results.map(mapRun);
     },
 
+    async getRunForAssistant(assistantId: string, runId: string): Promise<TestRunRow | null> {
+      const row = await prepare(
+        db,
+        `SELECT r.id, r.org_id, r.version_id, r.started_at, r.results, r.passed, r.published_anyway, r.config_hash
+         FROM test_runs r
+         JOIN assistant_versions v ON v.org_id = r.org_id AND v.id = r.version_id
+         WHERE r.org_id = ?1 AND r.id = ?2 AND v.assistant_id = ?3`,
+      )
+        .bind(orgId, runId, assistantId)
+        .first<TestRunDbRow>();
+      return row ? mapRun(row) : null;
+    },
+
     async latestRun(assistantId: string): Promise<TestRunRow | null> {
       const rows = await this.listRunsForAssistant(assistantId, 1);
       return rows[0] ?? null;
     },
 
     async createRun(input: CreateTestRunInput): Promise<TestRunRow> {
+      const configHash = input.configHash ?? null;
       await prepareInsert(
         db,
-        `INSERT INTO test_runs (id, org_id, version_id, started_at, results, passed)
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6)`,
+        `INSERT INTO test_runs (id, org_id, version_id, started_at, results, passed, config_hash)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7)`,
       )
         .bind(
           orgId,
@@ -303,6 +322,7 @@ export function testsFor(db: D1Database, orgId: string) {
           input.startedAt,
           JSON.stringify(input.results),
           input.passed ? 1 : 0,
+          configHash,
         )
         .run();
 
@@ -314,7 +334,46 @@ export function testsFor(db: D1Database, orgId: string) {
         results: [...input.results],
         passed: input.passed,
         publishedAnyway: false,
+        configHash,
       };
+    },
+
+    statements: {
+      /**
+       * Marks a failing run as `published_anyway = 1` inside the same batch as
+       * version promotion, conditioned on that exact promotion succeeding.
+       */
+      markPublishedAnyway: (input: {
+        runId: string;
+        assistantId: string;
+        promotedVersionId: string;
+        nextDraftId: string;
+        publishedAt: number;
+      }): D1PreparedStatement =>
+        prepare(
+          db,
+          `UPDATE test_runs
+           SET published_anyway = 1
+           WHERE org_id = ?1
+             AND id = ?2
+             AND version_id = ?3
+             AND passed = 0
+             AND EXISTS (
+               SELECT 1 FROM assistant_versions
+               WHERE org_id = ?1 AND assistant_id = ?4 AND id = ?3 AND state = 'published' AND published_at = ?5
+             )
+             AND EXISTS (
+               SELECT 1 FROM assistant_versions
+               WHERE org_id = ?1 AND assistant_id = ?4 AND id = ?6 AND state = 'draft'
+             )`,
+        ).bind(
+          orgId,
+          input.runId,
+          input.promotedVersionId,
+          input.assistantId,
+          input.publishedAt,
+          input.nextDraftId,
+        ),
     },
   };
 }
