@@ -110,6 +110,9 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
             input: toResponsesInput(request.messages),
             max_output_tokens: request.maxTokens,
             stream: true,
+            // Responses are stored by default; disable storage because this provider replays history each call.
+            // Source: https://developers.openai.com/api/docs/guides/migrate-to-responses — checked 2026-11-15
+            store: false,
             // Absent when no tool is allowed, matching phase 1's no-tools invariant.
             ...(request.tools && request.tools.length > 0
               ? { tools: request.tools.map(toResponsesTool) }
@@ -291,8 +294,7 @@ function toResponsesTool(tool: ToolDefinition) {
 function formatToolOutput(result: LlmToolResult): string {
   if (!result.isError) return result.content;
   // Responses API function_call_output has no separate is_error field; prefix
-  // errors with a fixed tag so failure status is explicit without escaping or
-  // inflating caller-truncated content.
+  // errors with a fixed tag so failure status is explicit without escaping.
   return result.content.length > 0 ? `[error] ${result.content}` : "[error]";
 }
 

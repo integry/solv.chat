@@ -114,6 +114,7 @@ describe("openaiProvider", () => {
       input: [{ role: "user", content: "Hi" }],
       max_output_tokens: 256,
       stream: true,
+      store: false,
     });
     expect("tools" in body).toBe(false);
   });
@@ -387,6 +388,7 @@ describe("openaiProvider", () => {
         instructions: "You are helpful.",
         max_output_tokens: 256,
         stream: true,
+        store: false,
         tools: [
           {
             type: "function",

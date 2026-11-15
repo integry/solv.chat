@@ -58,9 +58,9 @@ export interface LlmRequest {
   messages: readonly LlmMessage[];
   maxTokens: number;
   /**
-   * Omitted means "no tools": the serialised request must then be identical to
-   * a phase 1 request, which the provider tests assert, so nothing about
-   * answering from content changes when no tool is allowed.
+   * Omitted or empty means "no tools": providers omit `tools` from the
+   * request body, so nothing about answering from content changes when no tool
+   * is allowed.
    */
   tools?: readonly ToolDefinition[] | undefined;
 }
