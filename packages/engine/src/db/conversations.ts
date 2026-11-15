@@ -83,7 +83,7 @@ export function conversationsFor(db: D1Database, orgId: string) {
                   (SELECT q.content
                      FROM messages q
                     WHERE q.org_id = ?1 AND q.conversation_id = c.id AND q.role = 'user'
-                    ORDER BY q.created_at ASC, q.id ASC
+                    ORDER BY q.created_at ASC, q.rowid ASC
                     LIMIT 1) AS first_question,
                   (SELECT COUNT(*)
                      FROM messages m

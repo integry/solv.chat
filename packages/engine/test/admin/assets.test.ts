@@ -80,4 +80,50 @@ describe("admin static assets", () => {
 
     expect(assetBody({ body: "a{}", type: "text/css", encoding: "utf8" })).toBe("a{}");
   });
+
+  it("sets security headers on the admin shell while hashed assets and 404s keep their behaviour", async () => {
+    const app = unauthenticatedApp();
+
+    const shellCtx = createExecutionContext();
+    const shellRes = await app.fetch(new Request("https://example.com/admin"), env, shellCtx);
+    await waitOnExecutionContext(shellCtx);
+
+    expect(shellRes.status).toBe(200);
+    expect(shellRes.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(shellRes.headers.get("referrer-policy")).toBe("same-origin");
+    expect(shellRes.headers.get("x-frame-options")).toBe("DENY");
+
+    const csp = shellRes.headers.get("content-security-policy");
+    expect(csp).toBeTruthy();
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).not.toContain("'unsafe-inline'");
+    expect(csp).toContain("style-src 'self'");
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).toContain("frame-ancestors 'none'");
+
+    const html = await shellRes.text();
+    const jsMatch = /src="(\/admin\/assets\/[^"]+\.js)"/.exec(html);
+    expect(jsMatch?.[1]).toBeTruthy();
+
+    const assetCtx = createExecutionContext();
+    const assetRes = await app.fetch(
+      new Request(`https://example.com${jsMatch?.[1] ?? ""}`),
+      env,
+      assetCtx,
+    );
+    await waitOnExecutionContext(assetCtx);
+    expect(assetRes.status).toBe(200);
+    expect(assetRes.headers.get("content-type")).toContain("application/javascript");
+    expect(assetRes.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(assetRes.headers.get("content-security-policy")).toBeNull();
+
+    const missingCtx = createExecutionContext();
+    const missingRes = await app.fetch(
+      new Request("https://example.com/admin/assets/missing.js"),
+      env,
+      missingCtx,
+    );
+    await waitOnExecutionContext(missingCtx);
+    expect(missingRes.status).toBe(404);
+  });
 });

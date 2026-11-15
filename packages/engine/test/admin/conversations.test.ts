@@ -280,4 +280,55 @@ describe("admin conversations API", () => {
       feedback: [{ value: "up", note: "Very clear" }],
     });
   });
+
+  it("picks the same first question in list and detail when two questions share created_at", async () => {
+    const astA = await seedAssistant(ORG_A);
+    const conv = await seedConversation(ORG_A, astA, 1000);
+    // Insert a lexicographically larger id first and a smaller id second with the
+    // same created_at so ordering by (created_at, id) would disagree with (created_at, rowid).
+    await env.DB.prepare(
+      `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at, reply_to, question_key)
+       VALUES (?1, ?2, ?3, 'user', ?4, '[]', NULL, 0, 0, 1, 1001, NULL, ?5)`,
+    )
+      .bind(
+        "msg_zzzzzzzzzzzzzzzzzzzz",
+        ORG_A,
+        conv,
+        "First written question",
+        "first written question",
+      )
+      .run();
+    await env.DB.prepare(
+      `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at, reply_to, question_key)
+       VALUES (?1, ?2, ?3, 'user', ?4, '[]', NULL, 0, 0, 1, 1001, NULL, ?5)`,
+    )
+      .bind(
+        "msg_aaaaaaaaaaaaaaaaaaaa",
+        ORG_A,
+        conv,
+        "Second written question",
+        "second written question",
+      )
+      .run();
+
+    const app = appForOrg(ORG_A);
+    const [listRes, detailRes] = await Promise.all([
+      call(app, `/api/admin/assistants/${astA}/conversations`),
+      call(app, `/api/admin/conversations/${conv}`),
+    ]);
+    expect(listRes.status).toBe(200);
+    expect(detailRes.status).toBe(200);
+
+    const listBody = (await listRes.json()) as {
+      conversations: Array<{ id: string; firstQuestion: string | null }>;
+    };
+    const detailBody = (await detailRes.json()) as {
+      turns: Array<{ id: string; role: string; content: string }>;
+    };
+
+    const listFirst = listBody.conversations.find((c) => c.id === conv)?.firstQuestion;
+    const detailFirst = detailBody.turns.find((t) => t.role === "user")?.content;
+    expect(listFirst).toBe("First written question");
+    expect(detailFirst).toBe("First written question");
+  });
 });

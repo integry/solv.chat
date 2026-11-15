@@ -27,12 +27,12 @@ The metadata indexes (`org_id` and `assistant_id`) must exist before the first `
 
 Four secrets. Run `npx wrangler secret put <name>` inside `packages/engine` for each one:
 
-| Secret                | What it is                                                                    | Where it comes from                                              |
-| --------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `SOLV_ADMIN_PASSWORD` | The one password that signs you in to `/admin`.                               | You choose it (or generate one with `openssl rand -base64 24`).  |
-| `SOLV_SECRET_KEY`     | Signs session cookies and encrypts stored credentials.                        | `openssl rand -base64 32`. Changing it signs you out everywhere. |
-| `SOLV_ANTHROPIC_KEY`  | Your Anthropic key, if the instance uses Anthropic.                           | console.anthropic.com                                            |
-| `SOLV_OPENAI_KEY`     | Your OpenAI key. Needed for embeddings even when answers come from Anthropic. | platform.openai.com                                              |
+| Secret                | What it is                                                                                       | Where it comes from                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `SOLV_ADMIN_PASSWORD` | The one password that signs you in to `/admin`.                                                  | You choose it (or generate one with `openssl rand -base64 24`).  |
+| `SOLV_SECRET_KEY`     | Signs session cookies today; will also encrypt stored MCP tool credentials in phase 2 (planned). | `openssl rand -base64 32`. Changing it signs you out everywhere. |
+| `SOLV_ANTHROPIC_KEY`  | Your Anthropic key, if the instance uses Anthropic.                                              | console.anthropic.com                                            |
+| `SOLV_OPENAI_KEY`     | Your OpenAI key. Needed for embeddings even when answers come from Anthropic.                    | platform.openai.com                                              |
 
 By default, `packages/engine/wrangler.jsonc` sets `SOLV_LLM_PROVIDER` to `"anthropic"` and `SOLV_LLM_TIER` to `"fast"`. To answer with OpenAI or switch tiers (`"fast"` or `"balanced"`), edit those two values under `vars` in `packages/engine/wrangler.jsonc`.
 

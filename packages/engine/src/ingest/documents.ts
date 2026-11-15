@@ -315,9 +315,14 @@ export async function deleteDocuments(
   const keepSet = isPrune
     ? new Set(rawBody.keep === undefined ? [] : readStringArray(rawBody.keep, "keep"))
     : null;
-  const externalIds = !isPrune
-    ? [...new Set(readStringArray(rawBody.externalIds, "externalIds"))]
-    : [];
+  let externalIds: string[] = [];
+  if (!isPrune) {
+    const rawIds = readStringArray(rawBody.externalIds, "externalIds");
+    if (rawIds.length > MAX_BATCH_DOCUMENTS) {
+      throw new BadRequest([`externalIds: must contain at most ${MAX_BATCH_DOCUMENTS} items`]);
+    }
+    externalIds = [...new Set(rawIds)];
+  }
 
   const source = await findExistingSource(
     deps.tenant,

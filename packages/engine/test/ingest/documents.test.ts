@@ -390,6 +390,57 @@ describe("ingest documents", () => {
     expect(count?.count).toBe(0);
   });
 
+  it("caps DELETE externalIds at MAX_BATCH_DOCUMENTS and returns 400", async () => {
+    const app = createTestApp();
+    const { id: assistantId, key } = await createAssistantWithKey();
+
+    const putRes = await app.fetch(
+      new Request(`https://example.com/v1/ingest/${assistantId}/documents`, {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${key}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          documents: [
+            {
+              externalId: "keep-me",
+              url: "https://example.com/keep",
+              title: "Keep",
+              markdown: "hello",
+            },
+          ],
+        }),
+      }),
+      env,
+      ctx,
+    );
+    expect(putRes.status).toBe(200);
+
+    const tooManyIds = Array.from({ length: MAX_BATCH_DOCUMENTS + 1 }, (_, i) => `doc-${i}`);
+    const deleteRes = await app.fetch(
+      new Request(`https://example.com/v1/ingest/${assistantId}/documents`, {
+        method: "DELETE",
+        headers: {
+          authorization: `Bearer ${key}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ externalIds: tooManyIds }),
+      }),
+      env,
+      ctx,
+    );
+    expect(deleteRes.status).toBe(400);
+    expect(await deleteRes.json()).toMatchObject({
+      errors: [`externalIds: must contain at most ${MAX_BATCH_DOCUMENTS} items`],
+    });
+
+    const count = await env.DB.prepare("SELECT COUNT(*) AS count FROM documents WHERE org_id = ?1")
+      .bind(TEST_ORG_ID)
+      .first<{ count: number }>();
+    expect(count?.count).toBe(1);
+  });
+
   it("converges concurrent first default-source pushes onto one source while allowing explicit sources", async () => {
     const { id: assistantId } = await createAssistantWithKey();
     const scope = { orgId: TEST_ORG_ID, assistantId };
