@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultVersionConfig } from "@solvchat/core";
+import { defaultVersionConfig, MAX_TESTS_PER_ASSISTANT } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { apply } from "../src/apply.js";
 
@@ -246,5 +246,58 @@ describe("solv apply", () => {
     );
 
     expect(urls.every((u) => u.endsWith("/config"))).toBe(true);
+  });
+
+  it.each([
+    {
+      name: "an empty question",
+      tests: [{ question: "", expectation: { kind: "declines" } }],
+      expected: "tests[0].question",
+    },
+    {
+      name: "an invalid expectation",
+      tests: [{ question: "Do you ship?", expectation: { kind: "unknown" } }],
+      expected: "tests[0].expectation.kind",
+    },
+    {
+      name: `more than ${MAX_TESTS_PER_ASSISTANT} tests`,
+      tests: Array.from({ length: MAX_TESTS_PER_ASSISTANT + 1 }, (_, i) => ({
+        question: `Question ${i + 1}?`,
+        expectation: { kind: "declines" },
+      })),
+      expected: String(MAX_TESTS_PER_ASSISTANT),
+    },
+  ])("rejects $name before sending any config or test mutation", async ({ tests, expected }) => {
+    const configPath = join(root, "solv.config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        behaviour: { greeting: "Valid change" },
+        tests,
+      }),
+      "utf8",
+    );
+
+    let called = false;
+    const fetchImpl: typeof fetch = async () => {
+      called = true;
+      return Response.json({});
+    };
+
+    const logs: string[] = [];
+    await expect(
+      apply(
+        {
+          file: configPath,
+          endpoint: "https://chat.example.com",
+          assistant: "ast_123",
+          ingestKey: "ik_secret",
+        },
+        { fetchImpl, log: (line) => logs.push(line) },
+      ),
+    ).rejects.toThrow(expected);
+
+    expect(called).toBe(false);
+    expect(logs.join("\n")).toContain(expected);
   });
 });

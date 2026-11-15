@@ -1,7 +1,13 @@
 import { readFile } from "node:fs/promises";
-import { isPlainObject, parseVersionConfig, type VersionConfig } from "@solvchat/core";
+import {
+  isPlainObject,
+  parseVersionConfig,
+  type TestInput,
+  type VersionConfig,
+} from "@solvchat/core";
 import { assertValidHeaderValue, CliError, normalizeEndpoint, requestJson } from "./http.js";
 import type { CliDeps } from "./push.js";
+import { parseDeclaredTests } from "./test.js";
 
 export interface ApplyOptions {
   file: string;
@@ -79,12 +85,9 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
 
   // Separated before anything is sent. `parseVersionConfig` drops unknown
   // keys, so leaving `tests` in the config body would look like it worked.
-  let declaredTests: unknown[] | null = null;
+  let declaredTests: TestInput[] | null = null;
   if (isPlainObject(rawJson) && rawJson.tests !== undefined) {
-    if (!Array.isArray(rawJson.tests)) {
-      throw new CliError(`${options.file}: tests must be an array`);
-    }
-    declaredTests = rawJson.tests;
+    declaredTests = parseDeclaredTests(rawJson.tests, options.file, deps.log);
   }
   const configOnly = isPlainObject(rawJson)
     ? Object.fromEntries(Object.entries(rawJson).filter(([key]) => key !== "tests"))

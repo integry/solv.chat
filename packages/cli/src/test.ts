@@ -1,5 +1,10 @@
 import { readFile } from "node:fs/promises";
-import { isPlainObject } from "@solvchat/core";
+import {
+  isPlainObject,
+  MAX_TESTS_PER_ASSISTANT,
+  parseTestInput,
+  type TestInput,
+} from "@solvchat/core";
 import { assertValidHeaderValue, CliError, normalizeEndpoint, requestJson } from "./http.js";
 import type { CliDeps } from "./push.js";
 
@@ -9,11 +14,6 @@ export interface TestOptions {
   assistant: string;
   ingestKey?: string;
   dryRun?: boolean;
-}
-
-interface DeclaredTest {
-  question: string;
-  expectation: unknown;
 }
 
 interface RunResult {
@@ -29,18 +29,49 @@ interface RunResponse {
   stopped?: string | null;
 }
 
-function questionLabel(item: unknown): string {
-  if (isPlainObject(item) && typeof item.question === "string" && item.question.trim().length > 0) {
-    return item.question;
+/**
+ * Validates a `tests` declaration from `solv.config.json` against
+ * `@solvchat/core`'s test schema and per-assistant cap.
+ */
+export function parseDeclaredTests(
+  rawTests: unknown,
+  file: string,
+  log?: (line: string) => void,
+): TestInput[] {
+  if (!Array.isArray(rawTests)) {
+    throw new CliError(`${file}: tests must be an array`);
   }
-  return "(invalid test)";
+  if (rawTests.length > MAX_TESTS_PER_ASSISTANT) {
+    const message = `tests: an assistant can have at most ${MAX_TESTS_PER_ASSISTANT} tests`;
+    log?.(message);
+    throw new CliError(message);
+  }
+
+  const items: TestInput[] = [];
+  const errors: string[] = [];
+  for (let i = 0; i < rawTests.length; i++) {
+    const parsed = parseTestInput(rawTests[i]);
+    if (!parsed.ok) {
+      for (const error of parsed.errors) {
+        errors.push(`tests[${i}].${error}`);
+      }
+      continue;
+    }
+    items.push(parsed.value);
+  }
+  if (errors.length > 0) {
+    for (const error of errors) {
+      log?.(error);
+    }
+    throw new CliError(errors.join("; "));
+  }
+  return items;
 }
 
 /**
- * Reads a `tests` array from `solv.config.json`, validating shape locally.
- * Expects the engine's parser to remain the single authority on expectations.
+ * Reads and validates a `tests` array from `solv.config.json`.
  */
-async function readDeclaredTests(file: string): Promise<DeclaredTest[]> {
+async function readDeclaredTests(file: string, log?: (line: string) => void): Promise<TestInput[]> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(file, "utf8"));
@@ -50,10 +81,7 @@ async function readDeclaredTests(file: string): Promise<DeclaredTest[]> {
   if (!isPlainObject(parsed) || parsed.tests === undefined) {
     throw new CliError(`${file} declares no tests`);
   }
-  if (!Array.isArray(parsed.tests)) {
-    throw new CliError(`${file}: tests must be an array`);
-  }
-  return parsed.tests as DeclaredTest[];
+  return parseDeclaredTests(parsed.tests, file, log);
 }
 
 /**
@@ -63,7 +91,8 @@ async function readDeclaredTests(file: string): Promise<DeclaredTest[]> {
  * agree on whether the draft passes.
  */
 export async function test(options: TestOptions, deps: CliDeps): Promise<void> {
-  const declared = options.file === undefined ? null : await readDeclaredTests(options.file);
+  const declared =
+    options.file === undefined ? null : await readDeclaredTests(options.file, deps.log);
 
   if (options.dryRun) {
     if (declared === null) {
@@ -71,7 +100,7 @@ export async function test(options: TestOptions, deps: CliDeps): Promise<void> {
     } else {
       deps.log(`Would replace the assistant's tests with ${declared.length} from ${options.file}:`);
       for (const item of declared) {
-        deps.log(`  ${questionLabel(item)}`);
+        deps.log(`  ${item.question}`);
       }
       deps.log("Any test not in this file would be removed.");
     }

@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MAX_TESTS_PER_ASSISTANT } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/index.js";
 
@@ -381,5 +382,72 @@ describe("solv test", () => {
 
     expect(code).toBe(1);
     expect(errors.join("\n")).toContain("did not pass");
+  });
+
+  it("rejects invalid declared tests locally before --dry-run output or requests", async () => {
+    const configPath = join(root, "solv.config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        tests: [{ question: "", expectation: { kind: "declines" } }],
+      }),
+      "utf8",
+    );
+
+    const logs: string[] = [];
+    const errors: string[] = [];
+    let fetched = false;
+    const code = await runCli(
+      [
+        "test",
+        configPath,
+        "--dry-run",
+        "--endpoint",
+        "https://chat.example.com",
+        "--assistant",
+        "ast_123",
+      ],
+      {
+        env: {},
+        log: (line) => logs.push(line),
+        errorLog: (line) => errors.push(line),
+        fetchImpl: async () => {
+          fetched = true;
+          return Response.json({});
+        },
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(fetched).toBe(false);
+    expect(logs.join("\n")).not.toContain("Would replace");
+    expect(errors.join("\n")).toContain("tests[0].question");
+  });
+
+  it("rejects more than MAX_TESTS_PER_ASSISTANT declared tests before making requests", async () => {
+    const configPath = join(root, "solv.config.json");
+    const tests = Array.from({ length: MAX_TESTS_PER_ASSISTANT + 1 }, (_, i) => ({
+      question: `Question ${i + 1}?`,
+      expectation: { kind: "declines" },
+    }));
+    await writeFile(configPath, JSON.stringify({ tests }), "utf8");
+
+    const errors: string[] = [];
+    let fetched = false;
+    const code = await runCli(
+      ["test", configPath, "--endpoint", "https://chat.example.com", "--assistant", "ast_123"],
+      {
+        env: { SOLV_INGEST_KEY: "ik_secret" },
+        errorLog: (line) => errors.push(line),
+        fetchImpl: async () => {
+          fetched = true;
+          return Response.json({});
+        },
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(fetched).toBe(false);
+    expect(errors.join("\n")).toContain(String(MAX_TESTS_PER_ASSISTANT));
   });
 });
