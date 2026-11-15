@@ -330,4 +330,56 @@ describe("solv test", () => {
     expect(fetched).toBe(false);
     expect(errors.join("\n")).toContain("second.config.json");
   });
+
+  it("exits 1 when the server returns passed: false with an empty results array", async () => {
+    const logs: string[] = [];
+    const errors: string[] = [];
+
+    const code = await runCli(
+      ["test", "--endpoint", "https://chat.example.com", "--assistant", "ast_123"],
+      {
+        env: { SOLV_INGEST_KEY: "ik_secret_value" },
+        log: (line) => logs.push(line),
+        errorLog: (line) => errors.push(line),
+        fetchImpl: async () =>
+          Response.json({
+            passed: false,
+            results: [],
+          }),
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(logs.join("\n")).toContain("No tests to run.");
+    expect(errors.join("\n")).toContain("No tests to run");
+  });
+
+  it("exits 1 when the server returns passed: false even if all returned results passed", async () => {
+    const logs: string[] = [];
+    const errors: string[] = [];
+
+    const code = await runCli(
+      ["test", "--endpoint", "https://chat.example.com", "--assistant", "ast_123"],
+      {
+        env: { SOLV_INGEST_KEY: "ik_secret_value" },
+        log: (line) => logs.push(line),
+        errorLog: (line) => errors.push(line),
+        fetchImpl: async () =>
+          Response.json({
+            passed: false,
+            results: [
+              {
+                testId: "tst_1",
+                question: "Do you ship to Spain?",
+                outcome: "passed",
+                reason: 'Said "three days".',
+              },
+            ],
+          }),
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(errors.join("\n")).toContain("did not pass");
+  });
 });

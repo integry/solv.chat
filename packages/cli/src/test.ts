@@ -130,9 +130,15 @@ export async function test(options: TestOptions, deps: CliDeps): Promise<void> {
 
   if (run.results.length === 0) {
     deps.log("No tests to run.");
+    if (!run.passed) {
+      throw new CliError("No tests to run");
+    }
     return;
   }
   if (failed > 0 || notRun > 0) {
     throw new CliError(failed > 0 ? `${failed} test(s) failed` : `${notRun} test(s) did not run`);
+  }
+  if (!run.passed) {
+    throw new CliError("Test run did not pass");
   }
 }
