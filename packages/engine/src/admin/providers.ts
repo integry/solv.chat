@@ -9,9 +9,13 @@ import { MAX_SECRET_LENGTH, sealSecret } from "../security/secretBox.js";
 import { BadRequest, Conflict, NotFound } from "./errors.js";
 
 const PROVIDERS: readonly LlmProviderName[] = ["anthropic", "openai", "openrouter"];
+export const KEY_TEST_TIMEOUT_MS = 10_000;
+// Source: https://platform.claude.com/docs/en/api/models/list — checked 2026-11-15
 const ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models?limit=1";
 const ANTHROPIC_VERSION = "2026-10-21";
+// Source: https://developers.openai.com/api/docs/models — checked 2026-11-15
 const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
+// Source: https://openrouter.ai/docs/api-reference/limits — checked 2026-11-15
 const OPENROUTER_AUTH_KEY_URL = "https://openrouter.ai/api/v1/auth/key";
 
 const ALLOWED_SETTINGS_KEYS = new Set(["llmProvider", "llmTier", "llmModel", "embeddingsProvider"]);
@@ -229,6 +233,7 @@ export async function removeProviderKey(
 export async function testProviderKey(
   deps: ProviderAdminDeps,
   provider: LlmProviderName,
+  timeoutMs = KEY_TEST_TIMEOUT_MS,
 ): Promise<Response> {
   if (deps.keys.managed === true) throw new NotFound();
 
@@ -259,6 +264,8 @@ export async function testProviderKey(
   }
 
   const doFetch = deps.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
   try {
     if (provider === "anthropic") {
@@ -268,6 +275,7 @@ export async function testProviderKey(
           "x-api-key": apiKey,
           "anthropic-version": ANTHROPIC_VERSION,
         },
+        signal: controller.signal,
       });
     } else if (provider === "openai") {
       response = await doFetch(OPENAI_MODELS_URL, {
@@ -275,6 +283,7 @@ export async function testProviderKey(
         headers: {
           authorization: `Bearer ${apiKey}`,
         },
+        signal: controller.signal,
       });
     } else {
       response = await doFetch(OPENROUTER_AUTH_KEY_URL, {
@@ -284,6 +293,7 @@ export async function testProviderKey(
           "http-referer": OPENROUTER_DEFAULT_REFERER,
           "x-title": OPENROUTER_DEFAULT_TITLE,
         },
+        signal: controller.signal,
       });
     }
   } catch {
@@ -292,6 +302,8 @@ export async function testProviderKey(
       category: "unreachable",
       message: "Could not reach the provider.",
     });
+  } finally {
+    clearTimeout(timer);
   }
 
   // Never read or forward the provider's response body.

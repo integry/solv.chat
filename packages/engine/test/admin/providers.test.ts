@@ -1,6 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { KEY_TEST_TIMEOUT_MS } from "../../src/admin/providers.js";
 import type { App, AppOptions, Env } from "../../src/app.js";
 import { createApp } from "../../src/app.js";
 import { secretKeys } from "../../src/seams/open/secretKeys.js";
@@ -591,5 +592,105 @@ describe("admin provider settings & keys", () => {
       value: "openrouter",
       source: "stored",
     });
+  });
+
+  it("sends the expected URLs and headers when testing provider keys", async () => {
+    const seen: Array<{
+      url: string;
+      method: string | undefined;
+      headers: Headers;
+      hasSignal: boolean;
+    }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      seen.push({
+        url,
+        method: init?.method,
+        headers: new Headers(init?.headers),
+        hasSignal: init?.signal instanceof AbortSignal,
+      });
+      return new Response("{}", { status: 200 });
+    });
+
+    const { app, testEnv } = appFor(
+      ORG_A,
+      {
+        SOLV_ANTHROPIC_KEY: "sk-ant-contract",
+        SOLV_OPENAI_KEY: "sk-openai-contract",
+        SOLV_OPENROUTER_KEY: "sk-or-contract",
+      },
+      { fetch: fetchMock as unknown as typeof fetch },
+    );
+
+    for (const provider of ["anthropic", "openai", "openrouter"] as const) {
+      const res = await call(app, testEnv, `/api/admin/providers/keys/${provider}/test`, {
+        method: "POST",
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, category: "ok" });
+    }
+
+    expect(seen).toHaveLength(3);
+
+    const [anthropicCall, openaiCall, openrouterCall] = seen;
+    expect(anthropicCall?.url).toBe("https://api.anthropic.com/v1/models?limit=1");
+    expect(anthropicCall?.method).toBe("GET");
+    expect(anthropicCall?.hasSignal).toBe(true);
+    expect(anthropicCall?.headers.get("x-api-key")).toBe("sk-ant-contract");
+    expect(anthropicCall?.headers.get("anthropic-version")).toBe("2026-10-21");
+
+    expect(openaiCall?.url).toBe("https://api.openai.com/v1/models");
+    expect(openaiCall?.method).toBe("GET");
+    expect(openaiCall?.hasSignal).toBe(true);
+    expect(openaiCall?.headers.get("authorization")).toBe("Bearer sk-openai-contract");
+
+    expect(openrouterCall?.url).toBe("https://openrouter.ai/api/v1/auth/key");
+    expect(openrouterCall?.method).toBe("GET");
+    expect(openrouterCall?.hasSignal).toBe(true);
+    expect(openrouterCall?.headers.get("authorization")).toBe("Bearer sk-or-contract");
+    expect(openrouterCall?.headers.get("http-referer")).toBe("https://solv.chat");
+    expect(openrouterCall?.headers.get("x-title")).toBe("solv.chat");
+  });
+
+  it("aborts stalled key-test requests after the timeout deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let aborted = false;
+      const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) {
+            reject(new Error("expected AbortSignal"));
+            return;
+          }
+          signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        });
+      });
+
+      const { app, testEnv } = appFor(
+        ORG_A,
+        { SOLV_OPENAI_KEY: "sk-openai-stalled" },
+        { fetch: fetchMock as unknown as typeof fetch },
+      );
+
+      const pending = call(app, testEnv, "/api/admin/providers/keys/openai/test", {
+        method: "POST",
+      });
+      await vi.advanceTimersByTimeAsync(KEY_TEST_TIMEOUT_MS + 10);
+      const res = await pending;
+
+      expect(aborted).toBe(true);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        ok: false,
+        category: "unreachable",
+        message: "Could not reach the provider.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

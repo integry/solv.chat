@@ -109,7 +109,7 @@ function ProviderKeyCard({
 
   return (
     <section className="source-card stack" aria-label={`${label} API key`}>
-      <div className="row-between">
+      <div className="source-row-header">
         <div>
           <h3 className="section-heading">{label}</h3>
           <p className="muted">
@@ -146,7 +146,7 @@ function ProviderKeyCard({
           />
         </div>
 
-        <div className="row-actions">
+        <div className="actions">
           <button
             type="submit"
             className="btn btn-primary btn-sm"
@@ -181,13 +181,13 @@ function ProviderKeyCard({
         </p>
       )}
       {notice && (
-        <p className="notice" role="status">
+        <p className="notice-text" role="status">
           {notice}
         </p>
       )}
       {testResult && (
         <p
-          className={testResult.ok ? "notice" : "error-text"}
+          className={testResult.ok ? "notice-text" : "error-text"}
           role={testResult.ok ? "status" : "alert"}
         >
           {testResult.message}
@@ -308,12 +308,13 @@ export function Providers() {
             <h2 className="section-heading">Models</h2>
 
             <div className="field">
-              <div className="row-between">
+              <div className="sitemap-toolbar">
                 <label htmlFor="llm-provider">Answering provider</label>
                 <SourceBadge source={data.settings.llmProvider.source} label="Answering provider" />
               </div>
               <select
                 id="llm-provider"
+                className="select"
                 value={llmProvider}
                 disabled={busy}
                 onChange={(e) => {
@@ -329,7 +330,7 @@ export function Providers() {
 
             {llmProvider === "openrouter" ? (
               <div className="field">
-                <div className="row-between">
+                <div className="sitemap-toolbar">
                   <label htmlFor="llm-model">OpenRouter model ID</label>
                   <SourceBadge source={data.settings.llmModel.source} label="OpenRouter model ID" />
                 </div>
@@ -355,12 +356,13 @@ export function Providers() {
               </div>
             ) : (
               <div className="field">
-                <div className="row-between">
+                <div className="sitemap-toolbar">
                   <label htmlFor="llm-tier">Model tier</label>
                   <SourceBadge source={data.settings.llmTier.source} label="Model tier" />
                 </div>
                 <select
                   id="llm-tier"
+                  className="select"
                   value={llmTier}
                   disabled={busy}
                   onChange={(e) => {
@@ -375,7 +377,7 @@ export function Providers() {
             )}
 
             <div className="field">
-              <div className="row-between">
+              <div className="sitemap-toolbar">
                 <label htmlFor="embeddings-provider">Embeddings provider</label>
                 <SourceBadge
                   source={data.settings.embeddingsProvider.source}
@@ -384,6 +386,7 @@ export function Providers() {
               </div>
               <select
                 id="embeddings-provider"
+                className="select"
                 value={embeddingsProvider}
                 disabled={busy}
                 onChange={(e) => {
@@ -400,7 +403,7 @@ export function Providers() {
               </span>
             </div>
 
-            <div className="row-actions">
+            <div className="actions">
               <button type="submit" className="btn btn-primary" disabled={busy}>
                 {busy ? "Saving…" : "Save settings"}
               </button>
@@ -422,7 +425,7 @@ export function Providers() {
               </p>
             )}
             {notice && (
-              <p className="notice" role="status">
+              <p className="notice-text" role="status">
                 {notice}
               </p>
             )}
