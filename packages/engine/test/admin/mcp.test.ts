@@ -1070,4 +1070,80 @@ describe("admin MCP servers and tools API", () => {
     expect(afterAuth?.authKind).toBe("none");
     expect(afterAuth?.headerName).toBeNull();
   });
+
+  it("commits discovered tool upserts and pruning atomically on concurrent refreshes (F7)", async () => {
+    const app = appForOrg(ORG_A, mcpFetch([]));
+    const assistantId = await createAssistant(app);
+    const created = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 1",
+        url: "https://one.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string } };
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+
+    // Force Request A (discovering ["tool_a"]) to pause after remote discovery
+    // before its getServer read while Request B (discovering ["tool_b"]) runs to completion.
+    let releaseRequestA!: () => void;
+    const requestAGate = new Promise<void>((resolve) => {
+      releaseRequestA = resolve;
+    });
+    let getServerCalls = 0;
+
+    const gatedTenantA = {
+      ...tenant,
+      mcp: {
+        ...tenant.mcp,
+        async getServer(id: string) {
+          getServerCalls++;
+          if (getServerCalls === 1) {
+            await requestAGate;
+          }
+          return tenant.mcp.getServer(id);
+        },
+      },
+    };
+
+    const fetchA = mcpFetch([
+      { name: "tool_a", description: "Tool A", inputSchema: { type: "object" } },
+    ]);
+    const fetchB = mcpFetch([
+      { name: "tool_b", description: "Tool B", inputSchema: { type: "object" } },
+    ]);
+
+    let signalDiscoveryA!: () => void;
+    const discoveryADone = new Promise<void>((resolve) => {
+      signalDiscoveryA = resolve;
+    });
+    const trackedFetchA: typeof fetch = async (input, init) => {
+      const res = await fetchA(input, init);
+      const body = JSON.parse(String(init?.body)) as { method?: string };
+      if (body.method === "tools/list") {
+        signalDiscoveryA();
+      }
+      return res;
+    };
+
+    const refreshA = refreshMcpTools(
+      { tenant: gatedTenantA, secretKey: TEST_SECRET_KEY, fetchImpl: trackedFetchA },
+      created.server.id,
+    );
+
+    await discoveryADone;
+
+    const toolsB = await refreshMcpTools(
+      { tenant, secretKey: TEST_SECRET_KEY, fetchImpl: fetchB },
+      created.server.id,
+    );
+    expect(toolsB.map((t) => t.name)).toEqual(["tool_b"]);
+
+    releaseRequestA();
+    const toolsA = await refreshA;
+    expect(toolsA.map((t) => t.name)).toEqual(["tool_a"]);
+
+    const stored = await tenant.mcp.listTools(created.server.id);
+    expect(stored.map((t) => t.name)).toEqual(["tool_a"]);
+  });
 });

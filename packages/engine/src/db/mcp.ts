@@ -138,9 +138,10 @@ export interface SetToolAllowedWithDraftInput {
   nextConfig: VersionConfig;
 }
 
-export interface PruneToolsWithDraftInput {
+export interface SyncToolsWithDraftInput {
   assistantId: string;
   serverId: string;
+  tools: readonly UpsertMcpToolInput[];
   remoteNames: readonly string[];
   prunedAllowedNames: readonly string[];
   removedFromDraftNames: readonly string[];
@@ -612,16 +613,24 @@ export function mcpFor(db: D1Database, orgId: string) {
     },
 
     /**
-     * Atomically prunes dropped tools for `serverId` and reconciles the draft's
-     * `allowedTools` when any pruned allowed tool has no remaining allowed
-     * counterpart on another server.
+     * Atomically upserts discovered tools, prunes dropped tools for `serverId`,
+     * and reconciles the draft's `allowedTools` when any pruned allowed tool has
+     * no remaining allowed counterpart on another server.
      */
-    async pruneToolsWithDraft(input: PruneToolsWithDraftInput): Promise<boolean> {
+    async syncToolsWithDraft(input: SyncToolsWithDraftInput): Promise<boolean> {
       const expectedConfigJson = expectedVersionConfig(input.expectedDraft);
       const remoteJson = JSON.stringify([...input.remoteNames]);
       const prunedAllowedJson = JSON.stringify([...input.prunedAllowedNames]);
       const removedSet = new Set(input.removedFromDraftNames);
       const retainedNames = input.prunedAllowedNames.filter((n) => !removedSet.has(n));
+      const toolsJson = JSON.stringify(
+        input.tools.map((t) => ({
+          id: t.id,
+          name: t.name,
+          description: t.description,
+          inputSchema: JSON.stringify(t.inputSchema),
+        })),
+      );
 
       const unexpectedServerAllowedGuard = `NOT EXISTS (
         SELECT 1 FROM mcp_tools
@@ -645,7 +654,7 @@ export function mcpFor(db: D1Database, orgId: string) {
           input.removedFromDraftNames,
           retainedNames,
         );
-        const [, verifyRes] = await db.batch([
+        const statements: D1PreparedStatement[] = [
           prepare(
             db,
             `DELETE FROM mcp_tools
@@ -655,8 +664,37 @@ export function mcpFor(db: D1Database, orgId: string) {
                   SELECT 1 FROM assistant_versions
                    WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
                 )
+                AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
                 AND ${unexpectedServerAllowedGuard}${otherServerGuards}`,
           ).bind(...verifyArgs),
+        ];
+        if (input.tools.length > 0) {
+          const insertArgs = [...verifyArgs, toolsJson];
+          statements.push(
+            prepareInsert(
+              db,
+              `INSERT INTO mcp_tools (id, org_id, server_id, name, description, input_schema, allowed)
+               SELECT json_extract(t.value, '$.id'),
+                      ?1,
+                      ?2,
+                      json_extract(t.value, '$.name'),
+                      json_extract(t.value, '$.description'),
+                      json_extract(t.value, '$.inputSchema'),
+                      0
+                 FROM json_each(?${insertArgs.length}) t
+                WHERE EXISTS (
+                        SELECT 1 FROM assistant_versions
+                         WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
+                      )
+                  AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+                  AND ${unexpectedServerAllowedGuard}${otherServerGuards}
+               ON CONFLICT(org_id, server_id, name) DO UPDATE SET
+                 description = excluded.description,
+                 input_schema = excluded.input_schema`,
+            ).bind(...insertArgs),
+          );
+        }
+        statements.push(
           prepare(
             db,
             `SELECT 1 AS ok
@@ -665,7 +703,9 @@ export function mcpFor(db: D1Database, orgId: string) {
                 AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
                 AND ${unexpectedServerAllowedGuard}${otherServerGuards}`,
           ).bind(...verifyArgs),
-        ]);
+        );
+        const results = await db.batch(statements);
+        const verifyRes = results[results.length - 1];
         return (verifyRes?.results?.length ?? 0) > 0;
       }
 
@@ -685,7 +725,7 @@ export function mcpFor(db: D1Database, orgId: string) {
         input.removedFromDraftNames,
         retainedNames,
       );
-      const [draftRes] = await db.batch([
+      const statements: D1PreparedStatement[] = [
         prepare(
           db,
           `UPDATE assistant_versions
@@ -711,8 +751,96 @@ export function mcpFor(db: D1Database, orgId: string) {
           remoteJson,
           nextConfigJson,
         ),
-      ]);
+      ];
+      if (input.tools.length > 0) {
+        statements.push(
+          prepareInsert(
+            db,
+            `INSERT INTO mcp_tools (id, org_id, server_id, name, description, input_schema, allowed)
+             SELECT json_extract(t.value, '$.id'),
+                    ?1,
+                    ?2,
+                    json_extract(t.value, '$.name'),
+                    json_extract(t.value, '$.description'),
+                    json_extract(t.value, '$.inputSchema'),
+                    0
+               FROM json_each(?6) t
+              WHERE EXISTS (
+                      SELECT 1 FROM assistant_versions
+                       WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
+                    )
+                AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+             ON CONFLICT(org_id, server_id, name) DO UPDATE SET
+               description = excluded.description,
+               input_schema = excluded.input_schema`,
+          ).bind(
+            orgId,
+            input.serverId,
+            input.assistantId,
+            input.expectedDraft.id,
+            nextConfigJson,
+            toolsJson,
+          ),
+        );
+      }
+      const [draftRes] = await db.batch(statements);
       return (draftRes?.meta.changes ?? 0) > 0;
+    },
+
+    /** Atomically replaces a server's discovered tools when no draft version exists. */
+    async replaceServerTools(
+      serverId: string,
+      tools: readonly UpsertMcpToolInput[],
+    ): Promise<boolean> {
+      const remoteJson = JSON.stringify(tools.map((t) => t.name));
+      const statements: D1PreparedStatement[] = [
+        prepare(
+          db,
+          `DELETE FROM mcp_tools
+            WHERE org_id = ?1 AND server_id = ?2
+              AND name NOT IN (SELECT value FROM json_each(?3))`,
+        ).bind(orgId, serverId, remoteJson),
+      ];
+      if (tools.length > 0) {
+        statements.push(
+          prepareInsert(
+            db,
+            `INSERT INTO mcp_tools (id, org_id, server_id, name, description, input_schema, allowed)
+             SELECT json_extract(t.value, '$.id'),
+                    ?1,
+                    ?2,
+                    json_extract(t.value, '$.name'),
+                    json_extract(t.value, '$.description'),
+                    json_extract(t.value, '$.inputSchema'),
+                    0
+               FROM json_each(?3) t
+              WHERE EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+             ON CONFLICT(org_id, server_id, name) DO UPDATE SET
+               description = excluded.description,
+               input_schema = excluded.input_schema`,
+          ).bind(
+            orgId,
+            serverId,
+            JSON.stringify(
+              tools.map((t) => ({
+                id: t.id,
+                name: t.name,
+                description: t.description,
+                inputSchema: JSON.stringify(t.inputSchema),
+              })),
+            ),
+          ),
+        );
+      }
+      statements.push(
+        prepare(db, "SELECT 1 AS ok FROM mcp_servers WHERE org_id = ?1 AND id = ?2").bind(
+          orgId,
+          serverId,
+        ),
+      );
+      const results = await db.batch(statements);
+      const verifyRes = results[results.length - 1];
+      return (verifyRes?.results?.length ?? 0) > 0;
     },
 
     /**

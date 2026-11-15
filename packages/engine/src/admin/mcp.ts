@@ -386,11 +386,18 @@ export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<
   }
 
   const remote = await listRemoteTools(target, { fetchImpl: deps.fetchImpl });
-
+  const toolsByName = new Map<
+    string,
+    {
+      id: string;
+      serverId: string;
+      name: string;
+      description: string;
+      inputSchema: Record<string, unknown>;
+    }
+  >();
   for (const tool of remote) {
-    // upsertTool inserts with allowed = 0 and on conflict updates only the
-    // description and schema: new tools are off, existing switches are kept.
-    await deps.tenant.mcp.upsertTool({
+    toolsByName.set(tool.name, {
       id: newId("mcp"),
       serverId,
       name: tool.name,
@@ -398,10 +405,10 @@ export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<
       inputSchema: tool.inputSchema,
     });
   }
-
-  const remoteNames = remote.map((tool) => tool.name);
+  const toolsToUpsert = [...toolsByName.values()];
+  const remoteNames = toolsToUpsert.map((tool) => tool.name);
   let expectedDraftId: string | null = null;
-  let pruned = false;
+  let synced = false;
 
   for (let attempt = 0; attempt < MAX_DRAFT_UPDATE_ATTEMPTS; attempt++) {
     const currentServer = await deps.tenant.mcp.getServer(serverId);
@@ -409,8 +416,9 @@ export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<
 
     const draft = await deps.tenant.versions.draft(currentServer.assistantId);
     if (draft === null) {
-      await deps.tenant.mcp.removeToolsNotIn(serverId, remoteNames);
-      pruned = true;
+      const replaced = await deps.tenant.mcp.replaceServerTools(serverId, toolsToUpsert);
+      if (!replaced) throw new NotFound("mcp server");
+      synced = true;
       break;
     }
     if (expectedDraftId !== null && draft.id !== expectedDraftId) {
@@ -429,9 +437,10 @@ export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<
     const removedFromDraftNames = prunedAllowedNames.filter((n) => !otherAllowedNames.has(n));
     const { next, changed } = withoutToolNames(draft.config, removedFromDraftNames);
 
-    pruned = await deps.tenant.mcp.pruneToolsWithDraft({
+    synced = await deps.tenant.mcp.syncToolsWithDraft({
       assistantId: currentServer.assistantId,
       serverId,
+      tools: toolsToUpsert,
       remoteNames,
       prunedAllowedNames,
       removedFromDraftNames,
@@ -439,10 +448,10 @@ export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<
       nextConfig: next,
       hasDraftChange: changed,
     });
-    if (pruned) break;
+    if (synced) break;
   }
 
-  if (!pruned) {
+  if (!synced) {
     throw new Conflict("The draft changed while you were saving. Please try again.");
   }
 
