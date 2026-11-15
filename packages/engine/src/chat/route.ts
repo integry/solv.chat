@@ -296,7 +296,7 @@ export async function adminChatRoute(
   }
 
   const message = parsed.value.message;
-  if (message === undefined) {
+  if (parsed.value.actionResults !== undefined || message === undefined) {
     return eventStreamOf({ type: "error", message: "Resuming actions is not supported yet." });
   }
 
@@ -379,7 +379,7 @@ export async function chatRoute(
   }
 
   const message = parsed.value.message;
-  if (message === undefined) {
+  if (parsed.value.actionResults !== undefined || message === undefined) {
     return eventStreamOf(
       { type: "error", message: "Resuming actions is not supported yet." },
       origin,
