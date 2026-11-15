@@ -197,7 +197,8 @@ async function assistantRoutes(
         const currentRevision = await configRevision(draft);
         if (
           reviewedRun.versionId !== draft.id ||
-          (reviewedRun.configHash !== null && reviewedRun.configHash !== currentRevision)
+          reviewedRun.configHash === null ||
+          reviewedRun.configHash !== currentRevision
         ) {
           throw new Conflict("The draft changed after those tests ran. Please try again.");
         }

@@ -806,4 +806,35 @@ describe("publish gate with answer tests", () => {
       .first<{ published_anyway: number }>();
     expect(runRow?.published_anyway).toBe(0);
   });
+
+  it("rejects force: true with runId with 409 when the run has no configHash (legacy run)", async () => {
+    const app = makeApp("Contact sales for pricing.");
+    const draftRes = await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`);
+    expect(draftRes.status).toBe(200);
+    const { draft } = (await draftRes.json()) as { draft: VersionRow };
+
+    const legacyRunId = newId("run");
+    await env.DB.prepare(
+      "INSERT INTO test_runs (id, org_id, version_id, started_at, results, passed, published_anyway, config_hash) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, NULL)",
+    )
+      .bind(legacyRunId, TEST_ORG_ID, draft.id, Date.now(), "[]")
+      .run();
+
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Edited after legacy run" },
+    });
+
+    const overrideRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      force: true,
+      runId: legacyRunId,
+    });
+    expect(overrideRes.status).toBe(409);
+
+    const rows = await tableVersions(assistantId);
+    expect(rows.filter((r) => r.state === "published")).toHaveLength(0);
+    const runRow = await env.DB.prepare("SELECT published_anyway FROM test_runs WHERE id = ?1")
+      .bind(legacyRunId)
+      .first<{ published_anyway: number }>();
+    expect(runRow?.published_anyway).toBe(0);
+  });
 });
