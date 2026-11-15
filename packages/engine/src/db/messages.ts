@@ -336,6 +336,25 @@ export function messagesFor(db: D1Database, orgId: string) {
       return row?.total ?? 0;
     },
 
+    /**
+     * Tool calls already stored in this conversation. `json_array_length` reads the
+     * column the loop writes, so the cap counts exactly what was spent and needs
+     * no second counter to keep in step.
+     */
+    async countToolCalls(conversationId: string): Promise<number> {
+      const row = await prepare(
+        db,
+        `SELECT COALESCE(SUM(
+                  CASE WHEN tool_calls IS NULL OR json_valid(tool_calls) = 0
+                       THEN 0 ELSE json_array_length(tool_calls) END), 0) AS total
+           FROM messages
+          WHERE org_id = ?1 AND conversation_id = ?2`,
+      )
+        .bind(orgId, conversationId)
+        .first<{ total: number }>();
+      return row?.total ?? 0;
+    },
+
     async answeredShareFor(assistantId: string): Promise<number> {
       const row = await prepare(
         db,
