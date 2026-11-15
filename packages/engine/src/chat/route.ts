@@ -171,19 +171,18 @@ interface StreamResumeParams {
   origin: string | null;
 }
 
-async function resolveAnswerDeps(params: {
-  env: ChatEnv;
-  seams: Seams;
-  overrides: ChatRouteOverrides | undefined;
-  tenant: ReturnType<typeof forPublicScope>;
-  orgId: string;
-  assistantId: string;
-  allowedTools: readonly string[];
-  pageActions: readonly PageAction[] | undefined;
-  actionsEnabled: boolean;
-  preview: boolean;
-}) {
-  const { env, seams, overrides } = params;
+/** Resolves the embedder, retriever, LLM provider, and model for chat or test runs. */
+export async function resolveChatProviders(
+  env: ChatEnv,
+  seams: Seams,
+  orgId: string,
+  overrides?: ChatRouteOverrides,
+): Promise<{
+  embedder: Embedder;
+  retriever: Retriever;
+  provider: LlmProvider;
+  model: ModelInfo | undefined;
+}> {
   const providerKind = overrides?.providerKind ?? resolveLlmProvider(env.SOLV_LLM_PROVIDER);
   const tier =
     providerKind === "openrouter" ? "fast" : (overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER));
@@ -197,14 +196,37 @@ async function resolveAnswerDeps(params: {
   const embeddingsProvider = resolveEmbeddingsProvider(env.SOLV_EMBEDDINGS_PROVIDER);
 
   const embedder =
-    overrides?.embedder ?? (await embedderFor(params.orgId, embeddingsProvider, seams.keys));
+    overrides?.embedder ?? (await embedderFor(orgId, embeddingsProvider, seams.keys));
   const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
   const provider =
     overrides?.provider ??
     (await llmProviderFor(
-      { orgId: params.orgId, provider: providerKind, tier, model: env.SOLV_LLM_MODEL },
+      { orgId, provider: providerKind, tier, model: env.SOLV_LLM_MODEL },
       seams.keys,
     ));
+
+  return { embedder, retriever, provider, model };
+}
+
+async function resolveAnswerDeps(params: {
+  env: ChatEnv;
+  seams: Seams;
+  overrides: ChatRouteOverrides | undefined;
+  tenant: ReturnType<typeof forPublicScope>;
+  orgId: string;
+  assistantId: string;
+  allowedTools: readonly string[];
+  pageActions: readonly PageAction[] | undefined;
+  actionsEnabled: boolean;
+  preview: boolean;
+}) {
+  const { env, seams, overrides } = params;
+  const { embedder, retriever, provider, model } = await resolveChatProviders(
+    env,
+    seams,
+    params.orgId,
+    overrides,
+  );
 
   const actionRunner = params.preview
     ? null

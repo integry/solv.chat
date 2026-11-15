@@ -47,7 +47,11 @@ export interface Embedder {
    * provider request that billed tokens, and the result carries no total, so
    * a caller cannot count the same tokens twice.
    */
-  embed(texts: string[], onBilled: EmbeddingBilled): Promise<EmbedResult>;
+  embed(
+    texts: string[],
+    onBilled: EmbeddingBilled,
+    options?: { signal?: AbortSignal | undefined },
+  ): Promise<EmbedResult>;
 }
 
 export interface VectorRecord {
@@ -73,6 +77,7 @@ export interface Retriever {
     orgId: string;
     assistantId: string;
     topK: number;
+    signal?: AbortSignal | undefined;
   }): Promise<RetrievedChunk[]>;
   remove(chunkIds: string[]): Promise<void>;
 }
@@ -145,11 +150,16 @@ function openAICompatibleEmbedder(config: CompatEmbedderConfig): Embedder {
   const doFetch = config.fetchImpl ?? fetch;
 
   /** One provider request for `batch`, in input order. */
-  async function requestOnce(batch: string[], onBilled: EmbeddingBilled): Promise<number[][]> {
+  async function requestOnce(
+    batch: string[],
+    onBilled: EmbeddingBilled,
+    signal?: AbortSignal,
+  ): Promise<number[][]> {
     let response: Response;
     try {
       response = await doFetch(url, {
         method: "POST",
+        ...(signal ? { signal } : {}),
         headers: {
           authorization: `Bearer ${apiKey}`,
           "content-type": "application/json",
@@ -220,26 +230,31 @@ function openAICompatibleEmbedder(config: CompatEmbedderConfig): Embedder {
    * a non-retryable error would send it to the dead-letter queue unindexed.
    * A single input that still gets 400 fails as before.
    */
-  async function embedBatch(batch: string[], onBilled: EmbeddingBilled): Promise<number[][]> {
+  async function embedBatch(
+    batch: string[],
+    onBilled: EmbeddingBilled,
+    signal?: AbortSignal,
+  ): Promise<number[][]> {
     try {
-      return await requestOnce(batch, onBilled);
+      return await requestOnce(batch, onBilled, signal);
     } catch (err) {
+      if (signal?.aborted) throw err;
       if (!(err instanceof ProviderError) || err.status !== 400 || batch.length < 2) throw err;
       const mid = Math.ceil(batch.length / 2);
-      const first = await embedBatch(batch.slice(0, mid), onBilled);
-      const second = await embedBatch(batch.slice(mid), onBilled);
+      const first = await embedBatch(batch.slice(0, mid), onBilled, signal);
+      const second = await embedBatch(batch.slice(mid), onBilled, signal);
       return [...first, ...second];
     }
   }
 
   return {
     dimensions,
-    async embed(texts, onBilled) {
+    async embed(texts, onBilled, embedOptions) {
       if (texts.length === 0) return { vectors: [] };
 
       const out: number[][] = [];
       for (const batch of requestBatches(texts)) {
-        out.push(...(await embedBatch(batch, onBilled)));
+        out.push(...(await embedBatch(batch, onBilled, embedOptions?.signal)));
       }
       return { vectors: out };
     },

@@ -58,11 +58,12 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
   return {
     name: "anthropic",
     model: options.model,
-    async *stream(request) {
+    async *stream(request, streamOptions) {
       let response: Response;
       try {
         response = await doFetch(ANTHROPIC_MESSAGES_URL, {
           method: "POST",
+          ...(streamOptions?.signal ? { signal: streamOptions.signal } : {}),
           headers: {
             // Header only: never a query string, which ends up in logs we do not
             // control.
@@ -110,7 +111,7 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
       const pending = new Map<number, { callId: string; name: string; json: string }>();
 
       try {
-        for await (const event of readEventStream(response.body)) {
+        for await (const event of readEventStream(response.body, streamOptions?.signal)) {
           const payload = event.data as AnthropicEventPayload;
           const eventType = event.event ?? payload.type;
 
