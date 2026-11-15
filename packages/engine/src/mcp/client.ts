@@ -24,6 +24,7 @@ import { McpError, type McpTarget, type McpToolSpec } from "./types.js";
 //   tools/call ({ name, arguments }) -> result { content: [{ type: "text", text }], isError? }.
 const JSON_RPC_VERSION = "2.0";
 const MCP_PROTOCOL_VERSION = "2025-11-25";
+const SUPPORTED_MCP_PROTOCOL_VERSIONS = new Set<string>([MCP_PROTOCOL_VERSION]);
 const ACCEPT = "application/json, text/event-stream";
 const CLIENT_INFO = { name: "solv.chat", version: "0.1.0" };
 
@@ -281,12 +282,18 @@ async function withSession<T>(
       },
       false,
     );
+    const negotiatedVersion = init.result.protocolVersion;
+    if (
+      typeof negotiatedVersion !== "string" ||
+      !SUPPORTED_MCP_PROTOCOL_VERSIONS.has(negotiatedVersion)
+    ) {
+      throw new McpError("protocol", "That server does not support a compatible protocol version.");
+    }
+    ctx.protocolVersion = negotiatedVersion;
+
     const sessionId = init.response.headers.get("mcp-session-id");
     if (sessionId) {
       ctx.sessionId = sessionId;
-    }
-    if (typeof init.result.protocolVersion === "string" && init.result.protocolVersion !== "") {
-      ctx.protocolVersion = init.result.protocolVersion;
     }
 
     const notifResponse = await postJsonRpc(

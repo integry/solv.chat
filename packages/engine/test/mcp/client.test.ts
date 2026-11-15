@@ -674,4 +674,60 @@ describe("mcp client", () => {
       ),
     ).resolves.toEqual({ content: "Matched", isError: false });
   });
+
+  it.each([
+    ["missing protocolVersion", {}],
+    ["empty protocolVersion", { protocolVersion: "" }],
+    ["non-string protocolVersion", { protocolVersion: 123 }],
+    ["unsupported protocolVersion", { protocolVersion: "2024-11-05" }],
+  ])(
+    "rejects %s during initialize without sending initialized notification or tool operations",
+    async (_label, initResult) => {
+      const listServer = fakeServer((body) =>
+        Response.json({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: initResult,
+        }),
+      );
+      await expect(
+        listTools(
+          { url: "https://tools.example.com/mcp", authKind: "none" },
+          { fetchImpl: listServer.impl, resolveHost: PUBLIC_HOST },
+        ),
+      ).rejects.toSatisfy((err: unknown) => {
+        return (
+          err instanceof McpError &&
+          err.failure === "protocol" &&
+          !err.message.includes("2024-11-05")
+        );
+      });
+      expect(listServer.calls).toHaveLength(1);
+      expect(listServer.calls[0]?.body.method).toBe("initialize");
+
+      const callServer = fakeServer((body) =>
+        Response.json({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: initResult,
+        }),
+      );
+      await expect(
+        callTool(
+          { url: "https://tools.example.com/mcp", authKind: "none" },
+          "lookup_order",
+          { id: "42" },
+          { fetchImpl: callServer.impl, resolveHost: PUBLIC_HOST },
+        ),
+      ).rejects.toSatisfy((err: unknown) => {
+        return (
+          err instanceof McpError &&
+          err.failure === "protocol" &&
+          !err.message.includes("2024-11-05")
+        );
+      });
+      expect(callServer.calls).toHaveLength(1);
+      expect(callServer.calls[0]?.body.method).toBe("initialize");
+    },
+  );
 });
