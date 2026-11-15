@@ -1,15 +1,22 @@
-import { CHAT_PROTOCOL_VERSION, MAX_CHAT_MESSAGE_LENGTH, parseChatEventLine } from "@solvchat/core";
+import {
+  type ActionResult,
+  CHAT_PROTOCOL_VERSION,
+  MAX_CHAT_MESSAGE_LENGTH,
+  parseChatEventLine,
+} from "@solvchat/core";
 import { listForRequest, type RunRequest, runAction } from "./actions.js";
 import {
   type BuiltinSettings,
   clearHighlight,
   installBuiltins,
+  setBeforeNavigate,
   setHighlightHost,
 } from "./builtins.js";
 import { readEventLines } from "./sse.js";
 import {
   claimConversation,
   loadConversation,
+  type PendingResume,
   type SavedTurn,
   saveConversation,
   visitorId,
@@ -48,7 +55,7 @@ const SCRIPT_ORIGIN = (() => {
   return typeof location !== "undefined" ? location.origin : "";
 })();
 
-function parsePublicConfig(raw: unknown): Partial<WidgetPublicConfig> {
+export function parsePublicConfig(raw: unknown): Partial<WidgetPublicConfig> {
   if (typeof raw !== "object" || raw === null) return {};
   const data = raw as Record<string, unknown>;
   const widget =
@@ -107,6 +114,8 @@ export class SolvChat extends HTMLElement {
   #abortController: AbortController | null = null;
   #conversationId: string | null = null;
   #turns: SavedTurn[] = [];
+  #pendingResume: PendingResume | null = null;
+  #resumedBubble: { bubble: HTMLDivElement; textEl: HTMLDivElement; turn: SavedTurn } | null = null;
   #config: WidgetPublicConfig = { ...DEFAULT_CONFIG };
 
   #launcher!: HTMLButtonElement;
@@ -134,11 +143,18 @@ export class SolvChat extends HTMLElement {
       this.#restore(saved ?? { conversationId: null, open: false, turns: [] });
     }
 
-    void this.#loadConfig();
+    if (this.#pendingResume && this.#resumedBubble) {
+      void this.#resumeAfterConfigLoad();
+    } else {
+      void this.#loadConfig();
+    }
   }
 
   disconnectedCallback(): void {
     clearHighlight();
+    setBeforeNavigate(null);
+    this.#pendingResume = null;
+    this.#resumedBubble = null;
     if (this.#abortController) {
       this.#abortController.abort();
       this.#abortController = null;
@@ -373,8 +389,15 @@ export class SolvChat extends HTMLElement {
     }
   }
 
-  #restore(saved: { conversationId: string | null; open: boolean; turns: SavedTurn[] }): void {
+  #restore(saved: {
+    conversationId: string | null;
+    open: boolean;
+    turns: SavedTurn[];
+    pendingResume?: PendingResume;
+  }): void {
     this.#conversationId = saved.conversationId;
+    this.#pendingResume = saved.pendingResume ?? null;
+    this.#resumedBubble = null;
     this.#turns = saved.turns.map((turn) => ({
       ...turn,
       ...(turn.citations ? { citations: [...turn.citations] } : {}),
@@ -398,10 +421,17 @@ export class SolvChat extends HTMLElement {
             this.#appendCitationLink(bubble, citation.url, citation.title);
           }
         }
+        const canResume =
+          this.#pendingResume !== null &&
+          !turn.error &&
+          turn.messageId === this.#pendingResume.resumeMessageId;
         const unfinished =
+          !canResume &&
           !turn.error &&
           (!turn.messageId || (turn.awaiting !== undefined && turn.awaiting.length > 0));
-        if (unfinished) {
+        if (canResume) {
+          this.#resumedBubble = { bubble, textEl, turn };
+        } else if (unfinished) {
           delete turn.awaiting;
           turn.error = "Response interrupted. Please try again.";
           restoredUnfinished = true;
@@ -409,12 +439,16 @@ export class SolvChat extends HTMLElement {
         if (turn.error) {
           this.#renderBubbleError(bubble, turn.error);
         }
-        if (turn.messageId && !unfinished && !turn.error) {
+        if (turn.messageId && !unfinished && !canResume && !turn.error) {
           this.#appendFeedbackControls(bubble, turn);
         }
       }
     }
     this.#renderSuggestions();
+
+    if (this.#pendingResume && !this.#resumedBubble) {
+      this.#pendingResume = null;
+    }
 
     if (saved.open) {
       this.#openPanel(false);
@@ -436,6 +470,7 @@ export class SolvChat extends HTMLElement {
         conversationId: this.#conversationId,
         open: this.#open,
         turns: this.#turns,
+        ...(this.#pendingResume ? { pendingResume: this.#pendingResume } : {}),
       },
       this.#owner,
     );
@@ -823,6 +858,86 @@ export class SolvChat extends HTMLElement {
     }
   }
 
+  async #resumeAfterConfigLoad(): Promise<void> {
+    await this.#loadConfig();
+    const pending = this.#pendingResume;
+    const target = this.#resumedBubble;
+    if (!this.isConnected || !pending || !target) return;
+
+    this.#pendingResume = null;
+    this.#resumedBubble = null;
+    this.#persist();
+
+    const controller = new AbortController();
+    this.#abortController = controller;
+    this.#sending = true;
+    this.#sendBtn.disabled = true;
+    const { signal } = controller;
+
+    try {
+      const response = await this.#sendActionResumeRequest(
+        pending.conversationId,
+        pending.resumeMessageId,
+        pending.actionResults,
+        signal,
+      );
+      await this.#consumeStream(
+        response,
+        target.bubble,
+        target.textEl,
+        target.turn,
+        controller,
+        pending.depth,
+      );
+    } catch {
+      if (!signal.aborted && !target.turn.error) {
+        delete target.turn.awaiting;
+        this.#markTurnInterrupted(target.bubble, target.turn);
+      }
+    } finally {
+      if (this.#abortController === controller) {
+        this.#abortController = null;
+        this.#sending = false;
+        this.#sendBtn.disabled = false;
+      }
+      if (!signal.aborted) {
+        this.#persist();
+      }
+    }
+  }
+
+  async #sendActionResumeRequest(
+    conversationId: string,
+    resumeMessageId: string,
+    actionResults: ActionResult[],
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const requestBody: Record<string, unknown> = {
+      protocol: CHAT_PROTOCOL_VERSION,
+      assistant: this.#assistant(),
+      visitorId: visitorId(),
+      conversationId,
+      // Names the answer to continue: two requests in one conversation can
+      // interleave, so "the latest" is not good enough.
+      resumeMessageId,
+      actionResults,
+    };
+    if (location.href.startsWith("http://") || location.href.startsWith("https://")) {
+      requestBody.pageUrl = location.href;
+    }
+    const pageActions = listForRequest();
+    if (pageActions.length > 0) {
+      requestBody.pageActions = pageActions;
+    }
+
+    return fetch(`${this.#endpoint()}/v1/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(requestBody),
+      signal,
+    });
+  }
+
   /**
    * Runs the queued actions and sends their results back so the answer can
    * continue. A second request rather than a held stream: `navigate` replaces
@@ -843,46 +958,64 @@ export class SolvChat extends HTMLElement {
       (callId) => byId.get(callId) ?? { callId, name: "", input: {}, confirm: false },
     );
 
-    const results = [];
-    for (const request of toRun) {
-      if (signal.aborted) return;
-      clearHighlight();
-      const result = await runAction(request);
-      if (signal.aborted) return;
-      results.push(result);
-      if (request.name) {
-        if (!assistantTurn.actions) assistantTurn.actions = [];
-        assistantTurn.actions.push({ name: request.name, ok: result.ok });
-        this.#appendActionNote(bubble, request.name, result.ok);
-        this.#scrollToBottom();
-        this.#persist();
+    const results: ActionResult[] = [];
+    let navigated = false;
+    try {
+      for (let i = 0; i < toRun.length; i++) {
+        const request = toRun[i];
+        if (!request || signal.aborted) return;
+        clearHighlight();
+        setBeforeNavigate((targetHref) => {
+          navigated = true;
+          const pendingResults: ActionResult[] = [
+            ...results,
+            {
+              callId: request.callId,
+              ok: true,
+              result: JSON.stringify({ opened: targetHref }),
+            },
+            ...toRun.slice(i + 1).map((rem) => ({
+              callId: rem.callId,
+              ok: false as const,
+              error: "Page navigated before action could run.",
+            })),
+          ];
+          if (request.name) {
+            if (!assistantTurn.actions) assistantTurn.actions = [];
+            assistantTurn.actions.push({ name: request.name, ok: true });
+            this.#appendActionNote(bubble, request.name, true);
+            this.#scrollToBottom();
+          }
+          this.#pendingResume = {
+            conversationId: done.conversationId,
+            resumeMessageId: done.messageId,
+            actionResults: pendingResults,
+            depth,
+          };
+          this.#persist();
+        });
+        const result = await runAction(request);
+        setBeforeNavigate(null);
+        if (navigated || signal.aborted) return;
+        results.push(result);
+        if (request.name) {
+          if (!assistantTurn.actions) assistantTurn.actions = [];
+          assistantTurn.actions.push({ name: request.name, ok: result.ok });
+          this.#appendActionNote(bubble, request.name, result.ok);
+          this.#scrollToBottom();
+          this.#persist();
+        }
       }
+    } finally {
+      setBeforeNavigate(null);
     }
 
-    const requestBody: Record<string, unknown> = {
-      protocol: CHAT_PROTOCOL_VERSION,
-      assistant: this.#assistant(),
-      visitorId: visitorId(),
-      conversationId: done.conversationId,
-      // Names the answer to continue: two requests in one conversation can
-      // interleave, so "the latest" is not good enough.
-      resumeMessageId: done.messageId,
-      actionResults: results,
-    };
-    if (location.href.startsWith("http://") || location.href.startsWith("https://")) {
-      requestBody.pageUrl = location.href;
-    }
-    const pageActions = listForRequest();
-    if (pageActions.length > 0) {
-      requestBody.pageActions = pageActions;
-    }
-
-    const response = await fetch(`${this.#endpoint()}/v1/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(requestBody),
+    const response = await this.#sendActionResumeRequest(
+      done.conversationId,
+      done.messageId,
+      results,
       signal,
-    });
+    );
 
     await this.#consumeStream(response, bubble, textEl, assistantTurn, controller, depth);
   }

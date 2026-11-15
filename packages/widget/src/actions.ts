@@ -37,6 +37,12 @@ export interface RunRequest {
 
 const encoder = new TextEncoder();
 const registry = new Map<string, RegisteredAction>();
+let beforeListHook: (() => void) | null = null;
+
+/** Internal hook so built-in schemas can refresh DOM marker inventories on request. */
+export function setBeforeList(fn: (() => void) | null): void {
+  beforeListHook = fn;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -105,6 +111,7 @@ export function clearRegistry(): void {
 
 /** What goes on the wire. Sorted by name so the request body is stable. */
 export function listForRequest(): PageAction[] {
+  beforeListHook?.();
   return [...registry.values()]
     .sort((a, b) => a.name.localeCompare(b.name))
     .slice(0, MAX_PAGE_ACTIONS)

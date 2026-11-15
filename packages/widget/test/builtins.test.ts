@@ -2,7 +2,20 @@ import { MAX_PAGE_ACTIONS } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearRegistry, listForRequest, lookup, register, runAction } from "../src/actions.js";
 import { HIGHLIGHT_DURATION_MS, installBuiltins } from "../src/builtins.js";
+import { parsePublicConfig } from "../src/element.js";
 import "../src/widget.js";
+
+function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk));
+      }
+      controller.close();
+    },
+  });
+}
 
 async function flushAsync(): Promise<void> {
   for (let i = 0; i < 6; i++) {
@@ -380,5 +393,254 @@ describe("built-in page actions", () => {
 
     installBuiltins({ enabled: false, allowedOrigins: [] });
     expect(lookup("navigate")?.description).toBe("Custom SPA router");
+  });
+
+  describe("F1: public config parser compatibility", () => {
+    it("parses the exact publicConfigRoute response shape with enabled and disabled defaults", () => {
+      const enabled = parsePublicConfig({
+        title: "Docs Helper",
+        accentColor: "#112233",
+        position: "left",
+        greeting: "Hello!",
+        suggestedQuestions: ["How do I start?"],
+        actions: { builtins: true, allowedOrigins: ["https://shop.example.com"] },
+      });
+      expect(enabled.actions).toEqual({
+        enabled: true,
+        allowedOrigins: ["https://shop.example.com"],
+      });
+
+      const disabledByDefault = parsePublicConfig({
+        title: "Docs Helper",
+        accentColor: "#112233",
+        position: "right",
+        greeting: "Hello!",
+        suggestedQuestions: [],
+      });
+      expect(disabledByDefault.actions).toEqual({
+        enabled: false,
+        allowedOrigins: [],
+      });
+    });
+  });
+
+  describe("F2: cross-page navigation continuation", () => {
+    it("persists continuation before leaving and resumes on destination without replaying navigate", async () => {
+      const chatBodies: Array<Record<string, unknown>> = [];
+      let assignCalls = 0;
+      const assign = vi.spyOn(location, "assign").mockImplementation(() => {
+        assignCalls++;
+        // Verify pendingResume is already persisted before document replacement.
+        const raw = sessionStorage.getItem("solv-chat-open:pk_nav_resume");
+        expect(raw).not.toBeNull();
+        const saved = JSON.parse(raw ?? "{}") as { pendingResume?: { resumeMessageId: string } };
+        expect(saved.pendingResume?.resumeMessageId).toBe("msg_pause");
+      });
+
+      let chatStep = 0;
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_nav_resume")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatStep++;
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (chatStep === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Taking you there"}\n\n',
+                'event: action\ndata: {"callId":"call_nav","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_pause","conversationId":"conv_nav","awaitingActions":["call_nav"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":" — here is the pricing page."}\n\n',
+              'event: done\ndata: {"messageId":"msg_final","conversationId":"conv_nav"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el1 = document.createElement("solv-chat");
+      el1.setAttribute("assistant", "pk_nav_resume");
+      document.body.append(el1);
+      await flushAsync();
+
+      const root1 = el1.shadowRoot as ShadowRoot;
+      (root1.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root1.querySelector("#solv-input") as HTMLTextAreaElement).value = "Take me to pricing";
+      (root1.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await flushAsync();
+
+      expect(assign).toHaveBeenCalledTimes(1);
+      // Old page must not send a competing follow-up chat request.
+      expect(chatBodies).toHaveLength(1);
+
+      // Simulate destination page load with a fresh widget instance.
+      el1.remove();
+      clearRegistry();
+      const el2 = document.createElement("solv-chat");
+      el2.setAttribute("assistant", "pk_nav_resume");
+      document.body.append(el2);
+      await flushAsync();
+
+      expect(assignCalls).toBe(1);
+      expect(chatBodies).toHaveLength(2);
+      expect(chatBodies[1]?.resumeMessageId).toBe("msg_pause");
+      expect(chatBodies[1]?.conversationId).toBe("conv_nav");
+      expect(chatBodies[1]?.actionResults).toEqual([
+        {
+          callId: "call_nav",
+          ok: true,
+          result: JSON.stringify({ opened: new URL("/pricing", location.href).href }),
+        },
+      ]);
+
+      const root2 = el2.shadowRoot as ShadowRoot;
+      const bubbles = root2.querySelectorAll(".solv-bubble--assistant");
+      const resumed = bubbles[1];
+      expect(resumed?.querySelector(".solv-bubble-text")?.textContent).toBe(
+        "Taking you there — here is the pricing page.",
+      );
+      expect(resumed?.querySelector(".solv-bubble-error")).toBeNull();
+      expect(resumed?.querySelector(".solv-feedback")).not.toBeNull();
+    });
+  });
+
+  describe("F3: marker inventory in advertised schemas", () => {
+    it("advertises eligible target and fill names, excludes refused fields without reading values, and refreshes on request", () => {
+      document.body.innerHTML = `
+        <button data-solv-target="upgrade_control_42">Upgrade</button>
+        <input id="email" data-solv-fill="work_email" type="email" value="a@b.com" />
+        <input id="pw" data-solv-fill="secret_pw" type="password" value="hunter2" />
+        <form data-solv-no-fill>
+          <input id="card" data-solv-fill="card_nick" value="visa" />
+        </form>
+      `;
+      const pwReads = spyValueReads(document.getElementById("pw") as HTMLInputElement);
+      const cardReads = spyValueReads(document.getElementById("card") as HTMLInputElement);
+
+      installBuiltins({ enabled: true, allowedOrigins: [] });
+      const initial = listForRequest();
+      const highlight = initial.find((a) => a.name === "highlight");
+      const fill = initial.find((a) => a.name === "fill");
+
+      const highlightProps = (highlight?.inputSchema.properties ?? {}) as Record<
+        string,
+        { enum?: string[] }
+      >;
+      expect(highlightProps.target?.enum).toEqual(["upgrade_control_42"]);
+      const fillProps = (fill?.inputSchema.properties ?? {}) as Record<
+        string,
+        { items?: { properties?: Record<string, { enum?: string[] }> } }
+      >;
+      expect(fillProps.fields?.items?.properties?.name?.enum).toEqual(["work_email"]);
+      expect(pwReads).not.toHaveBeenCalled();
+      expect(cardReads).not.toHaveBeenCalled();
+
+      // DOM changes before next chat request are reflected in listForRequest().
+      const extra = document.createElement("a");
+      extra.setAttribute("data-solv-target", "billing_link");
+      document.body.append(extra);
+      const refreshed = listForRequest();
+      const refreshedHighlight = refreshed.find((a) => a.name === "highlight");
+      const refreshedProps = (refreshedHighlight?.inputSchema.properties ?? {}) as Record<
+        string,
+        { enum?: string[] }
+      >;
+      expect(refreshedProps.target?.enum).toEqual(["upgrade_control_42", "billing_link"]);
+    });
+  });
+
+  describe("F4: encoded section IDs", () => {
+    it("resolves Unicode section IDs from percent-encoded URLs and section names, and handles malformed escapes", async () => {
+      const scrollIntoView = vi.fn();
+      document.body.innerHTML = `<section id="café">Menu</section>`;
+      const section = document.getElementById("café") as HTMLElement;
+      section.scrollIntoView = scrollIntoView;
+
+      installBuiltins({ enabled: true, allowedOrigins: [] });
+
+      const fromEncodedUrl = await runAction({
+        callId: "c1",
+        name: "navigate",
+        input: { url: `${location.pathname}#caf%C3%A9` },
+        confirm: false,
+      });
+      expect(fromEncodedUrl.ok).toBe(true);
+      expect(JSON.parse(fromEncodedUrl.result ?? "{}")).toEqual({ scrolledTo: "café" });
+
+      const fromSectionParam = await runAction({
+        callId: "c2",
+        name: "navigate",
+        input: { url: location.pathname, section: "café" },
+        confirm: false,
+      });
+      expect(fromSectionParam.ok).toBe(true);
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+
+      const malformed = await runAction({
+        callId: "c3",
+        name: "navigate",
+        input: { url: `${location.pathname}#bad%ZZ` },
+        confirm: false,
+      });
+      expect(malformed.ok).toBe(false);
+      expect(malformed.error).toBe("That action did not finish.");
+    });
+  });
+
+  describe("F5: highlight note repositioning and viewport clamping", () => {
+    it("repositions the note on scroll, clamps to viewport, and cleans up listeners", async () => {
+      vi.useFakeTimers();
+      Object.defineProperty(window, "innerWidth", { value: 400, configurable: true });
+      Object.defineProperty(window, "innerHeight", { value: 300, configurable: true });
+
+      document.body.innerHTML = `<button data-solv-target="btn">Save</button>`;
+      const btn = document.querySelector("[data-solv-target='btn']") as HTMLElement;
+      let currentRect = { top: 900, bottom: 940, left: 350, right: 420, width: 70, height: 40 };
+      btn.getBoundingClientRect = () => currentRect as DOMRect;
+      btn.scrollIntoView = () => {};
+
+      installBuiltins({ enabled: true, allowedOrigins: [] });
+      await runAction({
+        callId: "c1",
+        name: "highlight",
+        input: { target: "btn", note: "Click here to save" },
+        confirm: false,
+      });
+
+      const note = document.querySelector(".solv-highlight-note") as HTMLElement;
+      expect(note).not.toBeNull();
+      // Initially clamped within viewport (300px height).
+      expect(Number.parseInt(note.style.top, 10)).toBeLessThanOrEqual(300 - 40 - 8);
+      expect(Number.parseInt(note.style.left, 10)).toBeLessThanOrEqual(400 - 260 - 8);
+
+      // Simulate smooth scroll bringing button into view.
+      currentRect = { top: 100, bottom: 140, left: 40, right: 110, width: 70, height: 40 };
+      window.dispatchEvent(new Event("scroll"));
+      expect(note.style.top).toBe("148px");
+      expect(note.style.left).toBe("40px");
+
+      // After highlight expires, listeners are removed and note is gone.
+      vi.advanceTimersByTime(HIGHLIGHT_DURATION_MS);
+      expect(document.querySelector(".solv-highlight-note")).toBeNull();
+      currentRect = { top: 20, bottom: 60, left: 10, right: 80, width: 70, height: 40 };
+      window.dispatchEvent(new Event("scroll"));
+      expect(note.style.top).toBe("148px");
+    });
   });
 });

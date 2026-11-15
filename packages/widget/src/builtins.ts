@@ -1,4 +1,4 @@
-import { lookup, type RegisteredAction, register, unregister } from "./actions.js";
+import { lookup, type RegisteredAction, register, setBeforeList, unregister } from "./actions.js";
 
 /** Marker attributes. Documented in docs/architecture.md under Page actions. */
 export const TARGET_ATTRIBUTE = "data-solv-target";
@@ -7,6 +7,9 @@ export const FILL_ATTRIBUTE = "data-solv-fill";
 export const NO_FILL_ATTRIBUTE = "data-solv-no-fill";
 
 export const HIGHLIGHT_DURATION_MS = 5000;
+const MAX_MARKER_NAMES = 50;
+const MAX_MARKER_SCHEMA_BYTES = 12 * 1024;
+const VIEWPORT_MARGIN_PX = 8;
 
 /**
  * Input types that are never filled or read, whatever the markup says.
@@ -52,15 +55,23 @@ interface ActiveHighlight {
   prevStyleAttr: string | null;
   noteEl: HTMLElement | null;
   timer: ReturnType<typeof setTimeout> | undefined;
+  cleanup?: () => void;
 }
 
 const installedBuiltins = new Map<string, RegisteredAction>();
+const schemaEncoder = new TextEncoder();
 let activeHighlight: ActiveHighlight | null = null;
 let highlightHost: ShadowRoot | null = null;
+let beforeNavigate: ((targetHref: string) => void) | null = null;
 
 /** Sets the widget shadow root that hosts highlight notes styled by styles.ts. */
 export function setHighlightHost(root: ShadowRoot | null): void {
   highlightHost = root;
+}
+
+/** Registers a hook invoked right before `navigate` leaves the current document. */
+export function setBeforeNavigate(handler: ((targetHref: string) => void) | null): void {
+  beforeNavigate = handler;
 }
 
 function escapeAttrValue(value: string): string {
@@ -138,12 +149,13 @@ function resolveNavigation(raw: string, allowedOrigins: Set<string>): URL | stri
   return url;
 }
 
-/** Removes any active highlight outline, note, and auto-dismiss timer. */
+/** Removes any active highlight outline, note, listeners, and auto-dismiss timer. */
 export function clearHighlight(): void {
   if (!activeHighlight) return;
   if (activeHighlight.timer !== undefined) {
     clearTimeout(activeHighlight.timer);
   }
+  activeHighlight.cleanup?.();
   if (activeHighlight.prevStyleAttr === null) {
     activeHighlight.element.removeAttribute("style");
   } else {
@@ -161,18 +173,46 @@ function rememberAndOutline(element: HTMLElement): void {
   activeHighlight = { element, prevStyleAttr, noteEl: null, timer };
 }
 
+function positionNote(element: HTMLElement, note: HTMLElement): void {
+  const rect = element.getBoundingClientRect();
+  const noteRect = note.getBoundingClientRect();
+  const noteWidth = noteRect.width || note.offsetWidth || 260;
+  const noteHeight = noteRect.height || note.offsetHeight || 40;
+  const vw =
+    typeof window !== "undefined"
+      ? window.innerWidth || document.documentElement.clientWidth || 0
+      : 0;
+  const vh =
+    typeof window !== "undefined"
+      ? window.innerHeight || document.documentElement.clientHeight || 0
+      : 0;
+
+  let left = Math.max(VIEWPORT_MARGIN_PX, rect.left);
+  if (vw > 0) {
+    left = Math.min(left, Math.max(VIEWPORT_MARGIN_PX, vw - noteWidth - VIEWPORT_MARGIN_PX));
+  }
+
+  const maxTop =
+    vh > 0
+      ? Math.max(VIEWPORT_MARGIN_PX, vh - noteHeight - VIEWPORT_MARGIN_PX)
+      : Number.POSITIVE_INFINITY;
+  let top = rect.bottom + VIEWPORT_MARGIN_PX;
+  if (vh > 0 && top > maxTop) {
+    const above = rect.top - noteHeight - VIEWPORT_MARGIN_PX;
+    top = above >= VIEWPORT_MARGIN_PX && above <= maxTop ? above : maxTop;
+  }
+  top = Math.max(VIEWPORT_MARGIN_PX, Math.min(top, maxTop));
+
+  note.style.top = `${Math.round(top)}px`;
+  note.style.left = `${Math.round(left)}px`;
+}
+
 function showNote(element: HTMLElement, text: string): void {
   if (!activeHighlight) return;
   const note = document.createElement("div");
   note.className = "solv-highlight-note";
   note.setAttribute("role", "status");
   note.textContent = text;
-
-  const rect = element.getBoundingClientRect();
-  const top = Math.max(8, rect.bottom + 8);
-  const left = Math.max(8, rect.left);
-  note.style.top = `${top}px`;
-  note.style.left = `${left}px`;
 
   if (highlightHost?.isConnected) {
     highlightHost.append(note);
@@ -191,12 +231,101 @@ function showNote(element: HTMLElement, text: string): void {
     note.style.pointerEvents = "none";
     document.body.append(note);
   }
+
+  positionNote(element, note);
+  const onReposition = () => {
+    if (activeHighlight?.noteEl === note) {
+      positionNote(element, note);
+    }
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("scroll", onReposition, { capture: true, passive: true });
+    window.addEventListener("scrollend", onReposition, { capture: true, passive: true });
+    window.addEventListener("resize", onReposition, { passive: true });
+    activeHighlight.cleanup = () => {
+      window.removeEventListener("scroll", onReposition, { capture: true });
+      window.removeEventListener("scrollend", onReposition, { capture: true });
+      window.removeEventListener("resize", onReposition);
+    };
+  }
   activeHighlight.noteEl = note;
+}
+
+function decodeFragmentId(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function collectMarkerNames(attribute: string, filter?: (element: Element) => boolean): string[] {
+  if (typeof document === "undefined") return [];
+  const names: string[] = [];
+  const seen = new Set<string>();
+  let totalBytes = 0;
+  for (const element of document.querySelectorAll(`[${attribute}]`)) {
+    if (names.length >= MAX_MARKER_NAMES) break;
+    const raw = element.getAttribute(attribute);
+    if (!raw || seen.has(raw)) continue;
+    if (filter && !filter(element)) continue;
+    const bytes = schemaEncoder.encode(raw).byteLength + 4;
+    if (totalBytes + bytes > MAX_MARKER_SCHEMA_BYTES) break;
+    seen.add(raw);
+    names.push(raw);
+    totalBytes += bytes;
+  }
+  return names;
+}
+
+function highlightInputSchema(): Record<string, unknown> {
+  const targets = collectMarkerNames(TARGET_ATTRIBUTE);
+  return {
+    type: "object",
+    properties: {
+      target: targets.length > 0 ? { type: "string", enum: targets } : { type: "string" },
+      note: { type: "string" },
+    },
+    required: ["target"],
+  };
+}
+
+function fillInputSchema(): Record<string, unknown> {
+  const fillables = collectMarkerNames(FILL_ATTRIBUTE, (el) => isRefusedField(el) === null);
+  return {
+    type: "object",
+    properties: {
+      fields: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: fillables.length > 0 ? { type: "string", enum: fillables } : { type: "string" },
+            value: { type: "string" },
+          },
+          required: ["name", "value"],
+        },
+      },
+    },
+    required: ["fields"],
+  };
+}
+
+function refreshBuiltinSchemas(): void {
+  const highlight = installedBuiltins.get("highlight");
+  if (highlight && lookup("highlight") === highlight) {
+    highlight.input = highlightInputSchema();
+  }
+  const fill = installedBuiltins.get("fill");
+  if (fill && lookup("fill") === fill) {
+    fill.input = fillInputSchema();
+  }
 }
 
 /** Registers the built-ins the owner enabled, and removes the ones they did not. */
 export function installBuiltins(settings: BuiltinSettings): void {
   if (!settings.enabled) {
+    setBeforeList(null);
     // Off by default and removable: a config that arrives saying "disabled"
     // after an earlier one said "enabled" must take tools away, without
     // removing a page's own custom action of the same name.
@@ -236,26 +365,26 @@ export function installBuiltins(settings: BuiltinSettings): void {
           target.pathname === location.pathname &&
           target.search === location.search;
         if (samePage && target.hash !== "") {
-          const id = target.hash.slice(1);
-          const element = document.getElementById(id);
+          const rawId = target.hash.slice(1);
+          const decodedId = decodeFragmentId(rawId);
+          const element =
+            document.getElementById(decodedId) ??
+            (decodedId !== rawId ? document.getElementById(rawId) : null);
           if (!element) throw new Error("that section is not on this page");
           element.scrollIntoView({ behavior: "smooth", block: "center" });
-          return { scrolledTo: id };
+          return { scrolledTo: element.id || decodedId };
         }
+        beforeNavigate?.(target.href);
         location.assign(target.href);
         // The conversation survives this because the transcript, the
-        // conversation id and the pending resume are in sessionStorage.
+        // conversation id and the pending resume are persisted before leaving.
         return { opened: target.href };
       },
     },
     {
       name: "highlight",
       description: "Point at a control on this page and explain it in a few words.",
-      input: {
-        type: "object",
-        properties: { target: { type: "string" }, note: { type: "string" } },
-        required: ["target"],
-      },
+      input: highlightInputSchema(),
       confirm: false,
       run: (input) => {
         const name = String(input.target ?? "");
@@ -282,20 +411,7 @@ export function installBuiltins(settings: BuiltinSettings): void {
     {
       name: "fill",
       description: "Put values into the fields on this page that accept them. Never submits.",
-      input: {
-        type: "object",
-        properties: {
-          fields: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: { name: { type: "string" }, value: { type: "string" } },
-              required: ["name", "value"],
-            },
-          },
-        },
-        required: ["fields"],
-      },
+      input: fillInputSchema(),
       // Always confirmed, per the specification: every fill waits for the
       // visitor. The prompt itself is the confirmation task.
       confirm: true,
@@ -353,4 +469,5 @@ export function installBuiltins(settings: BuiltinSettings): void {
       installedBuiltins.set(action.name, registered);
     }
   }
+  setBeforeList(refreshBuiltinSchemas);
 }

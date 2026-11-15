@@ -1,3 +1,5 @@
+import type { ActionResult } from "@solvchat/core";
+
 export interface SavedCitation {
   url: string;
   title: string;
@@ -21,10 +23,18 @@ export interface SavedTurn {
   actions?: SavedAction[];
 }
 
+export interface PendingResume {
+  conversationId: string;
+  resumeMessageId: string;
+  actionResults: ActionResult[];
+  depth: number;
+}
+
 export interface SavedConversation {
   conversationId: string | null;
   open: boolean;
   turns: SavedTurn[];
+  pendingResume?: PendingResume;
 }
 
 const VISITOR_KEY = "solv-chat-visitor";
@@ -82,6 +92,44 @@ export function visitorId(): string {
  * draws that line with no expiry logic. Keyed by assistant so two assistants
  * on one site cannot inherit each other's transcript.
  */
+function parsePendingResume(raw: unknown): PendingResume | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  if (
+    typeof record.conversationId !== "string" ||
+    record.conversationId === "" ||
+    typeof record.resumeMessageId !== "string" ||
+    record.resumeMessageId === "" ||
+    !Array.isArray(record.actionResults) ||
+    typeof record.depth !== "number" ||
+    !Number.isInteger(record.depth) ||
+    record.depth < 1
+  ) {
+    return undefined;
+  }
+  const actionResults: ActionResult[] = [];
+  for (const item of record.actionResults) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return undefined;
+    const entry = item as Record<string, unknown>;
+    if (typeof entry.callId !== "string" || entry.callId === "" || typeof entry.ok !== "boolean") {
+      return undefined;
+    }
+    if (entry.ok) {
+      if (typeof entry.result !== "string") return undefined;
+      actionResults.push({ callId: entry.callId, ok: true, result: entry.result });
+    } else {
+      if (typeof entry.error !== "string") return undefined;
+      actionResults.push({ callId: entry.callId, ok: false, error: entry.error });
+    }
+  }
+  return {
+    conversationId: record.conversationId,
+    resumeMessageId: record.resumeMessageId,
+    actionResults,
+    depth: record.depth,
+  };
+}
+
 export function loadConversation(assistant: string): SavedConversation | null {
   if (!assistant) return null;
   try {
@@ -93,7 +141,13 @@ export function loadConversation(assistant: string): SavedConversation | null {
     const conversationId = typeof record.conversationId === "string" ? record.conversationId : null;
     const open = typeof record.open === "boolean" ? record.open : false;
     const turns = Array.isArray(record.turns) ? (record.turns as SavedTurn[]) : [];
-    return { conversationId, open, turns };
+    const pendingResume = parsePendingResume(record.pendingResume);
+    return {
+      conversationId,
+      open,
+      turns,
+      ...(pendingResume ? { pendingResume } : {}),
+    };
   } catch {
     // Private-mode quota errors and malformed data both mean "no saved
     // conversation". A storage failure must never stop the widget opening.
@@ -124,6 +178,7 @@ export function saveConversation(assistant: string, saved: SavedConversation, ow
         conversationId: saved.conversationId,
         open: saved.open,
         turns: saved.turns.slice(-MAX_SAVED_TURNS),
+        ...(saved.pendingResume ? { pendingResume: saved.pendingResume } : {}),
       }),
     );
   } catch {
