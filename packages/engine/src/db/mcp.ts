@@ -141,6 +141,7 @@ export interface SetToolAllowedWithDraftInput {
 export interface SyncToolsWithDraftInput {
   assistantId: string;
   serverId: string;
+  expectedTarget: McpServerTargetSnapshot;
   tools: readonly UpsertMcpToolInput[];
   remoteNames: readonly string[];
   prunedAllowedNames: readonly string[];
@@ -233,6 +234,22 @@ function appendOtherServerAllowedGuards(
     )`;
   }
   return sql;
+}
+
+function appendTargetMatchGuard(params: unknown[], target: McpServerTargetSnapshot): string {
+  params.push(target.url, target.authKind, target.headerName, target.secretCiphertext);
+  const urlIdx = params.length - 3;
+  const authIdx = params.length - 2;
+  const headerIdx = params.length - 1;
+  const secretIdx = params.length;
+  return `EXISTS (
+    SELECT 1 FROM mcp_servers
+     WHERE org_id = ?1 AND id = ?2
+       AND url = ?${urlIdx}
+       AND auth_kind = ?${authIdx}
+       AND header_name IS ?${headerIdx}
+       AND secret_ciphertext IS ?${secretIdx}
+  )`;
 }
 
 /** Tenant-scoped data access for `mcp_servers` and `mcp_tools`. */
@@ -649,6 +666,7 @@ export function mcpFor(db: D1Database, orgId: string) {
           remoteJson,
           prunedAllowedJson,
         ];
+        const targetGuard = appendTargetMatchGuard(verifyArgs, input.expectedTarget);
         const otherServerGuards = appendOtherServerAllowedGuards(
           verifyArgs,
           input.removedFromDraftNames,
@@ -664,7 +682,7 @@ export function mcpFor(db: D1Database, orgId: string) {
                   SELECT 1 FROM assistant_versions
                    WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
                 )
-                AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+                AND ${targetGuard}
                 AND ${unexpectedServerAllowedGuard}${otherServerGuards}`,
           ).bind(...verifyArgs),
         ];
@@ -686,7 +704,7 @@ export function mcpFor(db: D1Database, orgId: string) {
                         SELECT 1 FROM assistant_versions
                          WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
                       )
-                  AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+                  AND ${targetGuard}
                   AND ${unexpectedServerAllowedGuard}${otherServerGuards}
                ON CONFLICT(org_id, server_id, name) DO UPDATE SET
                  description = excluded.description,
@@ -700,7 +718,7 @@ export function mcpFor(db: D1Database, orgId: string) {
             `SELECT 1 AS ok
                FROM assistant_versions
               WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
-                AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+                AND ${targetGuard}
                 AND ${unexpectedServerAllowedGuard}${otherServerGuards}`,
           ).bind(...verifyArgs),
         );
@@ -710,6 +728,9 @@ export function mcpFor(db: D1Database, orgId: string) {
       }
 
       const nextConfigJson = JSON.stringify(input.nextConfig);
+      // Unique per-batch marker so subsequent DELETE/INSERT statements only run
+      // if this batch's guarded UPDATE actually modified the draft row.
+      const txMarker = `__mcp_tx:${crypto.randomUUID()}`;
       const updateArgs: unknown[] = [
         orgId,
         input.serverId,
@@ -718,8 +739,9 @@ export function mcpFor(db: D1Database, orgId: string) {
         expectedConfigJson,
         remoteJson,
         prunedAllowedJson,
-        nextConfigJson,
+        txMarker,
       ];
+      const targetGuard = appendTargetMatchGuard(updateArgs, input.expectedTarget);
       const otherServerGuards = appendOtherServerAllowedGuards(
         updateArgs,
         input.removedFromDraftNames,
@@ -731,7 +753,7 @@ export function mcpFor(db: D1Database, orgId: string) {
           `UPDATE assistant_versions
               SET config = ?8
             WHERE org_id = ?1 AND assistant_id = ?3 AND state = 'draft' AND id = ?4 AND config = ?5
-              AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+              AND ${targetGuard}
               AND ${unexpectedServerAllowedGuard}${otherServerGuards}`,
         ).bind(...updateArgs),
         prepare(
@@ -749,7 +771,7 @@ export function mcpFor(db: D1Database, orgId: string) {
           input.assistantId,
           input.expectedDraft.id,
           remoteJson,
-          nextConfigJson,
+          txMarker,
         ),
       ];
       if (input.tools.length > 0) {
@@ -769,7 +791,6 @@ export function mcpFor(db: D1Database, orgId: string) {
                       SELECT 1 FROM assistant_versions
                        WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
                     )
-                AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
              ON CONFLICT(org_id, server_id, name) DO UPDATE SET
                description = excluded.description,
                input_schema = excluded.input_schema`,
@@ -778,30 +799,63 @@ export function mcpFor(db: D1Database, orgId: string) {
             input.serverId,
             input.assistantId,
             input.expectedDraft.id,
-            nextConfigJson,
+            txMarker,
             toolsJson,
           ),
         );
       }
-      const [draftRes] = await db.batch(statements);
-      return (draftRes?.meta.changes ?? 0) > 0;
+      statements.push(
+        prepare(
+          db,
+          `UPDATE assistant_versions
+              SET config = ?6
+            WHERE org_id = ?1 AND assistant_id = ?3 AND state = 'draft' AND id = ?4 AND config = ?5`,
+        ).bind(
+          orgId,
+          input.serverId,
+          input.assistantId,
+          input.expectedDraft.id,
+          txMarker,
+          nextConfigJson,
+        ),
+      );
+      const results = await db.batch(statements);
+      const draftRes = results[0];
+      const finalizeRes = results[results.length - 1];
+      return (draftRes?.meta.changes ?? 0) > 0 && (finalizeRes?.meta.changes ?? 0) > 0;
     },
 
     /** Atomically replaces a server's discovered tools when no draft version exists. */
     async replaceServerTools(
       serverId: string,
       tools: readonly UpsertMcpToolInput[],
+      expectedTarget: McpServerTargetSnapshot,
     ): Promise<boolean> {
       const remoteJson = JSON.stringify(tools.map((t) => t.name));
+      const guardArgs: unknown[] = [orgId, serverId];
+      const targetGuard = appendTargetMatchGuard(guardArgs, expectedTarget);
+      const deleteArgs = [...guardArgs, remoteJson];
       const statements: D1PreparedStatement[] = [
         prepare(
           db,
           `DELETE FROM mcp_tools
             WHERE org_id = ?1 AND server_id = ?2
-              AND name NOT IN (SELECT value FROM json_each(?3))`,
-        ).bind(orgId, serverId, remoteJson),
+              AND name NOT IN (SELECT value FROM json_each(?${deleteArgs.length}))
+              AND ${targetGuard}`,
+        ).bind(...deleteArgs),
       ];
       if (tools.length > 0) {
+        const insertArgs = [
+          ...guardArgs,
+          JSON.stringify(
+            tools.map((t) => ({
+              id: t.id,
+              name: t.name,
+              description: t.description,
+              inputSchema: JSON.stringify(t.inputSchema),
+            })),
+          ),
+        ];
         statements.push(
           prepareInsert(
             db,
@@ -813,30 +867,19 @@ export function mcpFor(db: D1Database, orgId: string) {
                     json_extract(t.value, '$.description'),
                     json_extract(t.value, '$.inputSchema'),
                     0
-               FROM json_each(?3) t
-              WHERE EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+               FROM json_each(?${insertArgs.length}) t
+              WHERE ${targetGuard}
              ON CONFLICT(org_id, server_id, name) DO UPDATE SET
                description = excluded.description,
                input_schema = excluded.input_schema`,
-          ).bind(
-            orgId,
-            serverId,
-            JSON.stringify(
-              tools.map((t) => ({
-                id: t.id,
-                name: t.name,
-                description: t.description,
-                inputSchema: JSON.stringify(t.inputSchema),
-              })),
-            ),
-          ),
+          ).bind(...insertArgs),
         );
       }
       statements.push(
-        prepare(db, "SELECT 1 AS ok FROM mcp_servers WHERE org_id = ?1 AND id = ?2").bind(
-          orgId,
-          serverId,
-        ),
+        prepare(
+          db,
+          `SELECT 1 AS ok FROM mcp_servers WHERE org_id = ?1 AND id = ?2 AND ${targetGuard}`,
+        ).bind(...guardArgs),
       );
       const results = await db.batch(statements);
       const verifyRes = results[results.length - 1];
@@ -906,6 +949,9 @@ export function mcpFor(db: D1Database, orgId: string) {
       }
 
       const nextConfigJson = JSON.stringify(input.nextConfig);
+      // Unique per-batch marker so subsequent DELETE statements only run if
+      // this batch's guarded UPDATE actually modified the draft row.
+      const txMarker = `__mcp_tx:${crypto.randomUUID()}`;
       const updateArgs: unknown[] = [
         orgId,
         input.serverId,
@@ -913,14 +959,14 @@ export function mcpFor(db: D1Database, orgId: string) {
         input.expectedDraft.id,
         expectedConfigJson,
         serverAllowedJson,
-        nextConfigJson,
+        txMarker,
       ];
       const otherServerGuards = appendOtherServerAllowedGuards(
         updateArgs,
         input.removedFromDraftNames,
         retainedNames,
       );
-      const [draftRes, , serverRes] = await db.batch([
+      const [draftRes, , serverRes, finalizeRes] = await db.batch([
         prepare(
           db,
           `UPDATE assistant_versions
@@ -937,7 +983,7 @@ export function mcpFor(db: D1Database, orgId: string) {
                 SELECT 1 FROM assistant_versions
                  WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
               )`,
-        ).bind(orgId, input.serverId, input.assistantId, input.expectedDraft.id, nextConfigJson),
+        ).bind(orgId, input.serverId, input.assistantId, input.expectedDraft.id, txMarker),
         prepare(
           db,
           `DELETE FROM mcp_servers
@@ -947,9 +993,26 @@ export function mcpFor(db: D1Database, orgId: string) {
                  WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
               )
               AND NOT EXISTS (SELECT 1 FROM mcp_tools WHERE org_id = ?1 AND server_id = ?2)`,
-        ).bind(orgId, input.serverId, input.assistantId, input.expectedDraft.id, nextConfigJson),
+        ).bind(orgId, input.serverId, input.assistantId, input.expectedDraft.id, txMarker),
+        prepare(
+          db,
+          `UPDATE assistant_versions
+              SET config = ?6
+            WHERE org_id = ?1 AND assistant_id = ?3 AND state = 'draft' AND id = ?4 AND config = ?5`,
+        ).bind(
+          orgId,
+          input.serverId,
+          input.assistantId,
+          input.expectedDraft.id,
+          txMarker,
+          nextConfigJson,
+        ),
       ]);
-      return (draftRes?.meta.changes ?? 0) > 0 && (serverRes?.meta.changes ?? 0) > 0;
+      return (
+        (draftRes?.meta.changes ?? 0) > 0 &&
+        (serverRes?.meta.changes ?? 0) > 0 &&
+        (finalizeRes?.meta.changes ?? 0) > 0
+      );
     },
 
     /**

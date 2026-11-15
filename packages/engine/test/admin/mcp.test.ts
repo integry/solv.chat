@@ -1085,23 +1085,23 @@ describe("admin MCP servers and tools API", () => {
     const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
 
     // Force Request A (discovering ["tool_a"]) to pause after remote discovery
-    // before its getServer read while Request B (discovering ["tool_b"]) runs to completion.
+    // before its target re-read while Request B (discovering ["tool_b"]) runs to completion.
     let releaseRequestA!: () => void;
     const requestAGate = new Promise<void>((resolve) => {
       releaseRequestA = resolve;
     });
-    let getServerCalls = 0;
+    let targetReads = 0;
 
     const gatedTenantA = {
       ...tenant,
       mcp: {
         ...tenant.mcp,
-        async getServer(id: string) {
-          getServerCalls++;
-          if (getServerCalls === 1) {
+        async readTargetWithSecretCiphertext(id: string) {
+          targetReads++;
+          if (targetReads === 2) {
             await requestAGate;
           }
-          return tenant.mcp.getServer(id);
+          return tenant.mcp.readTargetWithSecretCiphertext(id);
         },
       },
     };
@@ -1145,5 +1145,268 @@ describe("admin MCP servers and tools API", () => {
 
     const stored = await tenant.mcp.listTools(created.server.id);
     expect(stored.map((t) => t.name)).toEqual(["tool_a"]);
+  });
+
+  it("fences stale discovery results when target changes during refresh (F8)", async () => {
+    const app = appForOrg(ORG_A, mcpFetch([]));
+    const assistantId = await createAssistant(app);
+    const created = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 1",
+        url: "https://one.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string } };
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+
+    // Refresh A starts against endpoint A, then pauses during listRemoteTools.
+    let releaseFetchA!: () => void;
+    let signalFetchAStarted!: () => void;
+    const fetchAGate = new Promise<void>((resolve) => {
+      releaseFetchA = resolve;
+    });
+    const fetchAStarted = new Promise<void>((resolve) => {
+      signalFetchAStarted = resolve;
+    });
+
+    const fetchByUrl: typeof fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url === "https://one.example.com/mcp") {
+        const body = JSON.parse(String(init?.body)) as { method?: string };
+        if (body.method === "tools/list") {
+          signalFetchAStarted();
+          await fetchAGate;
+        }
+        return mcpFetch([
+          { name: "tool_a", description: "Tool A", inputSchema: { type: "object" } },
+        ])(input, init);
+      }
+      return mcpFetch([{ name: "tool_b", description: "Tool B", inputSchema: { type: "object" } }])(
+        input,
+        init,
+      );
+    };
+
+    const refreshA = refreshMcpTools(
+      { tenant, secretKey: TEST_SECRET_KEY, fetchImpl: fetchByUrl },
+      created.server.id,
+    );
+
+    await fetchAStarted;
+
+    // Owner PATCHes server to endpoint B, refreshes B, and enables tool_b.
+    await updateMcpServer({ tenant, secretKey: TEST_SECRET_KEY }, created.server.id, {
+      url: "https://two.example.com/mcp",
+    });
+    const toolsB = await refreshMcpTools(
+      { tenant, secretKey: TEST_SECRET_KEY, fetchImpl: fetchByUrl },
+      created.server.id,
+    );
+    const toolB = toolsB.find((t) => t.name === "tool_b");
+    expect(toolB).toBeDefined();
+    await setMcpToolAllowed(tenant, created.server.id, toolB?.id ?? "", { allowed: true });
+
+    // Now Refresh A receives endpoint A's old catalog; it must not overwrite B's catalog or prune tool_b.
+    releaseFetchA();
+    const resultA = await refreshA;
+    expect(resultA.map((t) => t.name)).toEqual(["tool_b"]);
+
+    const storedTools = await tenant.mcp.listTools(created.server.id);
+    expect(storedTools.map((t) => ({ name: t.name, allowed: t.allowed }))).toEqual([
+      { name: "tool_b", allowed: true },
+    ]);
+    expect((await tenant.versions.draft(assistantId))?.config.allowedTools).toEqual(["tool_b"]);
+  });
+
+  it("rejects stale target snapshots in syncToolsWithDraft and replaceServerTools (F8)", async () => {
+    const app = appForOrg(ORG_A, mcpFetch([]));
+    const assistantId = await createAssistant(app);
+    const created = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 1",
+        url: "https://one.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string } };
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const staleSnapshot = await tenant.mcp.readTargetWithSecretCiphertext(created.server.id);
+    expect(staleSnapshot).not.toBeNull();
+    if (!staleSnapshot) return;
+
+    await updateMcpServer({ tenant, secretKey: TEST_SECRET_KEY }, created.server.id, {
+      url: "https://two.example.com/mcp",
+    });
+    await refreshMcpTools(
+      {
+        tenant,
+        secretKey: TEST_SECRET_KEY,
+        fetchImpl: mcpFetch([
+          { name: "tool_b", description: "Tool B", inputSchema: { type: "object" } },
+        ]),
+      },
+      created.server.id,
+    );
+
+    const draft = await tenant.versions.draft(assistantId);
+    expect(draft).not.toBeNull();
+    if (!draft) return;
+
+    const synced = await tenant.mcp.syncToolsWithDraft({
+      assistantId,
+      serverId: created.server.id,
+      expectedTarget: staleSnapshot,
+      tools: [
+        {
+          id: "mcp_stale",
+          serverId: created.server.id,
+          name: "tool_a",
+          description: "Stale",
+          inputSchema: { type: "object" },
+        },
+      ],
+      remoteNames: ["tool_a"],
+      prunedAllowedNames: [],
+      removedFromDraftNames: [],
+      expectedDraft: draft,
+      nextConfig: draft.config,
+      hasDraftChange: false,
+    });
+    expect(synced).toBe(false);
+
+    const replaced = await tenant.mcp.replaceServerTools(
+      created.server.id,
+      [
+        {
+          id: "mcp_stale_2",
+          serverId: created.server.id,
+          name: "tool_a",
+          description: "Stale",
+          inputSchema: { type: "object" },
+        },
+      ],
+      staleSnapshot,
+    );
+    expect(replaced).toBe(false);
+
+    expect((await tenant.mcp.listTools(created.server.id)).map((t) => t.name)).toEqual(["tool_b"]);
+
+    // If the target keeps changing on every attempt, refreshMcpTools rejects with Conflict (409).
+    let n = 0;
+    const mutatingFetch: typeof fetch = async (input, init) => {
+      const body = JSON.parse(String(init?.body)) as { method?: string };
+      if (body.method === "tools/list") {
+        n++;
+        await updateMcpServer({ tenant, secretKey: TEST_SECRET_KEY }, created.server.id, {
+          url: `https://changing-${n}.example.com/mcp`,
+        });
+      }
+      return mcpFetch([])(input, init);
+    };
+    await expect(
+      refreshMcpTools(
+        { tenant, secretKey: TEST_SECRET_KEY, fetchImpl: mutatingFetch },
+        created.server.id,
+      ),
+    ).rejects.toThrow(/changed while refreshing/i);
+  });
+
+  it("gates removeServerWithDraft and syncToolsWithDraft on guarded UPDATE success (F9)", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch([{ name: "tool_x", description: "Tool X", inputSchema: { type: "object" } }]),
+    );
+    const assistantId = await createAssistant(app);
+    const created = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 1",
+        url: "https://one.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string }; tools: Array<{ id: string; name: string }> };
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const toolX = created.tools[0];
+    expect(toolX).toBeDefined();
+    if (!toolX) return;
+
+    // 1. Direct batch check for removeServerWithDraft: if draft already equals nextConfig,
+    //    the batch must return false and leave both mcp_tools and mcp_servers intact.
+    await setMcpToolAllowed(tenant, created.server.id, toolX.id, { allowed: true });
+    const draftWithX = await tenant.versions.draft(assistantId);
+    expect(draftWithX?.config.allowedTools).toEqual(["tool_x"]);
+    if (!draftWithX) return;
+
+    await setMcpToolAllowed(tenant, created.server.id, toolX.id, { allowed: false });
+    const draftWithoutX = await tenant.versions.draft(assistantId);
+    expect(draftWithoutX?.config.allowedTools).toEqual([]);
+    if (!draftWithoutX) return;
+
+    const directRemove = await tenant.mcp.removeServerWithDraft({
+      assistantId,
+      serverId: created.server.id,
+      serverAllowedNames: ["tool_x"],
+      removedFromDraftNames: ["tool_x"],
+      expectedDraft: draftWithX,
+      nextConfig: draftWithoutX.config,
+      hasDraftChange: true,
+    });
+    expect(directRemove).toBe(false);
+    expect(await tenant.mcp.getServer(created.server.id)).not.toBeNull();
+    expect((await tenant.mcp.listTools(created.server.id)).map((t) => t.name)).toEqual(["tool_x"]);
+
+    // 2. Direct batch check for syncToolsWithDraft (hasDraftChange): if draft already equals
+    //    nextConfig, the batch must return false and leave mcp_tools untouched.
+    const snapshot = await tenant.mcp.readTargetWithSecretCiphertext(created.server.id);
+    expect(snapshot).not.toBeNull();
+    if (!snapshot) return;
+
+    const directSync = await tenant.mcp.syncToolsWithDraft({
+      assistantId,
+      serverId: created.server.id,
+      expectedTarget: snapshot,
+      tools: [
+        {
+          id: "mcp_y",
+          serverId: created.server.id,
+          name: "tool_y",
+          description: "Tool Y",
+          inputSchema: { type: "object" },
+        },
+      ],
+      remoteNames: ["tool_y"],
+      prunedAllowedNames: ["tool_x"],
+      removedFromDraftNames: ["tool_x"],
+      expectedDraft: draftWithX,
+      nextConfig: draftWithoutX.config,
+      hasDraftChange: true,
+    });
+    expect(directSync).toBe(false);
+    expect((await tenant.mcp.listTools(created.server.id)).map((t) => t.name)).toEqual(["tool_x"]);
+
+    // 3. End-to-end concurrent deleteMcpServer while tool_x is disabled:
+    //    must retry and succeed with { deleted: true } rather than deleting and returning 404.
+    await setMcpToolAllowed(tenant, created.server.id, toolX.id, { allowed: true });
+    let disabledOnce = false;
+    const racingDeleteTenant = {
+      ...tenant,
+      mcp: {
+        ...tenant.mcp,
+        async listOtherAllowedToolNames(astId: string, excludeId: string) {
+          const res = await tenant.mcp.listOtherAllowedToolNames(astId, excludeId);
+          if (!disabledOnce) {
+            disabledOnce = true;
+            await setMcpToolAllowed(tenant, created.server.id, toolX.id, { allowed: false });
+          }
+          return res;
+        },
+      },
+    };
+
+    const deleteRes = await deleteMcpServer(racingDeleteTenant, created.server.id);
+    expect(deleteRes).toEqual({ deleted: true });
+    expect(await tenant.mcp.getServer(created.server.id)).toBeNull();
+    expect(await tenant.mcp.listTools(created.server.id)).toEqual([]);
   });
 });

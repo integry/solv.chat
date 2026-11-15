@@ -1,5 +1,10 @@
 import { isPlainObject, newId, parseVersionConfig, type VersionConfig } from "@solvchat/core";
-import type { McpAuthKind, McpServerWithStatsRow, McpToolRow } from "../db/mcp.js";
+import type {
+  McpAuthKind,
+  McpServerTargetSnapshot,
+  McpServerWithStatsRow,
+  McpToolRow,
+} from "../db/mcp.js";
 import type { Tenant } from "../db/tenant.js";
 import { listTools as listRemoteTools } from "../mcp/client.js";
 import { McpError, type McpTarget } from "../mcp/types.js";
@@ -367,95 +372,131 @@ export async function listMcpTools(tenant: Tenant, serverId: string): Promise<Mc
   return (await tenant.mcp.listTools(serverId)).map(toToolView);
 }
 
+function targetsEqual(a: McpServerTargetSnapshot, b: McpServerTargetSnapshot): boolean {
+  return (
+    a.url === b.url &&
+    a.authKind === b.authKind &&
+    a.headerName === b.headerName &&
+    a.secretCiphertext === b.secretCiphertext
+  );
+}
+
 /**
  * Lists the server's tools and stores them switched off, then drops the ones
  * it no longer offers and reconciles the draft's `allowedTools`. `allowed`
  * survives for tools that are still there.
  */
 export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<McpToolView[]> {
-  const snapshot = await deps.tenant.mcp.readTargetWithSecretCiphertext(serverId);
-  if (snapshot === null) throw new NotFound("mcp server");
+  for (let targetAttempt = 0; targetAttempt < MAX_DRAFT_UPDATE_ATTEMPTS; targetAttempt++) {
+    const snapshot = await deps.tenant.mcp.readTargetWithSecretCiphertext(serverId);
+    if (snapshot === null) throw new NotFound("mcp server");
 
-  const target: McpTarget = {
-    url: snapshot.url,
-    authKind: snapshot.authKind,
-    headerName: snapshot.headerName ?? undefined,
-  };
-  if (snapshot.authKind === "static_header" && snapshot.secretCiphertext !== null) {
-    target.headerValue = await openSecret(deps.secretKey, snapshot.secretCiphertext);
-  }
-
-  const remote = await listRemoteTools(target, { fetchImpl: deps.fetchImpl });
-  const toolsByName = new Map<
-    string,
-    {
-      id: string;
-      serverId: string;
-      name: string;
-      description: string;
-      inputSchema: Record<string, unknown>;
+    const target: McpTarget = {
+      url: snapshot.url,
+      authKind: snapshot.authKind,
+      headerName: snapshot.headerName ?? undefined,
+    };
+    if (snapshot.authKind === "static_header" && snapshot.secretCiphertext !== null) {
+      target.headerValue = await openSecret(deps.secretKey, snapshot.secretCiphertext);
     }
-  >();
-  for (const tool of remote) {
-    toolsByName.set(tool.name, {
-      id: newId("mcp"),
-      serverId,
-      name: tool.name,
-      description: tool.description,
-      inputSchema: tool.inputSchema,
-    });
-  }
-  const toolsToUpsert = [...toolsByName.values()];
-  const remoteNames = toolsToUpsert.map((tool) => tool.name);
-  let expectedDraftId: string | null = null;
-  let synced = false;
 
-  for (let attempt = 0; attempt < MAX_DRAFT_UPDATE_ATTEMPTS; attempt++) {
-    const currentServer = await deps.tenant.mcp.getServer(serverId);
-    if (currentServer === null) throw new NotFound("mcp server");
-
-    const draft = await deps.tenant.versions.draft(currentServer.assistantId);
-    if (draft === null) {
-      const replaced = await deps.tenant.mcp.replaceServerTools(serverId, toolsToUpsert);
-      if (!replaced) throw new NotFound("mcp server");
-      synced = true;
-      break;
+    const remote = await listRemoteTools(target, { fetchImpl: deps.fetchImpl });
+    const toolsByName = new Map<
+      string,
+      {
+        id: string;
+        serverId: string;
+        name: string;
+        description: string;
+        inputSchema: Record<string, unknown>;
+      }
+    >();
+    for (const tool of remote) {
+      toolsByName.set(tool.name, {
+        id: newId("mcp"),
+        serverId,
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      });
     }
-    if (expectedDraftId !== null && draft.id !== expectedDraftId) {
-      throw new Conflict("The draft changed because it was published. Please try again.");
+    const toolsToUpsert = [...toolsByName.values()];
+    const remoteNames = toolsToUpsert.map((tool) => tool.name);
+    let expectedDraftId: string | null = null;
+    let targetChanged = false;
+
+    for (let attempt = 0; attempt < MAX_DRAFT_UPDATE_ATTEMPTS; attempt++) {
+      const currentTarget = await deps.tenant.mcp.readTargetWithSecretCiphertext(serverId);
+      if (currentTarget === null) throw new NotFound("mcp server");
+      if (!targetsEqual(snapshot, currentTarget)) {
+        targetChanged = true;
+        break;
+      }
+
+      const draft = await deps.tenant.versions.draft(currentTarget.assistantId);
+      if (draft === null) {
+        const replaced = await deps.tenant.mcp.replaceServerTools(
+          serverId,
+          toolsToUpsert,
+          snapshot,
+        );
+        if (replaced) {
+          return (await deps.tenant.mcp.listTools(serverId)).map(toToolView);
+        }
+        const latestTarget = await deps.tenant.mcp.readTargetWithSecretCiphertext(serverId);
+        if (latestTarget === null) throw new NotFound("mcp server");
+        if (!targetsEqual(snapshot, latestTarget)) {
+          targetChanged = true;
+          break;
+        }
+        throw new NotFound("mcp server");
+      }
+      if (expectedDraftId !== null && draft.id !== expectedDraftId) {
+        throw new Conflict("The draft changed because it was published. Please try again.");
+      }
+      expectedDraftId = draft.id;
+
+      const prunedAllowedNames = await deps.tenant.mcp.listPrunedAllowedToolNames(
+        serverId,
+        remoteNames,
+      );
+      const otherAllowedNames = await deps.tenant.mcp.listOtherAllowedToolNames(
+        currentTarget.assistantId,
+        serverId,
+      );
+      const removedFromDraftNames = prunedAllowedNames.filter((n) => !otherAllowedNames.has(n));
+      const { next, changed } = withoutToolNames(draft.config, removedFromDraftNames);
+
+      const synced = await deps.tenant.mcp.syncToolsWithDraft({
+        assistantId: currentTarget.assistantId,
+        serverId,
+        expectedTarget: snapshot,
+        tools: toolsToUpsert,
+        remoteNames,
+        prunedAllowedNames,
+        removedFromDraftNames,
+        expectedDraft: draft,
+        nextConfig: next,
+        hasDraftChange: changed,
+      });
+      if (synced) {
+        return (await deps.tenant.mcp.listTools(serverId)).map(toToolView);
+      }
+
+      const latestTarget = await deps.tenant.mcp.readTargetWithSecretCiphertext(serverId);
+      if (latestTarget === null) throw new NotFound("mcp server");
+      if (!targetsEqual(snapshot, latestTarget)) {
+        targetChanged = true;
+        break;
+      }
     }
-    expectedDraftId = draft.id;
 
-    const prunedAllowedNames = await deps.tenant.mcp.listPrunedAllowedToolNames(
-      serverId,
-      remoteNames,
-    );
-    const otherAllowedNames = await deps.tenant.mcp.listOtherAllowedToolNames(
-      currentServer.assistantId,
-      serverId,
-    );
-    const removedFromDraftNames = prunedAllowedNames.filter((n) => !otherAllowedNames.has(n));
-    const { next, changed } = withoutToolNames(draft.config, removedFromDraftNames);
-
-    synced = await deps.tenant.mcp.syncToolsWithDraft({
-      assistantId: currentServer.assistantId,
-      serverId,
-      tools: toolsToUpsert,
-      remoteNames,
-      prunedAllowedNames,
-      removedFromDraftNames,
-      expectedDraft: draft,
-      nextConfig: next,
-      hasDraftChange: changed,
-    });
-    if (synced) break;
+    if (!targetChanged) {
+      throw new Conflict("The draft changed while you were saving. Please try again.");
+    }
   }
 
-  if (!synced) {
-    throw new Conflict("The draft changed while you were saving. Please try again.");
-  }
-
-  return (await deps.tenant.mcp.listTools(serverId)).map(toToolView);
+  throw new Conflict("The server configuration changed while refreshing tools. Please try again.");
 }
 
 /**
