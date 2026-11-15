@@ -1,12 +1,12 @@
 import { NAV_ITEMS, type NavItem } from "../routing.js";
 
 export interface NavigationProps {
-  current: string;
+  current: string | null;
   onNavigate: (path: string) => void;
   items?: readonly NavItem[];
 }
 
-function renderNavItem(item: NavItem, current: string, onNavigate: (path: string) => void) {
+function renderNavItem(item: NavItem, current: string | null, onNavigate: (path: string) => void) {
   const active = item.id === current;
   return (
     <li key={item.id}>

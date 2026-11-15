@@ -86,7 +86,8 @@ function AdminShell({
       ? selectedId
       : (assistants[0]?.id ?? null);
   const selectedAssistant = assistants.find((a) => a.id === effectiveSelectedId) ?? null;
-  const ExtraScreen = config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
+  const ExtraScreen =
+    screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
 
   return (
     <div className="shell">
@@ -127,6 +128,10 @@ function AdminShell({
                 assistantId={selectedAssistant?.id ?? null}
                 api={ADMIN_API_HELPERS}
               />
+            ) : screen === null ? (
+              <div className="screen">
+                <p className="muted">No screens available.</p>
+              </div>
             ) : screen === "providers" ? (
               <Providers />
             ) : assistantsRes.status === "loading" && assistants.length === 0 ? (

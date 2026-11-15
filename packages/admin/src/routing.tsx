@@ -36,21 +36,24 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "providers", label: "Providers", path: "/admin/providers", section: "Settings" },
 ];
 
-export function matchScreen(pathname: string, navItems: readonly NavItem[] = NAV_ITEMS): string {
+export function matchScreen(
+  pathname: string,
+  navItems: readonly NavItem[] = NAV_ITEMS,
+): string | null {
+  const first = navItems[0];
+  if (!first) return null;
   const normalized = pathname.replace(/\/+$/, "") || "/";
-  const fallback = navItems.some((item) => item.id === "overview")
-    ? "overview"
-    : (navItems[0]?.id ?? "overview");
+  const fallback = navItems.some((item) => item.id === "overview") ? "overview" : first.id;
   if (normalized === "/admin" || normalized === "/") return fallback;
   const found = navItems.find((item) => item.path === normalized);
   return found ? found.id : fallback;
 }
 
 export function useRoute(navItems: readonly NavItem[] = NAV_ITEMS): {
-  screen: string;
+  screen: string | null;
   navigate: (path: string) => void;
 } {
-  const [screen, setScreen] = useState<string>(() =>
+  const [screen, setScreen] = useState<string | null>(() =>
     matchScreen(window.location.pathname, navItems),
   );
 
@@ -68,7 +71,7 @@ export function useRoute(navItems: readonly NavItem[] = NAV_ITEMS): {
       if (window.location.pathname !== path) {
         window.history.pushState(null, "", path);
       }
-      setScreen(matchScreen(path, navItems));
+      setScreen(matchScreen(window.location.pathname, navItems));
     },
     [navItems],
   );

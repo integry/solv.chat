@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
 import type { Assistant, AssistantReport } from "../src/api/types.js";
 
@@ -85,6 +85,10 @@ function installFakeServer(options?: {
 }
 
 describe("Reports screen", () => {
+  beforeEach(() => {
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  });
+
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();

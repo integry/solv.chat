@@ -68,8 +68,33 @@ export interface ResolvedAdminConfig {
 const BUILTIN_IDS = new Set<string>(NAV_ITEMS.map((item) => item.id));
 const BUILTIN_PATHS = new Set<string>(NAV_ITEMS.map((item) => item.path));
 
-function normalizeAdminPath(path: string): string {
-  return path.replace(/\/+$/, "") || "/";
+function normalizeAdminPath(path: string, id: string): string {
+  if (!path.startsWith("/") || path.startsWith("//")) {
+    throw new Error(
+      `Extra admin nav item "${id}" must have a path under "/admin/" (got "${path}").`,
+    );
+  }
+  if (path.includes("?") || path.includes("#")) {
+    throw new Error(
+      `Extra admin nav item "${id}" path must not include a query string or fragment (got "${path}").`,
+    );
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(path, "http://localhost");
+  } catch {
+    throw new Error(
+      `Extra admin nav item "${id}" must have a valid path under "/admin/" (got "${path}").`,
+    );
+  }
+  const withoutTrailingSlash = path.replace(/\/+$/, "") || "/";
+  const canonicalPathname = parsed.pathname.replace(/\/+$/, "") || "/";
+  if (parsed.origin !== "http://localhost" || canonicalPathname !== withoutTrailingSlash) {
+    throw new Error(
+      `Extra admin nav item "${id}" must use a canonical path under "/admin/" (got "${path}").`,
+    );
+  }
+  return canonicalPathname;
 }
 
 /**
@@ -101,7 +126,7 @@ export function resolveAdminConfig(options?: MountAdminOptions): ResolvedAdminCo
     }
     seenExtraIds.add(id);
 
-    const normalizedPath = normalizeAdminPath(item.path);
+    const normalizedPath = normalizeAdminPath(item.path, id);
     if (!normalizedPath.startsWith("/admin/")) {
       throw new Error(
         `Extra admin nav item "${id}" must have a path under "/admin/" (got "${item.path}").`,

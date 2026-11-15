@@ -4,11 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type AdminMount,
   type Assistant,
+  type BuiltinScreenId,
   type ExtraScreenProps,
   mountAdmin,
   type SignInProps,
 } from "../src/index.js";
-import { NAV_ITEMS } from "../src/routing.js";
+import { matchScreen, NAV_ITEMS, useRoute } from "../src/routing.js";
 
 function makeAssistant(id: string, name: string): Assistant {
   return {
@@ -90,6 +91,18 @@ function AccountScreen(props: ExtraScreenProps) {
 
 function DummyScreen() {
   return <div>Dummy</div>;
+}
+
+function RouteProbe() {
+  const { screen: current, navigate } = useRoute();
+  return (
+    <div>
+      <span data-testid="current-screen">{current}</span>
+      <button type="button" onClick={() => navigate("/admin/custom/../providers?from=test#top")}>
+        Go
+      </button>
+    </div>
+  );
 }
 
 function CustomSignIn({ onSignedIn }: SignInProps) {
@@ -301,5 +314,53 @@ describe("admin extension point", () => {
     expect(screen.queryByRole("link", { name: "Providers" })).toBeNull();
     expect(screen.queryByText("Settings")).toBeNull();
     expect(screen.queryByRole("heading", { name: "Providers" })).toBeNull();
+  });
+
+  it("rejects noncanonical, query, fragment, and protocol-relative extension paths", () => {
+    const el = document.createElement("div");
+
+    for (const badPath of [
+      "/admin/custom/../providers",
+      "/admin/custom/../account",
+      "/admin/./account",
+      "/admin\\..\\providers",
+      "//evil.com/admin/account",
+      "/admin/account?tab=1",
+      "/admin/account#section",
+    ]) {
+      expect(() =>
+        mountAdmin(el, {
+          extraNavItems: [{ id: "custom", label: "Custom", path: badPath }],
+          extraScreens: { custom: DummyScreen },
+        }),
+      ).toThrow();
+    }
+  });
+
+  it("matches navigate against browser-normalized window.location.pathname", () => {
+    render(<RouteProbe />);
+    fireEvent.click(screen.getByRole("button", { name: "Go" }));
+    expect(window.location.pathname).toBe("/admin/providers");
+    expect(screen.getByTestId("current-screen").textContent).toBe("providers");
+  });
+
+  it("renders an empty state without restoring Overview when all built-in screens are hidden", async () => {
+    installMockFetch();
+    window.history.replaceState(null, "", "/admin/overview");
+
+    const allBuiltinIds = NAV_ITEMS.map((item) => item.id as BuiltinScreenId);
+    expect(matchScreen("/admin/overview", [])).toBeNull();
+
+    mountIntoDom({
+      hideScreens: allBuiltinIds,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("No screens available.")).toBeTruthy();
+    });
+
+    expect(screen.queryByRole("heading", { name: "Overview" })).toBeNull();
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(nav.querySelectorAll("a")).toHaveLength(0);
   });
 });
