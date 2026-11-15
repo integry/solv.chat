@@ -141,6 +141,74 @@ describe("openrouterProvider", () => {
     expect((caught as ProviderError).message).not.toContain(secret);
   });
 
+  it("sanitizes string error.code values so secrets cannot leak", async () => {
+    const secret = "sk-or-v1-code-secret";
+    const provider = openrouterProvider({
+      apiKey: secret,
+      model: "vendor/model",
+      fetchImpl: async () =>
+        sseResponse(
+          `data: {"error":{"code":"upstream_error_${secret}","message":"bad"},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}\n\n`,
+        ),
+    });
+
+    let caught: unknown;
+    try {
+      await collect(provider.stream(SAMPLE_REQUEST));
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ProviderError);
+    expect((caught as ProviderError).retryable).toBe(true);
+    expect((caught as ProviderError).message).toBe("openrouter stream error");
+    expect((caught as ProviderError).message).not.toContain(secret);
+
+    const nonRetryable = openrouterProvider({
+      apiKey: secret,
+      model: "vendor/model",
+      fetchImpl: async () =>
+        sseResponse(
+          'data: {"error":{"code":"invalid_request_error","message":"bad"},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}\n\n',
+        ),
+    });
+    await expect(collect(nonRetryable.stream(SAMPLE_REQUEST))).rejects.toMatchObject({
+      name: "ProviderError",
+      retryable: false,
+      message: "openrouter stream error",
+    });
+  });
+
+  it("emits usage attached to a mid-stream error event before throwing", async () => {
+    const provider = openrouterProvider({
+      apiKey: "test-key",
+      model: "vendor/model",
+      fetchImpl: async () =>
+        sseResponse(
+          [
+            'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
+            'data: {"error":{"code":502,"message":"upstream failed"},"usage":{"prompt_tokens":14,"completion_tokens":3,"cost":0.0025},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}\n\n',
+          ].join(""),
+        ),
+    });
+
+    const yielded: LlmChunk[] = [];
+    let caught: unknown;
+    try {
+      for await (const chunk of provider.stream(SAMPLE_REQUEST)) {
+        yielded.push(chunk);
+      }
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(ProviderError);
+    expect((caught as ProviderError).retryable).toBe(true);
+    expect(yielded).toEqual([
+      { kind: "text", text: "partial" },
+      { kind: "usage", tokensIn: 14, tokensOut: 3, costMicros: 2500 },
+    ]);
+  });
+
   it("maps HTTP errors and fetch rejections to sanitized ProviderError without leaking key", async () => {
     const secret = "sk-or-v1-very-secret-key";
 

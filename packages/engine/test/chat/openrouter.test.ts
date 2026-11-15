@@ -214,6 +214,60 @@ describe("chat/openrouter", () => {
     expect(summary?.costUnknown).toBe(true);
   });
 
+  it("records usage and cost in usage_daily when a mid-stream error event carries usage", async () => {
+    const astId = "ast_or_err_usage";
+    const chunkId = "chk_or_err_usage";
+    await seedAssistantWithChunk(astId, "pk_or_err_usage", chunkId);
+
+    const embedder = fakeEmbedder();
+    const {
+      vectors: [chunkVec],
+    } = await embedder.embed(["Reset your password in Settings."], async () => {});
+    if (!chunkVec) throw new Error("expected vector");
+    const retriever = memoryRetriever();
+    await retriever.upsert([{ chunkId, vector: chunkVec, orgId: TEST_ORG_ID, assistantId: astId }]);
+
+    const provider = openrouterProvider({
+      apiKey: "sk-or-test",
+      model: "anthropic/claude-sonnet-4",
+      fetchImpl: async () =>
+        sseResponse([
+          'data: {"choices":[{"delta":{"content":"Partial"},"finish_reason":null}]}\n\n',
+          'data: {"error":{"code":502,"message":"upstream failed"},"usage":{"prompt_tokens":18,"completion_tokens":6,"cost":0.004},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}\n\n',
+        ]),
+    });
+
+    const tenant = forPrincipal(env.DB, { orgId: TEST_ORG_ID, userId: "owner", role: "owner" });
+    const usage = usageDaily(env.DB);
+    const events = [];
+    for await (const ev of answerMessage(
+      {
+        tenant,
+        embedder,
+        retriever,
+        provider,
+        usage,
+        now: () => 1_700_000_000_000,
+      },
+      {
+        orgId: TEST_ORG_ID,
+        assistantId: astId,
+        visitorId: "vis_1",
+        message: "Reset your password in Settings.",
+        behaviour: defaultVersionConfig().behaviour,
+      },
+    )) {
+      events.push(ev);
+    }
+
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    const day = utcDay(1_700_000_000_000);
+    const summary = await tenant.usage.summaryFor(astId, day);
+    expect(summary).not.toBeNull();
+    expect(summary?.costMicros).toBeGreaterThanOrEqual(4000);
+    expect(summary?.costUnknown).toBe(false);
+  });
+
   it("returns standard SSE error event without fallback when SOLV_LLM_MODEL or SOLV_OPENROUTER_KEY is missing", async () => {
     const astId = "ast_or_cfg";
     await seedAssistantWithChunk(astId, "pk_or_cfg", "chk_or_cfg");

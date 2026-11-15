@@ -46,6 +46,13 @@ function isRetryableStreamError(code: number | string | undefined): boolean {
   return code !== "invalid_request_error";
 }
 
+function formatStreamErrorMessage(code: number | string | undefined): string {
+  if (typeof code === "number" && Number.isInteger(code) && code >= 100 && code <= 599) {
+    return `openrouter stream error: ${code}`;
+  }
+  return "openrouter stream error";
+}
+
 /** Creates an OpenRouter Chat Completions streaming provider. */
 export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
   const doFetch = options.fetchImpl ?? fetch;
@@ -101,22 +108,6 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
         for await (const event of readEventStream(response.body)) {
           const payload = event.data as OpenRouterChunkPayload;
 
-          if (payload.error) {
-            const code = payload.error.code;
-            throw new ProviderError(
-              `openrouter stream error: ${code ?? "unknown"}`,
-              isRetryableStreamError(code),
-            );
-          }
-
-          const choice = payload.choices?.[0];
-          if (typeof choice?.delta?.content === "string" && choice.delta.content.length > 0) {
-            yield { kind: "text", text: choice.delta.content };
-          }
-          if (choice?.finish_reason !== undefined && choice.finish_reason !== null) {
-            sawTerminal = true;
-          }
-
           if (payload.usage) {
             const promptTokens = payload.usage.prompt_tokens;
             if (typeof promptTokens === "number" && Number.isFinite(promptTokens)) {
@@ -131,6 +122,19 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
               costMicros = Math.round(costUsd * 1_000_000);
             }
           }
+
+          if (payload.error) {
+            const code = payload.error.code;
+            throw new ProviderError(formatStreamErrorMessage(code), isRetryableStreamError(code));
+          }
+
+          const choice = payload.choices?.[0];
+          if (typeof choice?.delta?.content === "string" && choice.delta.content.length > 0) {
+            yield { kind: "text", text: choice.delta.content };
+          }
+          if (choice?.finish_reason !== undefined && choice.finish_reason !== null) {
+            sawTerminal = true;
+          }
         }
       } catch (err) {
         failure = toProviderError(err, "openrouter stream failed");
@@ -143,7 +147,7 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
         failure = new ProviderError("openrouter stream ended without usage", true);
       }
 
-      if (tokensIn !== undefined || tokensOut !== undefined) {
+      if (tokensIn !== undefined || tokensOut !== undefined || costMicros !== undefined) {
         yield {
           kind: "usage",
           tokensIn: tokensIn ?? 0,
