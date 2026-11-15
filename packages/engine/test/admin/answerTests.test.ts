@@ -6,14 +6,14 @@ import {
   newId,
   type TestExpectation,
 } from "@solvchat/core";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runAnswerTests, TEST_RUN_WALL_TIME_MS } from "../../src/admin/answerTests.js";
 import { createApp } from "../../src/app.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { ANTHROPIC_MODELS } from "../../src/models.js";
 import type { LlmChunk, LlmProvider } from "../../src/providers/types.js";
 import type { UsageEvent } from "../../src/seams/types.js";
-import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
+import type { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { type createTestApp, fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
 
@@ -143,6 +143,8 @@ describe("admin answer tests", () => {
     await env.DB.batch([
       env.DB.prepare("DELETE FROM test_runs"),
       env.DB.prepare("DELETE FROM tests"),
+      env.DB.prepare("DELETE FROM mcp_tools"),
+      env.DB.prepare("DELETE FROM mcp_servers"),
       env.DB.prepare("DELETE FROM messages"),
       env.DB.prepare("DELETE FROM conversations"),
       env.DB.prepare("DELETE FROM chunks"),
@@ -431,7 +433,8 @@ describe("admin answer tests", () => {
       });
     }
 
-    // Per-run cap: at most MAX_TESTS_PER_RUN (25) run.
+    // Per-run cap: at most MAX_TESTS_PER_RUN (25) execute, omitted tests are
+    // preserved as not_run, and the incomplete run is never marked passing.
     const cappedRun = await runAnswerTests(
       {
         tenant,
@@ -449,8 +452,15 @@ describe("admin answer tests", () => {
       },
       assistantId,
     );
-    expect(cappedRun.results).toHaveLength(MAX_TESTS_PER_RUN);
-    expect(cappedRun.passed).toBe(true);
+    expect(cappedRun.results).toHaveLength(MAX_TESTS_PER_RUN + 3);
+    expect(cappedRun.results.slice(0, MAX_TESTS_PER_RUN).every((r) => r.outcome === "passed")).toBe(
+      true,
+    );
+    expect(cappedRun.results.slice(MAX_TESTS_PER_RUN).every((r) => r.outcome === "not_run")).toBe(
+      true,
+    );
+    expect(cappedRun.passed).toBe(false);
+    expect(cappedRun.stopped).toContain(String(MAX_TESTS_PER_RUN));
 
     // Wall-time cap: remaining tests marked not_run and passed is false.
     let clock = 0;
@@ -478,7 +488,7 @@ describe("admin answer tests", () => {
             return { ok: true };
           },
         },
-        now: () => (clock += TEST_RUN_WALL_TIME_MS / 2 + 1),
+        now: () => (clock += TEST_RUN_WALL_TIME_MS / 3 + 1),
       },
       wallAssistantId,
     );
@@ -568,5 +578,331 @@ describe("admin answer tests", () => {
     const bodyA = (await listA.json()) as { tests: Array<{ id: string; question: string }> };
     expect(bodyA.tests).toHaveLength(1);
     expect(bodyA.tests[0]?.question).toBe("Org A question?");
+  });
+
+  it("aborts a stalled operation and rejects a final test completing after the wall-time deadline", async () => {
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const retriever = memoryRetriever();
+
+    // 1) Stalled operation: embedder never resolves, signal is aborted at deadline.
+    const { assistantId: stalledAstId } = await seedAssistant(ORG_A);
+    await tenant.tests.create({
+      id: newId("tst"),
+      assistantId: stalledAstId,
+      question: "Stalled?",
+      expectation: { kind: "declines" },
+      createdAt: Date.now(),
+    });
+    await tenant.tests.create({
+      id: newId("tst"),
+      assistantId: stalledAstId,
+      question: "Never reached",
+      expectation: { kind: "declines" },
+      createdAt: Date.now() + 1,
+    });
+
+    let observedSignal: AbortSignal | undefined;
+    vi.useFakeTimers();
+    try {
+      const stalledPromise = runAnswerTests(
+        {
+          tenant,
+          orgId: ORG_A,
+          embedder: {
+            dimensions: 4,
+            embed(_texts, _onBilled, options) {
+              observedSignal = options?.signal;
+              return new Promise(() => {});
+            },
+          },
+          retriever,
+          provider: scriptedProvider("unused"),
+          model: ANTHROPIC_MODELS.fast,
+          usage: { async record() {} },
+          limits: {
+            async check() {
+              return { ok: true };
+            },
+          },
+        },
+        stalledAstId,
+      );
+      await vi.advanceTimersByTimeAsync(TEST_RUN_WALL_TIME_MS + 50);
+      const stalledRun = await stalledPromise;
+      expect(observedSignal?.aborted).toBe(true);
+      expect(stalledRun.passed).toBe(false);
+      expect(stalledRun.stopped).toMatch(/too long/i);
+      expect(stalledRun.results.map((r) => r.outcome)).toEqual(["not_run", "not_run"]);
+      const persistedStalled = await tenant.tests.latestRun(stalledAstId);
+      expect(persistedStalled?.id).toBe(stalledRun.runId);
+      expect(persistedStalled?.passed).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // 2) Final test completes after the deadline: marked not_run and passed is false.
+    const { assistantId: lateAstId } = await seedAssistant(ORG_A);
+    const embedder = constantEmbedder();
+    await seedChunk(
+      ORG_A,
+      lateAstId,
+      "https://site.example/late",
+      "Late answer.",
+      embedder,
+      retriever,
+    );
+    await tenant.tests.create({
+      id: newId("tst"),
+      assistantId: lateAstId,
+      question: "Slow final?",
+      expectation: { kind: "contains", phrase: "Late" },
+      createdAt: Date.now(),
+    });
+
+    let fakeNow = 0;
+    const lateRun = await runAnswerTests(
+      {
+        tenant,
+        orgId: ORG_A,
+        embedder,
+        retriever,
+        provider: {
+          name: "anthropic",
+          model: ANTHROPIC_MODELS.fast.id,
+          async *stream(): AsyncIterable<LlmChunk> {
+            fakeNow += TEST_RUN_WALL_TIME_MS + 1;
+            yield { kind: "text", text: "Late answer." };
+            yield { kind: "usage", tokensIn: 5, tokensOut: 5 };
+          },
+        },
+        model: ANTHROPIC_MODELS.fast,
+        usage: { async record() {} },
+        limits: {
+          async check() {
+            return { ok: true };
+          },
+        },
+        now: () => fakeNow,
+      },
+      lateAstId,
+    );
+    expect(lateRun.passed).toBe(false);
+    expect(lateRun.stopped).toMatch(/too long/i);
+    expect(lateRun.results.map((r) => r.outcome)).toEqual(["not_run"]);
+    const persistedLate = await tenant.tests.latestRun(lateAstId);
+    expect(persistedLate?.id).toBe(lateRun.runId);
+    expect(persistedLate?.passed).toBe(false);
+  });
+
+  it("preserves completed results and persists an incomplete run when retrieval rejects", async () => {
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const embedder = constantEmbedder();
+    const baseRetriever = memoryRetriever();
+    const { assistantId } = await seedAssistant(ORG_A);
+
+    for (let i = 0; i < 3; i++) {
+      await tenant.tests.create({
+        id: newId("tst"),
+        assistantId,
+        question: `Q${i}`,
+        expectation: { kind: "declines" },
+        createdAt: Date.now() + i,
+      });
+    }
+
+    let queryCalls = 0;
+    const flakyRetriever: typeof baseRetriever = {
+      ...baseRetriever,
+      async query(args) {
+        queryCalls += 1;
+        if (queryCalls === 2) {
+          throw new Error("vectorize unavailable");
+        }
+        return baseRetriever.query(args);
+      },
+    };
+
+    const run = await runAnswerTests(
+      {
+        tenant,
+        orgId: ORG_A,
+        embedder,
+        retriever: flakyRetriever,
+        provider: scriptedProvider("unused"),
+        model: ANTHROPIC_MODELS.fast,
+        usage: { async record() {} },
+        limits: {
+          async check() {
+            return { ok: true };
+          },
+        },
+      },
+      assistantId,
+    );
+
+    expect(run.passed).toBe(false);
+    expect(run.results.map((r) => r.outcome)).toEqual(["passed", "not_run", "passed"]);
+    const persisted = await tenant.tests.latestRun(assistantId);
+    expect(persisted?.id).toBe(run.runId);
+    expect(persisted?.passed).toBe(false);
+
+    // Persistence failures remain distinguishable from answer failures.
+    const failingTenant: typeof tenant = {
+      ...tenant,
+      tests: {
+        ...tenant.tests,
+        async createRun() {
+          throw new Error("d1 write failed");
+        },
+      },
+    };
+    await expect(
+      runAnswerTests(
+        {
+          tenant: failingTenant,
+          orgId: ORG_A,
+          embedder,
+          retriever: baseRetriever,
+          provider: scriptedProvider("unused"),
+          model: ANTHROPIC_MODELS.fast,
+          usage: { async record() {} },
+          limits: {
+            async check() {
+              return { ok: true };
+            },
+          },
+        },
+        assistantId,
+      ),
+    ).rejects.toThrow("d1 write failed");
+  });
+
+  it("passes configured MCP tools from the draft to the answering pipeline", async () => {
+    const embedder = constantEmbedder();
+    const retriever = memoryRetriever();
+    const { assistantId, versionId } = await seedAssistant(ORG_A);
+    await seedChunk(
+      ORG_A,
+      assistantId,
+      "https://site.example/orders",
+      "Use lookup_order to check order status.",
+      embedder,
+      retriever,
+    );
+
+    const serverId = newId("mcp");
+    const toolId = newId("mcp");
+    const now = Date.now();
+    const draftConfig = defaultVersionConfig();
+    draftConfig.allowedTools = ["lookup_order"];
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE assistant_versions SET config = ?1 WHERE org_id = ?2 AND id = ?3",
+      ).bind(JSON.stringify(draftConfig), ORG_A, versionId),
+      env.DB.prepare(
+        "INSERT INTO mcp_servers (id, org_id, assistant_id, label, url, auth_kind, header_name, secret_ciphertext, enabled, created_at) VALUES (?1, ?2, ?3, 'Orders', 'https://mcp.example/rpc', 'none', NULL, NULL, 1, ?4)",
+      ).bind(serverId, ORG_A, assistantId, now),
+      env.DB.prepare(
+        "INSERT INTO mcp_tools (id, org_id, server_id, name, description, input_schema, allowed) VALUES (?1, ?2, ?3, 'lookup_order', 'Look up an order', ?4, 1)",
+      ).bind(
+        toolId,
+        ORG_A,
+        serverId,
+        JSON.stringify({
+          type: "object",
+          properties: { orderId: { type: "string" } },
+          required: ["orderId"],
+        }),
+      ),
+    ]);
+
+    let sawToolOffer = false;
+    const app = appForOrg(ORG_A, {
+      fetch: async () =>
+        Response.json({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { content: [{ type: "text", text: "Order #42 is shipped." }] },
+        }),
+      chat: {
+        embedder,
+        retriever,
+        provider: {
+          name: "anthropic",
+          model: ANTHROPIC_MODELS.fast.id,
+          async *stream(request): AsyncIterable<LlmChunk> {
+            const hasTool = request.tools?.some((t) => t.name === "lookup_order") ?? false;
+            if (hasTool) sawToolOffer = true;
+            const hasToolResult = request.messages.some((m) => m.role === "tool_results");
+            if (!hasToolResult) {
+              if (!hasTool) {
+                yield { kind: "text", text: "I have no tools." };
+                yield { kind: "usage", tokensIn: 5, tokensOut: 5, stopReason: "end" };
+                return;
+              }
+              yield {
+                kind: "tool_call",
+                call: { callId: "call_1", name: "lookup_order", input: { orderId: "42" } },
+              };
+              yield { kind: "usage", tokensIn: 10, tokensOut: 8, stopReason: "tools" };
+              return;
+            }
+            yield { kind: "text", text: "Order #42 is shipped." };
+            yield { kind: "usage", tokensIn: 15, tokensOut: 10, stopReason: "end" };
+          },
+        },
+        model: ANTHROPIC_MODELS.fast,
+      },
+    });
+
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "Where is order 42?",
+      expectation: { kind: "contains", phrase: "shipped" },
+    });
+
+    const runRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/test-runs`);
+    expect(runRes.status).toBe(201);
+    const run = (await runRes.json()) as {
+      passed: boolean;
+      results: Array<{ outcome: string; excerpt: string }>;
+    };
+    expect(sawToolOffer).toBe(true);
+    expect(run.passed).toBe(true);
+    expect(run.results[0]?.outcome).toBe("passed");
+    expect(run.results[0]?.excerpt).toContain("shipped");
+  });
+
+  it("enforces the per-assistant cap across concurrent test creation requests", async () => {
+    const app = appForOrg(ORG_A);
+    const { assistantId } = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+
+    for (let i = 0; i < MAX_TESTS_PER_ASSISTANT - 1; i++) {
+      await tenant.tests.create({
+        id: newId("tst"),
+        assistantId,
+        question: `Existing ${i}`,
+        expectation: { kind: "declines" },
+        createdAt: Date.now() + i,
+      });
+    }
+
+    const [resA, resB] = await Promise.all([
+      call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+        question: "Concurrent A",
+        expectation: { kind: "declines" },
+      }),
+      call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+        question: "Concurrent B",
+        expectation: { kind: "declines" },
+      }),
+    ]);
+
+    const statuses = [resA.status, resB.status].sort((a, b) => a - b);
+    expect(statuses).toEqual([201, 400]);
+    const rejected = resA.status === 400 ? resA : resB;
+    const rejectedBody = (await rejected.json()) as { fields: string[] };
+    expect(rejectedBody.fields[0]).toContain(String(MAX_TESTS_PER_ASSISTANT));
+    expect(await tenant.tests.countFor(assistantId)).toBe(MAX_TESTS_PER_ASSISTANT);
   });
 });

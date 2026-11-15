@@ -163,6 +163,36 @@ export function testsFor(db: D1Database, orgId: string) {
       };
     },
 
+    async createIfUnderLimit(input: CreateTestInput, maxTests: number): Promise<TestRow | null> {
+      const res = await prepareInsert(
+        db,
+        `INSERT INTO tests (id, org_id, assistant_id, question, expectation, created_at)
+         SELECT ?2, ?1, ?3, ?4, ?5, ?6
+         WHERE (SELECT COUNT(*) FROM tests WHERE org_id = ?1 AND assistant_id = ?3) < ?7`,
+      )
+        .bind(
+          orgId,
+          input.id,
+          input.assistantId,
+          input.question,
+          JSON.stringify(input.expectation),
+          input.createdAt,
+          maxTests,
+        )
+        .run();
+
+      if ((res.meta.changes ?? 0) === 0) return null;
+
+      return {
+        id: input.id,
+        orgId,
+        assistantId: input.assistantId,
+        question: input.question,
+        expectation: input.expectation,
+        createdAt: input.createdAt,
+      };
+    },
+
     async updateQuestion(id: string, question: string): Promise<boolean> {
       const res = await prepare(db, "UPDATE tests SET question = ?3 WHERE org_id = ?1 AND id = ?2")
         .bind(orgId, id, question)

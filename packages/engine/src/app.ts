@@ -158,6 +158,8 @@ export function createApp(seams: Seams, options?: AppOptions): App {
               ...providers,
               usage: seams.usage,
               limits: seams.limits,
+              secretKey: env.SOLV_SECRET_KEY ?? "",
+              fetchImpl: chatOverrides?.fetch,
             };
           },
           costUnit:

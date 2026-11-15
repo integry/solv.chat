@@ -7,6 +7,8 @@ import {
   type TestExpectation,
 } from "@solvchat/core";
 import { answerMessage } from "../chat/answer.js";
+import { mcpRunnerFor } from "../chat/mcpRunner.js";
+import type { ToolRunner } from "../chat/toolLoop.js";
 import type { Tenant } from "../db/tenant.js";
 import type { TestRow, TestRunRow, TestWithLatestResult } from "../db/tests.js";
 import type { ModelInfo } from "../models.js";
@@ -34,6 +36,41 @@ export interface TestResult {
    * answer: a run holds many, and this is a log, not a transcript.
    */
   excerpt: string;
+}
+
+const WALL_TIME_MESSAGE = "The run took too long and stopped early.";
+const INFRA_ERROR_MESSAGE = "The assistant could not answer, so this test did not run.";
+
+function abortError(): DOMException {
+  return new DOMException("The operation was aborted.", "AbortError");
+}
+
+async function raceWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+  onAbort?: () => void,
+): Promise<T> {
+  if (signal.aborted) {
+    onAbort?.();
+    promise.catch(() => {});
+    throw abortError();
+  }
+  promise.catch(() => {});
+  let handleAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    handleAbort = () => {
+      onAbort?.();
+      reject(abortError());
+    };
+    signal.addEventListener("abort", handleAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    if (handleAbort) {
+      signal.removeEventListener("abort", handleAbort);
+    }
+  }
 }
 
 function notRun(test: TestRow, reason: string): TestResult {
@@ -109,6 +146,9 @@ export interface RunDeps {
   model?: ModelInfo | undefined;
   usage: UsageSink;
   limits: Limits;
+  secretKey?: string | undefined;
+  fetchImpl?: typeof fetch | undefined;
+  runners?: readonly ToolRunner[] | undefined;
   now?: (() => number) | undefined;
 }
 
@@ -132,18 +172,22 @@ export async function createTest(
   if (assistant === null) throw new NotFound("assistant");
   const parsed = parseTestInput(body);
   if (!parsed.ok) throw new BadRequest(parsed.errors);
-  // Checked here rather than by a database constraint: the owner gets a plain
-  // sentence naming the limit instead of a 409 from an index.
-  if ((await tenant.tests.countFor(assistantId)) >= MAX_TESTS_PER_ASSISTANT) {
+  // Enforced atomically with insertion so concurrent requests cannot exceed
+  // the per-assistant cap; the owner gets a plain sentence naming the limit.
+  const created = await tenant.tests.createIfUnderLimit(
+    {
+      id: newId("tst"),
+      assistantId,
+      question: parsed.value.question,
+      expectation: parsed.value.expectation as unknown as Record<string, unknown>,
+      createdAt: Date.now(),
+    },
+    MAX_TESTS_PER_ASSISTANT,
+  );
+  if (created === null) {
     throw new BadRequest([`tests: an assistant can have at most ${MAX_TESTS_PER_ASSISTANT} tests`]);
   }
-  return tenant.tests.create({
-    id: newId("tst"),
-    assistantId,
-    question: parsed.value.question,
-    expectation: parsed.value.expectation as unknown as Record<string, unknown>,
-    createdAt: Date.now(),
-  });
+  return created;
 }
 
 /** Updates an existing test's question and/or expectation. */
@@ -199,16 +243,30 @@ export async function runAnswerTests(
 ): Promise<{ runId: string; passed: boolean; results: TestResult[]; stopped?: string }> {
   const draft = await deps.tenant.versions.draft(assistantId);
   if (draft === null) throw new NotFound("assistant");
-  const tests = (await deps.tenant.tests.list(assistantId)).slice(0, MAX_TESTS_PER_RUN);
+  const mcp = await mcpRunnerFor(
+    {
+      tenant: deps.tenant,
+      secretKey: deps.secretKey ?? "",
+      fetchImpl: deps.fetchImpl,
+    },
+    assistantId,
+    draft.config.allowedTools,
+  );
+  const runners: ToolRunner[] = [...(deps.runners ?? [])];
+  if (mcp) runners.push(mcp);
+
+  const tests = await deps.tenant.tests.list(assistantId);
   const clock = deps.now ?? Date.now;
   const startedAt = clock();
 
   const results: TestResult[] = [];
   let stopped: string | undefined;
 
-  for (const test of tests) {
-    if (stopped !== undefined || clock() - startedAt > TEST_RUN_WALL_TIME_MS) {
-      stopped ??= "The run took too long and stopped early.";
+  for (let i = 0; i < tests.length; i++) {
+    const test = tests[i];
+    if (!test) continue;
+
+    if (stopped !== undefined) {
       // Not run, not failed: a test that never ran says nothing about the
       // draft, and calling it a failure sends the owner hunting a bug that is
       // not there.
@@ -216,53 +274,112 @@ export async function runAnswerTests(
       continue;
     }
 
-    // The same check a visitor's question passes. A run is spend like any
-    // other, and the owner's cap is the owner's cap.
-    const decision = await deps.limits.check(deps.orgId, assistantId, {
-      kind: "chat",
-      ip: "",
-    });
-    if (!decision.ok) {
-      stopped =
-        decision.reason === "spend_cap"
-          ? "This assistant reached its spending limit for today, so the run stopped."
-          : "Too many requests just now, so the run stopped.";
+    if (i >= MAX_TESTS_PER_RUN) {
+      stopped = `A run executes at most ${MAX_TESTS_PER_RUN} tests, so the remaining tests did not run.`;
       results.push(notRun(test, stopped));
       continue;
     }
 
+    const elapsedBefore = clock() - startedAt;
+    if (elapsedBefore >= TEST_RUN_WALL_TIME_MS) {
+      stopped = WALL_TIME_MESSAGE;
+      results.push(notRun(test, stopped));
+      continue;
+    }
+
+    const controller = new AbortController();
+    const remainingMs = Math.max(0, TEST_RUN_WALL_TIME_MS - elapsedBefore);
+    const timer = setTimeout(() => controller.abort(), remainingMs);
+
     const answer = { text: "", citations: [] as Array<{ url: string }>, usedFallback: false };
     let errored = false;
-    for await (const event of answerMessage(
-      {
-        tenant: deps.tenant,
-        embedder: deps.embedder,
-        retriever: deps.retriever,
-        provider: deps.provider,
-        model: deps.model,
-        usage: deps.usage,
-      },
-      {
-        orgId: deps.orgId,
-        assistantId,
-        visitorId: "answer-test",
-        message: test.question,
-        behaviour: draft.config.behaviour,
-        // The specification's two conditions, both satisfied by the pane's own
-        // mode: nothing is stored, and usage is metered.
-        preview: true,
-      },
-    )) {
-      if (event.type === "token") answer.text += event.text;
-      else if (event.type === "citation") answer.citations.push({ url: event.url });
-      else if (event.type === "error") {
-        // A provider failure is not a test failure; the draft was not judged.
-        results.push(notRun(test, "The assistant could not answer, so this test did not run."));
-        errored = true;
-        break;
+    let timedOut = false;
+
+    try {
+      // The same check a visitor's question passes. A run is spend like any
+      // other, and the owner's cap is the owner's cap.
+      const decision = await raceWithAbort(
+        deps.limits.check(deps.orgId, assistantId, {
+          kind: "chat",
+          ip: "",
+        }),
+        controller.signal,
+      );
+      if (!decision.ok) {
+        stopped =
+          decision.reason === "spend_cap"
+            ? "This assistant reached its spending limit for today, so the run stopped."
+            : "Too many requests just now, so the run stopped.";
+        results.push(notRun(test, stopped));
+        continue;
       }
+
+      const iterable = answerMessage(
+        {
+          tenant: deps.tenant,
+          embedder: deps.embedder,
+          retriever: deps.retriever,
+          provider: deps.provider,
+          model: deps.model,
+          usage: deps.usage,
+          runners,
+          signal: controller.signal,
+        },
+        {
+          orgId: deps.orgId,
+          assistantId,
+          visitorId: "answer-test",
+          message: test.question,
+          behaviour: draft.config.behaviour,
+          // The specification's two conditions, both satisfied by the pane's own
+          // mode: nothing is stored, and usage is metered.
+          preview: true,
+        },
+      );
+      const iterator = iterable[Symbol.asyncIterator]();
+      for (;;) {
+        const step = await raceWithAbort(iterator.next(), controller.signal, () => {
+          void iterator.return?.().catch(() => {});
+        });
+        if (step.done) break;
+        const event = step.value;
+        if (event.type === "token") answer.text += event.text;
+        else if (event.type === "citation") answer.citations.push({ url: event.url });
+        else if (event.type === "error") {
+          // A provider failure is not a test failure; the draft was not judged.
+          results.push(notRun(test, INFRA_ERROR_MESSAGE));
+          errored = true;
+          break;
+        }
+      }
+    } catch {
+      if (controller.signal.aborted) {
+        timedOut = true;
+      } else {
+        results.push(notRun(test, INFRA_ERROR_MESSAGE));
+        errored = true;
+      }
+    } finally {
+      clearTimeout(timer);
     }
-    if (errored) continue;
+
+    if (timedOut) {
+      stopped = WALL_TIME_MESSAGE;
+      results.push(notRun(test, stopped));
+      continue;
+    }
+    if (errored) {
+      if (controller.signal.aborted) {
+        stopped = WALL_TIME_MESSAGE;
+      }
+      continue;
+    }
+    if (controller.signal.aborted || clock() - startedAt >= TEST_RUN_WALL_TIME_MS) {
+      stopped = WALL_TIME_MESSAGE;
+      results.push(notRun(test, stopped));
+      continue;
+    }
+
     answer.usedFallback = answer.text.trim() === draft.config.behaviour.fallbackText.trim();
 
     const expectation = test.expectation as TestExpectation;
