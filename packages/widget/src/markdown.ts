@@ -30,7 +30,7 @@ interface ListData {
 }
 
 type ParsedBlock =
-  | { type: "paragraph"; source: string; text: string }
+  | { type: "paragraph"; source: string; text: string; literal?: boolean }
   | { type: "code"; source: string; code: string }
   | { type: "list"; source: string; list: ListData };
 
@@ -85,13 +85,10 @@ function findClosingFence(lines: string[], startIndex: number, minLength: number
   return -1;
 }
 
-function isClosedFenceAt(lines: string[], index: number): boolean {
-  const line = lines[index] ?? "";
+function matchFenceOpen(line: string): number | null {
   const open = FENCE_OPEN_RE.exec(line);
-  if (!open) return false;
-  const info = open[2] ?? "";
-  if (info.includes("`")) return false;
-  return findClosingFence(lines, index + 1, open[1]?.length ?? 3) !== -1;
+  if (!open || (open[2] ?? "").includes("`")) return null;
+  return open[1]?.length ?? 3;
 }
 
 function parseBlocks(markdown: string): ParsedBlock[] {
@@ -110,9 +107,8 @@ function parseBlocks(markdown: string): ParsedBlock[] {
       continue;
     }
 
-    const fenceOpen = FENCE_OPEN_RE.exec(line);
-    if (fenceOpen && !(fenceOpen[2] ?? "").includes("`")) {
-      const fenceLen = fenceOpen[1]?.length ?? 3;
+    const fenceLen = matchFenceOpen(line);
+    if (fenceLen !== null) {
       const closeIndex = findClosingFence(lines, i + 1, fenceLen);
       if (closeIndex !== -1) {
         const code = lines.slice(i + 1, closeIndex).join("\n");
@@ -121,6 +117,9 @@ function parseBlocks(markdown: string): ParsedBlock[] {
         i = closeIndex + 1;
         continue;
       }
+      const text = lines.slice(i).join("\n");
+      blocks.push({ type: "paragraph", source: text, text, literal: true });
+      break;
     }
 
     const firstList = matchListLine(line);
@@ -136,7 +135,7 @@ function parseBlocks(markdown: string): ParsedBlock[] {
 
       while (i < lines.length) {
         const nextLine = lines[i] ?? "";
-        if (nextLine.trim() === "" || isClosedFenceAt(lines, i)) {
+        if (nextLine.trim() === "" || matchFenceOpen(nextLine) !== null) {
           break;
         }
         const match = matchListLine(nextLine);
@@ -180,7 +179,7 @@ function parseBlocks(markdown: string): ParsedBlock[] {
     i++;
     while (i < lines.length) {
       const nextLine = lines[i] ?? "";
-      if (nextLine.trim() === "" || isClosedFenceAt(lines, i)) {
+      if (nextLine.trim() === "" || matchFenceOpen(nextLine) !== null) {
         break;
       }
       const nextList = matchListLine(nextLine);
@@ -394,8 +393,15 @@ function buildCodeBlockElement(codeText: string): HTMLDivElement {
   status.setAttribute("aria-live", "polite");
 
   let resetTimer: ReturnType<typeof setTimeout> | undefined;
-  copyBtn.addEventListener("click", () => {
-    void navigator.clipboard?.writeText(codeText).catch(() => {});
+  copyBtn.addEventListener("click", async () => {
+    if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(codeText);
+    } catch {
+      return;
+    }
     copyBtn.textContent = "Copied";
     status.textContent = "Copied";
     if (resetTimer !== undefined) {
@@ -428,7 +434,11 @@ function buildBlockElement(block: ParsedBlock): HTMLElement {
     return buildListElement(block.list);
   }
   const p = document.createElement("p");
-  renderInline(p, block.text);
+  if (block.literal) {
+    p.textContent = block.text;
+  } else {
+    renderInline(p, block.text);
+  }
   return p;
 }
 

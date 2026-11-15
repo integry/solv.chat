@@ -126,9 +126,15 @@ describe("Markdown rendering", () => {
     expect(topOl?.children[0]?.querySelector("ul > li")?.textContent).toBe("Sub bullet");
   });
 
-  it("renders fenced code blocks without highlighting, with a Copy button that announces Copied", async () => {
+  it("renders fenced code blocks without highlighting, with a Copy button that announces Copied only after writeText resolves", async () => {
     vi.useFakeTimers();
-    const writeText = vi.fn(async () => {});
+    let resolveWrite: (() => void) | undefined;
+    const writeText = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveWrite = resolve;
+        }),
+    );
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText },
       configurable: true,
@@ -155,10 +161,50 @@ describe("Markdown rendering", () => {
 
     copyBtn?.click();
     expect(writeText).toHaveBeenCalledWith("const x = 1;\nconsole.log(x);");
+    // Success feedback must not appear before the clipboard write settles.
+    expect(copyBtn?.textContent).toBe("Copy");
+    expect(live?.textContent).toBe("");
+
+    resolveWrite?.();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(copyBtn?.textContent).toBe("Copied");
     expect(live?.textContent).toBe("Copied");
 
     vi.advanceTimersByTime(2000);
+    expect(copyBtn?.textContent).toBe("Copy");
+    expect(live?.textContent).toBe("");
+  });
+
+  it("does not announce Copied when clipboard access is unavailable or writeText rejects", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: undefined,
+      configurable: true,
+    });
+
+    const container = document.createElement("div");
+    renderMarkdown(container, "```ts\nconst x = 1;\n```");
+
+    const copyBtn = container.querySelector<HTMLButtonElement>("button.solv-copy-btn");
+    const live = container.querySelector<HTMLElement>('[aria-live="polite"]');
+
+    copyBtn?.click();
+    await Promise.resolve();
+    expect(copyBtn?.textContent).toBe("Copy");
+    expect(live?.textContent).toBe("");
+
+    const writeText = vi.fn(async () => {
+      throw new Error("Clipboard denied");
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    copyBtn?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledWith("const x = 1;");
     expect(copyBtn?.textContent).toBe("Copy");
     expect(live?.textContent).toBe("");
   });
@@ -242,6 +288,25 @@ describe("Markdown rendering", () => {
     renderMarkdown(container, "Intro paragraph.\n\n```js\nconst a = 1;\n```");
     expect(container.children[0]).toBe(firstPara);
     expect(container.querySelector(".solv-code-block code")?.textContent).toBe("const a = 1;");
+  });
+
+  it("keeps unfinished fenced contents literal when containing emphasis, list markers, and inline backticks", () => {
+    const container = document.createElement("div");
+    const body = "**literal** and *italic*\n- item\n1. numbered\n`inline`";
+
+    renderMarkdown(container, `\`\`\`md\n${body}`);
+    expect(container.querySelector("strong, em, ul, ol, li, code, .solv-code-block")).toBeNull();
+    expect(container.textContent).toBe(`\`\`\`md\n${body}`);
+
+    // Also when interrupting a paragraph without a blank line.
+    renderMarkdown(container, `Intro\n\`\`\`md\n${body}`);
+    expect(container.querySelector("strong, em, ul, ol, li, code, .solv-code-block")).toBeNull();
+    expect(container.children[0]?.textContent).toBe("Intro");
+    expect(container.children[1]?.textContent).toBe(`\`\`\`md\n${body}`);
+
+    // Once closed, it transitions to a code block with the exact raw contents.
+    renderMarkdown(container, `Intro\n\`\`\`md\n${body}\n\`\`\``);
+    expect(container.querySelector(".solv-code-block code")?.textContent).toBe(body);
   });
 
   it("keeps user bubbles as plain text and produces identical output for streamed and restored assistant transcripts", async () => {
