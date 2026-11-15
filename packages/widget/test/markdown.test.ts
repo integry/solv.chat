@@ -93,6 +93,35 @@ describe("Markdown rendering", () => {
     expect(paragraphs[1]?.querySelector("code strong")).toBeNull();
   });
 
+  it("renders nested bold inside italic in both single and incremental renders", () => {
+    const input = "*outer **bold** end*";
+    const single = document.createElement("div");
+    renderMarkdown(single, input);
+
+    const em = single.querySelector("p > em");
+    expect(em).not.toBeNull();
+    expect(em?.textContent).toBe("outer bold end");
+    expect(em?.querySelector("strong")?.textContent).toBe("bold");
+    expect(single.textContent).toBe("outer bold end");
+
+    const incremental = document.createElement("div");
+    for (let len = 1; len <= input.length; len++) {
+      renderMarkdown(incremental, input.slice(0, len));
+    }
+    expect(serializeDom(incremental)).toEqual(serializeDom(single));
+
+    const multi = document.createElement("div");
+    renderMarkdown(
+      multi,
+      "*outer **bold** and **more** end* and **outer *italic* end** and *outer **unclosed end*",
+    );
+    const ems = multi.querySelectorAll("p > em");
+    expect(ems).toHaveLength(2);
+    expect(ems[0]?.querySelectorAll("strong")).toHaveLength(2);
+    expect(ems[1]?.textContent).toBe("outer **unclosed end");
+    expect(multi.querySelector("p > strong > em")?.textContent).toBe("italic");
+  });
+
   it("renders unordered and ordered lists with one level of nesting", () => {
     const container = document.createElement("div");
     renderMarkdown(
@@ -303,6 +332,28 @@ describe("Markdown rendering", () => {
       'wrap <img alt="a**b" src=x> and ![c**d](https://example.com/x.png) end',
     );
     expect(paragraphs[7]?.querySelector("strong")?.textContent).toBe("still bold");
+  });
+
+  it("preserves opaque script, style, and comment spans across blank lines and block-level markers", () => {
+    const container = document.createElement("div");
+    const scriptBlock = "<script>\n\n**literal**\n\n- item\n\n</script>";
+    const styleBlock = "<style>\n\n**literal**\n\n```js\ncode\n```\n\n</style>";
+    const commentBlock = "<!--\n\n**literal**\n\n-->";
+    renderMarkdown(
+      container,
+      [scriptBlock, styleBlock, commentBlock, "After **bold**"].join("\n\n"),
+    );
+
+    expect(container.querySelectorAll("script, style, ul, li, pre")).toHaveLength(0);
+    const paragraphs = container.querySelectorAll("p");
+    expect(paragraphs).toHaveLength(4);
+    expect(paragraphs[0]?.querySelector("strong")).toBeNull();
+    expect(paragraphs[0]?.textContent).toBe(scriptBlock);
+    expect(paragraphs[1]?.querySelector("strong")).toBeNull();
+    expect(paragraphs[1]?.textContent).toBe(styleBlock);
+    expect(paragraphs[2]?.querySelector("strong")).toBeNull();
+    expect(paragraphs[2]?.textContent).toBe(commentBlock);
+    expect(paragraphs[3]?.querySelector("strong")?.textContent).toBe("bold");
   });
 
   it("renders unterminated constructs as plain text mid-stream until closed and preserves existing DOM nodes", () => {

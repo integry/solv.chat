@@ -96,6 +96,13 @@ function parseBlocks(markdown: string): ParsedBlock[] {
   if (!normalized) return [];
 
   const lines = normalized.split("\n");
+  const lineStarts: number[] = new Array<number>(lines.length);
+  let offset = 0;
+  for (let k = 0; k < lines.length; k++) {
+    lineStarts[k] = offset;
+    offset += (lines[k]?.length ?? 0) + 1;
+  }
+
   const blocks: ParsedBlock[] = [];
   let i = 0;
 
@@ -175,16 +182,21 @@ function parseBlocks(markdown: string): ParsedBlock[] {
       continue;
     }
 
+    const blockStart = lineStarts[i] ?? 0;
     const paraLines: string[] = [line];
     i++;
     while (i < lines.length) {
       const nextLine = lines[i] ?? "";
-      if (nextLine.trim() === "" || matchFenceOpen(nextLine) !== null) {
-        break;
-      }
       const nextList = matchListLine(nextLine);
-      if (nextList && nextList.indent <= 3) {
-        break;
+      const isBlockBoundary =
+        nextLine.trim() === "" ||
+        matchFenceOpen(nextLine) !== null ||
+        (nextList !== null && nextList.indent <= 3);
+      if (isBlockBoundary) {
+        const currentEnd = (lineStarts[i] ?? normalized.length + 1) - 1;
+        if (!isInsideOpaqueHtmlSpan(normalized, blockStart, currentEnd)) {
+          break;
+        }
       }
       paraLines.push(nextLine);
       i++;
@@ -239,6 +251,35 @@ function findOpaqueLiteralSpanEnd(text: string, pos: number): number {
   return -1;
 }
 
+function isInsideOpaqueHtmlSpan(fullText: string, start: number, end: number): boolean {
+  let pos = start;
+  while (pos < end) {
+    const ch = fullText[pos];
+    if (ch === "`") {
+      const codeClose = fullText.indexOf("`", pos + 1);
+      if (codeClose !== -1 && !fullText.slice(pos + 1, codeClose).includes("\n")) {
+        if (codeClose >= end) {
+          return false;
+        }
+        pos = codeClose + 1;
+        continue;
+      }
+    }
+    if (ch === "<") {
+      const opaqueEnd = findOpaqueLiteralSpanEnd(fullText, pos);
+      if (opaqueEnd !== -1) {
+        if (opaqueEnd > end) {
+          return true;
+        }
+        pos = opaqueEnd;
+        continue;
+      }
+    }
+    pos++;
+  }
+  return false;
+}
+
 function findInlineClose(text: string, from: number, marker: "**" | "*"): number {
   let i = from;
   while (i < text.length) {
@@ -255,17 +296,29 @@ function findInlineClose(text: string, from: number, marker: "**" | "*"): number
         continue;
       }
     }
-    if (marker === "**") {
-      if (text.startsWith("**", i) && i > from && !/\s/.test(text[i - 1] ?? "")) {
-        return i;
+    if (ch === "*") {
+      let runEnd = i + 1;
+      while (text[runEnd] === "*") {
+        runEnd++;
       }
-    } else if (
-      ch === "*" &&
-      !text.startsWith("**", i) &&
-      i > from &&
-      !/\s/.test(text[i - 1] ?? "")
-    ) {
-      return i;
+      const runLen = runEnd - i;
+      if (marker === "**") {
+        if (runLen >= 2 && i > from && !/\s/.test(text[i - 1] ?? "")) {
+          return i;
+        }
+      } else if (runLen === 1) {
+        if (i > from && !/\s/.test(text[i - 1] ?? "")) {
+          return i;
+        }
+      } else if (runLen === 2 && runEnd < text.length && !/\s/.test(text[runEnd] ?? "")) {
+        const nestedClose = findInlineClose(text, runEnd, "**");
+        if (nestedClose !== -1) {
+          i = nestedClose + 2;
+          continue;
+        }
+      }
+      i = runEnd;
+      continue;
     }
     i++;
   }
