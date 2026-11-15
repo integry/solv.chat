@@ -4,7 +4,13 @@ import {
   MAX_CHAT_MESSAGE_LENGTH,
   parseChatEventLine,
 } from "@solvchat/core";
-import { listForRequest, type RunRequest, runAction, serialiseResult } from "./actions.js";
+import {
+  listForRequest,
+  type RegisteredAction,
+  type RunRequest,
+  runAction,
+  serialiseResult,
+} from "./actions.js";
 import {
   type BuiltinSettings,
   clearHighlight,
@@ -13,6 +19,7 @@ import {
   setHighlightHost,
   setOnExternalNavigate,
 } from "./builtins.js";
+import { askToConfirm, type ConfirmHandle } from "./confirm.js";
 import { readEventLines } from "./sse.js";
 import {
   claimConversation,
@@ -46,6 +53,12 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 const DROPPED_RESUME_TIMEOUT_MS = 5_000;
+
+const ACTION_WORDING: Record<string, string> = {
+  navigate: "Taking you to another page on this site.",
+  highlight: "Pointing at something on this page.",
+  fill: "Filling in the form for you.",
+};
 
 function buildMovedOnResults(pending: PendingResume): ActionResult[] {
   return pending.actionResults.map((entry) =>
@@ -128,6 +141,10 @@ export class SolvChat extends HTMLElement {
   #open = false;
   #sending = false;
   #abortController: AbortController | null = null;
+  /** Open confirmation prompts, refused if the panel closes or we unmount. */
+  #openConfirms = new Set<ConfirmHandle>();
+  /** Turn controller whose remaining confirmations were dismissed by closing the panel. */
+  #dismissedTurn: AbortController | null = null;
   #conversationId: string | null = null;
   #turns: SavedTurn[] = [];
   #pendingResume: PendingResume | null = null;
@@ -185,6 +202,11 @@ export class SolvChat extends HTMLElement {
   }
 
   disconnectedCallback(): void {
+    // A pending promise here would hang the answer; every one of these paths
+    // means the visitor did not say yes.
+    for (const handle of this.#openConfirms) handle.dismiss();
+    this.#openConfirms.clear();
+    this.#dismissedTurn = null;
     clearHighlight();
     setBeforeNavigate(null);
     setOnExternalNavigate(null);
@@ -403,6 +425,7 @@ export class SolvChat extends HTMLElement {
   }
 
   #openPanel(moveFocus: boolean): void {
+    this.#dismissedTurn = null;
     this.#open = true;
     this.#panel.hidden = false;
     this.#launcher.setAttribute("aria-expanded", "true");
@@ -414,6 +437,9 @@ export class SolvChat extends HTMLElement {
   }
 
   #closePanel(restoreFocus: boolean): void {
+    for (const handle of this.#openConfirms) handle.dismiss();
+    this.#openConfirms.clear();
+    this.#dismissedTurn = this.#abortController;
     this.#open = false;
     this.#panel.hidden = true;
     this.#launcher.setAttribute("aria-expanded", "false");
@@ -565,6 +591,39 @@ export class SolvChat extends HTMLElement {
     link.target = "_blank";
     container.append(link);
     return link;
+  }
+
+  /**
+   * Asks the visitor. Bound as a field so it can be handed to `runAction`
+   * without losing `this`.
+   */
+  #confirmAction = async (request: RunRequest, action: RegisteredAction): Promise<boolean> => {
+    if (this.#dismissedTurn && this.#dismissedTurn === this.#abortController) {
+      return false;
+    }
+    // Opening the panel first: a prompt the visitor cannot see is not consent.
+    if (!this.#open) this.#openPanel(false);
+    const handle = askToConfirm(this.#messagesEl, request, action, () => this.#inputEl.focus());
+    this.#openConfirms.add(handle);
+    try {
+      return await handle.answer;
+    } finally {
+      this.#openConfirms.delete(handle);
+      this.#scrollToBottom();
+    }
+  };
+
+  /**
+   * One line saying what the assistant is about to do, for every action and not
+   * only the confirmed ones: "The widget says what it is about to do" is
+   * unconditional in the specification.
+   */
+  #announceAction(bubble: HTMLDivElement, name: string): void {
+    const note = document.createElement("div");
+    note.className = "solv-action-note";
+    note.textContent = ACTION_WORDING[name] ?? `Using ${name} on this page.`;
+    bubble.append(note);
+    this.#scrollToBottom();
   }
 
   #appendActionNote(bubble: HTMLDivElement, name: string, ok: boolean): void {
@@ -785,6 +844,9 @@ export class SolvChat extends HTMLElement {
         this.#sending = false;
         this.#sendBtn.disabled = false;
       }
+      if (this.#dismissedTurn === controller) {
+        this.#dismissedTurn = null;
+      }
       if (!signal.aborted) {
         this.#persist();
       }
@@ -960,6 +1022,9 @@ export class SolvChat extends HTMLElement {
         this.#sending = false;
         this.#sendBtn.disabled = false;
       }
+      if (this.#dismissedTurn === controller) {
+        this.#dismissedTurn = null;
+      }
       if (!signal.aborted) {
         this.#persist();
       }
@@ -1114,7 +1179,10 @@ export class SolvChat extends HTMLElement {
         setOnExternalNavigate((target) => {
           externalTarget = target;
         });
-        const result = await runAction(request);
+        if (request.name) {
+          this.#announceAction(bubble, request.name);
+        }
+        const result = await runAction(request, { confirm: this.#confirmAction });
         setBeforeNavigate(null);
         setOnExternalNavigate(null);
         if (signal.aborted) return;

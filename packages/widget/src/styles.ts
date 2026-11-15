@@ -119,7 +119,8 @@ textarea:focus-visible {
   .solv-launcher,
   .solv-chip,
   .solv-send,
-  .solv-fb-btn {
+  .solv-fb-btn,
+  .solv-confirm {
     transition: none;
     animation: none;
   }
@@ -400,6 +401,38 @@ textarea:focus-visible {
   line-height: 1.4;
   box-shadow: var(--solv-shadow);
   pointer-events: none;
+}
+
+.solv-confirm {
+  align-self: flex-start;
+  max-width: 86%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--solv-surface);
+  border: 1px solid var(--solv-accent);
+}
+
+.solv-confirm-title {
+  font-weight: 600;
+}
+
+.solv-confirm-detail {
+  margin: 6px 0 8px;
+  padding-left: 1.1rem;
+  font-size: 13px;
+  /* Values come from the model and may be long; wrap rather than overflow. */
+  word-break: break-word;
+}
+
+.solv-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.solv-action-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--solv-muted);
 }
 
 .sr-only {
