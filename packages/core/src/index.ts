@@ -1,5 +1,14 @@
 export { type IdPrefix, isId, newId } from "./ids.js";
 export { Errors, fail, ok, type Result } from "./result.js";
+export {
+  MAX_TEST_PHRASE_LENGTH,
+  MAX_TEST_QUESTION_LENGTH,
+  MAX_TESTS_PER_ASSISTANT,
+  MAX_TESTS_PER_RUN,
+  parseTestInput,
+  type TestExpectation,
+  type TestInput,
+} from "./schemas/answerTest.js";
 export { type AssistantInput, parseAssistantInput } from "./schemas/assistant.js";
 export {
   type ActionResult,

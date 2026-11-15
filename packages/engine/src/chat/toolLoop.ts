@@ -104,6 +104,7 @@ export interface ToolLoopDeps {
    * already-reported model usage.
    */
   ensureLease?: (() => Promise<boolean>) | undefined;
+  signal?: AbortSignal | undefined;
   now?: (() => number) | undefined;
 }
 
@@ -303,13 +304,16 @@ async function* runLoopFrom(
     if (!(await checkLease())) {
       return { text, calls, pending: [], abortedByLease: true };
     }
-    const stream = deps.provider.stream({
-      ...baseRequest,
-      messages: [...messages],
-      // Omitted once tools are exhausted or never offered, so a no-tools answer
-      // serialises exactly as it did in phase 1.
-      ...(toolsOffered ? { tools: definitions } : {}),
-    });
+    const stream = deps.provider.stream(
+      {
+        ...baseRequest,
+        messages: [...messages],
+        // Omitted once tools are exhausted or never offered, so a no-tools answer
+        // serialises exactly as it did in phase 1.
+        ...(toolsOffered ? { tools: definitions } : {}),
+      },
+      deps.signal ? { signal: deps.signal } : undefined,
+    );
 
     const asked: ToolCall[] = [];
     let tokensIn = 0;
@@ -408,9 +412,17 @@ async function* runLoopFrom(
     }
 
     const controller = new AbortController();
+    const onParentAbort = () => controller.abort();
+    if (deps.signal) {
+      if (deps.signal.aborted) {
+        controller.abort();
+      } else {
+        deps.signal.addEventListener("abort", onParentAbort, { once: true });
+      }
+    }
     const remaining = Math.max(0, TOOL_WALL_TIME_MS - (clock() - startedAt));
     let timer: ReturnType<typeof setTimeout> | undefined;
-    if (remaining === 0) {
+    if (remaining === 0 || controller.signal.aborted) {
       controller.abort();
     } else {
       timer = setTimeout(() => controller.abort(), remaining);
@@ -493,6 +505,7 @@ async function* runLoopFrom(
         };
       }
     } finally {
+      deps.signal?.removeEventListener("abort", onParentAbort);
       if (timer !== undefined) {
         clearTimeout(timer);
       }

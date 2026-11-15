@@ -95,11 +95,12 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
   return {
     name: "openai",
     model: options.model,
-    async *stream(request) {
+    async *stream(request, streamOptions) {
       let response: Response;
       try {
         response = await doFetch(OPENAI_RESPONSES_URL, {
           method: "POST",
+          ...(streamOptions?.signal ? { signal: streamOptions.signal } : {}),
           headers: {
             authorization: `Bearer ${options.apiKey}`,
             "content-type": "application/json",
@@ -143,7 +144,7 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
       const pending = new Map<string, { callId: string; name: string; json: string }>();
 
       try {
-        for await (const event of readEventStream(response.body)) {
+        for await (const event of readEventStream(response.body, streamOptions?.signal)) {
           const payload = event.data as OpenAiResponsePayload;
           const eventType = event.event ?? payload.type;
 

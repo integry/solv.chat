@@ -80,5 +80,8 @@ export interface LlmProvider {
    * Phase 2 adds tools as an optional field on LlmRequest, which no current
    * caller has to change.
    */
-  stream(request: LlmRequest): AsyncIterable<LlmChunk>;
+  stream(
+    request: LlmRequest,
+    options?: { signal?: AbortSignal | undefined },
+  ): AsyncIterable<LlmChunk>;
 }

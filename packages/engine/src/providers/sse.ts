@@ -12,8 +12,12 @@ export interface RawEvent {
  * shared reader in `@solvchat/core`; a failed network read becomes a
  * `ProviderError` so callers see one error type.
  */
-export async function* readEventStream(body: ReadableStream<Uint8Array>): AsyncIterable<RawEvent> {
+export async function* readEventStream(
+  body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncIterable<RawEvent> {
   for await (const block of readSseBlocks(body, {
+    ...(signal ? { signal } : {}),
     mapReadError: (err) => toProviderError(err, "stream read failed"),
   })) {
     if (block.data.trim() === "[DONE]") return;

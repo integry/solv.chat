@@ -40,6 +40,7 @@ export interface AnswerDeps {
   model?: ModelInfo | undefined;
   usage: UsageSink;
   now?: (() => number) | undefined;
+  signal?: AbortSignal | undefined;
   /**
    * Tool sources for this answer. Empty (the default) reproduces phase 1
    * exactly: no `tools` key on the request, one model call.
@@ -238,8 +239,10 @@ export async function* answerMessage(
   // retriever, D1 read or model call must not make it vanish — so it is
   // recorded the moment the provider reports it, as spend that is not a
   // message. The answer's own usage event below carries model tokens only.
-  const embedded = await deps.embedder.embed([input.message], (tokens) =>
-    recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
+  const embedded = await deps.embedder.embed(
+    [input.message],
+    (tokens) => recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
+    deps.signal ? { signal: deps.signal } : undefined,
   );
   const [vector] = embedded.vectors;
   if (!vector) {
@@ -252,6 +255,7 @@ export async function* answerMessage(
     orgId: input.orgId,
     assistantId: input.assistantId,
     topK: TOP_K,
+    ...(deps.signal ? { signal: deps.signal } : {}),
   });
   const aboveFloor = hits.filter((hit) => hit.score >= SCORE_FLOOR);
   const chunks = await resolveChunks(deps.tenant, input.assistantId, aboveFloor);
@@ -342,6 +346,7 @@ export async function* answerMessage(
             messageCount,
           );
         },
+        signal: deps.signal,
         now: deps.now,
       },
       request,

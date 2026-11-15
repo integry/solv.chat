@@ -6,6 +6,7 @@ import {
   chatRoute,
   feedbackRoute,
   publicConfigRoute,
+  resolveChatProviders,
 } from "./chat/route.js";
 import { forPrincipal } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
@@ -135,8 +136,9 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         if (url.pathname === "/api/admin/chat") {
           return adminChatRoute(request, env, seams, ctx, principal, chatOverrides);
         }
+        const tenant = forPrincipal(env.DB, principal);
         return adminRoutes(request, url, {
-          tenant: forPrincipal(env.DB, principal),
+          tenant,
           orgId: principal.orgId,
           docs: env.DOCS,
           queue: env.INGEST_QUEUE,
@@ -154,6 +156,23 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           resolveSettings: () => resolveProviderSettings(env.DB, env, principal.orgId),
           checkConfigError: (resolved) =>
             checkLlmConfigError(env.DB, env, seams.keys, principal.orgId, resolved),
+          resolveRunDeps: async () => {
+            const providers = await resolveChatProviders(
+              env,
+              seams,
+              principal.orgId,
+              chatOverrides,
+            );
+            return {
+              tenant,
+              orgId: principal.orgId,
+              ...providers,
+              usage: seams.usage,
+              limits: seams.limits,
+              secretKey: env.SOLV_SECRET_KEY ?? "",
+              fetchImpl: chatOverrides?.fetch,
+            };
+          },
         });
       }
       if (
