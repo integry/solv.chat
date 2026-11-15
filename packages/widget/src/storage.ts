@@ -39,6 +39,7 @@ export interface SavedConversation {
 
 const VISITOR_KEY = "solv-chat-visitor";
 const OPEN_PREFIX = "solv-chat-open:";
+const HANDOFF_PREFIX = "__solv_chat_handoff__:";
 const MAX_SAVED_TURNS = 20;
 
 let fallbackVisitorId: string | null = null;
@@ -81,6 +82,15 @@ export function visitorId(): string {
       fallbackVisitorId = randomId();
     }
     return fallbackVisitorId;
+  }
+}
+
+function adoptVisitorId(id: string): void {
+  fallbackVisitorId = id;
+  try {
+    localStorage.setItem(VISITOR_KEY, id);
+  } catch {
+    // Ignore storage quota or private-mode errors.
   }
 }
 
@@ -130,24 +140,27 @@ function parsePendingResume(raw: unknown): PendingResume | undefined {
   };
 }
 
+function parseSavedConversation(parsed: unknown): SavedConversation | null {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const conversationId = typeof record.conversationId === "string" ? record.conversationId : null;
+  const open = typeof record.open === "boolean" ? record.open : false;
+  const turns = Array.isArray(record.turns) ? (record.turns as SavedTurn[]) : [];
+  const pendingResume = parsePendingResume(record.pendingResume);
+  return {
+    conversationId,
+    open,
+    turns,
+    ...(pendingResume ? { pendingResume } : {}),
+  };
+}
+
 export function loadConversation(assistant: string): SavedConversation | null {
   if (!assistant) return null;
   try {
     const raw = sessionStorage.getItem(`${OPEN_PREFIX}${assistant}`);
     if (raw === null) return null;
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return null;
-    const record = parsed as Record<string, unknown>;
-    const conversationId = typeof record.conversationId === "string" ? record.conversationId : null;
-    const open = typeof record.open === "boolean" ? record.open : false;
-    const turns = Array.isArray(record.turns) ? (record.turns as SavedTurn[]) : [];
-    const pendingResume = parsePendingResume(record.pendingResume);
-    return {
-      conversationId,
-      open,
-      turns,
-      ...(pendingResume ? { pendingResume } : {}),
-    };
+    return parseSavedConversation(JSON.parse(raw));
   } catch {
     // Private-mode quota errors and malformed data both mean "no saved
     // conversation". A storage failure must never stop the widget opening.
@@ -183,5 +196,117 @@ export function saveConversation(assistant: string, saved: SavedConversation, ow
     );
   } catch {
     // Ignore storage quota or private-mode errors.
+  }
+}
+
+interface CrossOriginHandoff {
+  assistant: string;
+  targetOrigin: string;
+  visitorId: string;
+  prevName: string;
+  saved: SavedConversation;
+}
+
+function parseHandoff(raw: string): CrossOriginHandoff | null {
+  if (!raw.startsWith(HANDOFF_PREFIX)) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw.slice(HANDOFF_PREFIX.length));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const record = parsed as Record<string, unknown>;
+    if (
+      typeof record.assistant !== "string" ||
+      record.assistant === "" ||
+      typeof record.targetOrigin !== "string" ||
+      record.targetOrigin === "" ||
+      typeof record.visitorId !== "string" ||
+      typeof record.prevName !== "string"
+    ) {
+      return null;
+    }
+    const saved = parseSavedConversation(record.saved);
+    if (!saved) return null;
+    return {
+      assistant: record.assistant,
+      targetOrigin: record.targetOrigin,
+      visitorId: record.visitorId,
+      prevName: record.prevName,
+      saved,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stages the conversation in `window.name` so a same-tab navigation to another
+ * configured origin can restore and resume it where `sessionStorage` is empty.
+ */
+export function stageCrossOriginHandoff(
+  assistant: string,
+  targetOrigin: string,
+  saved: SavedConversation,
+): void {
+  if (!assistant || !targetOrigin || typeof window === "undefined") return;
+  try {
+    const currentName = typeof window.name === "string" ? window.name : "";
+    const existing = currentName.startsWith(HANDOFF_PREFIX) ? parseHandoff(currentName) : null;
+    const prevName = currentName.startsWith(HANDOFF_PREFIX)
+      ? (existing?.prevName ?? "")
+      : currentName;
+    const payload: CrossOriginHandoff = {
+      assistant,
+      targetOrigin,
+      visitorId: visitorId(),
+      prevName,
+      saved: {
+        conversationId: saved.conversationId,
+        open: saved.open,
+        turns: saved.turns.slice(-MAX_SAVED_TURNS),
+        ...(saved.pendingResume ? { pendingResume: saved.pendingResume } : {}),
+      },
+    };
+    window.name = `${HANDOFF_PREFIX}${JSON.stringify(payload)}`;
+  } catch {
+    // Ignore window.name access or serialization errors.
+  }
+}
+
+/** Restores `window.name` if a staged cross-origin navigation did not depart. */
+export function clearCrossOriginHandoff(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const currentName = typeof window.name === "string" ? window.name : "";
+    if (!currentName.startsWith(HANDOFF_PREFIX)) return;
+    const existing = parseHandoff(currentName);
+    window.name = existing ? existing.prevName : "";
+  } catch {
+    // Ignore window.name access errors.
+  }
+}
+
+/**
+ * Consumes a staged cross-origin handoff for `assistant` on `location.origin`,
+ * restoring `window.name` and adopting the visitor id so the conversation continues.
+ */
+export function consumeCrossOriginHandoff(assistant: string): SavedConversation | null {
+  if (!assistant || typeof window === "undefined" || typeof location === "undefined") return null;
+  try {
+    const currentName = typeof window.name === "string" ? window.name : "";
+    if (!currentName.startsWith(HANDOFF_PREFIX)) return null;
+    const handoff = parseHandoff(currentName);
+    if (!handoff) {
+      window.name = "";
+      return null;
+    }
+    if (handoff.assistant !== assistant || handoff.targetOrigin !== location.origin) {
+      return null;
+    }
+    window.name = handoff.prevName;
+    if (handoff.visitorId) {
+      adoptVisitorId(handoff.visitorId);
+    }
+    return handoff.saved;
+  } catch {
+    return null;
   }
 }

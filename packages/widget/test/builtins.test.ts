@@ -52,6 +52,7 @@ describe("built-in page actions", () => {
     document.body.replaceChildren();
     localStorage.clear();
     sessionStorage.clear();
+    window.name = "";
   });
 
   afterEach(() => {
@@ -132,7 +133,7 @@ describe("built-in page actions", () => {
       expect(assign).toHaveBeenCalledWith(new URL("/pricing", location.href).href);
     });
 
-    it("refuses cross-origin navigation even for a listed origin when continuation cannot be preserved", async () => {
+    it("navigates to a configured allowed origin", async () => {
       const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
       installBuiltins({ enabled: true, allowedOrigins: ["https://shop.example.com"] });
 
@@ -143,8 +144,8 @@ describe("built-in page actions", () => {
         confirm: false,
       });
 
-      expect(result.ok).toBe(false);
-      expect(assign).not.toHaveBeenCalled();
+      expect(result.ok).toBe(true);
+      expect(assign).toHaveBeenCalledWith("https://shop.example.com/cart");
     });
 
     it.each([
@@ -184,6 +185,31 @@ describe("built-in page actions", () => {
       expect(result.ok).toBe(true);
       expect(scroll).toHaveBeenCalledTimes(1);
       expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("removes a same-page fragment locally without calling location.assign", async () => {
+      const prevUrl = location.href;
+      history.replaceState(null, "", "/pricing#details");
+      const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
+      const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+
+      try {
+        installBuiltins({ enabled: true, allowedOrigins: [] });
+        const result = await runAction({
+          callId: "c1",
+          name: "navigate",
+          input: { url: "/pricing" },
+          confirm: false,
+        });
+
+        expect(result.ok).toBe(true);
+        expect(assign).not.toHaveBeenCalled();
+        expect(location.pathname).toBe("/pricing");
+        expect(location.hash).toBe("");
+        expect(scrollTo).toHaveBeenCalledTimes(1);
+      } finally {
+        history.replaceState(null, "", prevUrl);
+      }
     });
   });
 
@@ -773,8 +799,10 @@ describe("built-in page actions", () => {
     });
   });
 
-  describe("F6: cross-origin navigation refusal in widget flow", () => {
-    it("refuses allowed cross-origin navigation without calling assign or stranding the answer", async () => {
+  describe("F12: cross-origin navigation and continuation for configured origins", () => {
+    it("navigates to an allowed origin, hands off conversation via window.name, and resumes on arrival", async () => {
+      const originalUrl = location.href;
+      window.name = "host-window";
       const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
       const chatBodies: Array<Record<string, unknown>> = [];
       let chatStep = 0;
@@ -797,7 +825,7 @@ describe("built-in page actions", () => {
           if (chatStep === 1) {
             return new Response(
               sseStream([
-                'event: token\ndata: {"text":"Checking shop"}\n\n',
+                'event: token\ndata: {"text":"Opening your cart"}\n\n',
                 'event: action\ndata: {"callId":"call_x","name":"navigate","input":{"url":"https://shop.example.com/cart"},"confirm":false}\n\n',
                 'event: done\ndata: {"messageId":"msg_x1","conversationId":"conv_x","awaitingActions":["call_x"]}\n\n',
               ]),
@@ -806,7 +834,7 @@ describe("built-in page actions", () => {
           }
           return new Response(
             sseStream([
-              'event: token\ndata: {"text":" — please open it directly."}\n\n',
+              'event: token\ndata: {"text":" — here is your cart."}\n\n',
               'event: done\ndata: {"messageId":"msg_x2","conversationId":"conv_x"}\n\n',
             ]),
             { status: 200, headers: { "content-type": "text/event-stream" } },
@@ -815,31 +843,217 @@ describe("built-in page actions", () => {
         return new Response("Not found", { status: 404 });
       }) as typeof fetch;
 
+      try {
+        const el1 = document.createElement("solv-chat");
+        el1.setAttribute("assistant", "pk_cross_origin");
+        el1.setAttribute("endpoint", "https://bot.example.com");
+        document.body.append(el1);
+        await flushAsync();
+
+        const root1 = el1.shadowRoot as ShadowRoot;
+        (root1.querySelector(".solv-launcher") as HTMLButtonElement).click();
+        (root1.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open shop";
+        (root1.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+        await flushAsync();
+
+        expect(assign).toHaveBeenCalledWith("https://shop.example.com/cart");
+        expect(chatBodies).toHaveLength(1);
+        expect(window.name).toContain("https://shop.example.com");
+
+        window.dispatchEvent(new Event("pagehide"));
+        await flushAsync();
+        el1.remove();
+        clearRegistry();
+
+        // Simulate arriving at https://shop.example.com/cart with empty origin storage.
+        sessionStorage.clear();
+        localStorage.clear();
+        const happyWindow = window as unknown as { happyDOM?: { setURL: (url: string) => void } };
+        happyWindow.happyDOM?.setURL("https://shop.example.com/cart");
+
+        const el2 = document.createElement("solv-chat");
+        el2.setAttribute("assistant", "pk_cross_origin");
+        el2.setAttribute("endpoint", "https://bot.example.com");
+        document.body.append(el2);
+        await flushAsync();
+
+        expect(window.name).toBe("host-window");
+        expect(chatBodies).toHaveLength(2);
+        expect(chatBodies[1]?.conversationId).toBe("conv_x");
+        expect(chatBodies[1]?.resumeMessageId).toBe("msg_x1");
+        expect(chatBodies[1]?.visitorId).toBe(chatBodies[0]?.visitorId);
+        expect(chatBodies[1]?.actionResults).toEqual([
+          {
+            callId: "call_x",
+            ok: true,
+            result: JSON.stringify({ opened: "https://shop.example.com/cart" }),
+          },
+        ]);
+
+        const bubbles = (el2.shadowRoot as ShadowRoot).querySelectorAll(".solv-bubble--assistant");
+        expect(bubbles[1]?.querySelector(".solv-bubble-text")?.textContent).toBe(
+          "Opening your cart — here is your cart.",
+        );
+        expect(bubbles[1]?.querySelector(".solv-feedback")).not.toBeNull();
+      } finally {
+        const happyWindow = window as unknown as { happyDOM?: { setURL: (url: string) => void } };
+        happyWindow.happyDOM?.setURL(originalUrl);
+      }
+    });
+
+    it("restores window.name and resumes locally when cross-origin navigation is canceled", async () => {
+      vi.useFakeTimers();
+      window.name = "host-window";
+      const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
+      const chatBodies: Array<Record<string, unknown>> = [];
+      let chatStep = 0;
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_cross_cancel")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: ["https://shop.example.com"] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatStep++;
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (chatStep === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Opening shop"}\n\n',
+                'event: action\ndata: {"callId":"call_xc","name":"navigate","input":{"url":"https://shop.example.com/cart"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_xc1","conversationId":"conv_xc","awaitingActions":["call_xc"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":" — stayed here."}\n\n',
+              'event: done\ndata: {"messageId":"msg_xc2","conversationId":"conv_xc"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
       const el = document.createElement("solv-chat");
-      el.setAttribute("assistant", "pk_cross_origin");
+      el.setAttribute("assistant", "pk_cross_cancel");
       document.body.append(el);
-      await flushAsync();
+      await vi.advanceTimersByTimeAsync(0);
 
       const root = el.shadowRoot as ShadowRoot;
       (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
       (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open shop";
       (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
-      await flushAsync();
+      await vi.advanceTimersByTimeAsync(0);
 
-      expect(assign).not.toHaveBeenCalled();
+      expect(assign).toHaveBeenCalledWith("https://shop.example.com/cart");
+      await vi.advanceTimersByTimeAsync(NAVIGATION_RECOVERY_MS);
+      const recoverBtn = root.querySelector(".solv-nav-recover") as HTMLButtonElement | null;
+      expect(recoverBtn).not.toBeNull();
+      recoverBtn?.click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(window.name).toBe("host-window");
       expect(chatBodies).toHaveLength(2);
       expect(chatBodies[1]?.actionResults).toEqual([
         {
-          callId: "call_x",
+          callId: "call_xc",
           ok: false,
-          error: "That action did not finish.",
+          error: "Navigation was canceled.",
         },
       ]);
-      const bubbles = root.querySelectorAll(".solv-bubble--assistant");
-      expect(bubbles[1]?.querySelector(".solv-bubble-text")?.textContent).toBe(
-        "Checking shop — please open it directly.",
-      );
-      expect(bubbles[1]?.querySelector(".solv-feedback")).not.toBeNull();
+    });
+  });
+
+  describe("F13: same-page fragment removal in widget flow", () => {
+    it("continues the answer without waiting for pagehide when removing a fragment", async () => {
+      vi.useFakeTimers();
+      const prevUrl = location.href;
+      history.replaceState(null, "", "/pricing#details");
+      const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
+      vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+      const chatBodies: Array<Record<string, unknown>> = [];
+      let chatStep = 0;
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_frag_clear")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatStep++;
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (chatStep === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Returning to top"}\n\n',
+                'event: action\ndata: {"callId":"call_frag","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_f1","conversationId":"conv_f","awaitingActions":["call_frag"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":" — back at pricing overview."}\n\n',
+              'event: done\ndata: {"messageId":"msg_f2","conversationId":"conv_f"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      try {
+        const el = document.createElement("solv-chat");
+        el.setAttribute("assistant", "pk_frag_clear");
+        document.body.append(el);
+        await vi.advanceTimersByTimeAsync(0);
+
+        const root = el.shadowRoot as ShadowRoot;
+        (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
+        (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Back to pricing";
+        (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(assign).not.toHaveBeenCalled();
+        expect(location.pathname).toBe("/pricing");
+        expect(location.hash).toBe("");
+        expect(root.querySelector(".solv-nav-recover")).toBeNull();
+        expect(chatBodies).toHaveLength(2);
+        expect(chatBodies[1]?.actionResults).toEqual([
+          {
+            callId: "call_frag",
+            ok: true,
+            result: JSON.stringify({ opened: new URL("/pricing", location.href).href }),
+          },
+        ]);
+
+        const bubbles = root.querySelectorAll(".solv-bubble--assistant");
+        expect(bubbles[1]?.querySelector(".solv-bubble-text")?.textContent).toBe(
+          "Returning to top — back at pricing overview.",
+        );
+        expect(bubbles[1]?.querySelector(".solv-action")?.textContent).toBe("Ran navigate");
+        expect(bubbles[1]?.querySelector(".solv-feedback")).not.toBeNull();
+      } finally {
+        history.replaceState(null, "", prevUrl);
+      }
     });
   });
 

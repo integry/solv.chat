@@ -15,10 +15,14 @@ import {
 import { readEventLines } from "./sse.js";
 import {
   claimConversation,
+  clearCrossOriginHandoff,
+  consumeCrossOriginHandoff,
   loadConversation,
   type PendingResume,
+  type SavedConversation,
   type SavedTurn,
   saveConversation,
+  stageCrossOriginHandoff,
   visitorId,
 } from "./storage.js";
 import { styles } from "./styles.js";
@@ -140,8 +144,12 @@ export class SolvChat extends HTMLElement {
     const assistant = this.#assistant();
     if (assistant) {
       claimConversation(assistant, this.#owner);
-      const saved = loadConversation(assistant);
+      const handoff = consumeCrossOriginHandoff(assistant);
+      const saved = handoff ?? loadConversation(assistant);
       this.#restore(saved ?? { conversationId: null, open: false, turns: [] });
+      if (handoff) {
+        this.#persist();
+      }
     }
 
     if (this.#pendingResume && this.#resumedBubble) {
@@ -464,17 +472,17 @@ export class SolvChat extends HTMLElement {
     }
   }
 
+  #snapshot(): SavedConversation {
+    return {
+      conversationId: this.#conversationId,
+      open: this.#open,
+      turns: this.#turns,
+      ...(this.#pendingResume ? { pendingResume: this.#pendingResume } : {}),
+    };
+  }
+
   #persist(): void {
-    saveConversation(
-      this.#assistant(),
-      {
-        conversationId: this.#conversationId,
-        open: this.#open,
-        turns: this.#turns,
-        ...(this.#pendingResume ? { pendingResume: this.#pendingResume } : {}),
-      },
-      this.#owner,
-    );
+    saveConversation(this.#assistant(), this.#snapshot(), this.#owner);
   }
 
   #appendBubble(role: "user" | "assistant"): { bubble: HTMLDivElement; textEl: HTMLDivElement } {
@@ -1030,13 +1038,28 @@ export class SolvChat extends HTMLElement {
             actionResults: pendingResults,
             depth,
           };
+          let crossOrigin: string | null = null;
+          try {
+            const parsed = new URL(targetHref, location.href);
+            if (parsed.origin !== location.origin) {
+              crossOrigin = parsed.origin;
+            }
+          } catch {
+            // Ignore unparseable targetHref.
+          }
           if (request.name) {
             if (!assistantTurn.actions) assistantTurn.actions = [];
             assistantTurn.actions.push({ name: request.name, ok: true });
             this.#persist();
+            if (crossOrigin !== null) {
+              stageCrossOriginHandoff(this.#assistant(), crossOrigin, this.#snapshot());
+            }
             assistantTurn.actions.pop();
           } else {
             this.#persist();
+            if (crossOrigin !== null) {
+              stageCrossOriginHandoff(this.#assistant(), crossOrigin, this.#snapshot());
+            }
           }
         });
         let result = await runAction(request);
@@ -1056,6 +1079,7 @@ export class SolvChat extends HTMLElement {
           // Navigation failed or was canceled while the document stayed active:
           // clear the pending handoff so this widget resumes the answer.
           this.#pendingResume = null;
+          clearCrossOriginHandoff();
         }
         results.push(result);
         if (request.name) {

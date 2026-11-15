@@ -153,13 +153,8 @@ function resolveNavigation(raw: string, allowedOrigins: Set<string>): URL | stri
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     return "only web addresses can be opened";
   }
-  if (url.origin !== location.origin) {
-    if (!allowedOrigins.has(url.origin)) {
-      return "that address is not on this site";
-    }
-    // Same-tab sessionStorage is origin-scoped and no cross-origin handoff
-    // exists yet, so cross-origin navigation cannot preserve the conversation.
-    return "that address is on another origin where this conversation cannot continue";
+  if (url.origin !== location.origin && !allowedOrigins.has(url.origin)) {
+    return "that address is not on this site";
   }
   return url;
 }
@@ -403,6 +398,15 @@ export function installBuiltins(settings: BuiltinSettings): void {
           if (!element) throw new Error("that section is not on this page");
           element.scrollIntoView({ behavior: "smooth", block: "center" });
           return { scrolledTo: element.id || decodedId };
+        }
+        // Removing a fragment on the current page is same-document navigation:
+        // update the URL locally instead of waiting for a pagehide that will not fire.
+        if (samePage && (location.hash !== "" || location.href.includes("#"))) {
+          history.pushState(null, "", target.href);
+          if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+            window.scrollTo({ top: 0, behavior: "smooth" });
+          }
+          return { opened: target.href };
         }
         beforeNavigate?.(target.href);
         location.assign(target.href);
