@@ -91,12 +91,17 @@ function capResult(content: string): { content: string; bytes: number } {
   if (bytes.byteLength <= MAX_TOOL_RESULT_BYTES) {
     return { content, bytes: bytes.byteLength };
   }
-  // `decoder` is non-fatal, so a split multi-byte character becomes U+FFFD
-  // rather than throwing; the marker tells the model the data is incomplete,
-  // which is the difference between a short answer and a wrong one.
-  const head = decoder.decode(bytes.slice(0, MAX_TOOL_RESULT_BYTES));
+  const marker = `\n\n[truncated: result was ${bytes.byteLength} bytes]`;
+  const markerBytes = encoder.encode(marker).byteLength;
+  let end = Math.max(0, MAX_TOOL_RESULT_BYTES - markerBytes);
+  // Step back from any UTF-8 continuation byte (10xxxxxx) so we never split a
+  // multi-byte character or introduce U+FFFD replacement bytes.
+  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) {
+    end--;
+  }
+  const head = decoder.decode(bytes.subarray(0, end));
   return {
-    content: `${head}\n\n[truncated: result was ${bytes.byteLength} bytes]`,
+    content: `${head}${marker}`,
     bytes: bytes.byteLength,
   };
 }

@@ -666,11 +666,14 @@ describe("chat/toolLoop", () => {
     const toolResultMsg = seenRequests[1]?.messages.at(-1);
     expect(toolResultMsg?.role).toBe("tool_results");
     if (toolResultMsg && toolResultMsg.role === "tool_results") {
-      const resultText = toolResultMsg.results[0]?.content;
+      const resultText = toolResultMsg.results[0]?.content ?? "";
       expect(resultText).toContain(
         `[truncated: result was ${new TextEncoder().encode(hugeBody).byteLength} bytes]`,
       );
       expect(resultText).not.toContain("TAIL_SECRET");
+      expect(new TextEncoder().encode(resultText).byteLength).toBeLessThanOrEqual(
+        MAX_TOOL_RESULT_BYTES,
+      );
     }
 
     const done = events.find((e) => e.type === "done");
@@ -1119,5 +1122,69 @@ describe("chat/toolLoop", () => {
       results: [{ callId: "c_pe", content: "The tool could not be called.", isError: true }],
     });
     expect(events.at(-1)?.type).toBe("done");
+  });
+
+  it("truncates multibyte UTF-8 tool results on character boundaries within MAX_TOOL_RESULT_BYTES", async () => {
+    const encoder = new TextEncoder();
+    // Test both a 2-byte ("é") and 4-byte ("😀") character straddling the reserved head budget.
+    for (const char of ["é", "😀"]) {
+      const pad = "A".repeat(MAX_TOOL_RESULT_BYTES - 1);
+      const body = `${pad}${char}TAIL`;
+      const bodyBytes = encoder.encode(body).byteLength;
+      const marker = `\n\n[truncated: result was ${bodyBytes} bytes]`;
+      const budget = MAX_TOOL_RESULT_BYTES - encoder.encode(marker).byteLength;
+      const boundaryBody = `${"A".repeat(budget - 1)}${char}${"Z".repeat(200)}`;
+      const boundaryBytes = encoder.encode(boundaryBody).byteLength;
+      const expectedMarker = `\n\n[truncated: result was ${boundaryBytes} bytes]`;
+
+      const seenRequests: LlmRequest[] = [];
+      const runner: ToolRunner = {
+        kind: "mcp",
+        definitions: [LOOKUP_TOOL],
+        async run() {
+          return { content: boundaryBody, isError: false };
+        },
+      };
+
+      await collectEvents(
+        answerMessage(
+          {
+            tenant,
+            embedder,
+            retriever,
+            provider: scriptedProvider(
+              [
+                {
+                  text: "",
+                  calls: [{ callId: "c_utf8", name: "lookup_order", input: { id: "1" } }],
+                },
+                { text: "Summary.", calls: [] },
+              ],
+              seenRequests,
+            ),
+            model: ANTHROPIC_MODELS.fast,
+            usage: { record: async () => {} },
+            runners: [runner],
+          },
+          {
+            orgId: TEST_ORG_ID,
+            assistantId: "ast_1",
+            visitorId: "vis_1",
+            message: "Check order status in your account.",
+            behaviour,
+          },
+        ),
+      );
+
+      const toolResultMsg = seenRequests[1]?.messages.at(-1);
+      expect(toolResultMsg?.role).toBe("tool_results");
+      if (toolResultMsg && toolResultMsg.role === "tool_results") {
+        const resultText = toolResultMsg.results[0]?.content ?? "";
+        expect(encoder.encode(resultText).byteLength).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES);
+        expect(resultText).not.toContain("\uFFFD");
+        expect(resultText).not.toContain(char);
+        expect(resultText.endsWith(expectedMarker)).toBe(true);
+      }
+    }
   });
 });
