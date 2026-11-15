@@ -125,7 +125,8 @@ describe("admin provider settings & keys", () => {
       source: "environment",
     });
     expect(bodyEnv.keys.openai?.source).toBe("environment");
-    expect(bodyEnv.configError).toBeNull();
+    expect(bodyEnv.configError).toContain("OpenRouter");
+    expect(bodyEnv.configError).toContain("SOLV_OPENROUTER_KEY");
 
     // 3. Stored settings beat environment variables
     const resPut = await call(appEnv, envVars, "/api/admin/providers", {
@@ -486,5 +487,54 @@ describe("admin provider settings & keys", () => {
       body: JSON.stringify({ key: TEST_KEY_CANARY }),
     });
     expect(putKeyRes.status).toBe(404);
+  });
+
+  it("reports missing embedding credentials even when the answering key is configured", async () => {
+    const { app, testEnv } = appFor(ORG_A, {
+      SOLV_LLM_PROVIDER: "anthropic",
+      SOLV_ANTHROPIC_KEY: "sk-env-anthropic",
+      SOLV_OPENAI_KEY: undefined,
+      SOLV_OPENROUTER_KEY: undefined,
+    });
+
+    // Seed an assistant so we can also verify Overview reports the same configError.
+    const astId = newId("ast");
+    await env.DB.prepare(
+      "INSERT INTO assistants (id, org_id, name, public_key, allowed_origins, created_at) VALUES (?1, ?2, 'Bot', 'pk_embed_check', '[\"https://example.com\"]', ?3)",
+    )
+      .bind(astId, ORG_A, Date.now())
+      .run();
+
+    // Select OpenRouter for embeddings with no OpenRouter key configured.
+    const putRes = await call(app, testEnv, "/api/admin/providers", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        llmProvider: "anthropic",
+        embeddingsProvider: "openrouter",
+      }),
+    });
+    expect(putRes.status).toBe(200);
+    const putBody = (await putRes.json()) as { configError: string | null };
+    expect(putBody.configError).toContain("OpenRouter");
+    expect(putBody.configError).toContain("embeddings");
+    expect(putBody.configError).toContain("Settings → Providers");
+    expect(putBody.configError).toContain("SOLV_OPENROUTER_KEY");
+
+    const overviewRes = await call(app, testEnv, `/api/admin/assistants/${astId}/overview`);
+    expect(overviewRes.status).toBe(200);
+    const overviewBody = (await overviewRes.json()) as { configError: string | null };
+    expect(overviewBody.configError).toBe(putBody.configError);
+
+    // Supplying the OpenRouter key clears the configuration error.
+    await call(app, testEnv, "/api/admin/providers/keys/openrouter", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ key: "sk-stored-openrouter" }),
+    });
+    const resolvedRes = await call(app, testEnv, "/api/admin/providers");
+    expect(resolvedRes.status).toBe(200);
+    const resolvedBody = (await resolvedRes.json()) as { configError: string | null };
+    expect(resolvedBody.configError).toBeNull();
   });
 });

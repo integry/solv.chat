@@ -191,13 +191,15 @@ export async function checkLlmConfigError(
     return `${label} is selected, but no API key is set. Add one in Settings → Providers or set ${secretEnvName(provider)}.`;
   }
 
+  const embeddingsProvider = settings.embeddingsProvider.value;
   try {
-    await keys.embeddingKey(orgId, settings.embeddingsProvider.value);
+    await keys.embeddingKey(orgId, embeddingsProvider);
   } catch (err) {
+    const label = providerLabel(embeddingsProvider);
     if (err instanceof StoredKeyError) {
-      const label = providerLabel(err.provider);
       return `The stored ${label} API key could not be read (SOLV_SECRET_KEY may have changed). Re-enter it in Settings → Providers.`;
     }
+    return `${label} is selected for embeddings, but no API key is set. Add one in Settings → Providers or set ${secretEnvName(embeddingsProvider)}.`;
   }
 
   return null;

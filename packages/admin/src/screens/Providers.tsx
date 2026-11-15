@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, deleteJson, postJson, putJson } from "../api/client.js";
 import type {
   EmbeddingsProviderName,
@@ -209,9 +209,10 @@ export function Providers() {
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  const settingsDirtyRef = useRef(false);
 
   useEffect(() => {
-    if (!data) return;
+    if (!data || settingsDirtyRef.current) return;
     setLlmProvider(data.settings.llmProvider.value);
     setLlmTier(data.settings.llmTier.value);
     setLlmModel(data.settings.llmModel.value ?? "");
@@ -233,6 +234,7 @@ export function Providers() {
           : { llmTier }),
         embeddingsProvider,
       });
+      settingsDirtyRef.current = false;
       res.setValue(updated);
       setNotice("Provider settings saved.");
     } catch (err) {
@@ -260,6 +262,7 @@ export function Providers() {
         llmModel: null,
         embeddingsProvider: null,
       });
+      settingsDirtyRef.current = false;
       res.setValue(updated);
       setNotice("Reset to environment defaults.");
     } catch (err) {
@@ -313,7 +316,10 @@ export function Providers() {
                 id="llm-provider"
                 value={llmProvider}
                 disabled={busy}
-                onChange={(e) => setLlmProvider(e.target.value as LlmProviderName)}
+                onChange={(e) => {
+                  settingsDirtyRef.current = true;
+                  setLlmProvider(e.target.value as LlmProviderName);
+                }}
               >
                 <option value="anthropic">Anthropic</option>
                 <option value="openai">OpenAI</option>
@@ -333,7 +339,10 @@ export function Providers() {
                   value={llmModel}
                   disabled={busy}
                   placeholder="anthropic/claude-sonnet-4"
-                  onChange={(e) => setLlmModel(e.target.value)}
+                  onChange={(e) => {
+                    settingsDirtyRef.current = true;
+                    setLlmModel(e.target.value);
+                  }}
                 />
                 <span className="field-hint">
                   Any OpenRouter model id. The daily spend cap is tracked in OpenRouter credits.
@@ -354,7 +363,10 @@ export function Providers() {
                   id="llm-tier"
                   value={llmTier}
                   disabled={busy}
-                  onChange={(e) => setLlmTier(e.target.value as LlmTier)}
+                  onChange={(e) => {
+                    settingsDirtyRef.current = true;
+                    setLlmTier(e.target.value as LlmTier);
+                  }}
                 >
                   <option value="fast">Fast</option>
                   <option value="balanced">Balanced</option>
@@ -374,7 +386,10 @@ export function Providers() {
                 id="embeddings-provider"
                 value={embeddingsProvider}
                 disabled={busy}
-                onChange={(e) => setEmbeddingsProvider(e.target.value as EmbeddingsProviderName)}
+                onChange={(e) => {
+                  settingsDirtyRef.current = true;
+                  setEmbeddingsProvider(e.target.value as EmbeddingsProviderName);
+                }}
               >
                 <option value="openai">OpenAI</option>
                 <option value="openrouter">OpenRouter</option>
