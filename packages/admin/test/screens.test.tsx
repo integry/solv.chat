@@ -794,6 +794,7 @@ describe("admin phase 1 screens", () => {
     const links = Array.from(nav.querySelectorAll("a"));
     expect(links.map((l) => l.textContent)).toEqual([
       "Overview",
+      "Reports",
       "Conversations",
       "Gaps",
       "Sources",
@@ -802,6 +803,7 @@ describe("admin phase 1 screens", () => {
       "Widget",
       "Tests",
       "Install",
+      "Providers",
     ]);
     for (const link of links) {
       expect(link.getAttribute("href")).toMatch(/^\/admin\//);

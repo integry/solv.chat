@@ -225,6 +225,46 @@ export function testsFor(db: D1Database, orgId: string) {
       return (res.meta.changes ?? 0) > 0;
     },
 
+    async replaceAll(
+      assistantId: string,
+      items: Array<{
+        id: string;
+        question: string;
+        expectation: Record<string, unknown>;
+        createdAt: number;
+      }>,
+    ): Promise<{ created: number; removed: number; tests: TestRow[] }> {
+      const deleteStmt = prepare(
+        db,
+        "DELETE FROM tests WHERE org_id = ?1 AND assistant_id = ?2",
+      ).bind(orgId, assistantId);
+      const insertStmts = items.map((item) =>
+        prepareInsert(
+          db,
+          `INSERT INTO tests (id, org_id, assistant_id, question, expectation, created_at)
+           VALUES (?2, ?1, ?3, ?4, ?5, ?6)`,
+        ).bind(
+          orgId,
+          item.id,
+          assistantId,
+          item.question,
+          JSON.stringify(item.expectation),
+          item.createdAt,
+        ),
+      );
+      const results = await db.batch([deleteStmt, ...insertStmts]);
+      const removed = results[0]?.meta.changes ?? 0;
+      const tests: TestRow[] = items.map((item) => ({
+        id: item.id,
+        orgId,
+        assistantId,
+        question: item.question,
+        expectation: item.expectation,
+        createdAt: item.createdAt,
+      }));
+      return { created: tests.length, removed, tests };
+    },
+
     async listRuns(versionId: string): Promise<TestRunRow[]> {
       const res = await prepare(
         db,

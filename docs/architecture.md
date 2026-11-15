@@ -172,6 +172,31 @@ environment variables (`vars` in `wrangler.jsonc`):
 
 An unrecognised value falls back to its default and is logged once.
 
+### Provider settings
+
+An owner can also configure the instance's answering provider, tier or OpenRouter
+model id, embeddings provider, and API keys per organisation in the admin under
+**Settings → Providers** (there is still no per-assistant model picker, and no
+custom base URL or endpoint field).
+
+- **Precedence**: stored setting beats environment variable beats built-in
+  default; stored key beats Worker secret. Removing a stored value falls back.
+- **Keys**: stored keys are sealed with `SOLV_SECRET_KEY` (`secretBox`),
+  write-only (never returned by any API or logged), and opened only at call
+  time inside the Worker. Storing a key without `SOLV_SECRET_KEY` is refused.
+  If a stored key cannot be opened (for example, `SOLV_SECRET_KEY` was
+  rotated), answering fails with the configuration-error path, the admin says
+  which key must be re-entered, and the Worker secret is not silently used
+  instead.
+- **Embeddings**: switching between `openai` and `openrouter` uses the same
+  model (`text-embedding-3-small`, 1536 dimensions) and does not invalidate the
+  index.
+- **Key test**: an owner-only, rate-limited test action checks the effective
+  key with one minimal provider request and reports success or the error
+  category without echoing the provider's response body.
+- **Managed keys**: when `KeyProvider.managed` is true (in the cloud layer),
+  the admin hides the key-entry fields.
+
 ### OpenRouter
 
 A third `LlmProvider`, `openrouter`, lets an instance answer with any chat model
@@ -344,7 +369,7 @@ React, served by the Worker. One screen per item:
 
 ```
 [assistant switcher]
-Overview · Conversations · Gaps
+Overview · Reports · Conversations · Gaps
 Sources · Tools · Behaviour · Widget · Tests
 Install
 ```
@@ -373,7 +398,8 @@ The cloud layer replaces these and nothing else:
   build ships a single-owner provider: an admin password set as a Worker secret,
   exchanged for a signed, HttpOnly session cookie.
 - `KeyProvider` — returns the model and embedding keys for an org. The open build
-  reads Worker secrets.
+  reads stored keys (sealed with `SOLV_SECRET_KEY`), then Worker secrets; when
+  `managed` is true, the admin hides key-entry fields.
 - `UsageSink` — receives usage events. The open build writes `usage_daily`.
 - `Limits` — answers "may this org do this?". The open build enforces only the
   per-assistant spend cap and rate limits.

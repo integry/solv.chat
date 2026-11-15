@@ -128,6 +128,28 @@ export interface TopQuestion {
   count: number;
 }
 
+export interface SourceCitationCount {
+  url: string;
+  title: string;
+  count: number;
+}
+
+export interface AssistantReport {
+  days: 7 | 30 | 90;
+  from: string;
+  to: string;
+  questions: number;
+  replies: number;
+  answeredShare: number;
+  thumbsDownShare: number;
+  costMicros: number;
+  topQuestions: TopQuestion[];
+  topGaps: TopQuestion[];
+  topSources: SourceCitationCount[];
+  uncitedSources: Array<{ url: string; title: string }>;
+  uncitedTotal: number;
+}
+
 export interface AssistantOverview {
   messages: number;
   answeredShare: number;
@@ -203,4 +225,38 @@ export interface TestRunResponse {
   passed: boolean;
   results: TestResult[];
   stopped?: string | undefined;
+}
+
+export type LlmProviderName = "anthropic" | "openai" | "openrouter";
+export type EmbeddingsProviderName = "openai" | "openrouter";
+export type LlmTier = "fast" | "balanced";
+export type SettingSource = "stored" | "environment" | "none";
+
+export interface ResolvedSetting<T> {
+  value: T;
+  source: SettingSource;
+}
+
+export interface ProviderKeyStatus {
+  source: SettingSource;
+  updatedAt: number | null;
+  unreadable: boolean;
+}
+
+export interface ProviderSettingsView {
+  settings: {
+    llmProvider: ResolvedSetting<LlmProviderName>;
+    llmTier: ResolvedSetting<LlmTier>;
+    llmModel: ResolvedSetting<string | null>;
+    embeddingsProvider: ResolvedSetting<EmbeddingsProviderName>;
+  };
+  keysManaged: boolean;
+  keys: Record<LlmProviderName, ProviderKeyStatus>;
+  configError: string | null;
+}
+
+export interface KeyTestResult {
+  ok: boolean;
+  category: "ok" | "unauthorised" | "rate_limited" | "unreachable" | "missing" | "unreadable";
+  message: string;
 }

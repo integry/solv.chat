@@ -8,15 +8,14 @@ import {
   publicConfigRoute,
   resolveChatProviders,
 } from "./chat/route.js";
-import { forPrincipal } from "./db/tenant.js";
+import { forPrincipal, type Tenant } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
-import { ingestRoutes } from "./ingest/router.js";
+import { type IngestResource, ingestRoutes } from "./ingest/router.js";
 import {
   checkLlmConfigError,
   embedderFor,
   type ProviderEnv,
-  resolveEmbeddingsProvider,
-  resolveLlmProvider,
+  resolveProviderSettings,
 } from "./providers/config.js";
 import { vectorizeRetriever } from "./providers/retrieval.js";
 import type { Seams } from "./seams/types.js";
@@ -52,6 +51,9 @@ export interface Env extends ProviderEnv {
   DOCS: R2Bucket;
   INGEST_QUEUE: Queue;
   SOLV_SECRET_KEY?: string | undefined;
+  SOLV_ANTHROPIC_KEY?: string | undefined;
+  SOLV_OPENAI_KEY?: string | undefined;
+  SOLV_OPENROUTER_KEY?: string | undefined;
 }
 
 export interface App {
@@ -99,17 +101,32 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         // making owners bust a cache.
         return widgetAsset();
       }
-      const ingestMatch = /^\/v1\/ingest\/([^/]+)\/(documents|config)$/.exec(url.pathname);
+      const resolveRunDeps = async (orgId: string, tenant: Tenant) => {
+        const providers = await resolveChatProviders(env, seams, orgId, chatOverrides);
+        return {
+          tenant,
+          orgId,
+          ...providers,
+          usage: seams.usage,
+          limits: seams.limits,
+          secretKey: env.SOLV_SECRET_KEY ?? "",
+          fetchImpl: chatOverrides?.fetch,
+        };
+      };
+      const ingestMatch = /^\/v1\/ingest\/([^/]+)\/(documents|config|tests|test-runs)$/.exec(
+        url.pathname,
+      );
       if (ingestMatch?.[1] && ingestMatch[2]) {
         const assistantId = decodeSegment(ingestMatch[1]);
         if (assistantId === null) return notFound();
-        return ingestRoutes(request, assistantId, ingestMatch[2] as "documents" | "config", {
+        return ingestRoutes(request, assistantId, ingestMatch[2] as IngestResource, {
           db: env.DB,
           docs: env.DOCS,
           queue: env.INGEST_QUEUE,
           retriever: vectorizeRetriever(env.VECTORS),
           limits: seams.limits,
           auth: seams.auth,
+          resolveRunDeps,
         });
       }
       if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
@@ -143,28 +160,18 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           retriever: vectorizeRetriever(env.VECTORS),
           publicBaseUrl: url.origin,
           fetchImpl: options?.fetch,
-          // Used only to seal and open stored MCP credentials.
+          // Used only to seal and open stored MCP credentials and provider keys.
           secretKey: env.SOLV_SECRET_KEY ?? "",
-          resolveRunDeps: async () => {
-            const providers = await resolveChatProviders(
-              env,
-              seams,
-              principal.orgId,
-              chatOverrides,
-            );
-            return {
-              tenant,
-              orgId: principal.orgId,
-              ...providers,
-              usage: seams.usage,
-              limits: seams.limits,
-              secretKey: env.SOLV_SECRET_KEY ?? "",
-              fetchImpl: chatOverrides?.fetch,
-            };
+          keys: seams.keys,
+          envSecretPresence: {
+            anthropic: Boolean(env.SOLV_ANTHROPIC_KEY),
+            openai: Boolean(env.SOLV_OPENAI_KEY),
+            openrouter: Boolean(env.SOLV_OPENROUTER_KEY),
           },
-          costUnit:
-            resolveLlmProvider(env.SOLV_LLM_PROVIDER) === "openrouter" ? "credits" : undefined,
-          checkConfigError: () => checkLlmConfigError(env, seams.keys, principal.orgId),
+          resolveSettings: () => resolveProviderSettings(env.DB, env, principal.orgId),
+          checkConfigError: (resolved) =>
+            checkLlmConfigError(env.DB, env, seams.keys, principal.orgId, resolved),
+          resolveRunDeps: () => resolveRunDeps(principal.orgId, tenant),
         });
       }
       if (
@@ -203,8 +210,13 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           for (const message of messages) message.ack();
           continue;
         }
-        const embeddingsProvider = resolveEmbeddingsProvider(env.SOLV_EMBEDDINGS_PROVIDER);
-        const embedder = await embedderFor(orgId, embeddingsProvider, seams.keys, options?.fetch);
+        const settings = await resolveProviderSettings(env.DB, env, orgId);
+        const embedder = await embedderFor(
+          orgId,
+          settings.embeddingsProvider.value,
+          seams.keys,
+          options?.fetch,
+        );
         await runIngestBatch(
           { messages },
           {

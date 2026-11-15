@@ -224,6 +224,60 @@ export async function deleteTest(tenant: Tenant, testId: string): Promise<{ dele
   return { deleted: true };
 }
 
+/**
+ * Replaces an assistant's entire test set with the declared list.
+ *
+ * Validation runs before any delete so an invalid payload leaves the existing
+ * tests untouched.
+ */
+export async function replaceTests(
+  tenant: Tenant,
+  assistantId: string,
+  body: unknown,
+): Promise<{ created: number; removed: number; tests: TestRow[] }> {
+  const assistant = await tenant.assistants.get(assistantId);
+  if (assistant === null) throw new NotFound("assistant");
+  if (!isPlainObject(body)) {
+    throw new BadRequest(["body: must be a JSON object"]);
+  }
+  if (!Array.isArray(body.tests)) {
+    throw new BadRequest(["tests: must be an array"]);
+  }
+  if (body.tests.length > MAX_TESTS_PER_ASSISTANT) {
+    throw new BadRequest([`tests: an assistant can have at most ${MAX_TESTS_PER_ASSISTANT} tests`]);
+  }
+
+  const parsedItems: Array<{ question: string; expectation: Record<string, unknown> }> = [];
+  const errors: string[] = [];
+  for (let i = 0; i < body.tests.length; i++) {
+    const parsed = parseTestInput(body.tests[i]);
+    if (!parsed.ok) {
+      for (const error of parsed.errors) {
+        errors.push(`tests[${i}].${error}`);
+      }
+      continue;
+    }
+    parsedItems.push({
+      question: parsed.value.question,
+      expectation: parsed.value.expectation as unknown as Record<string, unknown>,
+    });
+  }
+  if (errors.length > 0) {
+    throw new BadRequest(errors);
+  }
+
+  const baseNow = Date.now();
+  return tenant.tests.replaceAll(
+    assistantId,
+    parsedItems.map((item, index) => ({
+      id: newId("tst"),
+      question: item.question,
+      expectation: item.expectation,
+      createdAt: baseNow + index,
+    })),
+  );
+}
+
 /** Lists recent test runs for an assistant, newest first. */
 export async function listTestRuns(tenant: Tenant, assistantId: string): Promise<TestRunRow[]> {
   const assistant = await tenant.assistants.get(assistantId);

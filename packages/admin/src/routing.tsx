@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 export type ScreenId =
   | "overview"
+  | "reports"
   | "conversations"
   | "gaps"
   | "sources"
@@ -9,16 +10,19 @@ export type ScreenId =
   | "behaviour"
   | "widget"
   | "tests"
-  | "install";
+  | "install"
+  | "providers";
 
 export interface NavItem {
   id: ScreenId;
   label: string;
   path: string;
+  section?: string;
 }
 
 export const NAV_ITEMS: readonly NavItem[] = [
   { id: "overview", label: "Overview", path: "/admin/overview" },
+  { id: "reports", label: "Reports", path: "/admin/reports" },
   { id: "conversations", label: "Conversations", path: "/admin/conversations" },
   { id: "gaps", label: "Gaps", path: "/admin/gaps" },
   { id: "sources", label: "Sources", path: "/admin/sources" },
@@ -27,6 +31,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "widget", label: "Widget", path: "/admin/widget" },
   { id: "tests", label: "Tests", path: "/admin/tests" },
   { id: "install", label: "Install", path: "/admin/install" },
+  { id: "providers", label: "Providers", path: "/admin/providers", section: "Settings" },
 ];
 
 export function matchScreen(pathname: string): ScreenId {

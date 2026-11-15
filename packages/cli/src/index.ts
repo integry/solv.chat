@@ -1,13 +1,22 @@
 import { apply } from "./apply.js";
-import { APPLY_HELP, PUSH_HELP, parseCliArgs, ROOT_HELP } from "./args.js";
+import { APPLY_HELP, PUSH_HELP, parseCliArgs, ROOT_HELP, TEST_HELP } from "./args.js";
 import { CliError } from "./http.js";
 import { push } from "./push.js";
+import { test } from "./test.js";
 
 export { type ApplyOptions, apply, diffConfig } from "./apply.js";
-export { APPLY_HELP, type ParsedCommand, PUSH_HELP, parseCliArgs, ROOT_HELP } from "./args.js";
+export {
+  APPLY_HELP,
+  type ParsedCommand,
+  PUSH_HELP,
+  parseCliArgs,
+  ROOT_HELP,
+  TEST_HELP,
+} from "./args.js";
 export { CliError, formatApiError, normalizeEndpoint, requestJson } from "./http.js";
 export { externalIdFor, firstHeading, markdownFiles, splitFrontMatter } from "./markdown.js";
 export { BATCH_SIZE, type CliDeps, type PushDocument, type PushOptions, push } from "./push.js";
+export { type TestOptions, test } from "./test.js";
 
 export interface RunCliDeps {
   fetchImpl?: typeof fetch;
@@ -31,12 +40,18 @@ export async function runCli(argv: string[], deps: RunCliDeps = {}): Promise<num
     if (command.kind === "help") {
       if (command.topic === "push") log(PUSH_HELP);
       else if (command.topic === "apply") log(APPLY_HELP);
+      else if (command.topic === "test") log(TEST_HELP);
       else log(ROOT_HELP);
       return 0;
     }
 
     if (command.kind === "push") {
       await push(command.options, { fetchImpl, log });
+      return 0;
+    }
+
+    if (command.kind === "test") {
+      await test(command.options, { fetchImpl, log });
       return 0;
     }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, getJson } from "./client.js";
 
 export type ResourceState<T> =
@@ -25,15 +25,21 @@ export function useResource<T>(path: string | null): UseResourceResult<T> {
     value: undefined,
     error: null,
   });
+  const controllerRef = useRef<AbortController | null>(null);
+  const generationRef = useRef(0);
 
   useEffect(() => {
     void tick;
+    const gen = ++generationRef.current;
     if (path === null) {
+      controllerRef.current?.abort();
+      controllerRef.current = null;
       setState({ status: "loading", value: undefined, error: null });
       return;
     }
 
     const controller = new AbortController();
+    controllerRef.current = controller;
     setState((prev) => ({
       status: "loading",
       value: prev.value,
@@ -42,12 +48,12 @@ export function useResource<T>(path: string | null): UseResourceResult<T> {
 
     getJson<T>(path, controller.signal)
       .then((data) => {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && generationRef.current === gen) {
           setState({ status: "ready", value: data, error: null });
         }
       })
       .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || generationRef.current !== gen) return;
         const message =
           err instanceof ApiError || err instanceof Error ? err.message : "Could not load data.";
         setState({ status: "error", value: undefined, error: message });
@@ -55,6 +61,9 @@ export function useResource<T>(path: string | null): UseResourceResult<T> {
 
     return () => {
       controller.abort();
+      if (controllerRef.current === controller) {
+        controllerRef.current = null;
+      }
     };
   }, [path, tick]);
 
@@ -63,6 +72,9 @@ export function useResource<T>(path: string | null): UseResourceResult<T> {
   }, []);
 
   const setValue = useCallback((next: T | ((prev: T | undefined) => T)) => {
+    generationRef.current += 1;
+    controllerRef.current?.abort();
+    controllerRef.current = null;
     setState((prev) => ({
       status: "ready",
       value: typeof next === "function" ? (next as (prev: T | undefined) => T)(prev.value) : next,

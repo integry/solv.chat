@@ -43,7 +43,26 @@ export interface AuthProvider {
 export type LlmProviderName = "anthropic" | "openai" | "openrouter";
 export type EmbeddingsProviderName = "openai" | "openrouter";
 
+/**
+ * Thrown by a KeyProvider when a stored key exists for the org/provider
+ * but cannot be decrypted (for example, SOLV_SECRET_KEY is missing or rotated).
+ * Callers must not fall back to environment secrets when this is thrown.
+ */
+export class StoredKeyError extends Error {
+  readonly provider: LlmProviderName;
+  constructor(provider: LlmProviderName, message = `stored ${provider} key could not be read`) {
+    super(message);
+    this.name = "StoredKeyError";
+    this.provider = provider;
+  }
+}
+
 export interface KeyProvider {
+  /**
+   * True when the host layer supplies and manages provider keys itself, so
+   * the admin hides key-entry fields.
+   */
+  readonly managed?: boolean | undefined;
   modelKey(orgId: string, provider: LlmProviderName): Promise<string>;
   embeddingKey(orgId: string, provider?: EmbeddingsProviderName): Promise<string>;
 }
