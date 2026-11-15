@@ -47,7 +47,7 @@ async function call(
       headers,
       body: body === undefined ? null : JSON.stringify(body),
     }),
-    env,
+    { ...env, INGEST_QUEUE: { async send() {}, async sendBatch() {} } as unknown as Queue },
     ctx,
   );
   await waitOnExecutionContext(ctx);
@@ -187,7 +187,7 @@ describe("admin sources API", () => {
       {
         tenant: forIngestScope(env.DB, scope),
         docs: env.DOCS,
-        queue: env.INGEST_QUEUE,
+        queue: { async send() {}, async sendBatch() {} } as unknown as Queue,
       },
       scope,
       {

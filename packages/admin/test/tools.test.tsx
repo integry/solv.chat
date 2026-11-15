@@ -237,6 +237,7 @@ describe("Tools screen", () => {
       "Behaviour",
       "Widget",
       "Install",
+      "Providers",
     ]);
 
     fireEvent.click(screen.getByRole("link", { name: "Tools" }));

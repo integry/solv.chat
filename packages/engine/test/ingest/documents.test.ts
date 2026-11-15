@@ -412,7 +412,7 @@ describe("ingest documents", () => {
           ],
         }),
       }),
-      env,
+      { ...env, INGEST_QUEUE: countingQueue() as unknown as Queue },
       ctx,
     );
     expect(putRes.status).toBe(200);

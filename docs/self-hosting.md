@@ -25,15 +25,17 @@ The metadata indexes (`org_id` and `assistant_id`) must exist before the first `
 
 ## 2. Set secrets
 
-Four secrets. Run `npx wrangler secret put <name>` inside `packages/engine` for each one:
+Two secrets are required for the admin and encrypted storage, plus keys for the providers you use. Provider keys and provider/model choices can also be entered in `/admin` under **Settings → Providers** instead of setting provider secrets and `vars` (stored settings and keys take precedence over environment variables and secrets; `SOLV_SECRET_KEY` is required to store keys in the admin).
 
-| Secret                | What it is                                                                                   | Where it comes from                                                                                          |
-| --------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `SOLV_ADMIN_PASSWORD` | The one password that signs you in to `/admin`.                                              | You choose it (or generate one with `openssl rand -base64 24`).                                              |
-| `SOLV_SECRET_KEY`     | Signs session cookies and encrypts the credentials you give MCP servers.                     | `openssl rand -base64 32`. Changing it signs you out everywhere and makes stored MCP credentials unreadable. |
-| `SOLV_ANTHROPIC_KEY`  | Your Anthropic key, if the instance uses Anthropic.                                          | console.anthropic.com                                                                                        |
-| `SOLV_OPENAI_KEY`     | Your OpenAI key. Needed for embeddings by default even when answers come from Anthropic.     | platform.openai.com                                                                                          |
-| `SOLV_OPENROUTER_KEY` | Your OpenRouter key, if `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`. | openrouter.ai                                                                                                |
+Run `npx wrangler secret put <name>` inside `packages/engine` for each secret you set via Worker secrets:
+
+| Secret                | What it is                                                                                   | Where it comes from                                                                                               |
+| --------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `SOLV_ADMIN_PASSWORD` | The one password that signs you in to `/admin`.                                              | You choose it (or generate one with `openssl rand -base64 24`).                                                   |
+| `SOLV_SECRET_KEY`     | Signs session cookies and encrypts stored MCP server credentials and provider API keys.      | `openssl rand -base64 32`. Changing it signs you out everywhere and makes stored credentials and keys unreadable. |
+| `SOLV_ANTHROPIC_KEY`  | Your Anthropic key, if the instance uses Anthropic (or enter in **Settings → Providers**).   | console.anthropic.com                                                                                             |
+| `SOLV_OPENAI_KEY`     | Your OpenAI key. Needed for embeddings by default (or enter in **Settings → Providers**).    | platform.openai.com                                                                                               |
+| `SOLV_OPENROUTER_KEY` | Your OpenRouter key, if `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`. | openrouter.ai                                                                                                     |
 
 By default, `packages/engine/wrangler.jsonc` sets `SOLV_LLM_PROVIDER` to `"anthropic"` and `SOLV_LLM_TIER` to `"fast"`. To answer with OpenAI or switch tiers (`"fast"` or `"balanced"`), edit those two values under `vars` in `packages/engine/wrangler.jsonc`.
 
@@ -78,9 +80,11 @@ SOLV_INGEST_KEY=<the key> npx solv push ./content \
 ## Rotating a secret
 
 - `SOLV_SECRET_KEY` — every session is signed out, so sign in again, and every
-  MCP server credential stored with the old key can no longer be read. Open
-  **Tools** and enter each server's credential again; until you do, those
-  servers' tools cannot be called and the assistant answers without them.
+  MCP server credential and provider API key stored with the old key can no
+  longer be read. Open **Tools** to re-enter MCP server credentials, and open
+  **Settings → Providers** to re-enter any stored provider keys; until you do,
+  those servers' tools cannot be called and answering with a stored provider key
+  will fail rather than falling back to a Worker secret.
 
 Signing out clears the session cookie in that browser only. The engine keeps no list of sessions, so a copy of the cookie stays valid until it expires after 30 days. If you think a session cookie was copied, rotate `SOLV_SECRET_KEY`.
 

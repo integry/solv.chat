@@ -9,6 +9,7 @@ import { Gaps } from "./screens/Gaps.js";
 import { Install } from "./screens/Install.js";
 import { Login } from "./screens/Login.js";
 import { Overview } from "./screens/Overview.js";
+import { Providers } from "./screens/Providers.js";
 import { Reports } from "./screens/Reports.js";
 import { Sources } from "./screens/Sources.js";
 import { Tools } from "./screens/Tools.js";
@@ -39,6 +40,8 @@ function renderScreen(screen: ScreenId, assistantId: string) {
       return <Widget key={assistantId} assistantId={assistantId} />;
     case "install":
       return <Install key={assistantId} assistantId={assistantId} />;
+    case "providers":
+      return <Providers />;
   }
 }
 
@@ -102,7 +105,9 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
 
         <AssistantMutationsProvider>
           <main className="shell-main">
-            {assistantsRes.status === "loading" && assistants.length === 0 ? (
+            {screen === "providers" ? (
+              <Providers />
+            ) : assistantsRes.status === "loading" && assistants.length === 0 ? (
               <p className="muted">Loading assistants…</p>
             ) : assistantsRes.status === "error" ? (
               <p className="error-text" role="alert">

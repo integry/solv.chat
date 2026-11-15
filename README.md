@@ -28,13 +28,13 @@ npm run test -w @solvchat/engine
 npm run build -w @solvchat/engine
 ```
 
-Required Worker secrets (set with `wrangler secret put` or `.dev.vars` locally):
+Required Worker secrets (set with `wrangler secret put` or `.dev.vars` locally; provider keys can also be entered in the admin under **Settings → Providers** when `SOLV_SECRET_KEY` is set):
 
 - `SOLV_ADMIN_PASSWORD` — admin sign-in password
-- `SOLV_SECRET_KEY` — HMAC signing key for session cookies and AES-GCM encryption key for stored MCP tool credentials (changing it signs everyone out and makes stored tool credentials unreadable)
-- `SOLV_ANTHROPIC_KEY` — Anthropic API key (when `SOLV_LLM_PROVIDER` is `"anthropic"`)
-- `SOLV_OPENAI_KEY` — OpenAI API key (models and default embeddings)
-- `SOLV_OPENROUTER_KEY` — OpenRouter API key (when `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`)
+- `SOLV_SECRET_KEY` — HMAC signing key for session cookies and AES-GCM encryption key for stored MCP tool credentials and stored provider API keys (changing it signs everyone out and makes stored credentials and keys unreadable)
+- `SOLV_ANTHROPIC_KEY` — Anthropic API key (optional if entered in **Settings → Providers**)
+- `SOLV_OPENAI_KEY` — OpenAI API key (optional if entered in **Settings → Providers**)
+- `SOLV_OPENROUTER_KEY` — OpenRouter API key (optional if entered in **Settings → Providers**)
 
 ### Page actions (widget)
 

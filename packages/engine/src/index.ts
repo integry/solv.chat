@@ -82,16 +82,17 @@ export type {
   ToolCall,
   ToolDefinition,
 } from "./providers/types.js";
-export type {
-  AuthProvider,
-  KeyProvider,
-  LimitAction,
-  LimitDecision,
-  Limits,
-  Principal,
-  Seams,
-  UsageEvent,
-  UsageSink,
+export {
+  type AuthProvider,
+  type KeyProvider,
+  type LimitAction,
+  type LimitDecision,
+  type Limits,
+  type Principal,
+  type Seams,
+  StoredKeyError,
+  type UsageEvent,
+  type UsageSink,
 } from "./seams/types.js";
 export {
   MAX_SECRET_LENGTH,

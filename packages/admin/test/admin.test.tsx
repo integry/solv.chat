@@ -633,6 +633,7 @@ describe("admin app", () => {
       "Behaviour",
       "Widget",
       "Install",
+      "Providers",
     ]);
 
     for (const link of links) {

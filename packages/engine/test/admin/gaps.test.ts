@@ -43,7 +43,7 @@ async function call(
       headers,
       body: body === undefined ? null : JSON.stringify(body),
     }),
-    env,
+    { ...env, INGEST_QUEUE: { async send() {}, async sendBatch() {} } as unknown as Queue },
     ctx,
   );
   await waitOnExecutionContext(ctx);

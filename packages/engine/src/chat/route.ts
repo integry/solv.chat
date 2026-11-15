@@ -12,13 +12,7 @@ import {
 import { assistantByPublicKey, assistantForMessage, originAllowedInOrg } from "../db/public.js";
 import { forPublicScope } from "../db/tenant.js";
 import { ANTHROPIC_MODELS, type ModelInfo, OPENAI_MODELS, type Tier } from "../models.js";
-import {
-  embedderFor,
-  type ProviderEnv,
-  resolveEmbeddingsProvider,
-  resolveLlmProvider,
-  resolveTier,
-} from "../providers/config.js";
+import { embedderFor, type ProviderEnv, resolveProviderSettings } from "../providers/config.js";
 import { ProviderError } from "../providers/error.js";
 import { llmProviderFor } from "../providers/factory.js";
 import { type Embedder, type Retriever, vectorizeRetriever } from "../providers/retrieval.js";
@@ -183,9 +177,9 @@ export async function resolveChatProviders(
   provider: LlmProvider;
   model: ModelInfo | undefined;
 }> {
-  const providerKind = overrides?.providerKind ?? resolveLlmProvider(env.SOLV_LLM_PROVIDER);
-  const tier =
-    providerKind === "openrouter" ? "fast" : (overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER));
+  const resolved = await resolveProviderSettings(env.DB, env, orgId);
+  const providerKind = overrides?.providerKind ?? resolved.llmProvider.value;
+  const tier = providerKind === "openrouter" ? "fast" : (overrides?.tier ?? resolved.llmTier.value);
   const model =
     overrides?.model ??
     (providerKind === "anthropic"
@@ -193,15 +187,22 @@ export async function resolveChatProviders(
       : providerKind === "openai"
         ? OPENAI_MODELS[tier]
         : undefined);
-  const embeddingsProvider = resolveEmbeddingsProvider(env.SOLV_EMBEDDINGS_PROVIDER);
+  const embeddingsProvider = resolved.embeddingsProvider.value;
 
   const embedder =
-    overrides?.embedder ?? (await embedderFor(orgId, embeddingsProvider, seams.keys));
+    overrides?.embedder ??
+    (await embedderFor(orgId, embeddingsProvider, seams.keys, overrides?.fetch));
   const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
   const provider =
     overrides?.provider ??
     (await llmProviderFor(
-      { orgId, provider: providerKind, tier, model: env.SOLV_LLM_MODEL },
+      {
+        orgId,
+        provider: providerKind,
+        tier,
+        model: resolved.llmModel.value ?? undefined,
+        fetchImpl: overrides?.fetch,
+      },
       seams.keys,
     ));
 

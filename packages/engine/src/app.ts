@@ -15,8 +15,7 @@ import {
   checkLlmConfigError,
   embedderFor,
   type ProviderEnv,
-  resolveEmbeddingsProvider,
-  resolveLlmProvider,
+  resolveProviderSettings,
 } from "./providers/config.js";
 import { vectorizeRetriever } from "./providers/retrieval.js";
 import type { Seams } from "./seams/types.js";
@@ -52,6 +51,9 @@ export interface Env extends ProviderEnv {
   DOCS: R2Bucket;
   INGEST_QUEUE: Queue;
   SOLV_SECRET_KEY?: string | undefined;
+  SOLV_ANTHROPIC_KEY?: string | undefined;
+  SOLV_OPENAI_KEY?: string | undefined;
+  SOLV_OPENROUTER_KEY?: string | undefined;
 }
 
 export interface App {
@@ -158,12 +160,18 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           retriever: vectorizeRetriever(env.VECTORS),
           publicBaseUrl: url.origin,
           fetchImpl: options?.fetch,
-          // Used only to seal and open stored MCP credentials.
+          // Used only to seal and open stored MCP credentials and provider keys.
           secretKey: env.SOLV_SECRET_KEY ?? "",
+          keys: seams.keys,
+          envSecretPresence: {
+            anthropic: Boolean(env.SOLV_ANTHROPIC_KEY),
+            openai: Boolean(env.SOLV_OPENAI_KEY),
+            openrouter: Boolean(env.SOLV_OPENROUTER_KEY),
+          },
+          resolveSettings: () => resolveProviderSettings(env.DB, env, principal.orgId),
+          checkConfigError: (resolved) =>
+            checkLlmConfigError(env.DB, env, seams.keys, principal.orgId, resolved),
           resolveRunDeps: () => resolveRunDeps(principal.orgId, tenant),
-          costUnit:
-            resolveLlmProvider(env.SOLV_LLM_PROVIDER) === "openrouter" ? "credits" : undefined,
-          checkConfigError: () => checkLlmConfigError(env, seams.keys, principal.orgId),
         });
       }
       if (
@@ -202,8 +210,13 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           for (const message of messages) message.ack();
           continue;
         }
-        const embeddingsProvider = resolveEmbeddingsProvider(env.SOLV_EMBEDDINGS_PROVIDER);
-        const embedder = await embedderFor(orgId, embeddingsProvider, seams.keys, options?.fetch);
+        const settings = await resolveProviderSettings(env.DB, env, orgId);
+        const embedder = await embedderFor(
+          orgId,
+          settings.embeddingsProvider.value,
+          seams.keys,
+          options?.fetch,
+        );
         await runIngestBatch(
           { messages },
           {
