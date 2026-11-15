@@ -126,6 +126,7 @@ export interface AssistantOverview {
   todayCostMicros: number;
   todayCostUnknown?: boolean;
   dailyCostCapMicros?: number;
+  costUnit?: "usd" | "credits";
   configError?: string | null;
 }
 

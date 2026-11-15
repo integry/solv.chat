@@ -15,6 +15,7 @@ import {
   embedderFor,
   type ProviderEnv,
   resolveEmbeddingsProvider,
+  resolveLlmProvider,
 } from "./providers/config.js";
 import { vectorizeRetriever } from "./providers/retrieval.js";
 import type { Seams } from "./seams/types.js";
@@ -134,6 +135,8 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           retriever: vectorizeRetriever(env.VECTORS),
           publicBaseUrl: url.origin,
           fetchImpl: options?.fetch,
+          costUnit:
+            resolveLlmProvider(env.SOLV_LLM_PROVIDER) === "openrouter" ? "credits" : undefined,
           checkConfigError: () => checkLlmConfigError(env, seams.keys, principal.orgId),
         });
       }

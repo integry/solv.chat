@@ -275,6 +275,25 @@ describe("admin phase 1 screens", () => {
     ).toBeTruthy();
   });
 
+  it("formats cost and daily spend cap in credits when costUnit is credits", async () => {
+    installFakeServer({
+      overview: {
+        messages: 10,
+        answeredShare: 0.9,
+        topQuestions: [],
+        todayCostMicros: 20_000,
+        dailyCostCapMicros: 2_000_000,
+        costUnit: "credits",
+      },
+    });
+    render(<App />);
+
+    expect(await screen.findByText("0.02 credits")).toBeTruthy();
+    expect(
+      screen.getByText("Estimated cost so far today. Daily spend cap: 2.00 credits."),
+    ).toBeTruthy();
+  });
+
   it("opens Gaps, pre-fills Write the right answer, saves, and marks the gap as handled", async () => {
     const server = installFakeServer();
     render(<App />);

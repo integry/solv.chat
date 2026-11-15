@@ -177,9 +177,11 @@ describe("admin overview API", () => {
     expect(resNoModel.status).toBe(200);
     const noModelBody = (await resNoModel.json()) as {
       todayCostUnknown: boolean;
+      costUnit?: string;
       configError: string | null;
     };
     expect(noModelBody.todayCostUnknown).toBe(true);
+    expect(noModelBody.costUnit).toBe("credits");
     expect(noModelBody.configError).toContain("SOLV_LLM_MODEL");
 
     const ctx2 = createExecutionContext();

@@ -18,7 +18,7 @@ export const OPENROUTER_DEFAULT_REFERER = "https://solv.chat";
 export const OPENROUTER_DEFAULT_TITLE = "solv.chat";
 
 // Source: https://openrouter.ai/docs/api-reference/streaming and https://openrouter.ai/docs/use-cases/usage-accounting — checked 2026-11-15
-// OpenRouter includes `usage` (with `cost` in USD when available) in the final
+// OpenRouter includes `usage` (with `cost` in credits when available) in the final
 // streamed chunk automatically; `stream_options` is deprecated and has no effect.
 // Source: https://openrouter.ai/docs/api-reference/errors — checked 2026-11-15
 // Mid-stream errors arrive in an SSE chunk with an `error` object (and typically
@@ -117,9 +117,15 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
             if (typeof completionTokens === "number" && Number.isFinite(completionTokens)) {
               tokensOut = completionTokens;
             }
-            const costUsd = payload.usage.cost;
-            if (typeof costUsd === "number" && Number.isFinite(costUsd) && costUsd >= 0) {
-              costMicros = Math.round(costUsd * 1_000_000);
+            // Source: https://openrouter.ai/docs/use-cases/usage-accounting — checked 2026-11-15
+            // `usage.cost` is reported in OpenRouter credits; stored as micro-credits (10^-6).
+            const costCredits = payload.usage.cost;
+            if (
+              typeof costCredits === "number" &&
+              Number.isFinite(costCredits) &&
+              costCredits >= 0
+            ) {
+              costMicros = Math.round(costCredits * 1_000_000);
             }
           }
 

@@ -4,7 +4,7 @@ An open-source chatbot for your website. It answers visitors from your own
 content, can call tools on MCP servers you configure, and shows you which
 questions it could not answer.
 
-Runs on Cloudflare Workers with your own Anthropic or OpenAI key.
+Runs on Cloudflare Workers with your own Anthropic, OpenAI, or OpenRouter key.
 
 **Status: early development.** The chat engine, widget and admin work; MCP
 tools, answer tests and reports are not built yet. To run your own, follow

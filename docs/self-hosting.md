@@ -1,6 +1,6 @@
 # Self-hosting solv.chat
 
-You need a Cloudflare account, Node 24, an OpenAI key (always needed for embeddings), and an Anthropic key when answers come from Anthropic (the default).
+You need a Cloudflare account, Node 24, and keys for the providers you configure: by default, an Anthropic key for answers and an OpenAI key for embeddings (or a single OpenRouter key when both `SOLV_LLM_PROVIDER` and `SOLV_EMBEDDINGS_PROVIDER` are set to `"openrouter"`).
 
 ## 1. Clone, create Cloudflare resources, and migrate
 
@@ -46,6 +46,8 @@ To answer with any model on OpenRouter instead, set `SOLV_LLM_PROVIDER` to `"ope
   "SOLV_EMBEDDINGS_PROVIDER": "openrouter"
 }
 ```
+
+For OpenRouter, the daily spend cap is counted in OpenRouter credits.
 
 ## 3. Build and deploy
 

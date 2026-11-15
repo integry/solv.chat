@@ -11,6 +11,7 @@ export interface AssistantOverview {
   todayCostMicros: number;
   todayCostUnknown: boolean;
   dailyCostCapMicros: number;
+  costUnit?: "usd" | "credits" | undefined;
   configError: string | null;
 }
 
@@ -27,6 +28,7 @@ export async function overviewFor(
   assistantId: string,
   options?: {
     today?: string | undefined;
+    costUnit?: "usd" | "credits" | undefined;
     checkConfigError?: (() => Promise<string | null>) | undefined;
   },
 ): Promise<AssistantOverview> {
@@ -58,6 +60,7 @@ export async function overviewFor(
     todayCostMicros: todayUsage?.costMicros ?? 0,
     todayCostUnknown: todayUsage?.costUnknown ?? false,
     dailyCostCapMicros,
+    ...(options?.costUnit !== undefined ? { costUnit: options.costUnit } : {}),
     configError,
   };
 }

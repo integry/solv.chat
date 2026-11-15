@@ -35,6 +35,7 @@ export interface AdminRouteDeps {
   retriever: Pick<Retriever, "remove">;
   publicBaseUrl: string;
   fetchImpl?: typeof fetch | undefined;
+  costUnit?: "usd" | "credits" | undefined;
   checkConfigError?: (() => Promise<string | null>) | undefined;
 }
 
@@ -187,7 +188,10 @@ async function assistantRoutes(
     }
     if (action === "overview" && method === "GET") {
       return Response.json(
-        await overviewFor(tenant, assistantId, { checkConfigError: deps.checkConfigError }),
+        await overviewFor(tenant, assistantId, {
+          costUnit: deps.costUnit,
+          checkConfigError: deps.checkConfigError,
+        }),
       );
     }
     if (action === "install" && method === "GET") {
