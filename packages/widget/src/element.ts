@@ -1,4 +1,5 @@
 import { CHAT_PROTOCOL_VERSION, MAX_CHAT_MESSAGE_LENGTH, parseChatEventLine } from "@solvchat/core";
+import { listForRequest, type RunRequest, runAction } from "./actions.js";
 import { readEventLines } from "./sse.js";
 import {
   claimConversation,
@@ -353,6 +354,8 @@ export class SolvChat extends HTMLElement {
     this.#turns = saved.turns.map((turn) => ({
       ...turn,
       ...(turn.citations ? { citations: [...turn.citations] } : {}),
+      ...(turn.actions ? { actions: turn.actions.map((action) => ({ ...action })) } : {}),
+      ...(turn.awaiting ? { awaiting: [...turn.awaiting] } : {}),
     }));
 
     this.#messagesEl.replaceChildren(this.#greetingEl);
@@ -361,19 +364,28 @@ export class SolvChat extends HTMLElement {
       const { bubble, textEl } = this.#appendBubble(turn.role);
       textEl.textContent = turn.text;
       if (turn.role === "assistant") {
+        if (turn.actions) {
+          for (const action of turn.actions) {
+            this.#appendActionNote(bubble, action.name, action.ok);
+          }
+        }
         if (turn.citations) {
           for (const citation of turn.citations) {
             this.#appendCitationLink(bubble, citation.url, citation.title);
           }
         }
-        if (!turn.error && !turn.messageId) {
+        const unfinished =
+          !turn.error &&
+          (!turn.messageId || (turn.awaiting !== undefined && turn.awaiting.length > 0));
+        if (unfinished) {
+          delete turn.awaiting;
           turn.error = "Response interrupted. Please try again.";
           restoredUnfinished = true;
         }
         if (turn.error) {
           this.#renderBubbleError(bubble, turn.error);
         }
-        if (turn.messageId) {
+        if (turn.messageId && !unfinished) {
           this.#appendFeedbackControls(bubble, turn);
         }
       }
@@ -459,6 +471,19 @@ export class SolvChat extends HTMLElement {
     link.target = "_blank";
     container.append(link);
     return link;
+  }
+
+  #appendActionNote(bubble: HTMLDivElement, name: string, ok: boolean): void {
+    let container = bubble.querySelector<HTMLDivElement>(".solv-actions");
+    if (!container) {
+      container = document.createElement("div");
+      container.className = "solv-actions";
+      bubble.append(container);
+    }
+    const note = document.createElement("span");
+    note.className = "solv-action";
+    note.textContent = ok ? `Ran ${name}` : `Could not run ${name}`;
+    container.append(note);
   }
 
   #appendFeedbackControls(bubble: HTMLDivElement, turn: SavedTurn): void {
@@ -608,7 +633,6 @@ export class SolvChat extends HTMLElement {
     const { bubble, textEl } = this.#appendBubble("assistant");
     this.#persist();
 
-    let terminated = false;
     const controller = new AbortController();
     this.#abortController = controller;
     const { signal } = controller;
@@ -628,6 +652,12 @@ export class SolvChat extends HTMLElement {
       if (location.href.startsWith("http://") || location.href.startsWith("https://")) {
         requestBody.pageUrl = location.href;
       }
+      const pageActions = listForRequest();
+      // Omitted when the page registered nothing, so a site that never calls
+      // register sends exactly the phase 1 body.
+      if (pageActions.length > 0) {
+        requestBody.pageActions = pageActions;
+      }
 
       const response = await fetch(`${this.#endpoint()}/v1/chat`, {
         method: "POST",
@@ -636,14 +666,45 @@ export class SolvChat extends HTMLElement {
         signal,
       });
 
-      if (signal.aborted) return;
-
-      if (!response.ok || !response.body) {
-        terminated = true;
-        this.#setTurnError(bubble, assistantTurn, "Something went wrong. Please try again.");
-        return;
+      await this.#consumeStream(response, bubble, textEl, assistantTurn, controller, 0);
+    } catch {
+      if (!signal.aborted && !assistantTurn.error) {
+        delete assistantTurn.awaiting;
+        this.#markTurnInterrupted(bubble, assistantTurn);
       }
+    } finally {
+      if (this.#abortController === controller) {
+        this.#abortController = null;
+        this.#sending = false;
+        this.#sendBtn.disabled = false;
+      }
+      if (!signal.aborted) {
+        this.#persist();
+      }
+    }
+  }
 
+  async #consumeStream(
+    response: Response,
+    bubble: HTMLDivElement,
+    textEl: HTMLDivElement,
+    assistantTurn: SavedTurn,
+    controller: AbortController,
+    depth: number,
+  ): Promise<void> {
+    const { signal } = controller;
+    if (signal.aborted) return;
+
+    if (!response.ok || !response.body) {
+      delete assistantTurn.awaiting;
+      this.#setTurnError(bubble, assistantTurn, "Something went wrong. Please try again.");
+      return;
+    }
+
+    let terminated = false;
+    const pendingActions: RunRequest[] = [];
+
+    try {
       for await (const raw of readEventLines(response)) {
         if (signal.aborted) break;
         const event = parseChatEventLine(raw.name, raw.data);
@@ -663,14 +724,42 @@ export class SolvChat extends HTMLElement {
         } else if (event.type === "citation") {
           this.#appendCitation(bubble, assistantTurn, event.url, event.title);
           this.#persist();
+        } else if (event.type === "action") {
+          // Queued rather than run on arrival: `done` names the full set, and
+          // running them in one pass keeps one follow-up request per pause.
+          pendingActions.push({
+            callId: event.callId,
+            name: event.name,
+            input: event.input,
+            confirm: event.confirm,
+          });
         } else if (event.type === "done") {
           terminated = true;
           this.#conversationId = event.conversationId;
           assistantTurn.messageId = event.messageId;
-          this.#appendFeedbackControls(bubble, assistantTurn);
-          this.#persist();
+          if (event.awaitingActions && event.awaitingActions.length > 0 && depth < 5) {
+            // The answer paused, it did not finish: no feedback controls yet,
+            // and the pending calls are persisted so a reload mid-round-trip
+            // marks the turn interrupted rather than complete.
+            assistantTurn.awaiting = [...event.awaitingActions];
+            this.#persist();
+            await this.#resumeWithActionResults(
+              bubble,
+              textEl,
+              assistantTurn,
+              event,
+              pendingActions,
+              controller,
+              depth + 1,
+            );
+          } else {
+            delete assistantTurn.awaiting;
+            this.#appendFeedbackControls(bubble, assistantTurn);
+            this.#persist();
+          }
         } else if (event.type === "error") {
           terminated = true;
+          delete assistantTurn.awaiting;
           const msg = event.message.trim() || "Something went wrong. Please try again.";
           this.#setTurnError(bubble, assistantTurn, msg);
           this.#persist();
@@ -678,22 +767,78 @@ export class SolvChat extends HTMLElement {
       }
 
       if (!terminated && !signal.aborted) {
+        delete assistantTurn.awaiting;
         this.#markTurnInterrupted(bubble, assistantTurn);
       }
     } catch {
       if (!terminated && !signal.aborted) {
+        delete assistantTurn.awaiting;
         this.#markTurnInterrupted(bubble, assistantTurn);
       }
-    } finally {
-      if (this.#abortController === controller) {
-        this.#abortController = null;
-        this.#sending = false;
-        this.#sendBtn.disabled = false;
-      }
-      if (!signal.aborted) {
+    }
+  }
+
+  /**
+   * Runs the queued actions and sends their results back so the answer can
+   * continue. A second request rather than a held stream: `navigate` replaces
+   * the page, and this must survive that.
+   */
+  async #resumeWithActionResults(
+    bubble: HTMLDivElement,
+    textEl: HTMLDivElement,
+    assistantTurn: SavedTurn,
+    done: { messageId: string; conversationId: string; awaitingActions?: string[] },
+    pendingActions: RunRequest[],
+    controller: AbortController,
+    depth: number,
+  ): Promise<void> {
+    const { signal } = controller;
+    const byId = new Map(pendingActions.map((req) => [req.callId, req]));
+    const toRun = (done.awaitingActions ?? []).map(
+      (callId) => byId.get(callId) ?? { callId, name: "", input: {}, confirm: false },
+    );
+
+    const results = [];
+    for (const request of toRun) {
+      if (signal.aborted) return;
+      const result = await runAction(request);
+      if (signal.aborted) return;
+      results.push(result);
+      if (request.name) {
+        if (!assistantTurn.actions) assistantTurn.actions = [];
+        assistantTurn.actions.push({ name: request.name, ok: result.ok });
+        this.#appendActionNote(bubble, request.name, result.ok);
+        this.#scrollToBottom();
         this.#persist();
       }
     }
+
+    const requestBody: Record<string, unknown> = {
+      protocol: CHAT_PROTOCOL_VERSION,
+      assistant: this.#assistant(),
+      visitorId: visitorId(),
+      conversationId: done.conversationId,
+      // Names the answer to continue: two requests in one conversation can
+      // interleave, so "the latest" is not good enough.
+      resumeMessageId: done.messageId,
+      actionResults: results,
+    };
+    if (location.href.startsWith("http://") || location.href.startsWith("https://")) {
+      requestBody.pageUrl = location.href;
+    }
+    const pageActions = listForRequest();
+    if (pageActions.length > 0) {
+      requestBody.pageActions = pageActions;
+    }
+
+    const response = await fetch(`${this.#endpoint()}/v1/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(requestBody),
+      signal,
+    });
+
+    await this.#consumeStream(response, bubble, textEl, assistantTurn, controller, depth);
   }
 }
 

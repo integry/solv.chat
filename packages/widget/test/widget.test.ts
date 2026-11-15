@@ -1310,4 +1310,309 @@ describe("<solv-chat>", () => {
       { role: "assistant", text: "Answer C", messageId: "msg_c" },
     ]);
   });
+
+  describe("page actions round trip", () => {
+    function getSolv(): {
+      actions: {
+        register: (action: unknown) => void;
+        unregister: (name: string) => void;
+      };
+    } {
+      return (
+        globalThis as unknown as {
+          solv: {
+            actions: {
+              register: (action: unknown) => void;
+              unregister: (name: string) => void;
+            };
+          };
+        }
+      ).solv;
+    }
+
+    afterEach(() => {
+      getSolv().actions.unregister("open_invoice");
+      getSolv().actions.unregister("highlight_section");
+    });
+
+    it("omits pageActions when none are registered and sends replaced registration once", async () => {
+      const chatBodies: Array<Record<string, unknown>> = [];
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_actions")) {
+          return Response.json({ title: "Helper" });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"Ok"}\n\n',
+              'event: done\ndata: {"messageId":"msg_1","conversationId":"conv_1"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = mountWidget("pk_actions");
+      await flushAsync();
+      const root = shadow(el);
+      mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+
+      mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "First";
+      mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+      await flushAsync();
+
+      expect("pageActions" in (chatBodies[0] ?? {})).toBe(false);
+
+      const solv = getSolv();
+      solv.actions.register({
+        name: "open_invoice",
+        description: "Old",
+        input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        confirm: false,
+        run: async () => ({ ok: true }),
+      });
+      solv.actions.register({
+        name: "open_invoice",
+        description: "Open invoice",
+        input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        confirm: false,
+        run: async () => ({ ok: true }),
+      });
+
+      mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Second";
+      mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+      await flushAsync();
+
+      expect(chatBodies[1]?.pageActions).toEqual([
+        {
+          name: "open_invoice",
+          description: "Open invoice",
+          inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+          confirm: false,
+        },
+      ]);
+    });
+
+    it("completes the full action round trip, asserts follow-up body, and continues in the same bubble", async () => {
+      const chatBodies: Array<Record<string, unknown>> = [];
+      const runSpy = vi.fn(async ({ id }: Record<string, unknown>) => ({ opened: id }));
+
+      getSolv().actions.register({
+        name: "open_invoice",
+        description: "Open invoice",
+        input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        confirm: false,
+        run: runSpy,
+      });
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_roundtrip")) {
+          return Response.json({ title: "Helper" });
+        }
+        if (url.endsWith("/v1/chat")) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          chatBodies.push(body);
+          if (chatBodies.length === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Opening "}\n\n',
+                'event: action\ndata: {"callId":"call_1","name":"open_invoice","input":{"id":"inv_42"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_pause","conversationId":"conv_rt","awaitingActions":["call_1"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"your invoice."}\n\n',
+              'event: done\ndata: {"messageId":"msg_final","conversationId":"conv_rt"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = mountWidget("pk_roundtrip");
+      await flushAsync();
+      const root = shadow(el);
+      mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+
+      mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Open invoice 42";
+      mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+      await flushAsync();
+
+      expect(runSpy).toHaveBeenCalledWith({ id: "inv_42" });
+      expect(chatBodies).toHaveLength(2);
+
+      const followUp = chatBodies[1];
+      expect(followUp).toBeDefined();
+      expect(followUp?.protocol).toBe(CHAT_PROTOCOL_VERSION);
+      expect(followUp?.assistant).toBe("pk_roundtrip");
+      expect(typeof followUp?.visitorId).toBe("string");
+      expect(followUp?.conversationId).toBe("conv_rt");
+      expect(followUp?.resumeMessageId).toBe("msg_pause");
+      expect("message" in (followUp ?? {})).toBe(false);
+      expect(followUp?.actionResults).toEqual([
+        { callId: "call_1", ok: true, result: '{"opened":"inv_42"}' },
+      ]);
+
+      const assistantBubbles = root.querySelectorAll(".solv-bubble--assistant");
+      // Greeting + single assistant turn bubble (not split into two bubbles).
+      expect(assistantBubbles).toHaveLength(2);
+      const turnBubble = assistantBubbles[1];
+      expect(turnBubble?.querySelector(".solv-bubble-text")?.textContent).toBe(
+        "Opening your invoice.",
+      );
+      expect(turnBubble?.querySelector(".solv-action")?.textContent).toBe("Ran open_invoice");
+      expect(turnBubble?.querySelector(".solv-feedback")).not.toBeNull();
+    });
+
+    it("refuses unregistered and invalid actions, handles throwing actions, and runs two actions in one done", async () => {
+      const chatBodies: Array<Record<string, unknown>> = [];
+      const invalidSpy = vi.fn(async () => ({ ok: true }));
+
+      getSolv().actions.register({
+        name: "open_invoice",
+        description: "Open invoice",
+        input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        confirm: false,
+        run: invalidSpy,
+      });
+      getSolv().actions.register({
+        name: "highlight_section",
+        description: "Highlight",
+        input: {
+          type: "object",
+          properties: { section: { type: "string" } },
+          required: ["section"],
+        },
+        confirm: false,
+        run: async () => {
+          throw new Error("boom");
+        },
+      });
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_errors")) {
+          return Response.json({ title: "Helper" });
+        }
+        if (url.endsWith("/v1/chat")) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          chatBodies.push(body);
+          if (chatBodies.length === 1) {
+            return new Response(
+              sseStream([
+                'event: action\ndata: {"callId":"c1","name":"unknown_action","input":{},"confirm":false}\n\n',
+                'event: action\ndata: {"callId":"c2","name":"open_invoice","input":{"id":123},"confirm":false}\n\n',
+                'event: action\ndata: {"callId":"c3","name":"highlight_section","input":{"section":"billing"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_p","conversationId":"conv_e","awaitingActions":["c1","c2","c3"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"Continued anyway."}\n\n',
+              'event: done\ndata: {"messageId":"msg_f","conversationId":"conv_e"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = mountWidget("pk_errors");
+      await flushAsync();
+      const root = shadow(el);
+      mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+
+      mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Try actions";
+      mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+      await flushAsync();
+
+      expect(invalidSpy).not.toHaveBeenCalled();
+      expect(chatBodies).toHaveLength(2);
+      expect(chatBodies[1]?.actionResults).toEqual([
+        { callId: "c1", ok: false, error: "That action is not available." },
+        { callId: "c2", ok: false, error: "That action was not valid: id must be a string." },
+        { callId: "c3", ok: false, error: "That action did not finish." },
+      ]);
+      expect(root.textContent).toContain("Continued anyway.");
+    });
+
+    it("marks a paused round trip as interrupted if reloaded before follow-up completes", async () => {
+      let resolveFollowUp!: (res: Response) => void;
+      let chatCalls = 0;
+
+      getSolv().actions.register({
+        name: "open_invoice",
+        description: "Open invoice",
+        input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        confirm: false,
+        run: async ({ id }: Record<string, unknown>) => ({ opened: id }),
+      });
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_reload_rt")) {
+          return Response.json({ title: "Helper" });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatCalls++;
+          if (chatCalls === 1) {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Working on it"}\n\n',
+                'event: action\ndata: {"callId":"call_1","name":"open_invoice","input":{"id":"inv_1"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_pause","conversationId":"conv_r","awaitingActions":["call_1"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Promise<Response>((resolve) => {
+            resolveFollowUp = resolve;
+          });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el1 = mountWidget("pk_reload_rt");
+      await flushAsync();
+      const root1 = shadow(el1);
+      mustQuery<HTMLButtonElement>(root1, ".solv-launcher").click();
+      mustQuery<HTMLTextAreaElement>(root1, "#solv-input").value = "Open invoice 1";
+      mustQuery<HTMLFormElement>(root1, ".solv-form").requestSubmit();
+      await flushAsync();
+
+      // Simulate page reload while follow-up request is in flight.
+      el1.remove();
+      const el2 = mountWidget("pk_reload_rt");
+      await flushAsync();
+      const root2 = shadow(el2);
+
+      const bubbles = root2.querySelectorAll(".solv-bubble--assistant");
+      const restoredBubble = bubbles[1];
+      expect(restoredBubble?.querySelector(".solv-bubble-text")?.textContent).toBe("Working on it");
+      expect(restoredBubble?.querySelector(".solv-action")?.textContent).toBe("Ran open_invoice");
+      expect(restoredBubble?.querySelector(".solv-bubble-error")?.textContent).toBe(
+        "Response interrupted. Please try again.",
+      );
+      expect(restoredBubble?.querySelector(".solv-feedback")).toBeNull();
+
+      // Resolve dangling promise cleanly so test exits cleanly.
+      resolveFollowUp(
+        new Response(sseStream([]), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+      );
+    });
+  });
 });
