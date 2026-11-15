@@ -802,4 +802,57 @@ describe("admin phase 1 screens", () => {
       "ik_rotated_once",
     );
   });
+
+  it("renders action and tool call rows with names and outcomes on Conversation", async () => {
+    installFakeServer({
+      conversationDetails: {
+        cnv_1: {
+          conversation: {
+            id: "cnv_1",
+            assistantId: "ast_1",
+            visitorId: "vis_1",
+            startedAt: 1_700_000_100_000,
+            pageUrl: "https://docs.example.com/pricing",
+          },
+          turns: [
+            {
+              id: "msg_q1",
+              role: "user",
+              content: "Open my invoice please",
+              citations: [],
+              answered: true,
+              createdAt: 1_700_000_100_000,
+              feedback: [],
+              answerDocumentId: null,
+              replyTo: null,
+            },
+            {
+              id: "msg_a1",
+              role: "assistant",
+              content: "I tried to open your invoice.",
+              citations: [],
+              toolCalls: [
+                { callId: "c1", name: "lookup_order", kind: "mcp", ok: true },
+                { callId: "c2", name: "navigate", kind: "action", ok: false },
+              ],
+              answered: true,
+              createdAt: 1_700_000_100_500,
+              feedback: [],
+              answerDocumentId: null,
+              replyTo: "msg_q1",
+            },
+          ],
+        },
+      },
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+
+    const list = await screen.findByRole("list", { name: "What the assistant did" });
+    expect(list.textContent).toContain("Tool: lookup_order");
+    expect(list.textContent).toContain("On the page: navigate — did not work");
+  });
 });

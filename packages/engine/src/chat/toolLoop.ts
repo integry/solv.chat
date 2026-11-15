@@ -32,7 +32,20 @@ const decoder = new TextDecoder();
 export interface ToolRunResult {
   content: string;
   isError: boolean;
+  /** Set by a runner that cannot run the call here. */
+  pause?: boolean;
 }
+
+/**
+ * A runner's answer meaning "this call belongs to the client". The loop stops
+ * and returns the pending calls; the caller emits `action` events and waits
+ * for a follow-up request carrying the results.
+ */
+export const PAUSE_FOR_CLIENT: ToolRunResult = {
+  content: "",
+  isError: false,
+  pause: true,
+};
 
 /** What a tool source provides: the definitions and a way to run one. */
 export interface ToolRunner {
@@ -47,6 +60,8 @@ export interface StoredToolCall {
   name: string;
   kind: "mcp" | "action";
   ok: boolean;
+  /** True while awaiting client execution on a paused action reply. */
+  pending?: boolean;
   ms: number;
   input: Record<string, unknown>;
   resultBytes: number;
@@ -83,6 +98,8 @@ export interface ToolLoopDeps {
 export interface ToolLoopOutcome {
   text: string;
   calls: StoredToolCall[];
+  /** Calls the client must run. Empty when the answer finished. */
+  pending: ToolCall[];
 }
 
 /** Truncates on a UTF-8 boundary and says so, so the model is not misled. */
@@ -142,9 +159,37 @@ async function runWithDeadline(
  * a cap is reached. Provider-independent and tool-source-independent: the only
  * things it knows are the LlmProvider interface and the ToolRunner list.
  */
-export async function* runToolLoop(
+export function runToolLoop(
   deps: ToolLoopDeps,
   request: LlmRequest,
+): AsyncGenerator<ToolLoopEvent, ToolLoopOutcome, undefined> {
+  return runLoopFrom(deps, request, [...request.messages], "");
+}
+
+/**
+ * Continues a paused answer. Same loop, entered with the results the client
+ * produced already appended, so resumption is not a second code path.
+ */
+export function resumeToolLoop(
+  deps: ToolLoopDeps,
+  request: LlmRequest,
+  priorText: string,
+  pendingCalls: readonly ToolCall[],
+  results: readonly LlmToolResult[],
+): AsyncGenerator<ToolLoopEvent, ToolLoopOutcome, undefined> {
+  const messages: LlmMessage[] = [
+    ...request.messages,
+    { role: "assistant", content: priorText, toolCalls: [...pendingCalls] },
+    { role: "tool_results", results: [...results] },
+  ];
+  return runLoopFrom(deps, request, messages, priorText);
+}
+
+async function* runLoopFrom(
+  deps: ToolLoopDeps,
+  request: LlmRequest,
+  initialMessages: LlmMessage[],
+  initialText: string,
 ): AsyncGenerator<ToolLoopEvent, ToolLoopOutcome, undefined> {
   const clock = deps.now ?? Date.now;
   const startedAt = clock();
@@ -165,9 +210,9 @@ export async function* runToolLoop(
   // Strip any caller-supplied `tools` so disabling tools truly omits `tools`
   // from subsequent provider requests and only offered runner definitions apply.
   const { tools: _ignoredTools, ...baseRequest } = request;
-  const messages: LlmMessage[] = [...request.messages];
+  const messages: LlmMessage[] = initialMessages;
   const calls: StoredToolCall[] = [];
-  let text = "";
+  let text = initialText;
   let toolsOffered = definitions.length > 0;
   let budgetNoticeSent = false;
 
@@ -215,7 +260,7 @@ export async function* runToolLoop(
     }
 
     if (asked.length === 0) {
-      return { text, calls };
+      return { text, calls, pending: [] };
     }
 
     // Caps are checked after the model asked, not before: the model is allowed
@@ -231,7 +276,7 @@ export async function* runToolLoop(
     }
 
     if (overIterations || overConversation || overTime) {
-      if (budgetNoticeSent) return { text, calls };
+      if (budgetNoticeSent) return { text, calls, pending: [] };
       budgetNoticeSent = true;
       toolsOffered = false;
       messages.push(
@@ -261,6 +306,7 @@ export async function* runToolLoop(
       timer = setTimeout(() => controller.abort(), remaining);
     }
     const results: LlmToolResult[] = [];
+    const pending: ToolCall[] = [];
 
     try {
       for (const call of asked) {
@@ -293,6 +339,21 @@ export async function* runToolLoop(
             isError: true,
           };
         }
+        if (outcome.pause) {
+          pending.push(call);
+          calls.push({
+            callId: call.callId,
+            name: call.name,
+            kind: runner?.kind ?? "action",
+            ok: false,
+            pending: true,
+            ms: 0,
+            input: call.input,
+            resultBytes: 0,
+            resultPreview: "",
+          });
+          continue;
+        }
         const capped = capResult(outcome.content);
         results.push({ callId: call.callId, content: capped.content, isError: outcome.isError });
         calls.push({
@@ -319,6 +380,10 @@ export async function* runToolLoop(
       if (timer !== undefined) {
         clearTimeout(timer);
       }
+    }
+
+    if (pending.length > 0) {
+      return { text, calls, pending };
     }
 
     messages.push(

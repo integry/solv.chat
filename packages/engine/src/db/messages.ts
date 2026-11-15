@@ -127,6 +127,14 @@ const map = (row: Row): MessageRow => ({
   replyTo: row.reply_to,
 });
 
+function hasPendingCalls(toolCalls: unknown[] | null): boolean {
+  if (!Array.isArray(toolCalls)) return false;
+  return toolCalls.some(
+    (call) =>
+      typeof call === "object" && call !== null && (call as { pending?: unknown }).pending === true,
+  );
+}
+
 /** Tenant-scoped data access for `messages`. */
 export function messagesFor(db: D1Database, orgId: string) {
   return {
@@ -159,6 +167,46 @@ export function messagesFor(db: D1Database, orgId: string) {
         .bind(orgId, id)
         .first<Row>();
       return row ? map(row) : null;
+    },
+
+    /**
+     * The assistant reply a resume is continuing, scoped to one conversation.
+     * Returns null unless it is in this org, in this conversation, and still has
+     * pending calls — so a stale, foreign or already-finished id is indistinguishable
+     * from an unknown one.
+     */
+    async getPendingReply(conversationId: string, id: string): Promise<MessageRow | null> {
+      const row = await prepare(
+        db,
+        `SELECT ${COLUMNS} FROM messages
+          WHERE org_id = ?1 AND id = ?2 AND conversation_id = ?3 AND role = 'assistant'`,
+      )
+        .bind(orgId, id, conversationId)
+        .first<Row>();
+      const mapped = row ? map(row) : null;
+      if (mapped === null || !hasPendingCalls(mapped.toolCalls)) return null;
+      return mapped;
+    },
+
+    /** Replaces the content and calls of a reply once the client's results arrived. */
+    async completeReply(
+      id: string,
+      content: string,
+      toolCalls: unknown[],
+      tokensIn: number,
+      tokensOut: number,
+    ): Promise<boolean> {
+      const res = await prepare(
+        db,
+        `UPDATE messages
+            SET content = ?3, tool_calls = ?4, tokens_in = tokens_in + ?5, tokens_out = tokens_out + ?6
+          WHERE org_id = ?1 AND id = ?2`,
+      )
+        // Token counts accumulate: the pause and the resume are two model calls on
+        // one message, and the owner's cost figure must include both.
+        .bind(orgId, id, content, JSON.stringify(toolCalls), tokensIn, tokensOut)
+        .run();
+      return (res.meta.changes ?? 0) > 0;
     },
 
     async unanswered(assistantId: string, limit = 50): Promise<MessageRow[]> {

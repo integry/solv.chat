@@ -72,6 +72,10 @@ describe("chat/publicConfig", () => {
       fallbackText: "Secret fallback",
       suggestedQuestions: ["How do I start?"],
     };
+    base.actions = {
+      builtins: true,
+      allowedOrigins: ["https://shop.example"],
+    };
 
     const draft = await tenant.versions.createDraft({
       id: "ver_1",
@@ -84,6 +88,10 @@ describe("chat/publicConfig", () => {
     // Update draft only — should not appear on public config yet.
     const updatedDraft = defaultVersionConfig();
     updatedDraft.widget.title = "Draft Only Title";
+    updatedDraft.actions = {
+      builtins: false,
+      allowedOrigins: ["https://draft-only.example"],
+    };
     await tenant.versions.updateDraft("ast_1", updatedDraft);
 
     const app = createTestApp();
@@ -103,6 +111,7 @@ describe("chat/publicConfig", () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(Object.keys(body).sort()).toEqual([
       "accentColor",
+      "actions",
       "greeting",
       "position",
       "suggestedQuestions",
@@ -114,6 +123,10 @@ describe("chat/publicConfig", () => {
       position: "left",
       greeting: "Published greeting",
       suggestedQuestions: ["How do I start?"],
+      actions: {
+        builtins: true,
+        allowedOrigins: ["https://shop.example"],
+      },
     });
 
     // Publish the draft change and verify it becomes visible.
@@ -130,6 +143,10 @@ describe("chat/publicConfig", () => {
 
     const body2 = (await res2.json()) as Record<string, unknown>;
     expect(body2.title).toBe("Draft Only Title");
+    expect(body2.actions).toEqual({
+      builtins: false,
+      allowedOrigins: ["https://draft-only.example"],
+    });
   });
 
   it("rejects missing or unlisted Origin with 403 before checking limits", async () => {
