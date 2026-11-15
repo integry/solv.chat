@@ -246,4 +246,35 @@ describe("passwordAuth", () => {
     );
     expect(await auth.resolveOrg({ kind: "queued_ingest", orgId: "org_elsewhere" })).toBeNull();
   });
+
+  it("uses a derived signing key rather than the raw SOLV_SECRET_KEY", async () => {
+    const auth = passwordAuth(ENV, env.DB);
+    const res = await auth.login(loginRequest(ENV.SOLV_ADMIN_PASSWORD));
+    const pair = cookiePair(res.headers.get("set-cookie"));
+    const value = pair.slice("solv_session=".length);
+    const [payload, mac] = value.split(".") as [string, string];
+
+    const rawKey = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(ENV.SOLV_SECRET_KEY),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const rawMacBytes = new Uint8Array(
+      await crypto.subtle.sign("HMAC", rawKey, new TextEncoder().encode(payload)),
+    );
+    let binary = "";
+    for (const byte of rawMacBytes) binary += String.fromCharCode(byte);
+    const rawMac = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+    expect(mac).not.toBe(rawMac);
+    expect(
+      await auth.authenticate(
+        new Request("https://example.com/api/admin/me", {
+          headers: { cookie: `solv_session=${payload}.${rawMac}` },
+        }),
+      ),
+    ).toBeNull();
+  });
 });

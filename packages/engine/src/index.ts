@@ -54,3 +54,9 @@ export type {
   UsageEvent,
   UsageSink,
 } from "./seams/types.js";
+export {
+  MAX_SECRET_LENGTH,
+  openSecret,
+  SecretBoxError,
+  sealSecret,
+} from "./security/secretBox.js";
