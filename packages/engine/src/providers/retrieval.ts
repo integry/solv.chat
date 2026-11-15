@@ -1,8 +1,13 @@
 import { EMBEDDING_MODEL } from "../models.js";
 import { isRetryableStatus, ProviderError, toProviderError } from "./error.js";
+import { OPENROUTER_DEFAULT_REFERER, OPENROUTER_DEFAULT_TITLE } from "./openrouter.js";
 
 // Source: https://platform.openai.com/docs/api-reference/embeddings/create — checked 2026-11-14
 const OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings";
+
+// Source: https://openrouter.ai/docs/api-reference/embeddings — checked 2026-11-15
+const OPENROUTER_EMBEDDINGS_URL = "https://openrouter.ai/api/v1/embeddings";
+const OPENROUTER_EMBEDDING_MODEL = `openai/${EMBEDDING_MODEL.id}`;
 
 // Source: https://developers.openai.com/api/reference/resources/embeddings/methods/create — checked 2026-11-14
 // OpenAI's embeddings endpoint accepts up to 2,048 inputs per request, and at
@@ -79,6 +84,13 @@ export interface OpenAIEmbedderOptions {
   fetchImpl?: typeof fetch | undefined;
 }
 
+export interface OpenRouterEmbedderOptions {
+  apiKey: string;
+  httpReferer?: string | undefined;
+  title?: string | undefined;
+  fetchImpl?: typeof fetch | undefined;
+}
+
 interface OpenAIEmbeddingResponse {
   data?: Array<{
     index?: number;
@@ -117,34 +129,45 @@ export function embeddingCostMicros(tokens: number): number {
   return Math.ceil((tokens * EMBEDDING_MODEL.costMicrosPerMillion) / 1_000_000);
 }
 
-/** Creates an OpenAI Embeddings API client backed by the given API key. */
-export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
-  const model = options.model ?? EMBEDDING_MODEL.id;
-  const dimensions = options.dimensions ?? EMBEDDING_MODEL.dimensions;
-  const doFetch = options.fetchImpl ?? fetch;
+interface CompatEmbedderConfig {
+  label: string;
+  url: string;
+  apiKey: string;
+  model: string;
+  dimensions: number;
+  sendDimensions: boolean;
+  extraHeaders?: Record<string, string>;
+  fetchImpl?: typeof fetch | undefined;
+}
+
+function openAICompatibleEmbedder(config: CompatEmbedderConfig): Embedder {
+  const { label, url, apiKey, model, dimensions, sendDimensions, extraHeaders } = config;
+  const doFetch = config.fetchImpl ?? fetch;
 
   /** One provider request for `batch`, in input order. */
   async function requestOnce(batch: string[], onBilled: EmbeddingBilled): Promise<number[][]> {
     let response: Response;
     try {
-      response = await doFetch(OPENAI_EMBEDDINGS_URL, {
+      response = await doFetch(url, {
         method: "POST",
         headers: {
-          authorization: `Bearer ${options.apiKey}`,
+          authorization: `Bearer ${apiKey}`,
           "content-type": "application/json",
+          ...extraHeaders,
         },
         body: JSON.stringify({
           model,
           input: batch,
+          ...(sendDimensions ? { dimensions } : {}),
         }),
       });
     } catch (err) {
-      throw toProviderError(err, "openai embeddings request failed");
+      throw toProviderError(err, `${label} embeddings request failed`);
     }
 
     if (!response.ok) {
       throw new ProviderError(
-        `openai embeddings request failed with ${response.status}`,
+        `${label} embeddings request failed with ${response.status}`,
         isRetryableStatus(response.status),
         response.status,
       );
@@ -154,7 +177,7 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
     try {
       payload = (await response.json()) as OpenAIEmbeddingResponse;
     } catch (err) {
-      throw toProviderError(err, "openai embeddings response was not valid JSON");
+      throw toProviderError(err, `${label} embeddings response was not valid JSON`);
     }
 
     // Reported before the payload is validated: a malformed body was
@@ -165,7 +188,7 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
     }
 
     if (!Array.isArray(payload.data) || payload.data.length !== batch.length) {
-      throw new ProviderError("openai embeddings response length mismatch", true);
+      throw new ProviderError(`${label} embeddings response length mismatch`, true);
     }
 
     const ordered: Array<number[] | undefined> = new Array(batch.length);
@@ -176,7 +199,7 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
         item.index >= batch.length ||
         !Array.isArray(item.embedding)
       ) {
-        throw new ProviderError("openai embeddings response item malformed", true);
+        throw new ProviderError(`${label} embeddings response item malformed`, true);
       }
       ordered[item.index] = item.embedding;
     }
@@ -184,7 +207,7 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
     const vectors: number[][] = [];
     for (const vector of ordered) {
       if (vector === undefined) {
-        throw new ProviderError("openai embeddings response missing index", true);
+        throw new ProviderError(`${label} embeddings response missing index`, true);
       }
       vectors.push(vector);
     }
@@ -221,6 +244,40 @@ export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
       return { vectors: out };
     },
   };
+}
+
+/** Creates an OpenAI Embeddings API client backed by the given API key. */
+export function openAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
+  return openAICompatibleEmbedder({
+    label: "openai",
+    url: OPENAI_EMBEDDINGS_URL,
+    apiKey: options.apiKey,
+    model: options.model ?? EMBEDDING_MODEL.id,
+    dimensions: options.dimensions ?? EMBEDDING_MODEL.dimensions,
+    sendDimensions: false,
+    fetchImpl: options.fetchImpl,
+  });
+}
+
+/**
+ * Creates an OpenRouter Embeddings API client fixed to `openai/text-embedding-3-small`
+ * at 1536 dimensions (the Vectorize index size).
+ * Source: https://openrouter.ai/docs/api-reference/embeddings — checked 2026-11-15
+ */
+export function openRouterEmbedder(options: OpenRouterEmbedderOptions): Embedder {
+  return openAICompatibleEmbedder({
+    label: "openrouter",
+    url: OPENROUTER_EMBEDDINGS_URL,
+    apiKey: options.apiKey,
+    model: OPENROUTER_EMBEDDING_MODEL,
+    dimensions: EMBEDDING_MODEL.dimensions,
+    sendDimensions: true,
+    extraHeaders: {
+      "http-referer": options.httpReferer ?? OPENROUTER_DEFAULT_REFERER,
+      "x-title": options.title ?? OPENROUTER_DEFAULT_TITLE,
+    },
+    fetchImpl: options.fetchImpl,
+  });
 }
 
 /** Metadata properties that `vectorizeRetriever` upserts and filters every query on. */

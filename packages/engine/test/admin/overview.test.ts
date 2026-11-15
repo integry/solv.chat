@@ -64,6 +64,9 @@ describe("admin overview API", () => {
       answeredShare: 0,
       topQuestions: [],
       todayCostMicros: 0,
+      todayCostUnknown: false,
+      dailyCostCapMicros: 2_000_000,
+      configError: null,
     });
   });
 
@@ -137,5 +140,57 @@ describe("admin overview API", () => {
     // Cross-org assistant is 404.
     const crossRes = await call(app, `/api/admin/assistants/${astB}/overview`);
     expect(crossRes.status).toBe(404);
+  });
+
+  it("reports todayCostUnknown and OpenRouter configuration errors", async () => {
+    const astA = await seedAssistant(ORG_A);
+    const today = utcDay(Date.now());
+    await env.DB.prepare(
+      "INSERT INTO usage_daily (org_id, assistant_id, day, messages, tokens_in, tokens_out, cost_micros, cost_unknown) VALUES (?1, ?2, ?3, 1, 10, 5, 0, 1)",
+    )
+      .bind(ORG_A, astA, today)
+      .run();
+
+    const app = createTestApp({
+      auth: {
+        async authenticate() {
+          return { orgId: ORG_A, userId: "owner", role: "owner" };
+        },
+      },
+      keys: {
+        async modelKey() {
+          throw new Error("Missing required secret: SOLV_OPENROUTER_KEY");
+        },
+        async embeddingKey() {
+          return "test-embedding-key";
+        },
+      },
+    });
+
+    const ctx1 = createExecutionContext();
+    const resNoModel = await app.fetch(
+      new Request(`https://example.com/api/admin/assistants/${astA}/overview`),
+      { ...env, SOLV_LLM_PROVIDER: "openrouter" },
+      ctx1,
+    );
+    await waitOnExecutionContext(ctx1);
+    expect(resNoModel.status).toBe(200);
+    const noModelBody = (await resNoModel.json()) as {
+      todayCostUnknown: boolean;
+      configError: string | null;
+    };
+    expect(noModelBody.todayCostUnknown).toBe(true);
+    expect(noModelBody.configError).toContain("SOLV_LLM_MODEL");
+
+    const ctx2 = createExecutionContext();
+    const resNoKey = await app.fetch(
+      new Request(`https://example.com/api/admin/assistants/${astA}/overview`),
+      { ...env, SOLV_LLM_PROVIDER: "openrouter", SOLV_LLM_MODEL: "vendor/model" },
+      ctx2,
+    );
+    await waitOnExecutionContext(ctx2);
+    expect(resNoKey.status).toBe(200);
+    const noKeyBody = (await resNoKey.json()) as { configError: string | null };
+    expect(noKeyBody.configError).toContain("SOLV_OPENROUTER_KEY");
   });
 });

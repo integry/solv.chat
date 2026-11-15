@@ -35,6 +35,7 @@ export interface AdminRouteDeps {
   retriever: Pick<Retriever, "remove">;
   publicBaseUrl: string;
   fetchImpl?: typeof fetch | undefined;
+  checkConfigError?: (() => Promise<string | null>) | undefined;
 }
 
 function readEntryFields(body: unknown): { question: string; answer: string } {
@@ -185,7 +186,9 @@ async function assistantRoutes(
       return Response.json(result, { status: 201 });
     }
     if (action === "overview" && method === "GET") {
-      return Response.json(await overviewFor(tenant, assistantId));
+      return Response.json(
+        await overviewFor(tenant, assistantId, { checkConfigError: deps.checkConfigError }),
+      );
     }
     if (action === "install" && method === "GET") {
       return Response.json(await getInstallInfo(tenant, assistantId, deps.publicBaseUrl));

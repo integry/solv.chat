@@ -10,7 +10,13 @@ import {
 import { forPrincipal } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
 import { ingestRoutes } from "./ingest/router.js";
-import { openAIEmbedder, vectorizeRetriever } from "./providers/retrieval.js";
+import {
+  checkLlmConfigError,
+  embedderFor,
+  type ProviderEnv,
+  resolveEmbeddingsProvider,
+} from "./providers/config.js";
+import { vectorizeRetriever } from "./providers/retrieval.js";
 import type { Seams } from "./seams/types.js";
 import { WIDGET_BUNDLE } from "./widgetBundle.js";
 
@@ -38,13 +44,11 @@ function widgetAsset(): Response {
   });
 }
 
-export interface Env {
+export interface Env extends ProviderEnv {
   DB: D1Database;
   VECTORS: VectorizeIndex;
   DOCS: R2Bucket;
   INGEST_QUEUE: Queue;
-  SOLV_LLM_PROVIDER?: string | undefined;
-  SOLV_LLM_TIER?: string | undefined;
 }
 
 export interface App {
@@ -130,6 +134,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           retriever: vectorizeRetriever(env.VECTORS),
           publicBaseUrl: url.origin,
           fetchImpl: options?.fetch,
+          checkConfigError: () => checkLlmConfigError(env, seams.keys, principal.orgId),
         });
       }
       if (
@@ -168,13 +173,14 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           for (const message of messages) message.ack();
           continue;
         }
-        const apiKey = await seams.keys.embeddingKey(orgId);
+        const embeddingsProvider = resolveEmbeddingsProvider(env.SOLV_EMBEDDINGS_PROVIDER);
+        const embedder = await embedderFor(orgId, embeddingsProvider, seams.keys, options?.fetch);
         await runIngestBatch(
           { messages },
           {
             db: env.DB,
             docs: env.DOCS,
-            embedder: openAIEmbedder({ apiKey }),
+            embedder,
             retriever,
             usage: seams.usage,
             resolveOrg,

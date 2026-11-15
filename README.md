@@ -32,8 +32,9 @@ Required Worker secrets (set with `wrangler secret put` or `.dev.vars` locally):
 
 - `SOLV_ADMIN_PASSWORD` — admin sign-in password
 - `SOLV_SECRET_KEY` — HMAC signing key for session cookies (will also encrypt stored MCP tool credentials in phase 2, planned)
-- `SOLV_ANTHROPIC_KEY` — Anthropic API key
-- `SOLV_OPENAI_KEY` — OpenAI API key (models and embeddings)
+- `SOLV_ANTHROPIC_KEY` — Anthropic API key (when `SOLV_LLM_PROVIDER` is `"anthropic"`)
+- `SOLV_OPENAI_KEY` — OpenAI API key (models and default embeddings)
+- `SOLV_OPENROUTER_KEY` — OpenRouter API key (when `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`)
 
 ## License
 

@@ -124,6 +124,9 @@ export interface AssistantOverview {
   answeredShare: number;
   topQuestions: TopQuestion[];
   todayCostMicros: number;
+  todayCostUnknown?: boolean;
+  dailyCostCapMicros?: number;
+  configError?: string | null;
 }
 
 export interface InstallInfo {

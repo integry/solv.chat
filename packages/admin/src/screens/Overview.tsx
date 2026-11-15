@@ -39,6 +39,11 @@ export function Overview({ assistantId }: OverviewProps) {
         </p>
       ) : overviewRes.value ? (
         <div className="stack">
+          {overviewRes.value.configError && (
+            <div className="warning-banner" role="alert">
+              {overviewRes.value.configError}
+            </div>
+          )}
           <div className="overview-grid">
             <section className="source-card stack" aria-label="Messages">
               <div className="stat-label">Messages</div>
@@ -57,7 +62,19 @@ export function Overview({ assistantId }: OverviewProps) {
             <section className="source-card stack" aria-label="Today's cost">
               <div className="stat-label">Today&apos;s cost</div>
               <div className="stat-value">{formatUsd(overviewRes.value.todayCostMicros)}</div>
-              <p className="muted">Estimated cost so far today.</p>
+              <p className="muted">
+                {overviewRes.value.dailyCostCapMicros !== undefined
+                  ? overviewRes.value.dailyCostCapMicros > 0
+                    ? `Estimated cost so far today. Daily spend cap: ${formatUsd(overviewRes.value.dailyCostCapMicros)}.`
+                    : "Estimated cost so far today. No daily spend cap."
+                  : "Estimated cost so far today."}
+              </p>
+              {overviewRes.value.todayCostUnknown && (
+                <p className="error-text" role="alert">
+                  Cost is not being reported for this model, so the daily spend cap cannot protect
+                  this instance.
+                </p>
+              )}
             </section>
           </div>
 

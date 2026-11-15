@@ -146,8 +146,9 @@ numbers, install snippet.
 
 ## Providers
 
-`LlmProvider` has three implementations: Anthropic, OpenAI and OpenRouter. `Embedder` has one:
-OpenAI embeddings. `Retriever` has one: Vectorize; the interface exists so
+`LlmProvider` has three implementations: Anthropic, OpenAI and OpenRouter. `Embedder` has two:
+OpenAI embeddings (default) and OpenRouter embeddings (`SOLV_EMBEDDINGS_PROVIDER=openrouter`,
+fixed to `openai/text-embedding-3-small` at 1536 dimensions). `Retriever` has one: Vectorize; the interface exists so
 Cloudflare AI Search can be added as a second backend.
 
 Model IDs, prices and limits live in one file, `packages/engine/src/models.ts`.
