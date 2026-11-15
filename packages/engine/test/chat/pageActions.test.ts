@@ -7,6 +7,7 @@ import {
   parseChatEventLine,
 } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
+import { getConversation } from "../../src/admin/conversations.js";
 import { createApp } from "../../src/app.js";
 import { RESUME_CLAIM_TTL_MS } from "../../src/chat/answer.js";
 import { SAFETY_FRAME } from "../../src/chat/prompt.js";
@@ -868,5 +869,133 @@ describe("chat/pageActions", () => {
     });
     expect(final.find((e) => e.type === "done")).toBeDefined();
     expect((await tenant.messages.get(done1.messageId))?.content).toBe("Step A. Step B. Finished.");
+  });
+
+  it("F4: persists and emits merged pre-pause and resumed citations when indexed content changes", async () => {
+    await publishConfig(true);
+    const callA: ToolCall = { callId: "call_cit_a", name: "navigate", input: { path: "/billing" } };
+    const callB: ToolCall = {
+      callId: "call_cit_b",
+      name: "highlight",
+      input: { selector: "#upgrade" },
+    };
+
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder,
+        retriever,
+        provider: scriptedProvider([
+          { text: "Starting from billing. ", calls: [callA] },
+          { text: "Checking plans. ", calls: [callB] },
+          { text: "Updated with FAQ.", calls: [] },
+        ]),
+        model: ANTHROPIC_MODELS.fast,
+      },
+    });
+
+    // Initial turn retrieves source A (Billing) and pauses.
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION, HIGHLIGHT_ACTION],
+    });
+    expect(first.filter((e) => e.type === "citation")).toEqual([]);
+    const done1 = first.find((e) => e.type === "done");
+    if (done1?.type !== "done") throw new Error("expected done");
+    expect((await tenant.messages.get(done1.messageId))?.citations).toEqual([
+      { url: "https://site.example/billing", title: "Billing" },
+    ]);
+
+    // While paused, indexed content changes from source A to source B (Plans).
+    const [vec] = (await embedder.embed(["How do I change my plan?"], async () => {})).vectors;
+    if (!vec) throw new Error("Expected embedding vector");
+    await tenant.documents.upsert({
+      id: "doc_2",
+      sourceId: "src_1",
+      externalId: "plans",
+      url: "https://site.example/plans",
+      title: "Plans",
+      contentHash: "hash_2",
+      updatedAt: 2000,
+    });
+    await tenant.documents.replaceChunks("doc_2", [
+      {
+        id: "chk_2",
+        ordinal: 0,
+        text: "Upgrade or downgrade on the plans page.",
+        headingPath: "Plans",
+      },
+    ]);
+    await retriever.remove(["chk_1"]);
+    await retriever.upsert([
+      { chunkId: "chk_2", vector: vec, orgId: TEST_ORG_ID, assistantId: "ast_1" },
+    ]);
+
+    // First resume retrieves B and pauses again; persisted citations retain A and add B.
+    const second = await postChat(app, {
+      conversationId: done1.conversationId,
+      resumeMessageId: done1.messageId,
+      pageActions: [NAVIGATE_ACTION, HIGHLIGHT_ACTION],
+      actionResults: [{ callId: callA.callId, ok: true, result: '{"ok":true}' }],
+    });
+    expect(second.filter((e) => e.type === "citation")).toEqual([]);
+    const done2 = second.find((e) => e.type === "done");
+    if (done2?.type !== "done") throw new Error("expected done");
+    expect(done2.awaitingActions).toEqual([callB.callId]);
+    expect((await tenant.messages.get(done1.messageId))?.citations).toEqual([
+      { url: "https://site.example/billing", title: "Billing" },
+      { url: "https://site.example/plans", title: "Plans" },
+    ]);
+
+    // Before final resume, retrieval includes both A (duplicate) and C (FAQ).
+    await tenant.documents.upsert({
+      id: "doc_3",
+      sourceId: "src_1",
+      externalId: "faq",
+      url: "https://site.example/faq",
+      title: "FAQ",
+      contentHash: "hash_3",
+      updatedAt: 3000,
+    });
+    await tenant.documents.replaceChunks("doc_3", [
+      {
+        id: "chk_3",
+        ordinal: 0,
+        text: "Plan changes take effect immediately.",
+        headingPath: "FAQ",
+      },
+    ]);
+    await retriever.remove(["chk_2"]);
+    await retriever.upsert([
+      { chunkId: "chk_1", vector: vec, orgId: TEST_ORG_ID, assistantId: "ast_1" },
+      { chunkId: "chk_3", vector: vec, orgId: TEST_ORG_ID, assistantId: "ast_1" },
+    ]);
+
+    const third = await postChat(app, {
+      conversationId: done1.conversationId,
+      resumeMessageId: done1.messageId,
+      actionResults: [{ callId: callB.callId, ok: true, result: '{"ok":true}' }],
+    });
+    const done3 = third.find((e) => e.type === "done");
+    if (done3?.type !== "done") throw new Error("expected done");
+    expect(done3.awaitingActions).toBeUndefined();
+
+    const expectedCitations = [
+      { url: "https://site.example/billing", title: "Billing" },
+      { url: "https://site.example/plans", title: "Plans" },
+      { url: "https://site.example/faq", title: "FAQ" },
+    ];
+
+    // Visitor SSE citation events, persisted message row, and admin Conversation view all match.
+    const emittedCitations = third
+      .filter((e): e is Extract<ChatEvent, { type: "citation" }> => e.type === "citation")
+      .map(({ url, title }) => ({ url, title }));
+    expect(emittedCitations).toEqual(expectedCitations);
+
+    const stored = await tenant.messages.get(done1.messageId);
+    expect(stored?.citations).toEqual(expectedCitations);
+
+    const conversation = await getConversation(tenant, done1.conversationId);
+    const assistantTurn = conversation.turns.find((t) => t.id === done1.messageId);
+    expect(assistantTurn?.citations).toEqual(expectedCitations);
   });
 });

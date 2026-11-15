@@ -275,6 +275,7 @@ export function messagesFor(db: D1Database, orgId: string) {
       claimToken: string;
       revision: number;
       content: string;
+      citations: Citation[];
       toolCalls: unknown[];
       resumeContext: unknown | null;
       tokensIn: number;
@@ -284,17 +285,18 @@ export function messagesFor(db: D1Database, orgId: string) {
         db,
         `UPDATE messages
             SET content = ?3,
-                tool_calls = ?4,
-                resume_context = ?5,
-                tokens_in = tokens_in + ?6,
-                tokens_out = tokens_out + ?7,
+                citations = ?4,
+                tool_calls = ?5,
+                resume_context = ?6,
+                tokens_in = tokens_in + ?7,
+                tokens_out = tokens_out + ?8,
                 resume_claim = NULL,
                 resume_claimed_at = NULL,
                 resume_revision = resume_revision + 1
           WHERE org_id = ?1
             AND id = ?2
-            AND resume_claim = ?8
-            AND resume_revision = ?9`,
+            AND resume_claim = ?9
+            AND resume_revision = ?10`,
       )
         // Token counts accumulate: the pause and the resume are two model calls on
         // one message, and the owner's cost figure must include both.
@@ -302,6 +304,7 @@ export function messagesFor(db: D1Database, orgId: string) {
           orgId,
           params.id,
           params.content,
+          JSON.stringify(params.citations),
           JSON.stringify(params.toolCalls),
           params.resumeContext == null ? null : JSON.stringify(params.resumeContext),
           params.tokensIn,

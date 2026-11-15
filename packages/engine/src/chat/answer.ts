@@ -5,6 +5,7 @@ import {
   newId,
   type PageAction,
 } from "@solvchat/core";
+import type { Citation } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
 import { type ResolvedChunk, resolveChunks } from "../ingest/resolve.js";
 import type { ModelInfo } from "../models.js";
@@ -87,6 +88,27 @@ function citableByUrl(chunks: readonly ResolvedChunk[]): ResolvedChunk[] {
     if (seen.has(chunk.url)) continue;
     seen.add(chunk.url);
     out.push(chunk);
+  }
+  return out;
+}
+
+/**
+ * Combines pre-pause citations with newly retrieved citations, deduplicating by
+ * URL so the completed answer retains attribution for text generated before and
+ * after each pause.
+ */
+function mergeCitations(existing: readonly Citation[], added: readonly Citation[]): Citation[] {
+  const seen = new Set<string>();
+  const out: Citation[] = [];
+  for (const citation of existing) {
+    if (seen.has(citation.url)) continue;
+    seen.add(citation.url);
+    out.push({ url: citation.url, title: citation.title });
+  }
+  for (const citation of added) {
+    if (seen.has(citation.url)) continue;
+    seen.add(citation.url);
+    out.push({ url: citation.url, title: citation.title });
   }
   return out;
 }
@@ -659,12 +681,18 @@ export async function* answerWithActionResults(
       throw err;
     }
 
+    const resumedCitations = citableByUrl(chunks).map((c) => ({ url: c.url, title: c.title }));
+    // Retain citations that supported text generated before the pause alongside
+    // newly retrieved sources so the combined answer stays consistently attributed.
+    const citations = mergeCitations(pendingReply.citations, resumedCitations);
+
     const mergedCalls = [...resolvedPriorCalls, ...newCalls];
     const saved = await deps.tenant.messages.completeReply({
       id: pendingReply.id,
       claimToken,
       revision: pendingReply.resumeRevision,
       content: text,
+      citations,
       toolCalls: mergedCalls,
       resumeContext: nextPending.length > 0 ? (nextContinuation ?? null) : null,
       tokensIn,
@@ -695,8 +723,8 @@ export async function* answerWithActionResults(
       return;
     }
 
-    for (const chunk of citableByUrl(chunks)) {
-      yield { type: "citation", url: chunk.url, title: chunk.title };
+    for (const citation of citations) {
+      yield { type: "citation", url: citation.url, title: citation.title };
     }
 
     yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
