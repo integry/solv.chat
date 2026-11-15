@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_TESTS_PER_ASSISTANT } from "@solvchat/core";
+import { MAX_TESTS_PER_RUN } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/index.js";
 
@@ -424,9 +424,9 @@ describe("solv test", () => {
     expect(errors.join("\n")).toContain("tests[0].question");
   });
 
-  it("rejects more than MAX_TESTS_PER_ASSISTANT declared tests before making requests", async () => {
+  it("rejects more than MAX_TESTS_PER_RUN declared tests before making requests", async () => {
     const configPath = join(root, "solv.config.json");
-    const tests = Array.from({ length: MAX_TESTS_PER_ASSISTANT + 1 }, (_, i) => ({
+    const tests = Array.from({ length: MAX_TESTS_PER_RUN + 1 }, (_, i) => ({
       question: `Question ${i + 1}?`,
       expectation: { kind: "declines" },
     }));
@@ -448,6 +448,6 @@ describe("solv test", () => {
 
     expect(code).toBe(1);
     expect(fetched).toBe(false);
-    expect(errors.join("\n")).toContain(String(MAX_TESTS_PER_ASSISTANT));
+    expect(errors.join("\n")).toContain(String(MAX_TESTS_PER_RUN));
   });
 });

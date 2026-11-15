@@ -2,7 +2,6 @@ import { Errors, fail, ok, type Result } from "../result.js";
 import { isPlainObject, parseUrl, readTrimmedString } from "./shared.js";
 
 /** Chosen here; the specification names caps but no numbers. */
-export const MAX_TESTS_PER_ASSISTANT = 50;
 export const MAX_TESTS_PER_RUN = 25;
 export const MAX_TEST_QUESTION_LENGTH = 500;
 export const MAX_TEST_PHRASE_LENGTH = 200;

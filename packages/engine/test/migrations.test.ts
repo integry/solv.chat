@@ -184,4 +184,18 @@ describe("migrations", () => {
       { id: "msg_w", reply_to: "msg_x", question_key: null },
     ]);
   });
+
+  it("uses unique, sequential numeric prefixes for every migration", () => {
+    const names = env.TEST_MIGRATIONS.map((m) => m.name);
+    const prefixes = names.map((name) => {
+      const match = /^(\d{4})_/.exec(name);
+      expect(match, `Migration ${name} must start with a 4-digit prefix`).not.toBeNull();
+      return match?.[1] ?? "";
+    });
+
+    expect(new Set(prefixes).size).toBe(prefixes.length);
+    for (let i = 0; i < prefixes.length; i++) {
+      expect(Number(prefixes[i])).toBe(i + 1);
+    }
+  });
 });

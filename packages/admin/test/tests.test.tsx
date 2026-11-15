@@ -50,11 +50,11 @@ function installFakeServer(options?: {
 
     if (path === `/api/admin/assistants/${assistant.id}/tests` && method === "POST") {
       if (options?.onPostTest) await options.onPostTest();
-      if (tests.length >= 50) {
+      if (tests.length >= 25) {
         return Response.json(
           {
             error: "That is not valid.",
-            fields: ["tests: an assistant can have at most 50 tests"],
+            fields: ["tests: an assistant can have at most 25 tests"],
           },
           { status: 400 },
         );
@@ -406,8 +406,8 @@ describe("Tests screen", () => {
     ).toBeGreaterThanOrEqual(1);
   });
 
-  it("displays the test-limit validation error when creating a 51st test", async () => {
-    const existing: AnswerTest[] = Array.from({ length: 50 }, (_, i) => ({
+  it("displays the test-limit validation error when creating a 26th test", async () => {
+    const existing: AnswerTest[] = Array.from({ length: 25 }, (_, i) => ({
       id: `tst_${i + 1}`,
       orgId: "org_00000000000000000000",
       assistantId: "ast_1",
@@ -431,7 +431,7 @@ describe("Tests screen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save test" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toBe("an assistant can have at most 50 tests");
+    expect(alert.textContent).toBe("an assistant can have at most 25 tests");
     expect(screen.queryByText("One too many?")).toBeNull();
   });
 

@@ -172,7 +172,69 @@ describe("built-in page actions", () => {
       });
 
       expect(result.ok).toBe(false);
+      expect(result.error).toBe("That destination is not allowed.");
       expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("shows plain refusal wording in the widget when navigate targets a disallowed origin", async () => {
+      const chatBodies: Array<Record<string, unknown>> = [];
+      let callCount = 0;
+      globalThis.fetch = vi.fn(async (input, init) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_nav_refused")) {
+          return Response.json({
+            title: "Help",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          callCount += 1;
+          if (callCount === 1) {
+            return new Response(
+              sseStream([
+                'event: action\ndata: {"callId":"call_refuse","name":"navigate","input":{"url":"https://evil.example.com/phish"},"confirm":false}\n\n',
+                'event: done\ndata: {"conversationId":"conv_refuse","messageId":"msg_refuse","awaitingActions":["call_refuse"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"I cannot open that site."}\n\n',
+              'event: done\ndata: {"conversationId":"conv_refuse","messageId":"msg_refuse_2"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_nav_refused");
+      document.body.append(el);
+      await flushAsync();
+
+      const root = el.shadowRoot as ShadowRoot;
+      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Open evil site";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await flushAsync();
+
+      expect(chatBodies[1]?.actionResults).toEqual([
+        {
+          callId: "call_refuse",
+          ok: false,
+          error: "That destination is not allowed.",
+        },
+      ]);
+      const notes = [...root.querySelectorAll(".solv-action-note")].map((n) => n.textContent);
+      expect(notes).toContain("The assistant cannot open that page.");
+      expect(notes).not.toContain("Taking you to another page on this site.");
     });
 
     it("scrolls to a same-page section without reloading", async () => {

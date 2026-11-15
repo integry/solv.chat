@@ -1,6 +1,5 @@
 import {
   isPlainObject,
-  MAX_TESTS_PER_ASSISTANT,
   MAX_TESTS_PER_RUN,
   newId,
   parseTestInput,
@@ -184,10 +183,10 @@ export async function createTest(
       expectation: parsed.value.expectation as unknown as Record<string, unknown>,
       createdAt: Date.now(),
     },
-    MAX_TESTS_PER_ASSISTANT,
+    MAX_TESTS_PER_RUN,
   );
   if (created === null) {
-    throw new BadRequest([`tests: an assistant can have at most ${MAX_TESTS_PER_ASSISTANT} tests`]);
+    throw new BadRequest([`tests: an assistant can have at most ${MAX_TESTS_PER_RUN} tests`]);
   }
   return created;
 }
@@ -243,8 +242,8 @@ export async function replaceTests(
   if (!Array.isArray(body.tests)) {
     throw new BadRequest(["tests: must be an array"]);
   }
-  if (body.tests.length > MAX_TESTS_PER_ASSISTANT) {
-    throw new BadRequest([`tests: an assistant can have at most ${MAX_TESTS_PER_ASSISTANT} tests`]);
+  if (body.tests.length > MAX_TESTS_PER_RUN) {
+    throw new BadRequest([`tests: an assistant can have at most ${MAX_TESTS_PER_RUN} tests`]);
   }
 
   const parsedItems: Array<{ question: string; expectation: Record<string, unknown> }> = [];

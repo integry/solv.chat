@@ -1,5 +1,13 @@
 import { MAX_ACTION_SCHEMA_BYTES } from "@solvchat/core";
-import { lookup, type RegisteredAction, register, setBeforeList, unregister } from "./actions.js";
+import {
+  ActionRefusalError,
+  lookup,
+  NAVIGATION_NOT_ALLOWED_ERROR,
+  type RegisteredAction,
+  register,
+  setBeforeList,
+  unregister,
+} from "./actions.js";
 
 /** Marker attributes. Documented in docs/architecture.md under Page actions. */
 export const TARGET_ATTRIBUTE = "data-solv-target";
@@ -384,7 +392,15 @@ export function installBuiltins(settings: BuiltinSettings): void {
       run: (input) => {
         clearHighlight();
         const target = resolveNavigation(String(input.url ?? ""), allowedOrigins);
-        if (typeof target === "string") throw new Error(target);
+        if (typeof target === "string") {
+          if (
+            target === "that address is not on this site" ||
+            target === "only web addresses can be opened"
+          ) {
+            throw new ActionRefusalError(NAVIGATION_NOT_ALLOWED_ERROR);
+          }
+          throw new Error(target);
+        }
         if (typeof input.section === "string" && input.section !== "") {
           const section = input.section.startsWith("#") ? input.section.slice(1) : input.section;
           if (section !== "") target.hash = section;

@@ -32,7 +32,7 @@ npm run test -w @solvchat/engine
 npm run build -w @solvchat/engine
 ```
 
-Required Worker secrets (set with `wrangler secret put` or `.dev.vars` locally; provider keys can also be entered in the admin under **Settings → Providers** when `SOLV_SECRET_KEY` is set):
+Required Worker secrets (set with `wrangler secret put` or `.dev.vars` locally; provider/model choices and encrypted API keys can also be configured in the admin under **Settings → Providers** when `SOLV_SECRET_KEY` is set, and stored settings/keys take precedence over `vars` and Worker secrets):
 
 - `SOLV_ADMIN_PASSWORD` — admin sign-in password
 - `SOLV_SECRET_KEY` — signs session cookies and encrypts stored MCP tool credentials and stored provider API keys. Changing it signs everyone out **and** makes stored credentials and keys unreadable until you enter them again.
@@ -75,6 +75,9 @@ and `fill` puts values into fields you marked. Mark them in your HTML:
 Anything marked `confirm`, and every `fill`, waits for the visitor to accept.
 Nothing is submitted, bought, sent or deleted without their own click. Password,
 payment and one-time-code fields are never filled or read, even if marked.
+Page actions time out after 5 seconds so an answer is not held indefinitely;
+timing out does not cancel the call, so an action that timed out may still
+complete in the page.
 
 ## License
 

@@ -37,7 +37,14 @@ Run `npx wrangler secret put <name>` inside `packages/engine` for each secret yo
 | `SOLV_OPENAI_KEY`     | Your OpenAI key. Needed for embeddings by default (or enter in **Settings → Providers**).    | platform.openai.com                                                                                               |
 | `SOLV_OPENROUTER_KEY` | Your OpenRouter key, if `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`. | openrouter.ai                                                                                                     |
 
-By default, `packages/engine/wrangler.jsonc` sets `SOLV_LLM_PROVIDER` to `"anthropic"` and `SOLV_LLM_TIER` to `"fast"`. To answer with OpenAI or switch tiers (`"fast"` or `"balanced"`), edit those two values under `vars` in `packages/engine/wrangler.jsonc`. Built-in model IDs, prices and token limits are listed in `packages/engine/src/models.ts`.
+### Provider settings in the admin and OpenRouter
+
+You can configure the answering provider (`anthropic`, `openai`, or `openrouter`), tier or OpenRouter model ID, embeddings provider (`openai` or `openrouter`), and API keys in `/admin` under **Settings → Providers** (and test the effective key from that screen):
+
+- **Precedence**: stored settings beat `vars` in `wrangler.jsonc`, which beat built-in defaults; stored keys beat Worker secrets. Removing a stored value falls back to the environment variable or default.
+- **Encrypted keys**: keys entered in **Settings → Providers** are encrypted with `SOLV_SECRET_KEY`, write-only, and never returned by any API. `SOLV_SECRET_KEY` must be set before storing a key in the admin. If a stored key cannot be decrypted (for example after rotating `SOLV_SECRET_KEY`), answering fails rather than silently falling back to a Worker secret.
+
+By default, `packages/engine/wrangler.jsonc` sets `SOLV_LLM_PROVIDER` to `"anthropic"` and `SOLV_LLM_TIER` to `"fast"`. To answer with OpenAI or switch tiers (`"fast"` or `"balanced"`), edit those two values under `vars` in `packages/engine/wrangler.jsonc` (or choose them in **Settings → Providers**). Built-in model IDs, prices and token limits are listed in `packages/engine/src/models.ts`.
 
 To answer with any model on OpenRouter instead, set `SOLV_LLM_PROVIDER` to `"openrouter"` and `SOLV_LLM_MODEL` to the OpenRouter model slug (`SOLV_LLM_TIER` is ignored). You can also set `SOLV_EMBEDDINGS_PROVIDER` to `"openrouter"` to embed with `openai/text-embedding-3-small` (1536 dimensions) using `SOLV_OPENROUTER_KEY` so no OpenAI key is needed:
 
@@ -49,7 +56,7 @@ To answer with any model on OpenRouter instead, set `SOLV_LLM_PROVIDER` to `"ope
 }
 ```
 
-For OpenRouter, the daily spend cap is counted in OpenRouter credits.
+For OpenRouter, the daily spend cap is counted in OpenRouter credits (if OpenRouter omits cost on a response, cost is stored as unknown and the spend cap cannot protect the instance). Tool calling and page actions depend on whether the chosen OpenRouter model supports tools.
 
 ## 3. Build and deploy
 
@@ -101,9 +108,11 @@ Mark what the assistant may touch in your HTML with two attributes:
 
 **Other sites it may send visitors to** is a different list from **Allowed origins**: the first lists extra origins `navigate` may open in a new tab, while the second lists which sites may embed and chat with the assistant at all. At most 16 page actions are sent per chat request.
 
+A page action times out after 5 seconds so it does not hold the answer indefinitely. Timing out does not cancel the underlying call, so an action that timed out may still complete in the page.
+
 ## 7. Tests (optional)
 
-Open **Tests** to write questions your assistant must keep getting right (up to 50 tests per assistant). Each test is a question plus one expectation: `cites` a URL, `contains` a phrase, `notContains` a phrase, or `declines` (uses the fallback).
+Open **Tests** to write questions your assistant must keep getting right (up to 25 tests per assistant). Each test is a question plus one expectation: `cites` a URL, `contains` a phrase, `notContains` a phrase, or `declines` (uses the fallback).
 
 Clicking **Publish** runs the tests against the draft first (at most 25 tests per run, within 60 seconds). If any fail, you are shown which and why, and can fix the draft or click **Publish anyway**.
 
@@ -133,6 +142,19 @@ Signing out clears the session cookie in that browser only. The engine keeps no 
 
 - An ingest key — rotate it on the **Install** screen in `/admin` and replace it in CI; the old one stops working at once.
 - A provider key — takes effect on the next request; nothing else changes.
+
+## Upgrading an existing instance
+
+From the repository root, apply the new D1 migrations, rebuild, and redeploy:
+
+```sh
+npm ci
+npm run migrations:apply -w @solvchat/engine
+npm run build
+cd packages/engine && npx wrangler deploy
+```
+
+No environment variable needs to change. Upgrading to this version signs existing admin sessions out once because session cookies are now signed with a key derived from `SOLV_SECRET_KEY`; sign in again after deploying.
 
 ## Not here yet
 

@@ -6,6 +6,7 @@ import {
 } from "@solvchat/core";
 import {
   listForRequest,
+  NAVIGATION_NOT_ALLOWED_ERROR,
   type RegisteredAction,
   type RunRequest,
   runAction,
@@ -616,12 +617,13 @@ export class SolvChat extends HTMLElement {
    * only the confirmed ones: "The widget says what it is about to do" is
    * unconditional in the specification.
    */
-  #announceAction(bubble: HTMLDivElement, name: string): void {
+  #announceAction(bubble: HTMLDivElement, name: string): HTMLDivElement {
     const note = document.createElement("div");
     note.className = "solv-action-note";
     note.textContent = ACTION_WORDING[name] ?? `Using ${name} on this page.`;
     bubble.append(note);
     this.#scrollToBottom();
+    return note;
   }
 
   #appendActionNote(bubble: HTMLDivElement, name: string, ok: boolean): void {
@@ -1177,13 +1179,19 @@ export class SolvChat extends HTMLElement {
         setOnExternalNavigate((target) => {
           externalTarget = target;
         });
-        if (request.name) {
-          this.#announceAction(bubble, request.name);
-        }
+        const actionNote = request.name ? this.#announceAction(bubble, request.name) : null;
         const result = await runAction(request, { confirm: this.#confirmAction });
         setBeforeNavigate(null);
         setOnExternalNavigate(null);
         if (signal.aborted) return;
+        if (
+          request.name === "navigate" &&
+          !result.ok &&
+          result.error === NAVIGATION_NOT_ALLOWED_ERROR &&
+          actionNote
+        ) {
+          actionNote.textContent = "The assistant cannot open that page.";
+        }
         if (navigatedTo !== null) {
           const target: URL = navigatedTo;
           if (result.ok) {

@@ -518,7 +518,7 @@ describe("runAction", () => {
       expect(res).toEqual({
         callId: "call_hang",
         ok: false,
-        error: "That action did not finish.",
+        error: "That action timed out and may still finish in the page.",
       });
     } finally {
       vi.useRealTimers();

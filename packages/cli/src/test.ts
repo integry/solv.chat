@@ -1,10 +1,5 @@
 import { readFile } from "node:fs/promises";
-import {
-  isPlainObject,
-  MAX_TESTS_PER_ASSISTANT,
-  parseTestInput,
-  type TestInput,
-} from "@solvchat/core";
+import { isPlainObject, MAX_TESTS_PER_RUN, parseTestInput, type TestInput } from "@solvchat/core";
 import { assertValidHeaderValue, CliError, normalizeEndpoint, requestJson } from "./http.js";
 import type { CliDeps } from "./push.js";
 
@@ -41,8 +36,8 @@ export function parseDeclaredTests(
   if (!Array.isArray(rawTests)) {
     throw new CliError(`${file}: tests must be an array`);
   }
-  if (rawTests.length > MAX_TESTS_PER_ASSISTANT) {
-    const message = `tests: an assistant can have at most ${MAX_TESTS_PER_ASSISTANT} tests`;
+  if (rawTests.length > MAX_TESTS_PER_RUN) {
+    const message = `tests: an assistant can have at most ${MAX_TESTS_PER_RUN} tests`;
     log?.(message);
     throw new CliError(message);
   }
