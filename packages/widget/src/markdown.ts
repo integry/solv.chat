@@ -289,6 +289,14 @@ function parseBlocks(markdown: string): ParsedBlock[] {
       break;
     }
 
+    // Thematic breaks like `* * *` or `- - -` also match the list regex, so
+    // they must be recognised first to stay literal (CommonMark precedence).
+    if (isThematicBreak(line)) {
+      blocks.push({ type: "paragraph", source: line, text: line, literal: true });
+      i++;
+      continue;
+    }
+
     const firstList = matchListLine(line);
     if (firstList && firstList.indent <= 3) {
       const startLine = i;
@@ -302,7 +310,11 @@ function parseBlocks(markdown: string): ParsedBlock[] {
 
       while (i < lines.length) {
         const nextLine = lines[i] ?? "";
-        if (nextLine.trim() === "" || matchFenceOpen(nextLine) !== null) {
+        if (
+          nextLine.trim() === "" ||
+          matchFenceOpen(nextLine) !== null ||
+          isThematicBreak(nextLine)
+        ) {
           break;
         }
         const match = matchListLine(nextLine);
@@ -342,7 +354,7 @@ function parseBlocks(markdown: string): ParsedBlock[] {
       continue;
     }
 
-    if (isAtxHeading(line) || isThematicBreak(line)) {
+    if (isAtxHeading(line)) {
       blocks.push({ type: "paragraph", source: line, text: line, literal: true });
       i++;
       continue;
@@ -603,7 +615,10 @@ interface InlineScanFrame {
   pendingRunEnd: number;
 }
 
-function createInlineCloseFinder(text: string): (from: number, marker: "**" | "*") => number {
+function createInlineCloseFinder(
+  text: string,
+  allowLinks: boolean,
+): (from: number, marker: "**" | "*") => number {
   const len = text.length;
   // Memoize scan outcomes for positions strictly past `from` (-2 = uncomputed).
   let boldMemo: Int32Array | null = null;
@@ -694,6 +709,17 @@ function createInlineCloseFinder(text: string): (from: number, marker: "**" | "*
           const codeClose = text.indexOf("`", i + 1);
           if (codeClose !== -1 && !text.slice(i + 1, codeClose).includes("\n")) {
             frame.i = codeClose + 1;
+            continue;
+          }
+        }
+
+        // Mirror renderInline: a complete `[label](destination)` span is consumed
+        // whole (as a link or as literal text), so delimiters inside the
+        // destination never close surrounding emphasis.
+        if (allowLinks && ch === "[" && (i === 0 || text[i - 1] !== "!")) {
+          const linkBounds = findLinkEnd(text, i);
+          if (linkBounds) {
+            frame.i = linkBounds.closeParen + 1;
             continue;
           }
         }
@@ -801,7 +827,7 @@ function renderInline(parent: Node, text: string, allowLinks = true, depth = 0):
   let findClose: ((from: number, marker: "**" | "*") => number) | undefined;
   const getClose = (from: number, marker: "**" | "*"): number => {
     if (!findClose) {
-      findClose = createInlineCloseFinder(text);
+      findClose = createInlineCloseFinder(text, allowLinks);
     }
     return findClose(from, marker);
   };

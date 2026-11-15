@@ -318,6 +318,93 @@ describe("Markdown rendering", () => {
     expect(container.textContent).toContain("<script>alert(1)</script>");
   });
 
+  it("keeps spaced thematic breaks literal instead of turning them into list items", () => {
+    for (const separator of ["* * *", "- - -", "-  -  -", "  * * *", "***", "---"]) {
+      const standalone = document.createElement("div");
+      renderMarkdown(standalone, `Before\n\n${separator}\n\nAfter`);
+      expect(standalone.querySelector("ul, ol, li, hr")).toBeNull();
+      expect(standalone.querySelector("p.solv-md-literal")?.textContent).toBe(separator);
+      expect(standalone.querySelectorAll("p")).toHaveLength(3);
+      expect(standalone.textContent).toBe(`Before${separator}After`);
+    }
+
+    const afterList = document.createElement("div");
+    renderMarkdown(afterList, "- one\n- two\n* * *\n- three");
+    const lists = afterList.querySelectorAll("ul");
+    expect(lists).toHaveLength(2);
+    expect(Array.from(lists[0]?.querySelectorAll("li") ?? []).map((li) => li.textContent)).toEqual([
+      "one",
+      "two",
+    ]);
+    expect(Array.from(lists[1]?.querySelectorAll("li") ?? []).map((li) => li.textContent)).toEqual([
+      "three",
+    ]);
+    expect(afterList.querySelector("p.solv-md-literal")?.textContent).toBe("* * *");
+    expect(afterList.querySelector("li")?.textContent).not.toContain("*");
+
+    const nestedLooking = document.createElement("div");
+    renderMarkdown(nestedLooking, "1. one\n  - - -\n2. two");
+    expect(nestedLooking.querySelectorAll("ol")).toHaveLength(2);
+    expect(nestedLooking.querySelector("ol ul")).toBeNull();
+    expect(nestedLooking.querySelector("p.solv-md-literal")?.textContent).toBe("  - - -");
+
+    const streamed = document.createElement("div");
+    const input = "- one\n* * *\n- two";
+    for (let len = 1; len <= input.length; len++) {
+      renderMarkdown(streamed, input.slice(0, len));
+    }
+    const single = document.createElement("div");
+    renderMarkdown(single, input);
+    expect(serializeDom(streamed)).toEqual(serializeDom(single));
+  });
+
+  it("keeps link destinations opaque while scanning for emphasis delimiters", () => {
+    const cases: Array<{ input: string; tag: "em" | "strong"; href: string }> = [
+      { input: "*[Docs](https://example.com/a*b)*", tag: "em", href: "https://example.com/a*b" },
+      {
+        input: "**[Docs](https://example.com/a**b)**",
+        tag: "strong",
+        href: "https://example.com/a**b",
+      },
+      {
+        input: "See *the [Docs](https://example.com/x*y*z) page* now",
+        tag: "em",
+        href: "https://example.com/x*y*z",
+      },
+      {
+        input: "**bold [Docs](https://example.com/**/path) end**",
+        tag: "strong",
+        href: "https://example.com/**/path",
+      },
+    ];
+
+    for (const { input, tag, href } of cases) {
+      const single = document.createElement("div");
+      renderMarkdown(single, input);
+      const wrapper = single.querySelector(`p > ${tag}`);
+      expect(wrapper, input).not.toBeNull();
+      const link = wrapper?.querySelector<HTMLAnchorElement>("a.solv-md-link");
+      expect(link, input).not.toBeNull();
+      expect(link?.href, input).toBe(href);
+      expect(link?.textContent, input).toBe("Docs");
+      expect(single.textContent, input).not.toContain("*");
+      expect(single.textContent, input).not.toContain("[");
+      expect(single.textContent, input).not.toContain("https://");
+
+      const incremental = document.createElement("div");
+      for (let len = 1; len <= input.length; len++) {
+        renderMarkdown(incremental, input.slice(0, len));
+      }
+      expect(serializeDom(incremental), input).toEqual(serializeDom(single));
+    }
+
+    // Unsafe destinations stay literal as a whole, still without splitting them.
+    const unsafe = document.createElement("div");
+    renderMarkdown(unsafe, "*[JS](javascript:a*b)*");
+    expect(unsafe.querySelector("a")).toBeNull();
+    expect(unsafe.querySelector("p > em")?.textContent).toBe("[JS](javascript:a*b)");
+  });
+
   it("preserves inline Markdown delimiters inside unsupported headings, block quotes, and tables literally", () => {
     const markdown = [
       "# **Heading**",
