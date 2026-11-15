@@ -318,6 +318,124 @@ describe("Markdown rendering", () => {
     expect(container.textContent).toContain("<script>alert(1)</script>");
   });
 
+  it("preserves inline Markdown delimiters inside unsupported headings, block quotes, and tables literally", () => {
+    const markdown = [
+      "# **Heading**",
+      "## *Subheading* with `code` and [link](https://example.com)",
+      "",
+      "**Setext** heading",
+      "===",
+      "",
+      "*Sub* heading",
+      "---",
+      "",
+      "> *Quoted text*",
+      "> **Bold quote** and `inline` and [site](https://example.com)",
+      "> > - Quoted list item",
+      "lazy *continuation*",
+      "",
+      "| Col A | Col B |",
+      "| --- | --- |",
+      '| `print("a  b")` | **bold** and *em* and [link](https://example.com) |',
+      "",
+      "Header **one** | *two*",
+      ":--- | ---:",
+      "`cell` | *value*",
+    ].join("\n");
+
+    const container = document.createElement("div");
+    renderMarkdown(container, markdown);
+
+    expect(
+      container.querySelector("h1, h2, table, blockquote, strong, em, code, a, ul, li"),
+    ).toBeNull();
+    const literals = container.querySelectorAll("p.solv-md-literal");
+    expect(literals).toHaveLength(7);
+    expect(literals[0]?.textContent).toBe("# **Heading**");
+    expect(literals[1]?.textContent).toBe(
+      "## *Subheading* with `code` and [link](https://example.com)",
+    );
+    expect(literals[2]?.textContent).toBe("**Setext** heading\n===");
+    expect(literals[3]?.textContent).toBe("*Sub* heading\n---");
+    expect(literals[4]?.textContent).toBe(
+      [
+        "> *Quoted text*",
+        "> **Bold quote** and `inline` and [site](https://example.com)",
+        "> > - Quoted list item",
+        "lazy *continuation*",
+      ].join("\n"),
+    );
+    expect(literals[5]?.textContent).toBe(
+      [
+        "| Col A | Col B |",
+        "| --- | --- |",
+        '| `print("a  b")` | **bold** and *em* and [link](https://example.com) |',
+      ].join("\n"),
+    );
+    expect(literals[6]?.textContent).toBe(
+      ["Header **one** | *two*", ":--- | ---:", "`cell` | *value*"].join("\n"),
+    );
+
+    const incremental = document.createElement("div");
+    for (let len = 1; len <= markdown.length; len++) {
+      renderMarkdown(incremental, markdown.slice(0, len));
+    }
+    expect(serializeDom(incremental)).toEqual(serializeDom(container));
+  });
+
+  it("keeps supported blocks around headings, block quotes, and tables formatted while keeping unsupported blocks literal", () => {
+    const container = document.createElement("div");
+    renderMarkdown(
+      container,
+      [
+        "Before **bold**",
+        "# **Heading**",
+        "Middle *italic*",
+        "> *Quoted text*",
+        "- List **item**",
+        "| Col A | Col B |",
+        "| --- | --- |",
+        "| `code` | *em* |",
+        "After **bold** and #hashtag",
+        "",
+        "| **Not a table** | still bold |",
+      ].join("\n"),
+    );
+
+    expect(container.querySelectorAll("strong")).toHaveLength(4);
+    expect(container.querySelectorAll("em")).toHaveLength(1);
+    expect(container.querySelectorAll("code")).toHaveLength(0);
+    expect(container.querySelectorAll("ul > li")).toHaveLength(1);
+
+    const literals = container.querySelectorAll("p.solv-md-literal");
+    expect(literals).toHaveLength(3);
+    expect(literals[0]?.textContent).toBe("# **Heading**");
+    expect(literals[1]?.textContent).toBe("> *Quoted text*");
+    expect(literals[2]?.textContent).toBe("| Col A | Col B |\n| --- | --- |\n| `code` | *em* |");
+  });
+
+  it("keeps empty or non-paragraph block quotes from absorbing following lines as lazy continuations", () => {
+    const container = document.createElement("div");
+    renderMarkdown(
+      container,
+      [
+        ">",
+        "**Not quoted**",
+        "",
+        "> # Quoted heading",
+        "*Also not quoted*",
+        "",
+        "> ```ts",
+        "> const x = 1;",
+        "**After quote fence**",
+      ].join("\n"),
+    );
+
+    expect(container.querySelector("p:nth-child(2) strong")?.textContent).toBe("Not quoted");
+    expect(container.querySelector("p:nth-child(4) em")?.textContent).toBe("Also not quoted");
+    expect(container.querySelector("p:nth-child(6) strong")?.textContent).toBe("After quote fence");
+  });
+
   it("preserves Markdown delimiters inside unsupported image and raw HTML constructs literally", () => {
     const container = document.createElement("div");
     renderMarkdown(
@@ -504,6 +622,79 @@ describe("Markdown rendering", () => {
     );
     expect(restoredLiteral.textContent).toBe(unfinishedFence);
     expect(getComputedStyle(restoredLiteral).whiteSpace).toBe("pre-wrap");
+  });
+
+  it("preserves repeated spaces inside inline code and keeps unsupported blocks literal in assistant bubbles", async () => {
+    const answer = [
+      'Run `print("a  b")` and check:',
+      "",
+      "- Item with `a   b`",
+      "",
+      "# **Heading**",
+      "",
+      "> *Quoted text*",
+      "",
+      "| Col A | Col B |",
+      "| --- | --- |",
+      '| `print("c  d")` | *em* |',
+    ].join("\n");
+
+    const chunks =
+      answer
+        .match(/.{1,10}/gs)
+        ?.map((part) => `event: token\ndata: ${JSON.stringify({ text: part })}\n\n`) ?? [];
+    chunks.push('event: done\ndata: {"messageId":"m_ws","conversationId":"c_ws"}\n\n');
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/chat")) {
+        return new Response(sseStream(chunks), { status: 200 });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const liveEl = mountWidget("pk_md_whitespace");
+    await flushAsync();
+    const liveRoot = shadow(liveEl);
+    mustQuery<HTMLButtonElement>(liveRoot, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(liveRoot, "#solv-input").value = "Format check";
+    mustQuery<HTMLFormElement>(liveRoot, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    const assertBubble = (root: ShadowRoot) => {
+      const bubbleText = mustQuery<HTMLDivElement>(
+        root,
+        ".solv-bubble--assistant .solv-bubble-text",
+      );
+      expect(getComputedStyle(bubbleText).whiteSpace).toBe("normal");
+
+      const inlineCodes = bubbleText.querySelectorAll("code");
+      expect(inlineCodes).toHaveLength(2);
+      expect(inlineCodes[0]?.textContent).toBe('print("a  b")');
+      expect(inlineCodes[1]?.textContent).toBe("a   b");
+      for (const code of inlineCodes) {
+        expect(getComputedStyle(code).whiteSpace).toBe("pre-wrap");
+      }
+
+      expect(bubbleText.querySelector("h1, blockquote, table, strong, em")).toBeNull();
+      const literals = bubbleText.querySelectorAll<HTMLParagraphElement>("p.solv-md-literal");
+      expect(literals).toHaveLength(3);
+      expect(literals[0]?.textContent).toBe("# **Heading**");
+      expect(literals[1]?.textContent).toBe("> *Quoted text*");
+      expect(literals[2]?.textContent).toBe(
+        '| Col A | Col B |\n| --- | --- |\n| `print("c  d")` | *em* |',
+      );
+      for (const literal of literals) {
+        expect(getComputedStyle(literal).whiteSpace).toBe("pre-wrap");
+      }
+    };
+
+    assertBubble(liveRoot);
+
+    liveEl.remove();
+    const restoredEl = mountWidget("pk_md_whitespace");
+    await flushAsync();
+    assertBubble(shadow(restoredEl));
   });
 
   it("keeps user bubbles as plain text and produces identical output for streamed and restored assistant transcripts", async () => {

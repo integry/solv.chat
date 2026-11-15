@@ -44,6 +44,11 @@ interface ListMatch {
 const FENCE_OPEN_RE = /^ {0,3}(`{3,})(.*)$/;
 const UNORDERED_RE = /^([ \t]*)[-*+] (.*)$/;
 const ORDERED_RE = /^([ \t]*)(\d+)\. (.*)$/;
+const ATX_HEADING_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+const SETEXT_UNDERLINE_RE = /^ {0,3}(?:={2,}|-{2,})[ \t]*$/;
+const THEMATIC_BREAK_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+const BLOCK_QUOTE_RE = /^ {0,3}>/;
+const TABLE_DELIMITER_CELL_RE = /^[ \t]*:?-+:?[ \t]*$/;
 
 function measureIndent(prefix: string): number {
   let count = 0;
@@ -51,6 +56,161 @@ function measureIndent(prefix: string): number {
     count += ch === "\t" ? 2 : 1;
   }
   return count;
+}
+
+function leadingIndent(line: string): number {
+  const m = /^([ \t]*)/.exec(line);
+  return measureIndent(m?.[1] ?? "");
+}
+
+function isAtxHeading(line: string): boolean {
+  return ATX_HEADING_RE.test(line);
+}
+
+function isBlockQuoteLine(line: string): boolean {
+  return BLOCK_QUOTE_RE.test(line);
+}
+
+function isThematicBreak(line: string): boolean {
+  return THEMATIC_BREAK_RE.test(line);
+}
+
+function isEscaped(str: string, index: number): boolean {
+  let backslashes = 0;
+  for (let i = index - 1; i >= 0 && str[i] === "\\"; i--) {
+    backslashes++;
+  }
+  return backslashes % 2 === 1;
+}
+
+function splitTableRow(line: string): string[] | null {
+  if (leadingIndent(line) > 3) return null;
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return null;
+  let content = trimmed;
+  if (content.startsWith("|")) {
+    content = content.slice(1);
+  }
+  if (content.endsWith("|") && !isEscaped(content, content.length - 1)) {
+    content = content.slice(0, -1);
+  }
+  const cells: string[] = [];
+  let start = 0;
+  for (let i = 0; i < content.length; i++) {
+    if (content[i] === "\\" && i + 1 < content.length) {
+      i++;
+      continue;
+    }
+    if (content[i] === "|") {
+      cells.push(content.slice(start, i));
+      start = i + 1;
+    }
+  }
+  cells.push(content.slice(start));
+  return cells;
+}
+
+function isTableStart(lines: string[], index: number): boolean {
+  if (index + 1 >= lines.length) return false;
+  const headerLine = lines[index] ?? "";
+  const delimLine = lines[index + 1] ?? "";
+  if (
+    matchFenceOpen(headerLine) !== null ||
+    isAtxHeading(headerLine) ||
+    isBlockQuoteLine(headerLine) ||
+    isThematicBreak(headerLine)
+  ) {
+    return false;
+  }
+  const headerList = matchListLine(headerLine);
+  if (headerList && headerList.indent <= 3) {
+    return false;
+  }
+  const delimList = matchListLine(delimLine);
+  if (delimList && delimList.indent <= 3) {
+    return false;
+  }
+  const headerCells = splitTableRow(headerLine);
+  const delimCells = splitTableRow(delimLine);
+  if (!headerCells || !delimCells || headerCells.length !== delimCells.length) {
+    return false;
+  }
+  return delimCells.every((cell) => TABLE_DELIMITER_CELL_RE.test(cell));
+}
+
+function isBlockBoundaryLine(lines: string[], index: number, checkTable = true): boolean {
+  const line = lines[index] ?? "";
+  if (line.trim() === "") return true;
+  if (matchFenceOpen(line) !== null) return true;
+  const list = matchListLine(line);
+  if (list && list.indent <= 3) return true;
+  if (isAtxHeading(line) || isBlockQuoteLine(line) || isThematicBreak(line)) return true;
+  if (checkTable && isTableStart(lines, index)) return true;
+  return false;
+}
+
+function collectBlockQuote(lines: string[], startIndex: number): number {
+  let i = startIndex;
+  let innerFenceLen: number | null = null;
+
+  const updateInnerFence = (rawLine: string): { canLazyContinue: boolean } => {
+    const inner = rawLine.replace(/^(?: {0,3}>[ \t]?)+/, "");
+    if (innerFenceLen !== null) {
+      const closeMatch = /^ {0,3}(`{3,})\s*$/.exec(inner);
+      if (closeMatch && (closeMatch[1]?.length ?? 0) >= innerFenceLen) {
+        innerFenceLen = null;
+      }
+      return { canLazyContinue: false };
+    }
+    const openLen = matchFenceOpen(inner);
+    if (openLen !== null) {
+      innerFenceLen = openLen;
+      return { canLazyContinue: false };
+    }
+    if (inner.trim() === "" || isAtxHeading(inner) || isThematicBreak(inner)) {
+      return { canLazyContinue: false };
+    }
+    return { canLazyContinue: true };
+  };
+
+  let state = updateInnerFence(lines[i] ?? "");
+  i++;
+
+  while (i < lines.length) {
+    const nextLine = lines[i] ?? "";
+    if (nextLine.trim() === "") {
+      break;
+    }
+    if (isBlockQuoteLine(nextLine)) {
+      state = updateInnerFence(nextLine);
+      i++;
+      continue;
+    }
+    if (!state.canLazyContinue) {
+      break;
+    }
+    if (isBlockBoundaryLine(lines, i) || SETEXT_UNDERLINE_RE.test(nextLine)) {
+      break;
+    }
+    i++;
+  }
+
+  return i;
+}
+
+function collectTable(lines: string[], startIndex: number): number {
+  let i = startIndex + 2;
+  while (i < lines.length) {
+    const nextLine = lines[i] ?? "";
+    if (nextLine.trim() === "" || leadingIndent(nextLine) > 3 || !nextLine.includes("|")) {
+      break;
+    }
+    if (isBlockBoundaryLine(lines, i, false)) {
+      break;
+    }
+    i++;
+  }
+  return i;
 }
 
 function matchListLine(line: string): ListMatch | null {
@@ -182,27 +342,54 @@ function parseBlocks(markdown: string): ParsedBlock[] {
       continue;
     }
 
+    if (isAtxHeading(line) || isThematicBreak(line)) {
+      blocks.push({ type: "paragraph", source: line, text: line, literal: true });
+      i++;
+      continue;
+    }
+
+    if (isBlockQuoteLine(line)) {
+      const end = collectBlockQuote(lines, i);
+      const text = lines.slice(i, end).join("\n");
+      blocks.push({ type: "paragraph", source: text, text, literal: true });
+      i = end;
+      continue;
+    }
+
+    if (isTableStart(lines, i)) {
+      const end = collectTable(lines, i);
+      const text = lines.slice(i, end).join("\n");
+      blocks.push({ type: "paragraph", source: text, text, literal: true });
+      i = end;
+      continue;
+    }
+
     const blockStart = lineStarts[i] ?? 0;
     const paraLines: string[] = [line];
     i++;
+    let literal = false;
     while (i < lines.length) {
       const nextLine = lines[i] ?? "";
-      const nextList = matchListLine(nextLine);
-      const isBlockBoundary =
-        nextLine.trim() === "" ||
-        matchFenceOpen(nextLine) !== null ||
-        (nextList !== null && nextList.indent <= 3);
-      if (isBlockBoundary) {
-        const currentEnd = (lineStarts[i] ?? normalized.length + 1) - 1;
-        if (!isInsideOpaqueHtmlSpan(normalized, blockStart, currentEnd)) {
-          break;
-        }
+      const currentEnd = (lineStarts[i] ?? normalized.length + 1) - 1;
+      const inOpaqueHtml = isInsideOpaqueHtmlSpan(normalized, blockStart, currentEnd);
+      if (!inOpaqueHtml && SETEXT_UNDERLINE_RE.test(nextLine)) {
+        paraLines.push(nextLine);
+        i++;
+        literal = true;
+        break;
+      }
+      if (isBlockBoundaryLine(lines, i) && !inOpaqueHtml) {
+        break;
       }
       paraLines.push(nextLine);
       i++;
     }
     const text = paraLines.join("\n");
-    blocks.push({ type: "paragraph", source: text, text });
+    blocks.push(
+      literal
+        ? { type: "paragraph", source: text, text, literal: true }
+        : { type: "paragraph", source: text, text },
+    );
   }
 
   return blocks;
@@ -702,7 +889,11 @@ function nodesEqual(a: Node, b: Node): boolean {
 
 function reconcileParagraph(prevEl: HTMLElement, nextEl: HTMLElement): void {
   if (prevEl.className !== nextEl.className) {
-    prevEl.className = nextEl.className;
+    if (nextEl.className) {
+      prevEl.className = nextEl.className;
+    } else {
+      prevEl.removeAttribute("class");
+    }
   }
   let k = 0;
   while (k < prevEl.childNodes.length && k < nextEl.childNodes.length) {

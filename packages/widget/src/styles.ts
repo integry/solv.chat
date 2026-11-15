@@ -236,6 +236,7 @@ textarea:focus-visible {
   padding: 1px 4px;
   border-radius: 4px;
   background: var(--solv-border);
+  white-space: pre-wrap;
 }
 
 .solv-md-link {
