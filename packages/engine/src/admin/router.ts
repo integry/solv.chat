@@ -1,6 +1,7 @@
 import { isPlainObject } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
+import { McpError } from "../mcp/types.js";
 import type { Retriever } from "../providers/retrieval.js";
 import { writeTheRightAnswer } from "./answers.js";
 import {
@@ -15,6 +16,16 @@ import { saveEntry } from "./entries.js";
 import { BadRequest, Conflict, NotFound, readJsonBody } from "./errors.js";
 import { listGaps } from "./gaps.js";
 import { getInstallInfo } from "./install.js";
+import {
+  createMcpServer,
+  deleteMcpServer,
+  listMcpServers,
+  listMcpTools,
+  type McpDeps,
+  refreshMcpTools,
+  setMcpToolAllowed,
+  updateMcpServer,
+} from "./mcp.js";
 import { overviewFor } from "./overview.js";
 import { importSitemapUrls, previewSitemap } from "./sitemap.js";
 import {
@@ -35,6 +46,20 @@ export interface AdminRouteDeps {
   retriever: Pick<Retriever, "remove">;
   publicBaseUrl: string;
   fetchImpl?: typeof fetch | undefined;
+  /**
+   * SOLV_SECRET_KEY, passed down from app.ts. Not read through a seam: the
+   * Biome rule in biome.json forbids importing seams/open outside worker.ts,
+   * and createApp(seams) must not depend on the open build.
+   */
+  secretKey?: string | undefined;
+}
+
+function mcpDeps(deps: AdminRouteDeps): McpDeps {
+  return {
+    tenant: deps.tenant,
+    secretKey: deps.secretKey ?? "",
+    fetchImpl: deps.fetchImpl,
+  };
 }
 
 function readEntryFields(body: unknown): { question: string; answer: string } {
@@ -190,6 +215,13 @@ async function assistantRoutes(
     if (action === "install" && method === "GET") {
       return Response.json(await getInstallInfo(tenant, assistantId, deps.publicBaseUrl));
     }
+    if (action === "mcp-servers" && method === "GET") {
+      return Response.json({ servers: await listMcpServers(tenant, assistantId) });
+    }
+    if (action === "mcp-servers" && method === "POST") {
+      const result = await createMcpServer(mcpDeps(deps), assistantId, await readJsonBody(request));
+      return Response.json(result, { status: 201 });
+    }
     throw new NotFound();
   }
 
@@ -286,6 +318,48 @@ async function conversationRoutes(
   return Response.json(await getConversation(deps.tenant, conversationId));
 }
 
+async function mcpServerRoutes(
+  request: Request,
+  segments: string[],
+  deps: AdminRouteDeps,
+): Promise<Response> {
+  const method = request.method;
+  const serverId = segments[1];
+  if (!serverId) throw new NotFound();
+
+  if (segments.length === 2) {
+    if (method === "PATCH") {
+      return Response.json(
+        await updateMcpServer(mcpDeps(deps), serverId, await readJsonBody(request)),
+      );
+    }
+    if (method === "DELETE") {
+      return Response.json(await deleteMcpServer(deps.tenant, serverId));
+    }
+    throw new NotFound();
+  }
+
+  if (segments.length === 3) {
+    const sub = segments[2];
+    if (sub === "refresh" && method === "POST") {
+      const tools = await refreshMcpTools(mcpDeps(deps), serverId);
+      return Response.json({ tools });
+    }
+    if (sub === "tools" && method === "GET") {
+      return Response.json({ tools: await listMcpTools(deps.tenant, serverId) });
+    }
+    throw new NotFound();
+  }
+
+  if (segments.length === 4 && segments[2] === "tools" && segments[3] && method === "PATCH") {
+    return Response.json(
+      await setMcpToolAllowed(deps.tenant, serverId, segments[3], await readJsonBody(request)),
+    );
+  }
+
+  throw new NotFound();
+}
+
 /** Dispatches authenticated `/api/admin/*` requests with a tenant-scoped handle. */
 export async function adminRoutes(
   request: Request,
@@ -297,6 +371,7 @@ export async function adminRoutes(
     if (segments[0] === "assistants") return await assistantRoutes(request, url, segments, deps);
     if (segments[0] === "sources") return await sourceRoutes(request, url, segments, deps);
     if (segments[0] === "conversations") return await conversationRoutes(request, segments, deps);
+    if (segments[0] === "mcp-servers") return await mcpServerRoutes(request, segments, deps);
     return Response.json({ error: "Not found." }, { status: 404 });
   } catch (error) {
     // Mapped here, once: a handler building its own responses would eventually
@@ -310,6 +385,11 @@ export async function adminRoutes(
     }
     if (error instanceof Conflict) {
       return Response.json({ error: error.message || "Please try again." }, { status: 409 });
+    }
+    if (error instanceof McpError) {
+      // The server the owner pointed us at failed, not this request. The
+      // message is already plain and carries no upstream body.
+      return Response.json({ error: error.message }, { status: 502 });
     }
     throw error;
   }

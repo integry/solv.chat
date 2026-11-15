@@ -628,6 +628,7 @@ describe("admin app", () => {
       "Conversations",
       "Gaps",
       "Sources",
+      "Tools",
       "Behaviour",
       "Widget",
       "Install",

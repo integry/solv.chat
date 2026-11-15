@@ -727,6 +727,7 @@ describe("admin phase 1 screens", () => {
       "Conversations",
       "Gaps",
       "Sources",
+      "Tools",
       "Behaviour",
       "Widget",
       "Install",

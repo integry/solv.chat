@@ -141,3 +141,28 @@ export interface InstallInfo {
   allowedOrigins: string[];
   snippet: string;
 }
+
+export type McpAuthKind = "none" | "static_header";
+
+export interface McpServerSummary {
+  id: string;
+  assistantId: string;
+  label: string;
+  url: string;
+  authKind: McpAuthKind;
+  headerName: string | null;
+  hasSecret: boolean;
+  enabled: boolean;
+  createdAt: number;
+  toolCount: number;
+  allowedCount: number;
+}
+
+export interface McpToolView {
+  id: string;
+  serverId: string;
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  allowed: boolean;
+}
