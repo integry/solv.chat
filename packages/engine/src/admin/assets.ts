@@ -16,6 +16,17 @@ export function assetBody(asset: AdminAssetEntry): string | ArrayBuffer {
   return bytes.buffer;
 }
 
+const ADMIN_CSP = [
+  "default-src 'none'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "connect-src 'self'",
+  "img-src 'self'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+
 /**
  * Serves the admin bundle. Any unmatched /admin path returns index.html so
  * client-side routing works on a deep link or a refresh, except unknown asset
@@ -45,6 +56,10 @@ export function adminAsset(url: URL): Response {
       headers: {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "same-origin",
+        "x-frame-options": "DENY",
+        "content-security-policy": ADMIN_CSP,
       },
     });
   }

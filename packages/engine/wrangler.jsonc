@@ -44,6 +44,13 @@
     "consumers": [
       {
         "queue": "solvchat-ingest",
+        // Workers Free allows 50 external subrequests per invocation (1,000 for Cloudflare bindings);
+        // each message makes ~9 binding/network calls (D1, R2, OpenAI embed, Vectorize), so 4 keeps
+        // a full batch within the Free limit.
+        // Sources (checked 2026-11-15):
+        //   https://developers.cloudflare.com/queues/configuration/configure-queues/
+        //   https://developers.cloudflare.com/workers/platform/limits/
+        "max_batch_size": 4,
         "dead_letter_queue": "solvchat-ingest-dlq"
       }
     ]

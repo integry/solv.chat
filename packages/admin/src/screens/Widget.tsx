@@ -379,7 +379,7 @@ export function Widget({ assistantId }: WidgetProps) {
               style={{
                 backgroundColor: /^#[0-9a-fA-F]{6}$/.test(accentColor)
                   ? accentColor
-                  : "#transparent",
+                  : "transparent",
               }}
               aria-hidden="true"
             />
