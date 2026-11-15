@@ -837,4 +837,213 @@ describe("publish gate with answer tests", () => {
       .first<{ published_anyway: number }>();
     expect(runRow?.published_anyway).toBe(0);
   });
+
+  it("rolls back promotion when override recording fails for force: true with runId", async () => {
+    const app = makeApp("Contact sales for pricing.");
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+
+    const firstRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    expect(firstRes.status).toBe(409);
+    const firstBody = (await firstRes.json()) as { run: { id: string } };
+    const reviewedRunId = firstBody.run.id;
+
+    await env.DB.prepare(
+      `CREATE TRIGGER fail_override_update
+       BEFORE UPDATE OF published_anyway ON test_runs
+       BEGIN
+         SELECT RAISE(ABORT, 'injected override failure');
+       END`,
+    ).run();
+
+    try {
+      await expect(
+        call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+          force: true,
+          runId: reviewedRunId,
+        }),
+      ).rejects.toThrow(/injected override failure/);
+
+      const rows = await tableVersions(assistantId);
+      expect(rows).toHaveLength(1);
+      expect(rows.filter((r) => r.state === "published")).toHaveLength(0);
+      expect(rows.filter((r) => r.state === "draft")).toHaveLength(1);
+
+      const runRow = await env.DB.prepare("SELECT published_anyway FROM test_runs WHERE id = ?1")
+        .bind(reviewedRunId)
+        .first<{ published_anyway: number }>();
+      expect(runRow?.published_anyway).toBe(0);
+    } finally {
+      await env.DB.prepare("DROP TRIGGER IF EXISTS fail_override_update").run();
+    }
+
+    // Because promotion rolled back, the draft ID is unchanged and a retry succeeds.
+    const retryRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      force: true,
+      runId: reviewedRunId,
+    });
+    expect(retryRes.status).toBe(200);
+    const rowsAfterRetry = await tableVersions(assistantId);
+    expect(rowsAfterRetry.filter((r) => r.state === "published")).toHaveLength(1);
+    const runRowAfterRetry = await env.DB.prepare(
+      "SELECT published_anyway FROM test_runs WHERE id = ?1",
+    )
+      .bind(reviewedRunId)
+      .first<{ published_anyway: number }>();
+    expect(runRowAfterRetry?.published_anyway).toBe(1);
+  });
+
+  it("rolls back promotion when override recording fails for force: true without runId", async () => {
+    const app = makeApp("Contact sales for pricing.");
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+
+    await env.DB.prepare(
+      `CREATE TRIGGER fail_override_update
+       BEFORE UPDATE OF published_anyway ON test_runs
+       BEGIN
+         SELECT RAISE(ABORT, 'injected override failure');
+       END`,
+    ).run();
+
+    try {
+      await expect(
+        call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, { force: true }),
+      ).rejects.toThrow(/injected override failure/);
+
+      const rows = await tableVersions(assistantId);
+      expect(rows).toHaveLength(1);
+      expect(rows.filter((r) => r.state === "published")).toHaveLength(0);
+      expect(rows.filter((r) => r.state === "draft")).toHaveLength(1);
+
+      const runRow = await env.DB.prepare(
+        "SELECT passed, published_anyway FROM test_runs ORDER BY started_at DESC LIMIT 1",
+      ).first<{ passed: number; published_anyway: number }>();
+      expect(runRow).toEqual({ passed: 0, published_anyway: 0 });
+    } finally {
+      await env.DB.prepare("DROP TRIGGER IF EXISTS fail_override_update").run();
+    }
+  });
+
+  it("leaves published_anyway = 0 when a concurrent publish beats force: true with runId", async () => {
+    const app = makeApp("Contact sales for pricing.");
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+
+    const firstRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    expect(firstRes.status).toBe(409);
+    const firstBody = (await firstRes.json()) as { run: { id: string } };
+    const reviewedRunId = firstBody.run.id;
+
+    const tenant = forPrincipal(env.DB, {
+      orgId: TEST_ORG_ID,
+      userId: "owner",
+      role: "owner",
+    });
+
+    // Freeze time so both the racing normal publish and the force batch get the same published_at.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 5_000);
+    try {
+      const racingTenant = {
+        ...tenant,
+        versions: {
+          ...tenant.versions,
+          async draft(id: string) {
+            const read = await tenant.versions.draft(id);
+            await publishDraft(tenant, id);
+            return read;
+          },
+        },
+      };
+
+      const res = await adminRoutes(
+        new Request(`https://example.com/api/admin/assistants/${assistantId}/publish`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ force: true, runId: reviewedRunId }),
+        }),
+        new URL(`https://example.com/api/admin/assistants/${assistantId}/publish`),
+        {
+          tenant: racingTenant,
+          orgId: TEST_ORG_ID,
+          docs: env.DOCS,
+          queue: env.INGEST_QUEUE,
+          retriever: { async remove() {} },
+          publicBaseUrl: "https://example.com",
+        },
+      );
+      expect(res.status).toBe(409);
+
+      const runRow = await env.DB.prepare("SELECT published_anyway FROM test_runs WHERE id = ?1")
+        .bind(reviewedRunId)
+        .first<{ published_anyway: number }>();
+      expect(runRow?.published_anyway).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves published_anyway = 0 when the draft is edited during force: true without runId", async () => {
+    let signalRunning!: () => void;
+    const testRunning = new Promise<void>((resolve) => {
+      signalRunning = resolve;
+    });
+    let releaseProvider!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+
+    const retriever = memoryRetriever();
+    await seedChunk(retriever);
+
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder: constantEmbedder(),
+        retriever,
+        provider: {
+          name: "anthropic",
+          model: ANTHROPIC_MODELS.fast.id,
+          async *stream() {
+            signalRunning();
+            await gate;
+            yield { kind: "text", text: "Contact sales for pricing." };
+            yield { kind: "usage", tokensIn: 10, tokensOut: 5 };
+          },
+        },
+      },
+    });
+
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+
+    const publishPromise = call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      force: true,
+    });
+    await testRunning;
+
+    const editRes = await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Edited mid-force-run" },
+    });
+    expect(editRes.status).toBe(200);
+
+    releaseProvider();
+    const publishRes = await publishPromise;
+    expect(publishRes.status).toBe(409);
+
+    const rows = await tableVersions(assistantId);
+    expect(rows.filter((r) => r.state === "published")).toHaveLength(0);
+    const runRow = await env.DB.prepare(
+      "SELECT passed, published_anyway FROM test_runs ORDER BY started_at DESC LIMIT 1",
+    ).first<{ passed: number; published_anyway: number }>();
+    expect(runRow).toEqual({ passed: 0, published_anyway: 0 });
+  });
 });

@@ -166,6 +166,7 @@ export function versionsFor(db: D1Database, orgId: string) {
       nextDraftId: string,
       publishedAt: number,
       expectedConfig?: string,
+      extraStatements?: D1PreparedStatement[],
     ): Promise<VersionRow | null> {
       const configClause = expectedConfig === undefined ? "" : " AND config = ?4";
       const promoteConfigClause = expectedConfig === undefined ? "" : " AND config = ?5";
@@ -219,6 +220,7 @@ export function versionsFor(db: D1Database, orgId: string) {
           orgId,
           draftId,
         ),
+        ...(extraStatements ?? []),
       ]);
       if ((results[1]?.meta.changes ?? 0) === 0) return null;
       const promoted = results[3]?.results?.[0] as Row | undefined;

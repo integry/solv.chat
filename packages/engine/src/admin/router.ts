@@ -216,11 +216,14 @@ async function assistantRoutes(
         ) {
           throw new Conflict("The draft changed after those tests ran. Please try again.");
         }
-        const version = await publishDraft(tenant, assistantId, draft);
-        if (!reviewedRun.passed) {
-          // The specification: "the choice is recorded on the run".
-          await tenant.tests.markPublishedAnyway(reviewedRun.id);
-        }
+        // The specification: "the choice is recorded on the run" — committed in
+        // the same batch as promotion so the two cannot diverge.
+        const version = await publishDraft(
+          tenant,
+          assistantId,
+          draft,
+          reviewedRun.passed ? undefined : reviewedRun.id,
+        );
         return Response.json({
           version,
           run: { id: reviewedRun.id, passed: reviewedRun.passed },
@@ -241,11 +244,14 @@ async function assistantRoutes(
           { status: 409 },
         );
       }
-      const version = await publishDraft(tenant, assistantId, run?.draft);
-      if (run !== null && !run.passed && force) {
-        // The specification: "the choice is recorded on the run".
-        await tenant.tests.markPublishedAnyway(run.runId);
-      }
+      // The specification: "the choice is recorded on the run" — committed in
+      // the same batch as promotion so the two cannot diverge.
+      const version = await publishDraft(
+        tenant,
+        assistantId,
+        run?.draft,
+        run !== null && !run.passed && force ? run.runId : undefined,
+      );
       return Response.json({
         version,
         ...(run ? { run: { id: run.runId, passed: run.passed } } : {}),

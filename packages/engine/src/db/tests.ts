@@ -338,10 +338,42 @@ export function testsFor(db: D1Database, orgId: string) {
       };
     },
 
-    async markPublishedAnyway(runId: string): Promise<void> {
-      await prepare(db, "UPDATE test_runs SET published_anyway = 1 WHERE org_id = ?1 AND id = ?2")
-        .bind(orgId, runId)
-        .run();
+    statements: {
+      /**
+       * Marks a failing run as `published_anyway = 1` inside the same batch as
+       * version promotion, conditioned on that exact promotion succeeding.
+       */
+      markPublishedAnyway: (input: {
+        runId: string;
+        assistantId: string;
+        promotedVersionId: string;
+        nextDraftId: string;
+        publishedAt: number;
+      }): D1PreparedStatement =>
+        prepare(
+          db,
+          `UPDATE test_runs
+           SET published_anyway = 1
+           WHERE org_id = ?1
+             AND id = ?2
+             AND version_id = ?3
+             AND passed = 0
+             AND EXISTS (
+               SELECT 1 FROM assistant_versions
+               WHERE org_id = ?1 AND assistant_id = ?4 AND id = ?3 AND state = 'published' AND published_at = ?5
+             )
+             AND EXISTS (
+               SELECT 1 FROM assistant_versions
+               WHERE org_id = ?1 AND assistant_id = ?4 AND id = ?6 AND state = 'draft'
+             )`,
+        ).bind(
+          orgId,
+          input.runId,
+          input.promotedVersionId,
+          input.assistantId,
+          input.publishedAt,
+          input.nextDraftId,
+        ),
     },
   };
 }

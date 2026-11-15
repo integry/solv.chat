@@ -68,22 +68,38 @@ export async function configRevision(draft: VersionRow): Promise<string> {
  *
  * When `expectedDraft` is supplied (from the publish test gate), promotion is
  * atomically bound to that exact draft row and configuration revision.
+ * When `overrideRunId` is supplied, the failing test run's `published_anyway`
+ * flag is recorded in the same batch, conditioned on promotion succeeding.
  */
 export async function publishDraft(
   tenant: Tenant,
   assistantId: string,
   expectedDraft?: VersionRow,
+  overrideRunId?: string,
 ): Promise<VersionRow> {
   const draft = expectedDraft ?? (await tenant.versions.draft(assistantId));
   if (draft === null) throw new NotFound("assistant");
 
   const now = Date.now();
+  const nextDraftId = newId("ver");
+  const extraStatements = overrideRunId
+    ? [
+        tenant.tests.statements.markPublishedAnyway({
+          runId: overrideRunId,
+          assistantId,
+          promotedVersionId: draft.id,
+          nextDraftId,
+          publishedAt: now,
+        }),
+      ]
+    : undefined;
   const published = await tenant.versions.publishDraft(
     assistantId,
     draft.id,
-    newId("ver"),
+    nextDraftId,
     now,
     expectedDraft ? expectedVersionConfig(expectedDraft) : undefined,
+    extraStatements,
   );
   if (published === null) {
     const assistant = await tenant.assistants.get(assistantId);
