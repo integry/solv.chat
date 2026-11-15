@@ -1,4 +1,4 @@
-import { isPlainObject, newId, parseVersionConfig } from "@solvchat/core";
+import { isPlainObject, newId, parseVersionConfig, type VersionConfig } from "@solvchat/core";
 import type { McpAuthKind, McpServerWithStatsRow, McpToolRow } from "../db/mcp.js";
 import type { Tenant } from "../db/tenant.js";
 import { listTools as listRemoteTools } from "../mcp/client.js";
@@ -264,14 +264,70 @@ export async function updateMcpServer(
   return { server: await getServerSummary(deps, serverId) };
 }
 
-/** Deletes an MCP server and its discovered tools. */
+const MAX_DRAFT_UPDATE_ATTEMPTS = 5;
+
+function withoutToolNames(
+  config: VersionConfig,
+  namesToRemove: readonly string[],
+): { next: VersionConfig; changed: boolean } {
+  if (namesToRemove.length === 0) return { next: config, changed: false };
+  const removeSet = new Set(namesToRemove);
+  const filtered = config.allowedTools.filter((name) => !removeSet.has(name));
+  if (filtered.length === config.allowedTools.length) {
+    return { next: config, changed: false };
+  }
+  const parsed = parseVersionConfig({ allowedTools: filtered }, config);
+  if (!parsed.ok) {
+    throw new Conflict("The draft changed while you were saving. Please try again.");
+  }
+  return { next: parsed.value, changed: true };
+}
+
+/** Deletes an MCP server, its discovered tools, and reconciles the draft's `allowedTools`. */
 export async function deleteMcpServer(
   tenant: Tenant,
   serverId: string,
 ): Promise<{ deleted: true }> {
-  const removed = await tenant.mcp.removeServer(serverId);
-  if (!removed) throw new NotFound("mcp server");
-  return { deleted: true };
+  let expectedDraftId: string | null = null;
+
+  for (let attempt = 0; attempt < MAX_DRAFT_UPDATE_ATTEMPTS; attempt++) {
+    const server = await tenant.mcp.getServer(serverId);
+    if (server === null) throw new NotFound("mcp server");
+
+    const draft = await tenant.versions.draft(server.assistantId);
+    if (draft === null) {
+      const removed = await tenant.mcp.removeServer(serverId);
+      if (!removed) throw new NotFound("mcp server");
+      return { deleted: true };
+    }
+    if (expectedDraftId !== null && draft.id !== expectedDraftId) {
+      throw new Conflict("The draft changed because it was published. Please try again.");
+    }
+    expectedDraftId = draft.id;
+
+    const serverAllowedNames = await tenant.mcp.listServerAllowedToolNames(serverId);
+    const otherAllowedNames = await tenant.mcp.listOtherAllowedToolNames(
+      server.assistantId,
+      serverId,
+    );
+    const removedFromDraftNames = serverAllowedNames.filter((n) => !otherAllowedNames.has(n));
+    const { next, changed } = withoutToolNames(draft.config, removedFromDraftNames);
+
+    const removed = await tenant.mcp.removeServerWithDraft({
+      assistantId: server.assistantId,
+      serverId,
+      serverAllowedNames,
+      removedFromDraftNames,
+      expectedDraft: draft,
+      nextConfig: next,
+      hasDraftChange: changed,
+    });
+    if (removed) {
+      return { deleted: true };
+    }
+  }
+
+  throw new Conflict("The draft changed while you were saving. Please try again.");
 }
 
 /** Lists all discovered tools for one MCP server. */
@@ -283,7 +339,8 @@ export async function listMcpTools(tenant: Tenant, serverId: string): Promise<Mc
 
 /**
  * Lists the server's tools and stores them switched off, then drops the ones
- * it no longer offers. `allowed` survives for tools that are still there.
+ * it no longer offers and reconciles the draft's `allowedTools`. `allowed`
+ * survives for tools that are still there.
  */
 export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<McpToolView[]> {
   const server = await deps.tenant.mcp.getServer(serverId);
@@ -314,14 +371,56 @@ export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<
       inputSchema: tool.inputSchema,
     });
   }
-  await deps.tenant.mcp.removeToolsNotIn(
-    serverId,
-    remote.map((tool) => tool.name),
-  );
+
+  const remoteNames = remote.map((tool) => tool.name);
+  let expectedDraftId: string | null = null;
+  let pruned = false;
+
+  for (let attempt = 0; attempt < MAX_DRAFT_UPDATE_ATTEMPTS; attempt++) {
+    const currentServer = await deps.tenant.mcp.getServer(serverId);
+    if (currentServer === null) throw new NotFound("mcp server");
+
+    const draft = await deps.tenant.versions.draft(currentServer.assistantId);
+    if (draft === null) {
+      await deps.tenant.mcp.removeToolsNotIn(serverId, remoteNames);
+      pruned = true;
+      break;
+    }
+    if (expectedDraftId !== null && draft.id !== expectedDraftId) {
+      throw new Conflict("The draft changed because it was published. Please try again.");
+    }
+    expectedDraftId = draft.id;
+
+    const prunedAllowedNames = await deps.tenant.mcp.listPrunedAllowedToolNames(
+      serverId,
+      remoteNames,
+    );
+    const otherAllowedNames = await deps.tenant.mcp.listOtherAllowedToolNames(
+      currentServer.assistantId,
+      serverId,
+    );
+    const removedFromDraftNames = prunedAllowedNames.filter((n) => !otherAllowedNames.has(n));
+    const { next, changed } = withoutToolNames(draft.config, removedFromDraftNames);
+
+    pruned = await deps.tenant.mcp.pruneToolsWithDraft({
+      assistantId: currentServer.assistantId,
+      serverId,
+      remoteNames,
+      prunedAllowedNames,
+      removedFromDraftNames,
+      expectedDraft: draft,
+      nextConfig: next,
+      hasDraftChange: changed,
+    });
+    if (pruned) break;
+  }
+
+  if (!pruned) {
+    throw new Conflict("The draft changed while you were saving. Please try again.");
+  }
+
   return (await deps.tenant.mcp.listTools(serverId)).map(toToolView);
 }
-
-const MAX_DRAFT_UPDATE_ATTEMPTS = 5;
 
 /**
  * Switches one tool on or off, and keeps the draft version's `allowedTools` in
@@ -340,29 +439,52 @@ export async function setMcpToolAllowed(
 
   const server = await tenant.mcp.getServer(serverId);
   if (server === null) throw new NotFound("mcp server");
-  const tools = await tenant.mcp.listTools(serverId);
-  const tool = tools.find((candidate) => candidate.id === toolId);
-  if (!tool) throw new NotFound("mcp tool");
 
-  await tenant.mcp.setToolAllowed(toolId, allowed);
-
+  let expectedDraftId: string | null = null;
   for (let attempt = 0; attempt < MAX_DRAFT_UPDATE_ATTEMPTS; attempt++) {
+    const tools = await tenant.mcp.listTools(serverId);
+    const tool = tools.find((candidate) => candidate.id === toolId);
+    if (!tool) throw new NotFound("mcp tool");
+
     const draft = await tenant.versions.draft(server.assistantId);
-    if (draft === null) break;
+    if (draft === null) {
+      await tenant.mcp.setToolAllowed(toolId, allowed);
+      return { tool: toToolView({ ...tool, allowed }) };
+    }
+    if (expectedDraftId !== null && draft.id !== expectedDraftId) {
+      throw new Conflict("The draft changed because it was published. Please try again.");
+    }
+    expectedDraftId = draft.id;
+
     const names = new Set(draft.config.allowedTools);
-    if (allowed) names.add(tool.name);
-    else names.delete(tool.name);
+    let keepName = false;
+    if (allowed) {
+      names.add(tool.name);
+    } else {
+      keepName = await tenant.mcp.hasOtherAllowedTool(server.assistantId, toolId, tool.name);
+      if (!keepName) {
+        names.delete(tool.name);
+      }
+    }
+
     const next = parseVersionConfig({ allowedTools: [...names] }, draft.config);
-    if (!next.ok) break;
-    const updated = await tenant.versions.updateDraft(server.assistantId, next.value, draft);
+    if (!next.ok) {
+      throw new Conflict("The draft changed while you were saving. Please try again.");
+    }
+
+    const updated = await tenant.mcp.setToolAllowedWithDraft({
+      assistantId: server.assistantId,
+      toolId,
+      toolName: tool.name,
+      allowed,
+      keepName,
+      expectedDraft: draft,
+      nextConfig: next.value,
+    });
     if (updated) {
       return { tool: toToolView({ ...tool, allowed }) };
     }
   }
 
-  const draft = await tenant.versions.draft(server.assistantId);
-  if (draft !== null) {
-    throw new Conflict("The draft changed while you were saving. Please try again.");
-  }
-  return { tool: toToolView({ ...tool, allowed }) };
+  throw new Conflict("The draft changed while you were saving. Please try again.");
 }

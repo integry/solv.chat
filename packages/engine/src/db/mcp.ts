@@ -1,4 +1,6 @@
+import type { VersionConfig } from "@solvchat/core";
 import { prepare, prepareInsert, safeJsonObject } from "./sql.js";
+import { expectedVersionConfig, type VersionRow } from "./versions.js";
 
 export type McpAuthKind = "none" | "static_header";
 
@@ -108,6 +110,37 @@ export interface UpsertMcpToolInput {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+}
+
+export interface SetToolAllowedWithDraftInput {
+  assistantId: string;
+  toolId: string;
+  toolName: string;
+  allowed: boolean;
+  keepName: boolean;
+  expectedDraft: VersionRow;
+  nextConfig: VersionConfig;
+}
+
+export interface PruneToolsWithDraftInput {
+  assistantId: string;
+  serverId: string;
+  remoteNames: readonly string[];
+  prunedAllowedNames: readonly string[];
+  removedFromDraftNames: readonly string[];
+  expectedDraft: VersionRow;
+  nextConfig: VersionConfig;
+  hasDraftChange: boolean;
+}
+
+export interface RemoveServerWithDraftInput {
+  assistantId: string;
+  serverId: string;
+  serverAllowedNames: readonly string[];
+  removedFromDraftNames: readonly string[];
+  expectedDraft: VersionRow;
+  nextConfig: VersionConfig;
+  hasDraftChange: boolean;
 }
 
 const SERVER_COLUMNS =
@@ -346,6 +379,363 @@ export function mcpFor(db: D1Database, orgId: string) {
         .bind(orgId, id, allowed ? 1 : 0)
         .run();
       return (res.meta.changes ?? 0) > 0;
+    },
+
+    /** Returns whether another allowed tool on the assistant shares `name`. */
+    async hasOtherAllowedTool(
+      assistantId: string,
+      excludeToolId: string,
+      name: string,
+    ): Promise<boolean> {
+      const row = await prepare(
+        db,
+        `SELECT 1 AS found
+           FROM mcp_tools t
+           JOIN mcp_servers s ON s.id = t.server_id AND s.org_id = t.org_id
+          WHERE t.org_id = ?1 AND s.assistant_id = ?2 AND t.name = ?3 AND t.id != ?4 AND t.allowed = 1
+          LIMIT 1`,
+      )
+        .bind(orgId, assistantId, name, excludeToolId)
+        .first<{ found: number }>();
+      return row !== null;
+    },
+
+    /**
+     * Atomically updates `mcp_tools.allowed` and the draft's `config` in one
+     * batch, guarded on the draft's stored config and (when disabling) whether
+     * another allowed tool on the assistant still requires the name.
+     */
+    async setToolAllowedWithDraft(input: SetToolAllowedWithDraftInput): Promise<boolean> {
+      const expectedConfigJson = expectedVersionConfig(input.expectedDraft);
+      const nextConfigJson = JSON.stringify(input.nextConfig);
+
+      const otherSql = input.allowed
+        ? ""
+        : input.keepName
+          ? ` AND EXISTS (
+                SELECT 1 FROM mcp_tools t
+                JOIN mcp_servers s ON s.id = t.server_id AND s.org_id = t.org_id
+                WHERE t.org_id = ?1 AND s.assistant_id = ?3 AND t.name = ?6 AND t.id != ?2 AND t.allowed = 1
+              )`
+          : ` AND NOT EXISTS (
+                SELECT 1 FROM mcp_tools t
+                JOIN mcp_servers s ON s.id = t.server_id AND s.org_id = t.org_id
+                WHERE t.org_id = ?1 AND s.assistant_id = ?3 AND t.name = ?6 AND t.id != ?2 AND t.allowed = 1
+              )`;
+
+      const toolArgs = input.allowed
+        ? [orgId, input.toolId, input.assistantId, input.expectedDraft.id, expectedConfigJson]
+        : [
+            orgId,
+            input.toolId,
+            input.assistantId,
+            input.expectedDraft.id,
+            expectedConfigJson,
+            input.toolName,
+          ];
+
+      const draftArgs = input.allowed
+        ? [
+            orgId,
+            input.toolId,
+            input.assistantId,
+            input.expectedDraft.id,
+            expectedConfigJson,
+            nextConfigJson,
+          ]
+        : [
+            orgId,
+            input.toolId,
+            input.assistantId,
+            input.expectedDraft.id,
+            expectedConfigJson,
+            input.toolName,
+            nextConfigJson,
+          ];
+
+      const draftNextParam = input.allowed ? "?6" : "?7";
+      const [toolRes, draftRes] = await db.batch([
+        prepare(
+          db,
+          `UPDATE mcp_tools
+              SET allowed = ${input.allowed ? 1 : 0}
+            WHERE org_id = ?1 AND id = ?2
+              AND EXISTS (
+                SELECT 1 FROM assistant_versions
+                 WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
+              )${otherSql}`,
+        ).bind(...toolArgs),
+        prepare(
+          db,
+          `UPDATE assistant_versions
+              SET config = ${draftNextParam}
+            WHERE org_id = ?1 AND assistant_id = ?3 AND state = 'draft' AND id = ?4 AND config = ?5
+              AND EXISTS (SELECT 1 FROM mcp_tools WHERE org_id = ?1 AND id = ?2)${otherSql}`,
+        ).bind(...draftArgs),
+      ]);
+
+      return (toolRes?.meta.changes ?? 0) > 0 && (draftRes?.meta.changes ?? 0) > 0;
+    },
+
+    async listPrunedAllowedToolNames(
+      serverId: string,
+      remoteNames: readonly string[],
+    ): Promise<string[]> {
+      const res = await prepare(
+        db,
+        `SELECT DISTINCT name
+           FROM mcp_tools
+          WHERE org_id = ?1 AND server_id = ?2 AND allowed = 1
+            AND name NOT IN (SELECT value FROM json_each(?3))`,
+      )
+        .bind(orgId, serverId, JSON.stringify([...remoteNames]))
+        .all<{ name: string }>();
+      return res.results.map((r) => r.name);
+    },
+
+    async listServerAllowedToolNames(serverId: string): Promise<string[]> {
+      const res = await prepare(
+        db,
+        `SELECT DISTINCT name
+           FROM mcp_tools
+          WHERE org_id = ?1 AND server_id = ?2 AND allowed = 1`,
+      )
+        .bind(orgId, serverId)
+        .all<{ name: string }>();
+      return res.results.map((r) => r.name);
+    },
+
+    async listOtherAllowedToolNames(
+      assistantId: string,
+      excludeServerId: string,
+    ): Promise<Set<string>> {
+      const res = await prepare(
+        db,
+        `SELECT DISTINCT t.name
+           FROM mcp_tools t
+           JOIN mcp_servers s ON s.id = t.server_id AND s.org_id = t.org_id
+          WHERE t.org_id = ?1 AND s.assistant_id = ?2 AND t.server_id != ?3 AND t.allowed = 1`,
+      )
+        .bind(orgId, assistantId, excludeServerId)
+        .all<{ name: string }>();
+      return new Set(res.results.map((r) => r.name));
+    },
+
+    /**
+     * Atomically prunes dropped tools for `serverId` and reconciles the draft's
+     * `allowedTools` when any pruned allowed tool has no remaining allowed
+     * counterpart on another server.
+     */
+    async pruneToolsWithDraft(input: PruneToolsWithDraftInput): Promise<boolean> {
+      const expectedConfigJson = expectedVersionConfig(input.expectedDraft);
+      const remoteJson = JSON.stringify([...input.remoteNames]);
+      const prunedAllowedJson = JSON.stringify([...input.prunedAllowedNames]);
+      const removedDraftJson = JSON.stringify([...input.removedFromDraftNames]);
+
+      const unexpectedServerAllowedGuard = `NOT EXISTS (
+        SELECT 1 FROM mcp_tools
+         WHERE org_id = ?1 AND server_id = ?2 AND allowed = 1
+           AND name NOT IN (SELECT value FROM json_each(?6))
+           AND name NOT IN (SELECT value FROM json_each(?7))
+      )`;
+      const otherServerAllowedGuard =
+        input.removedFromDraftNames.length === 0
+          ? ""
+          : ` AND NOT EXISTS (
+              SELECT 1 FROM mcp_tools t
+              JOIN mcp_servers s ON s.id = t.server_id AND s.org_id = t.org_id
+               WHERE t.org_id = ?1 AND s.assistant_id = ?3 AND t.server_id != ?2 AND t.allowed = 1
+                 AND t.name IN (SELECT value FROM json_each(?8))
+            )`;
+
+      if (!input.hasDraftChange) {
+        const verifyArgs: unknown[] = [
+          orgId,
+          input.serverId,
+          input.assistantId,
+          input.expectedDraft.id,
+          expectedConfigJson,
+          remoteJson,
+          prunedAllowedJson,
+        ];
+        if (input.removedFromDraftNames.length > 0) {
+          verifyArgs.push(removedDraftJson);
+        }
+        const [, verifyRes] = await db.batch([
+          prepare(
+            db,
+            `DELETE FROM mcp_tools
+              WHERE org_id = ?1 AND server_id = ?2
+                AND name NOT IN (SELECT value FROM json_each(?6))
+                AND EXISTS (
+                  SELECT 1 FROM assistant_versions
+                   WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
+                )
+                AND ${unexpectedServerAllowedGuard}${otherServerAllowedGuard}`,
+          ).bind(...verifyArgs),
+          prepare(
+            db,
+            `SELECT 1 AS ok
+               FROM assistant_versions
+              WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
+                AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+                AND ${unexpectedServerAllowedGuard}${otherServerAllowedGuard}`,
+          ).bind(...verifyArgs),
+        ]);
+        return (verifyRes?.results?.length ?? 0) > 0;
+      }
+
+      const nextConfigJson = JSON.stringify(input.nextConfig);
+      const updateArgs: unknown[] = [
+        orgId,
+        input.serverId,
+        input.assistantId,
+        input.expectedDraft.id,
+        expectedConfigJson,
+        remoteJson,
+        prunedAllowedJson,
+        removedDraftJson,
+        nextConfigJson,
+      ];
+      const [draftRes] = await db.batch([
+        prepare(
+          db,
+          `UPDATE assistant_versions
+              SET config = ?9
+            WHERE org_id = ?1 AND assistant_id = ?3 AND state = 'draft' AND id = ?4 AND config = ?5
+              AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+              AND ${unexpectedServerAllowedGuard}${otherServerAllowedGuard}`,
+        ).bind(...updateArgs),
+        prepare(
+          db,
+          `DELETE FROM mcp_tools
+            WHERE org_id = ?1 AND server_id = ?2
+              AND name NOT IN (SELECT value FROM json_each(?6))
+              AND EXISTS (
+                SELECT 1 FROM assistant_versions
+                 WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?7
+              )`,
+        ).bind(
+          orgId,
+          input.serverId,
+          input.assistantId,
+          input.expectedDraft.id,
+          expectedConfigJson,
+          remoteJson,
+          nextConfigJson,
+        ),
+      ]);
+      return (draftRes?.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Atomically deletes a server, its tools, and reconciles the draft's
+     * `allowedTools` when any of its allowed tools has no remaining allowed
+     * counterpart on another server.
+     */
+    async removeServerWithDraft(input: RemoveServerWithDraftInput): Promise<boolean> {
+      const expectedConfigJson = expectedVersionConfig(input.expectedDraft);
+      const serverAllowedJson = JSON.stringify([...input.serverAllowedNames]);
+      const removedDraftJson = JSON.stringify([...input.removedFromDraftNames]);
+
+      const unexpectedServerAllowedGuard = `NOT EXISTS (
+        SELECT 1 FROM mcp_tools
+         WHERE org_id = ?1 AND server_id = ?2 AND allowed = 1
+           AND name NOT IN (SELECT value FROM json_each(?6))
+      )`;
+      const otherServerAllowedGuard =
+        input.removedFromDraftNames.length === 0
+          ? ""
+          : ` AND NOT EXISTS (
+              SELECT 1 FROM mcp_tools t
+              JOIN mcp_servers s ON s.id = t.server_id AND s.org_id = t.org_id
+               WHERE t.org_id = ?1 AND s.assistant_id = ?3 AND t.server_id != ?2 AND t.allowed = 1
+                 AND t.name IN (SELECT value FROM json_each(?7))
+            )`;
+
+      if (!input.hasDraftChange) {
+        const guardArgs: unknown[] = [
+          orgId,
+          input.serverId,
+          input.assistantId,
+          input.expectedDraft.id,
+          expectedConfigJson,
+          serverAllowedJson,
+        ];
+        if (input.removedFromDraftNames.length > 0) {
+          guardArgs.push(removedDraftJson);
+        }
+        const [, serverRes] = await db.batch([
+          prepare(
+            db,
+            `DELETE FROM mcp_tools
+              WHERE org_id = ?1 AND server_id = ?2
+                AND EXISTS (
+                  SELECT 1 FROM assistant_versions
+                   WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
+                )
+                AND ${unexpectedServerAllowedGuard}${otherServerAllowedGuard}`,
+          ).bind(...guardArgs),
+          prepare(
+            db,
+            `DELETE FROM mcp_servers
+              WHERE org_id = ?1 AND id = ?2
+                AND EXISTS (
+                  SELECT 1 FROM assistant_versions
+                   WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
+                )
+                AND NOT EXISTS (SELECT 1 FROM mcp_tools WHERE org_id = ?1 AND server_id = ?2)`,
+          ).bind(
+            orgId,
+            input.serverId,
+            input.assistantId,
+            input.expectedDraft.id,
+            expectedConfigJson,
+          ),
+        ]);
+        return (serverRes?.meta.changes ?? 0) > 0;
+      }
+
+      const nextConfigJson = JSON.stringify(input.nextConfig);
+      const [draftRes, , serverRes] = await db.batch([
+        prepare(
+          db,
+          `UPDATE assistant_versions
+              SET config = ?8
+            WHERE org_id = ?1 AND assistant_id = ?3 AND state = 'draft' AND id = ?4 AND config = ?5
+              AND EXISTS (SELECT 1 FROM mcp_servers WHERE org_id = ?1 AND id = ?2)
+              AND ${unexpectedServerAllowedGuard}${otherServerAllowedGuard}`,
+        ).bind(
+          orgId,
+          input.serverId,
+          input.assistantId,
+          input.expectedDraft.id,
+          expectedConfigJson,
+          serverAllowedJson,
+          removedDraftJson,
+          nextConfigJson,
+        ),
+        prepare(
+          db,
+          `DELETE FROM mcp_tools
+            WHERE org_id = ?1 AND server_id = ?2
+              AND EXISTS (
+                SELECT 1 FROM assistant_versions
+                 WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
+              )`,
+        ).bind(orgId, input.serverId, input.assistantId, input.expectedDraft.id, nextConfigJson),
+        prepare(
+          db,
+          `DELETE FROM mcp_servers
+            WHERE org_id = ?1 AND id = ?2
+              AND EXISTS (
+                SELECT 1 FROM assistant_versions
+                 WHERE org_id = ?1 AND assistant_id = ?3 AND id = ?4 AND state = 'draft' AND config = ?5
+              )
+              AND NOT EXISTS (SELECT 1 FROM mcp_tools WHERE org_id = ?1 AND server_id = ?2)`,
+        ).bind(orgId, input.serverId, input.assistantId, input.expectedDraft.id, nextConfigJson),
+      ]);
+      return (draftRes?.meta.changes ?? 0) > 0 && (serverRes?.meta.changes ?? 0) > 0;
     },
 
     /**

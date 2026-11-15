@@ -1,5 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import { Conflict } from "../../src/admin/errors.js";
+import { setMcpToolAllowed } from "../../src/admin/mcp.js";
 import { createApp } from "../../src/app.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { openSecret } from "../../src/security/secretBox.js";
@@ -574,5 +576,243 @@ describe("admin MCP servers and tools API", () => {
     // Disabling the server excludes its tools from listAllowedTools.
     await call(app, "PATCH", `/api/admin/mcp-servers/${created.server.id}`, { enabled: false });
     expect(await tenant.mcp.listAllowedTools(assistantId)).toEqual([]);
+  });
+
+  it("reconciles draft allowedTools when refresh prunes an allowed tool and preserves it if re-discovered", async () => {
+    let currentTools: McpToolDef[] = [
+      { name: "lookup_order", description: "Lookup", inputSchema: { type: "object" } },
+      { name: "keep_me", description: "Keep", inputSchema: { type: "object" } },
+    ];
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch((method, id) => {
+        if (method === "tools/list") {
+          return Response.json({ jsonrpc: "2.0", id, result: { tools: currentTools } });
+        }
+        return Response.json({ jsonrpc: "2.0", id, error: { code: -32601, message: "n/a" } });
+      }),
+    );
+    const assistantId = await createAssistant(app);
+    const created = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Orders",
+        url: "https://tools.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string }; tools: Array<{ id: string; name: string }> };
+    const lookupTool = created.tools.find((t) => t.name === "lookup_order");
+    expect(lookupTool).toBeDefined();
+
+    await call(
+      app,
+      "PATCH",
+      `/api/admin/mcp-servers/${created.server.id}/tools/${lookupTool?.id}`,
+      { allowed: true },
+    );
+
+    // Drop lookup_order from remote discovery and refresh.
+    currentTools = [{ name: "keep_me", description: "Keep", inputSchema: { type: "object" } }];
+    const refreshRes = await call(
+      app,
+      "POST",
+      `/api/admin/mcp-servers/${created.server.id}/refresh`,
+    );
+    expect(refreshRes.status).toBe(200);
+
+    const draftAfterPrune = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: { config: { allowedTools: string[] } } };
+    expect(draftAfterPrune.draft.config.allowedTools).toEqual([]);
+
+    // Re-adding lookup_order later inserts it with allowed = false and leaves draft empty.
+    currentTools = [
+      { name: "lookup_order", description: "Lookup", inputSchema: { type: "object" } },
+      { name: "keep_me", description: "Keep", inputSchema: { type: "object" } },
+    ];
+    const reAddRes = await call(app, "POST", `/api/admin/mcp-servers/${created.server.id}/refresh`);
+    expect(reAddRes.status).toBe(200);
+    const reAdded = (await reAddRes.json()) as {
+      tools: Array<{ name: string; allowed: boolean }>;
+    };
+    expect(reAdded.tools.find((t) => t.name === "lookup_order")?.allowed).toBe(false);
+
+    const draftAfterReAdd = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: { config: { allowedTools: string[] } } };
+    expect(draftAfterReAdd.draft.config.allowedTools).toEqual([]);
+  });
+
+  it("reconciles draft allowedTools on server deletion while preserving names allowed on another server", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch([
+        { name: "only_server1", description: "Only 1", inputSchema: { type: "object" } },
+        { name: "shared_tool", description: "Shared", inputSchema: { type: "object" } },
+      ]),
+    );
+    const assistantId = await createAssistant(app);
+
+    const s1 = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 1",
+        url: "https://one.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string }; tools: Array<{ id: string; name: string }> };
+
+    const s2 = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 2",
+        url: "https://two.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string }; tools: Array<{ id: string; name: string }> };
+
+    for (const tool of s1.tools) {
+      await call(app, "PATCH", `/api/admin/mcp-servers/${s1.server.id}/tools/${tool.id}`, {
+        allowed: true,
+      });
+    }
+    const s2Shared = s2.tools.find((t) => t.name === "shared_tool");
+    await call(app, "PATCH", `/api/admin/mcp-servers/${s2.server.id}/tools/${s2Shared?.id}`, {
+      allowed: true,
+    });
+
+    const delRes = await call(app, "DELETE", `/api/admin/mcp-servers/${s1.server.id}`);
+    expect(delRes.status).toBe(200);
+
+    const draftAfterDelete = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: { config: { allowedTools: string[] } } };
+    expect(draftAfterDelete.draft.config.allowedTools).toEqual(["shared_tool"]);
+  });
+
+  it("keeps draft allowedTools when disabling one server's tool if another server's tool with the same name remains allowed", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch([{ name: "lookup_order", description: "Lookup", inputSchema: { type: "object" } }]),
+    );
+    const assistantId = await createAssistant(app);
+
+    const s1 = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 1",
+        url: "https://one.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string }; tools: Array<{ id: string; name: string }> };
+
+    const s2 = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 2",
+        url: "https://two.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string }; tools: Array<{ id: string; name: string }> };
+
+    const t1 = s1.tools[0];
+    const t2 = s2.tools[0];
+    expect(t1).toBeDefined();
+    expect(t2).toBeDefined();
+
+    await call(app, "PATCH", `/api/admin/mcp-servers/${s1.server.id}/tools/${t1?.id}`, {
+      allowed: true,
+    });
+    await call(app, "PATCH", `/api/admin/mcp-servers/${s2.server.id}/tools/${t2?.id}`, {
+      allowed: true,
+    });
+
+    // Disable Server 1's lookup_order; Server 2's lookup_order is still allowed.
+    const disableFirst = await call(
+      app,
+      "PATCH",
+      `/api/admin/mcp-servers/${s1.server.id}/tools/${t1?.id}`,
+      { allowed: false },
+    );
+    expect(disableFirst.status).toBe(200);
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    expect((await tenant.mcp.listAllowedTools(assistantId)).map((t) => t.id)).toEqual([t2?.id]);
+
+    const draftAfterFirst = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: { config: { allowedTools: string[] } } };
+    expect(draftAfterFirst.draft.config.allowedTools).toEqual(["lookup_order"]);
+
+    // Disable Server 2's lookup_order; now the name is removed from draft.
+    const disableSecond = await call(
+      app,
+      "PATCH",
+      `/api/admin/mcp-servers/${s2.server.id}/tools/${t2?.id}`,
+      { allowed: false },
+    );
+    expect(disableSecond.status).toBe(200);
+
+    const draftAfterSecond = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: { config: { allowedTools: string[] } } };
+    expect(draftAfterSecond.draft.config.allowedTools).toEqual([]);
+    expect(await tenant.mcp.listAllowedTools(assistantId)).toEqual([]);
+  });
+
+  it("commits tool allowed and draft allowedTools atomically on concurrent updates and conflicts", async () => {
+    const app = appForOrg(
+      ORG_A,
+      mcpFetch([{ name: "lookup_order", description: "Lookup", inputSchema: { type: "object" } }]),
+    );
+    const assistantId = await createAssistant(app);
+    const created = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Server 1",
+        url: "https://one.example.com/mcp",
+        authKind: "none",
+      })
+    ).json()) as { server: { id: string }; tools: Array<{ id: string; name: string }> };
+    const toolId = created.tools[0]?.id ?? "";
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+
+    // Simulate a competing draft update on every attempt: Conflict is thrown and neither side changes.
+    let mutatingCalls = 0;
+    const alwaysContendedTenant = {
+      ...tenant,
+      versions: {
+        ...tenant.versions,
+        async draft(id: string) {
+          const row = await tenant.versions.draft(id);
+          if (row !== null) {
+            mutatingCalls++;
+            // Mutate the draft right after reading so setToolAllowedWithDraft sees a stale config.
+            await tenant.versions.updateDraft(
+              assistantId,
+              {
+                ...row.config,
+                behaviour: { ...row.config.behaviour, persona: `race-${mutatingCalls}` },
+              },
+              row,
+            );
+          }
+          return row;
+        },
+      },
+    };
+
+    await expect(
+      setMcpToolAllowed(alwaysContendedTenant, created.server.id, toolId, { allowed: true }),
+    ).rejects.toBeInstanceOf(Conflict);
+
+    const toolAfterConflict = await tenant.mcp.getToolByName(created.server.id, "lookup_order");
+    const draftAfterConflict = await tenant.versions.draft(assistantId);
+    expect(toolAfterConflict?.allowed).toBe(false);
+    expect(draftAfterConflict?.config.allowedTools).toEqual([]);
+
+    // Concurrent enable and disable on the same tool always leave mcp_tools.allowed and draft aligned.
+    await Promise.allSettled([
+      setMcpToolAllowed(tenant, created.server.id, toolId, { allowed: true }),
+      setMcpToolAllowed(tenant, created.server.id, toolId, { allowed: false }),
+    ]);
+
+    const finalTool = await tenant.mcp.getToolByName(created.server.id, "lookup_order");
+    const finalDraft = await tenant.versions.draft(assistantId);
+    expect(finalDraft?.config.allowedTools.includes("lookup_order")).toBe(finalTool?.allowed);
   });
 });
