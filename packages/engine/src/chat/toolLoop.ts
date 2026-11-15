@@ -83,7 +83,8 @@ export type ToolLoopEvent =
 
 export interface ToolLoopDeps {
   provider: LlmProvider;
-  model: ModelInfo;
+  /** Prices a call when the provider does not report its cost; absent means unknown. */
+  model?: ModelInfo | undefined;
   runners: readonly ToolRunner[];
   /** Calls already stored in this conversation, for the per-conversation cap. */
   priorCalls: number;
@@ -92,8 +93,11 @@ export interface ToolLoopDeps {
    * (previews or standalone callers), the loop checks `priorCalls + calls.length`.
    */
   reserveCalls?: ((count: number) => Promise<boolean>) | undefined;
-  /** Recorded per model call so the spend cap sees real spend, not one event. */
-  onModelUsage: (tokensIn: number, tokensOut: number, costMicros: number) => Promise<void>;
+  /**
+   * Recorded per model call so the spend cap sees real spend, not one event.
+   * `costMicros` is null when the call's cost is unknown.
+   */
+  onModelUsage: (tokensIn: number, tokensOut: number, costMicros: number | null) => Promise<void>;
   /**
    * Optional lease/ownership check called before model/tool work and before
    * emitting output. Returning false stops the loop without suppressing
@@ -310,6 +314,7 @@ async function* runLoopFrom(
     const asked: ToolCall[] = [];
     let tokensIn = 0;
     let tokensOut = 0;
+    let reportedCostMicros: number | undefined;
     let usageReported = false;
     let completed = false;
     let assistantText = "";
@@ -334,6 +339,7 @@ async function* runLoopFrom(
         } else {
           tokensIn = chunk.tokensIn;
           tokensOut = chunk.tokensOut;
+          reportedCostMicros = chunk.costMicros;
           usageReported = true;
         }
       }
@@ -344,7 +350,11 @@ async function* runLoopFrom(
       // provider reported are owed whether or not the rest of the turn works,
       // even if the resume lease was lost before the stream finished.
       if (usageReported || completed) {
-        await deps.onModelUsage(tokensIn, tokensOut, costMicros(deps.model, tokensIn, tokensOut));
+        // A provider-reported cost (OpenRouter) wins over the price table.
+        const cost =
+          reportedCostMicros ??
+          (deps.model === undefined ? null : costMicros(deps.model, tokensIn, tokensOut));
+        await deps.onModelUsage(tokensIn, tokensOut, cost);
       }
     }
 

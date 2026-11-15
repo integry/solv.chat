@@ -5,12 +5,18 @@ export interface OverviewProps {
   assistantId: string;
 }
 
-function formatUsd(costMicros: number): string {
-  const dollars = costMicros / 1_000_000;
-  if (costMicros > 0 && dollars < 0.01) {
+function formatCost(costMicros: number, unit: "usd" | "credits" = "usd"): string {
+  const amount = costMicros / 1_000_000;
+  if (unit === "credits") {
+    if (costMicros > 0 && amount < 0.01) {
+      return "< 0.01 credits";
+    }
+    return `${amount.toFixed(2)} credits`;
+  }
+  if (costMicros > 0 && amount < 0.01) {
     return "< $0.01";
   }
-  return `$${dollars.toFixed(2)}`;
+  return `$${amount.toFixed(2)}`;
 }
 
 function formatPercent(share: number): string {
@@ -39,6 +45,11 @@ export function Overview({ assistantId }: OverviewProps) {
         </p>
       ) : overviewRes.value ? (
         <div className="stack">
+          {overviewRes.value.configError && (
+            <div className="warning-banner" role="alert">
+              {overviewRes.value.configError}
+            </div>
+          )}
           <div className="overview-grid">
             <section className="source-card stack" aria-label="Messages">
               <div className="stat-label">Messages</div>
@@ -56,8 +67,22 @@ export function Overview({ assistantId }: OverviewProps) {
 
             <section className="source-card stack" aria-label="Today's cost">
               <div className="stat-label">Today&apos;s cost</div>
-              <div className="stat-value">{formatUsd(overviewRes.value.todayCostMicros)}</div>
-              <p className="muted">Estimated cost so far today.</p>
+              <div className="stat-value">
+                {formatCost(overviewRes.value.todayCostMicros, overviewRes.value.costUnit)}
+              </div>
+              <p className="muted">
+                {overviewRes.value.dailyCostCapMicros !== undefined
+                  ? overviewRes.value.dailyCostCapMicros > 0
+                    ? `Estimated cost so far today. Daily spend cap: ${formatCost(overviewRes.value.dailyCostCapMicros, overviewRes.value.costUnit)}.`
+                    : "Estimated cost so far today. No daily spend cap."
+                  : "Estimated cost so far today."}
+              </p>
+              {overviewRes.value.todayCostUnknown && (
+                <p className="error-text" role="alert">
+                  Cost is not being reported for this model, so the daily spend cap cannot protect
+                  this instance.
+                </p>
+              )}
             </section>
           </div>
 

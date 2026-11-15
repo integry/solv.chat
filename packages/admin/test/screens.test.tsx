@@ -248,6 +248,52 @@ describe("admin phase 1 screens", () => {
     expect(screen.getByText("7 times")).toBeTruthy();
   });
 
+  it("renders configuration error and unknown-cost spend cap warning on Overview", async () => {
+    installFakeServer({
+      overview: {
+        messages: 5,
+        answeredShare: 0.8,
+        topQuestions: [],
+        todayCostMicros: 0,
+        todayCostUnknown: true,
+        dailyCostCapMicros: 2_000_000,
+        configError: "OpenRouter is selected, but SOLV_LLM_MODEL is not set.",
+      },
+    });
+    render(<App />);
+
+    expect(
+      await screen.findByText("OpenRouter is selected, but SOLV_LLM_MODEL is not set."),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/Estimated cost so far today\. Daily spend cap: \$2\.00\./),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Cost is not being reported for this model, so the daily spend cap cannot protect this instance.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("formats cost and daily spend cap in credits when costUnit is credits", async () => {
+    installFakeServer({
+      overview: {
+        messages: 10,
+        answeredShare: 0.9,
+        topQuestions: [],
+        todayCostMicros: 20_000,
+        dailyCostCapMicros: 2_000_000,
+        costUnit: "credits",
+      },
+    });
+    render(<App />);
+
+    expect(await screen.findByText("0.02 credits")).toBeTruthy();
+    expect(
+      screen.getByText("Estimated cost so far today. Daily spend cap: 2.00 credits."),
+    ).toBeTruthy();
+  });
+
   it("opens Gaps, pre-fills Write the right answer, saves, and marks the gap as handled", async () => {
     const server = installFakeServer();
     render(<App />);

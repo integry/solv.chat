@@ -40,9 +40,12 @@ export interface AuthProvider {
   logout(request: Request): Promise<Response>;
 }
 
+export type LlmProviderName = "anthropic" | "openai" | "openrouter";
+export type EmbeddingsProviderName = "openai" | "openrouter";
+
 export interface KeyProvider {
-  modelKey(orgId: string, provider: "anthropic" | "openai"): Promise<string>;
-  embeddingKey(orgId: string): Promise<string>;
+  modelKey(orgId: string, provider: LlmProviderName): Promise<string>;
+  embeddingKey(orgId: string, provider?: EmbeddingsProviderName): Promise<string>;
 }
 
 export interface UsageEvent {
@@ -53,6 +56,7 @@ export interface UsageEvent {
   tokensIn: number;
   tokensOut: number;
   costMicros: number;
+  costUnknown?: boolean | undefined;
 }
 
 export interface UsageSink {

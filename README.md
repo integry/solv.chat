@@ -4,7 +4,7 @@ An open-source chatbot for your website. It answers visitors from your own
 content, can call tools on MCP servers you configure, and shows you which
 questions it could not answer.
 
-Runs on Cloudflare Workers with your own Anthropic or OpenAI key.
+Runs on Cloudflare Workers with your own Anthropic, OpenAI, or OpenRouter key.
 
 **Status: early development.** The chat engine, widget and admin work; MCP
 tools, answer tests and reports are not built yet. To run your own, follow
@@ -32,8 +32,9 @@ Required Worker secrets (set with `wrangler secret put` or `.dev.vars` locally):
 
 - `SOLV_ADMIN_PASSWORD` — admin sign-in password
 - `SOLV_SECRET_KEY` — HMAC signing key for session cookies and AES-GCM encryption key for stored MCP tool credentials (changing it signs everyone out and makes stored tool credentials unreadable)
-- `SOLV_ANTHROPIC_KEY` — Anthropic API key
-- `SOLV_OPENAI_KEY` — OpenAI API key (models and embeddings)
+- `SOLV_ANTHROPIC_KEY` — Anthropic API key (when `SOLV_LLM_PROVIDER` is `"anthropic"`)
+- `SOLV_OPENAI_KEY` — OpenAI API key (models and default embeddings)
+- `SOLV_OPENROUTER_KEY` — OpenRouter API key (when `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`)
 
 ### Page actions (widget)
 
@@ -43,7 +44,11 @@ Sites can register custom client-side actions for the assistant to call:
 solv.actions.register({
   name: "open_invoice",
   description: "Open one of the visitor's invoices",
-  input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  input: {
+    type: "object",
+    properties: { id: { type: "string" } },
+    required: ["id"],
+  },
   confirm: false,
   run: async ({ id }) => {
     router.push(`/invoices/${id}`);
