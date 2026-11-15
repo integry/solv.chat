@@ -60,6 +60,11 @@ export interface AppOptions {
 
 /** Creates the Worker fetch and queue handlers wired to the given extension seams. */
 export function createApp(seams: Seams, options?: AppOptions): App {
+  const chatOverrides: ChatRouteOverrides | undefined =
+    options?.fetch && !options.chat?.fetch
+      ? { ...options.chat, fetch: options.fetch }
+      : options?.chat;
+
   return {
     async fetch(request, env, ctx) {
       const url = new URL(request.url);
@@ -70,7 +75,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         return Response.json({ ok: true });
       }
       if (url.pathname === "/v1/chat") {
-        return chatRoute(request, env, seams, ctx, options?.chat);
+        return chatRoute(request, env, seams, ctx, chatOverrides);
       }
       if (url.pathname === "/v1/feedback") {
         return feedbackRoute(request, env, seams);
@@ -121,7 +126,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         const principal = await seams.auth.authenticate(request);
         if (principal === null) return Response.json({ error: "Sign in first." }, { status: 401 });
         if (url.pathname === "/api/admin/chat") {
-          return adminChatRoute(request, env, seams, ctx, principal, options?.chat);
+          return adminChatRoute(request, env, seams, ctx, principal, chatOverrides);
         }
         return adminRoutes(request, url, {
           tenant: forPrincipal(env.DB, principal),

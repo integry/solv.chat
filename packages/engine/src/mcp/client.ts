@@ -45,6 +45,7 @@ export interface McpClientOptions {
   fetchImpl?: typeof fetch | undefined;
   resolveHost?: HostResolver | undefined;
   timeoutMs?: number | undefined;
+  signal?: AbortSignal | undefined;
 }
 
 interface SessionContext {
@@ -259,6 +260,14 @@ async function withSession<T>(
   const headers = authHeaders(target);
   const timeoutMs = options.timeoutMs ?? MCP_TIMEOUT_MS;
   const controller = new AbortController();
+  const onCallerAbort = () => controller.abort();
+  if (options.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+  }
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   const ctx: SessionContext = {
@@ -309,6 +318,7 @@ async function withSession<T>(
     return await fn(ctx);
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener("abort", onCallerAbort);
   }
 }
 

@@ -22,12 +22,15 @@ import type { LlmProvider } from "../providers/types.js";
 import type { AuthProvider, Principal, Seams } from "../seams/types.js";
 import { answerMessage } from "./answer.js";
 import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
+import { mcpRunnerFor } from "./mcpRunner.js";
 
 export interface ChatEnv {
   DB: D1Database;
   VECTORS: VectorizeIndex;
   SOLV_LLM_PROVIDER?: string | undefined;
   SOLV_LLM_TIER?: string | undefined;
+  /** Opens stored MCP credentials at call time. */
+  SOLV_SECRET_KEY?: string | undefined;
 }
 
 const DEFAULT_PROVIDER = "anthropic" as const;
@@ -65,6 +68,7 @@ export interface ChatRouteOverrides {
   model?: ModelInfo | undefined;
   providerKind?: "anthropic" | "openai" | undefined;
   tier?: Tier | undefined;
+  fetch?: typeof fetch | undefined;
 }
 
 const encoder = new TextEncoder();
@@ -156,6 +160,12 @@ interface StreamAnswerParams {
   visitorId: string;
   message: string;
   behaviour: BehaviourConfig;
+  /**
+   * The version's tool allow-list: published for a visitor, draft for the
+   * owner's preview. Taken from the same row the behaviour came from, so the
+   * two can never disagree about which version is answering.
+   */
+  allowedTools: readonly string[];
   conversationId: string | undefined;
   pageUrl: string | undefined;
   preview: boolean;
@@ -187,6 +197,18 @@ function streamAnswerResponse(params: StreamAnswerParams): Response {
               seams.keys,
             ));
 
+          // No tool switched on and published means no runner, so the request
+          // carries no `tools` key and this is phase 1 behaviour exactly.
+          const mcp = await mcpRunnerFor(
+            {
+              tenant: params.tenant,
+              secretKey: env.SOLV_SECRET_KEY ?? "",
+              fetchImpl: overrides?.fetch,
+            },
+            params.assistantId,
+            params.allowedTools,
+          );
+
           for await (const event of answerMessage(
             {
               tenant: params.tenant,
@@ -195,6 +217,7 @@ function streamAnswerResponse(params: StreamAnswerParams): Response {
               provider,
               model,
               usage: seams.usage,
+              runners: mcp ? [mcp] : [],
             },
             {
               orgId: params.orgId,
@@ -311,6 +334,7 @@ export async function adminChatRoute(
     visitorId: parsed.value.visitorId,
     message,
     behaviour: version.config.behaviour,
+    allowedTools: version.config.allowedTools,
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: true,
@@ -397,6 +421,7 @@ export async function chatRoute(
     visitorId: parsed.value.visitorId,
     message,
     behaviour: version.config.behaviour,
+    allowedTools: version.config.allowedTools,
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: false,
