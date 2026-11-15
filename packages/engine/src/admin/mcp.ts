@@ -79,6 +79,20 @@ interface ParsedServerInput {
   enabled?: boolean;
 }
 
+const RESERVED_HEADER_NAMES = new Set([
+  "host",
+  "content-length",
+  "content-type",
+  "accept",
+  "connection",
+  "transfer-encoding",
+]);
+
+function isReservedHeaderName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return RESERVED_HEADER_NAMES.has(lower) || lower.startsWith("mcp-");
+}
+
 /** Validates and normalises the owner's input. Errors name their field. */
 function readServerInput(body: unknown, forCreate: boolean): ParsedServerInput {
   if (!isPlainObject(body)) {
@@ -131,6 +145,8 @@ function readServerInput(body: unknown, forCreate: boolean): ParsedServerInput {
         // Header names go straight into an outbound request; anything outside
         // this set could split a header.
         errors.push("headerName: must be letters, digits and hyphens");
+      } else if (isReservedHeaderName(headerName)) {
+        errors.push("headerName: header name is reserved");
       } else {
         parsed.headerName = headerName;
       }

@@ -1409,4 +1409,50 @@ describe("admin MCP servers and tools API", () => {
     expect(await tenant.mcp.getServer(created.server.id)).toBeNull();
     expect(await tenant.mcp.listTools(created.server.id)).toEqual([]);
   });
+
+  it("rejects reserved header names case-insensitively with 400 naming headerName", async () => {
+    const app = appForOrg(ORG_A, mcpFetch([]));
+    const assistantId = await createAssistant(app);
+
+    const reserved = [
+      "host",
+      "Host",
+      "Content-Length",
+      "CONTENT-TYPE",
+      "Accept",
+      "connection",
+      "Transfer-Encoding",
+      "mcp-session-id",
+      "MCP-Protocol-Version",
+    ];
+    for (const badHeader of reserved) {
+      const res = await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+        label: "Bad Header",
+        url: "https://tools.example.com/mcp",
+        authKind: "static_header",
+        headerName: badHeader,
+        headerValue: "secret",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { fields?: string[] };
+      expect(body.fields?.some((f) => f.startsWith("headerName:"))).toBe(true);
+    }
+
+    const createRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/mcp-servers`, {
+      label: "Good Header",
+      url: "https://tools.example.com/mcp",
+      authKind: "static_header",
+      headerName: "X-Api-Key",
+      headerValue: "secret",
+    });
+    expect(createRes.status).toBe(201);
+    const created = (await createRes.json()) as { server: { id: string } };
+
+    const patchRes = await call(app, "PATCH", `/api/admin/mcp-servers/${created.server.id}`, {
+      headerName: "MCP-Custom",
+    });
+    expect(patchRes.status).toBe(400);
+    const patchBody = (await patchRes.json()) as { fields?: string[] };
+    expect(patchBody.fields?.some((f) => f.startsWith("headerName:"))).toBe(true);
+  });
 });
