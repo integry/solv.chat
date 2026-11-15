@@ -131,10 +131,10 @@ const TESTS: AnswerTest[] = [
 function findChromeBinary(): string {
   const candidates = [
     process.env.CHROME_PATH,
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
     "/usr/bin/google-chrome",
     "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   ];
   for (const candidate of candidates) {
@@ -286,10 +286,10 @@ async function launchChromium(): Promise<{
       const timer = setTimeout(() => {
         finish(
           new Error(
-            `Timed out waiting for Chromium DevTools endpoint (${chromePath}). Output: ${output.slice(0, 500)}`,
+            `Timed out waiting for Chromium DevTools endpoint (${chromePath}). Output: ${output.slice(-1000)}`,
           ),
         );
-      }, 25_000);
+      }, 60_000);
 
       const pollTimer = setInterval(() => {
         if (!existsSync(devToolsPortPath)) return;
@@ -390,7 +390,7 @@ describe("Admin layout regressions (Chromium)", () => {
     chromeProc = launched.process;
     cdp = launched.cdp;
     userDataDir = launched.userDataDir;
-  }, 45_000);
+  }, 75_000);
 
   afterAll(async () => {
     cdp?.close();
