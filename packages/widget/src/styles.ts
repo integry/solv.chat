@@ -376,6 +376,22 @@ textarea:focus-visible {
   cursor: default;
 }
 
+.solv-highlight-note {
+  position: fixed;
+  z-index: 2147483647;
+  max-width: 260px;
+  padding: 6px 10px;
+  border: 1px solid var(--solv-border);
+  border-radius: 8px;
+  background: var(--solv-bg);
+  color: var(--solv-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: var(--solv-shadow);
+  pointer-events: none;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

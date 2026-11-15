@@ -1,5 +1,11 @@
 import { CHAT_PROTOCOL_VERSION, MAX_CHAT_MESSAGE_LENGTH, parseChatEventLine } from "@solvchat/core";
 import { listForRequest, type RunRequest, runAction } from "./actions.js";
+import {
+  type BuiltinSettings,
+  clearHighlight,
+  installBuiltins,
+  setHighlightHost,
+} from "./builtins.js";
 import { readEventLines } from "./sse.js";
 import {
   claimConversation,
@@ -16,6 +22,7 @@ interface WidgetPublicConfig {
   position: "left" | "right";
   greeting: string;
   suggestedQuestions: string[];
+  actions: BuiltinSettings;
 }
 
 const DEFAULT_CONFIG: WidgetPublicConfig = {
@@ -24,6 +31,7 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
   position: "right",
   greeting: "Hello. Ask me anything about this site.",
   suggestedQuestions: [],
+  actions: { enabled: false, allowedOrigins: [] },
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
@@ -70,6 +78,18 @@ function parsePublicConfig(raw: unknown): Partial<WidgetPublicConfig> {
       (item): item is string => typeof item === "string" && item.trim().length > 0,
     );
   }
+  // Page actions, read defensively: an older engine sends nothing and the
+  // built-ins must then stay off.
+  const actions =
+    typeof data.actions === "object" && data.actions !== null
+      ? (data.actions as Record<string, unknown>)
+      : {};
+  out.actions = {
+    enabled: actions.builtins === true,
+    allowedOrigins: Array.isArray(actions.allowedOrigins)
+      ? actions.allowedOrigins.filter((item): item is string => typeof item === "string")
+      : [],
+  };
   return out;
 }
 
@@ -105,6 +125,7 @@ export class SolvChat extends HTMLElement {
       this.#renderShell();
       this.#initialized = true;
     }
+    setHighlightHost(this.#root);
 
     const assistant = this.#assistant();
     if (assistant) {
@@ -117,6 +138,7 @@ export class SolvChat extends HTMLElement {
   }
 
   disconnectedCallback(): void {
+    clearHighlight();
     if (this.#abortController) {
       this.#abortController.abort();
       this.#abortController = null;
@@ -303,6 +325,8 @@ export class SolvChat extends HTMLElement {
     } else {
       this.removeAttribute("data-position");
     }
+    // Registered after the config says so, and removed if it says not to.
+    installBuiltins(this.#config.actions);
     this.#renderSuggestions();
   }
 
@@ -822,6 +846,7 @@ export class SolvChat extends HTMLElement {
     const results = [];
     for (const request of toRun) {
       if (signal.aborted) return;
+      clearHighlight();
       const result = await runAction(request);
       if (signal.aborted) return;
       results.push(result);

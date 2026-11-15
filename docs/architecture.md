@@ -241,6 +241,14 @@ Built in:
 - `fill` — put values into form fields the owner has marked as fillable. It never
   submits.
 
+The owner marks what the built-ins may touch with two attributes:
+`data-solv-target="<name>"` on anything `highlight` may point at, and
+`data-solv-fill="<name>"` on each field `fill` may set; `data-solv-no-fill` on
+a form or any ancestor takes everything inside it out of scope. The model is
+given these names, never a selector, so what it can reach is exactly what the
+markup offers. Password, payment and one-time-code fields are refused even
+when marked.
+
 Custom: the site registers its own actions in code,
 
 ```js
