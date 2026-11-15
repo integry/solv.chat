@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -233,48 +233,109 @@ async function launchChromium(): Promise<{
     [
       "--headless=new",
       "--no-sandbox",
+      "--disable-setuid-sandbox",
       "--disable-gpu",
       "--disable-dev-shm-usage",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-sync",
+      "--disable-extensions",
+      "--password-store=basic",
+      "--use-mock-keychain",
       "--remote-debugging-port=0",
       `--user-data-dir=${userDataDir}`,
       "about:blank",
     ],
-    { stdio: ["ignore", "ignore", "pipe"] },
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        DBUS_SESSION_BUS_ADDRESS: "/dev/null",
+      },
+    },
   );
 
-  const wsBrowserUrl = await new Promise<string>((resolveUrl, rejectUrl) => {
-    const timer = setTimeout(() => {
-      rejectUrl(new Error("Timed out waiting for Chromium DevTools endpoint"));
-    }, 10_000);
-    let stderr = "";
-    proc.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-      const match = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
-      if (match?.[1]) {
+  try {
+    const devToolsPortPath = resolve(userDataDir, "DevToolsActivePort");
+    const wsBrowserUrl = await new Promise<string>((resolveUrl, rejectUrl) => {
+      let settled = false;
+      let output = "";
+
+      const finish = (err: Error | null, url?: string) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        resolveUrl(match[1]);
-      }
-    });
-    proc.on("exit", (code) => {
-      clearTimeout(timer);
-      rejectUrl(new Error(`Chromium exited early with code ${code}: ${stderr}`));
-    });
-  });
+        clearInterval(pollTimer);
+        if (err) {
+          rejectUrl(err);
+        } else if (url) {
+          resolveUrl(url);
+        }
+      };
 
-  const devToolsOrigin = new URL(wsBrowserUrl).origin.replace(/^ws:/, "http:");
-  const targets = (await (await fetch(`${devToolsOrigin}/json/list`)).json()) as Array<{
-    type: string;
-    webSocketDebuggerUrl?: string;
-  }>;
-  const pageTarget = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
-  if (!pageTarget?.webSocketDebuggerUrl) {
-    throw new Error("Could not find Chromium page target");
+      const checkOutput = (chunk: Buffer) => {
+        output += chunk.toString("utf8");
+        const match = output.match(/DevTools listening on (ws:\/\/[^\s]+)/);
+        if (match?.[1]) {
+          finish(null, match[1]);
+        }
+      };
+
+      const timer = setTimeout(() => {
+        finish(
+          new Error(
+            `Timed out waiting for Chromium DevTools endpoint (${chromePath}). Output: ${output.slice(0, 500)}`,
+          ),
+        );
+      }, 25_000);
+
+      const pollTimer = setInterval(() => {
+        if (!existsSync(devToolsPortPath)) return;
+        try {
+          const lines = readFileSync(devToolsPortPath, "utf8").trim().split(/\r?\n/);
+          const port = lines[0]?.trim();
+          const wsPath = lines[1]?.trim();
+          if (port && wsPath) {
+            finish(null, `ws://127.0.0.1:${port}${wsPath}`);
+          }
+        } catch {
+          // File may still be partially written; retry on next tick.
+        }
+      }, 100);
+
+      proc.stdout?.on("data", checkOutput);
+      proc.stderr?.on("data", checkOutput);
+      proc.on("error", (err) => {
+        finish(new Error(`Failed to spawn Chromium (${chromePath}): ${err.message}`));
+      });
+      proc.on("exit", (code) => {
+        finish(new Error(`Chromium exited early with code ${code}: ${output.slice(0, 500)}`));
+      });
+    });
+
+    const devToolsOrigin = new URL(wsBrowserUrl).origin.replace(/^ws:/, "http:");
+    const targets = (await (await fetch(`${devToolsOrigin}/json/list`)).json()) as Array<{
+      type: string;
+      webSocketDebuggerUrl?: string;
+    }>;
+    const pageTarget = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+    if (!pageTarget?.webSocketDebuggerUrl) {
+      throw new Error("Could not find Chromium page target");
+    }
+
+    const cdp = await CdpClient.connect(pageTarget.webSocketDebuggerUrl);
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    return { process: proc, cdp, userDataDir };
+  } catch (err) {
+    if (proc.exitCode === null) {
+      proc.kill("SIGKILL");
+    }
+    rmSync(userDataDir, { recursive: true, force: true });
+    throw err;
   }
-
-  const cdp = await CdpClient.connect(pageTarget.webSocketDebuggerUrl);
-  await cdp.send("Page.enable");
-  await cdp.send("Runtime.enable");
-  return { process: proc, cdp, userDataDir };
 }
 
 describe("Admin layout regressions (Chromium)", () => {
@@ -329,7 +390,7 @@ describe("Admin layout regressions (Chromium)", () => {
     chromeProc = launched.process;
     cdp = launched.cdp;
     userDataDir = launched.userDataDir;
-  }, 30_000);
+  }, 45_000);
 
   afterAll(async () => {
     cdp?.close();
