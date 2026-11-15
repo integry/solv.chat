@@ -20,6 +20,23 @@ export { type Chunk, chunkMarkdown, MAX_CHARS, OVERLAP_CHARS } from "./ingest/ch
 export { type IngestConsumerDeps, runIngestBatch } from "./ingest/consumer.js";
 export { type ResolvedChunk, resolveChunks } from "./ingest/resolve.js";
 export {
+  callTool,
+  listTools,
+  MCP_MAX_RESPONSE_BYTES,
+  MCP_MAX_TOOL_RESULT_CHARS,
+  MCP_MAX_TOOLS,
+  MCP_TIMEOUT_MS,
+  type McpCallResult,
+  type McpClientOptions,
+} from "./mcp/client.js";
+export {
+  type McpAuthKind,
+  McpError,
+  type McpFailure,
+  type McpTarget,
+  type McpToolSpec,
+} from "./mcp/types.js";
+export {
   ANTHROPIC_MODELS,
   costMicros,
   EMBEDDING_MODEL,

@@ -23,7 +23,11 @@ export const MAX_CHAT_HISTORY_TURNS = 6;
 export const MAX_PAGE_ACTIONS = 16;
 export const MAX_ACTION_NAME_LENGTH = 64;
 export const MAX_ACTION_DESCRIPTION_LENGTH = 200;
-export const MAX_ACTION_SCHEMA_BYTES = 4096;
+/**
+ * Maximum serialised size in bytes for a single input schema, shared by page
+ * actions and MCP tools so one cap governs every schema shown to the model.
+ */
+export const MAX_ACTION_SCHEMA_BYTES = 16 * 1024;
 export const MAX_ACTION_RESULT_BYTES = 8192;
 
 /** The name pattern actions must match, so a name can never look like prose. */
