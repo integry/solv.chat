@@ -223,6 +223,54 @@ describe("action schema validator", () => {
     expect(validate(schema, { plan: "pro", extra: true })).toBe("unexpected extra");
   });
 
+  it("requires own properties for Object.prototype names, including in nested objects", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        constructor: { type: "string" },
+        nested: {
+          type: "object",
+          properties: {
+            toString: { type: "string" },
+          },
+          required: ["toString"],
+        },
+      },
+      required: ["constructor", "nested"],
+    };
+
+    expect(validate(schema, { nested: { toString: "ok" } })).toBe("missing constructor");
+    expect(validate(schema, { constructor: undefined, nested: { toString: "ok" } })).toBe(
+      "missing constructor",
+    );
+    expect(validate(schema, { constructor: "v1", nested: {} })).toBe("nested is not valid");
+    expect(validate(schema, { constructor: "v1", nested: { toString: "ok" } })).toBeNull();
+  });
+
+  it("validates composite enum members across JSON round trips", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        selection: {
+          enum: [{ id: "inv_1", tags: ["a", "b"] }, ["x", 1], null],
+        },
+      },
+      required: ["selection"],
+    };
+
+    const matchingObject = JSON.parse('{"selection":{"tags":["a","b"],"id":"inv_1"}}');
+    const matchingArray = JSON.parse('{"selection":["x",1]}');
+    const matchingNull = JSON.parse('{"selection":null}');
+    const mismatchObject = JSON.parse('{"selection":{"id":"inv_2","tags":["a","b"]}}');
+    const mismatchArray = JSON.parse('{"selection":["x",2]}');
+
+    expect(validate(schema, matchingObject)).toBeNull();
+    expect(validate(schema, matchingArray)).toBeNull();
+    expect(validate(schema, matchingNull)).toBeNull();
+    expect(validate(schema, mismatchObject)).toBe("selection is not an allowed value");
+    expect(validate(schema, mismatchArray)).toBe("selection is not an allowed value");
+  });
+
   it("validates nested objects and typed arrays", () => {
     const schema = {
       type: "object",
@@ -313,6 +361,57 @@ describe("runAction", () => {
     expect(invalid.ok).toBe(false);
     expect(invalid.error).toContain("id must be a string");
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing Object.prototype-named required inputs and accepts JSON-parsed composite enums in runAction", async () => {
+    const protoRun = vi.fn();
+    register({
+      name: "proto_action",
+      description: "Test Object.prototype required property",
+      input: {
+        type: "object",
+        properties: { constructor: { type: "string" } },
+        required: ["constructor"],
+      },
+      confirm: false,
+      run: protoRun,
+    });
+
+    const missingProto = await runAction({
+      callId: "call_proto",
+      name: "proto_action",
+      input: JSON.parse("{}"),
+      confirm: false,
+    });
+    expect(missingProto.ok).toBe(false);
+    expect(missingProto.error).toContain("missing constructor");
+    expect(protoRun).not.toHaveBeenCalled();
+
+    const enumRun = vi.fn((input) => ({ selected: input.selection }));
+    register({
+      name: "select_item",
+      description: "Select a composite enum item",
+      input: {
+        type: "object",
+        properties: { selection: { enum: [{ id: "inv_1" }] } },
+        required: ["selection"],
+      },
+      confirm: false,
+      run: enumRun,
+    });
+
+    const matched = await runAction({
+      callId: "call_enum_ok",
+      name: "select_item",
+      input: JSON.parse('{"selection":{"id":"inv_1"}}'),
+      confirm: false,
+    });
+    expect(matched).toEqual({
+      callId: "call_enum_ok",
+      ok: true,
+      result: '{"selected":{"id":"inv_1"}}',
+    });
+    expect(enumRun).toHaveBeenCalledTimes(1);
   });
 
   it("refuses confirmation-required actions when no confirmation handler is available", async () => {

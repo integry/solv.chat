@@ -209,12 +209,12 @@ export function validate(schema: Record<string, unknown>, value: unknown): strin
   const required = Array.isArray(schema.required) ? schema.required : [];
 
   for (const key of required) {
-    if (typeof key !== "string" || !(key in value) || value[key] === undefined) {
+    if (typeof key !== "string" || !Object.hasOwn(value, key) || value[key] === undefined) {
       return `missing ${String(key)}`;
     }
   }
   for (const [key, raw] of Object.entries(value)) {
-    const property = properties[key];
+    const property = Object.hasOwn(properties, key) ? properties[key] : undefined;
     // An unexpected key is refused rather than ignored: the model chose it,
     // and the page's run() was written against the schema it declared.
     if (!isRecord(property)) return `unexpected ${key}`;
@@ -224,8 +224,22 @@ export function validate(schema: Record<string, unknown>, value: unknown): strin
   return null;
 }
 
+function jsonEquals(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, index) => jsonEquals(item, b[index]));
+  }
+  if (isRecord(a) && isRecord(b)) {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((key) => Object.hasOwn(b, key) && jsonEquals(a[key], b[key]));
+  }
+  return false;
+}
+
 function checkValue(schema: Record<string, unknown>, value: unknown, path: string): string | null {
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value as never)) {
+  if (Array.isArray(schema.enum) && !schema.enum.some((allowed) => jsonEquals(allowed, value))) {
     return `${path} is not an allowed value`;
   }
   if (schema.type === undefined && Array.isArray(schema.enum)) {
