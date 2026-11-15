@@ -5,18 +5,39 @@ import type { ToolDefinition } from "../providers/types.js";
 import { openSecret } from "../security/secretBox.js";
 import type { ToolRunner, ToolRunResult } from "./toolLoop.js";
 
+// Both Anthropic and OpenAI restrict tool names to 1..64 characters matching ^[a-zA-Z0-9_-]+$.
+// Sources (checked 2026-11-15):
+// - https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview
+// - https://developers.openai.com/api/docs/guides/function-calling
+export const MAX_TOOL_ALIAS_LENGTH = 64;
+export const TOOL_ALIAS_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+function sanitizeToolBase(toolName: string): string {
+  const cleaned = toolName.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return cleaned.length > 0 ? cleaned : "tool";
+}
+
 /**
- * Model-visible name for a tool. Two servers may both offer `search`, so the
- * server is part of the name: otherwise the engine would have to choose which
- * server a call meant, and choosing would mean guessing which credential to
- * spend.
- *
- * Prefixed with `m` so the name always starts with a letter even when the
- * server id suffix begins with a digit, keeping it within both providers'
- * tool-name rules.
+ * Derives a unique model-visible alias from `toolName`, truncated to fit
+ * provider limits and suffixed with a short counter on any collision.
  */
-function qualifiedName(serverId: string, toolName: string): string {
-  return `m${serverId.slice(-8)}__${toolName}`;
+function allocateAlias(toolName: string, usedNames: Set<string>): string {
+  const base = sanitizeToolBase(toolName);
+  let candidate = base.slice(0, MAX_TOOL_ALIAS_LENGTH);
+  if (!usedNames.has(candidate)) {
+    usedNames.add(candidate);
+    return candidate;
+  }
+
+  for (let counter = 2; ; counter++) {
+    const suffix = `_${counter}`;
+    const prefixLength = Math.max(0, MAX_TOOL_ALIAS_LENGTH - suffix.length);
+    candidate = `${base.slice(0, prefixLength)}${suffix}`;
+    if (!usedNames.has(candidate)) {
+      usedNames.add(candidate);
+      return candidate;
+    }
+  }
 }
 
 export interface McpRunnerDeps {
@@ -38,6 +59,7 @@ export async function mcpRunnerFor(
   deps: McpRunnerDeps,
   assistantId: string,
   allowedToolNames: readonly string[],
+  reservedNames: Iterable<string> = [],
 ): Promise<ToolRunner | null> {
   // Already filtered to allowed tools on enabled servers, inside this org.
   const rows = await deps.tenant.mcp.listAllowedTools(assistantId);
@@ -47,26 +69,38 @@ export async function mcpRunnerFor(
   const usable = rows.filter((row) => published.has(row.name));
   if (usable.length === 0) return null;
 
-  const byQualified = new Map(usable.map((row) => [qualifiedName(row.serverId, row.name), row]));
-  const definitions: ToolDefinition[] = usable.map((row) => ({
-    name: qualifiedName(row.serverId, row.name),
-    // The server's own description, passed through as data. It reaches the
-    // prompt as part of the tool list, never as an instruction, and the safety
-    // frame says tool text is to be read and not obeyed.
-    description: row.description,
-    inputSchema: row.inputSchema,
-  }));
+  // Explicit per-request alias table: alias -> { serverId, toolName, row }.
+  // Page actions and MCP tools share `usedNames` so an MCP alias never
+  // collides with a page action's name.
+  const usedNames = new Set(reservedNames);
+  const aliasTable = new Map<
+    string,
+    { serverId: string; toolName: string; row: (typeof usable)[number] }
+  >();
+  const definitions: ToolDefinition[] = [];
+
+  for (const row of usable) {
+    const alias = allocateAlias(row.name, usedNames);
+    aliasTable.set(alias, { serverId: row.serverId, toolName: row.name, row });
+    definitions.push({
+      name: alias,
+      // The server's own description, passed through as data. It reaches the
+      // prompt as part of the tool list, never as an instruction, and the safety
+      // frame says tool text is to be read and not obeyed.
+      description: row.description,
+      inputSchema: row.inputSchema,
+    });
+  }
 
   return {
     kind: "mcp",
     definitions,
     async run(call, signal): Promise<ToolRunResult> {
-      const row = byQualified.get(call.name);
-      if (!row) {
-        // Cannot happen through the loop, which only calls names it offered,
-        // but a wrong answer here would be a call with the wrong credential.
-        return { content: "That tool is not available.", isError: true };
+      const entry = aliasTable.get(call.name);
+      if (!entry) {
+        return { content: `No tool named ${call.name} is available.`, isError: true };
       }
+      const { serverId, toolName, row } = entry;
 
       let target: McpTarget;
       try {
@@ -79,7 +113,7 @@ export async function mcpRunnerFor(
                 // Opened here, per call, and held only for this request: the
                 // specification says "decrypted only inside the Worker at call
                 // time", and a runner that kept it would widen that window.
-                headerValue: await openCredential(deps, row.serverId),
+                headerValue: await openCredential(deps, serverId),
               }
             : {}),
         };
@@ -87,14 +121,14 @@ export async function mcpRunnerFor(
         // Typically SOLV_SECRET_KEY was rotated without re-entering the keys.
         // The owner needs to know; the visitor gets an answer without the tool.
         console.error("mcp: stored credential could not be read", {
-          serverId: row.serverId,
+          serverId,
           reason: err instanceof Error ? err.message : "unknown error",
         });
         return { content: "That tool is not available right now.", isError: true };
       }
 
       try {
-        const result = await callTool(target, row.name, call.input, {
+        const result = await callTool(target, toolName, call.input, {
           fetchImpl: deps.fetchImpl,
           signal,
         });

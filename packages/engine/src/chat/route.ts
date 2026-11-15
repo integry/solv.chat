@@ -228,6 +228,7 @@ async function resolveAnswerDeps(params: {
   const actionRunner = params.preview
     ? null
     : actionRunnerFor(params.pageActions, { builtinsEnabled: params.actionsEnabled });
+  const reservedNames = actionRunner ? actionRunner.definitions.map((d) => d.name) : [];
   // No tool switched on and published means no runner, so the request
   // carries no `tools` key and this is phase 1 behaviour exactly.
   const mcp = await mcpRunnerFor(
@@ -238,6 +239,7 @@ async function resolveAnswerDeps(params: {
     },
     params.assistantId,
     params.allowedTools,
+    reservedNames,
   );
   const runners: ToolRunner[] = [];
   if (actionRunner) runners.push(actionRunner);

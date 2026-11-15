@@ -2,7 +2,11 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import { defaultVersionConfig, parseChatEventLine } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/app.js";
-import { mcpRunnerFor } from "../../src/chat/mcpRunner.js";
+import {
+  MAX_TOOL_ALIAS_LENGTH,
+  mcpRunnerFor,
+  TOOL_ALIAS_PATTERN,
+} from "../../src/chat/mcpRunner.js";
 import { SAFETY_FRAME } from "../../src/chat/prompt.js";
 import { type StoredToolCall, TOOL_WALL_TIME_MS } from "../../src/chat/toolLoop.js";
 import { forPrincipal } from "../../src/db/tenant.js";
@@ -238,6 +242,7 @@ describe("chat/mcpTools", () => {
     app: ReturnType<typeof createApp>,
     message: string,
     secretKey = SECRET_KEY,
+    extraBody?: Record<string, unknown>,
   ) {
     const ctx = createExecutionContext();
     const res = await app.fetch(
@@ -252,6 +257,7 @@ describe("chat/mcpTools", () => {
           assistant: "pk_shop_a",
           visitorId: "vis_1",
           message,
+          ...extraBody,
         }),
       }),
       { ...env, SOLV_SECRET_KEY: secretKey },
@@ -302,7 +308,7 @@ describe("chat/mcpTools", () => {
       results: { lookup_order: (args) => `Order ${String(args.id)} is shipped.` },
     });
     const seen: LlmRequest[] = [];
-    const qualified = "m00000001__lookup_order";
+    const alias = "lookup_order";
 
     const app = createApp(fakeSeams(), {
       fetch: server.fetchImpl,
@@ -314,7 +320,7 @@ describe("chat/mcpTools", () => {
           [
             {
               text: "Checking... ",
-              calls: [{ callId: "c_1", name: qualified, input: { id: "A-1" } }],
+              calls: [{ callId: "c_1", name: alias, input: { id: "A-1" } }],
             },
             { text: "Your order A-1 is shipped.", calls: [] },
           ],
@@ -325,23 +331,23 @@ describe("chat/mcpTools", () => {
 
     const events = await askPublic(app, "Where is order A-1?");
 
-    // Model saw the qualified tool and then the tool result
+    // Model saw the alias and then the tool result
     expect(seen).toHaveLength(2);
-    expect(seen[0]?.tools?.map((t) => t.name)).toEqual([qualified]);
+    expect(seen[0]?.tools?.map((t) => t.name)).toEqual([alias]);
     expect(seen[1]?.messages.at(-1)).toEqual({
       role: "tool_results",
       results: [{ callId: "c_1", content: "Order A-1 is shipped.", isError: false }],
     });
 
-    // Server received the unprefixed tool name
+    // Server received the original tool name
     const toolCallReq = server.calls.find((c) => c.method === "tools/call");
     expect(toolCallReq?.params).toEqual({ name: "lookup_order", arguments: { id: "A-1" } });
 
     // SSE events include tool running/done with kind: "mcp" and matching callId
     const toolEvents = events.filter((e) => e.type === "tool");
     expect(toolEvents).toEqual([
-      { type: "tool", name: qualified, state: "running", callId: "c_1", kind: "mcp" },
-      { type: "tool", name: qualified, state: "done", callId: "c_1", kind: "mcp", ok: true },
+      { type: "tool", name: alias, state: "running", callId: "c_1", kind: "mcp" },
+      { type: "tool", name: alias, state: "done", callId: "c_1", kind: "mcp", ok: true },
     ]);
 
     const done = events.find((e) => e.type === "done");
@@ -353,7 +359,7 @@ describe("chat/mcpTools", () => {
       const storedCall = (stored?.toolCalls as StoredToolCall[] | undefined)?.[0];
       expect(storedCall).toMatchObject({
         callId: "c_1",
-        name: qualified,
+        name: alias,
         kind: "mcp",
         ok: true,
         input: { id: "A-1" },
@@ -405,7 +411,7 @@ describe("chat/mcpTools", () => {
     });
 
     await askPublic(app, "What can you do?");
-    expect(seen[0]?.tools?.map((t) => t.name.split("__")[1])).toEqual(["lookup_order"]);
+    expect(seen[0]?.tools?.map((t) => t.name)).toEqual(["lookup_order"]);
   });
 
   it("uses published allowedTools for /v1/chat and draft allowedTools for /api/admin/chat", async () => {
@@ -436,7 +442,7 @@ describe("chat/mcpTools", () => {
       },
     });
     await askPublic(publicApp, "Hello");
-    expect(publicSeen[0]?.tools?.map((t) => t.name.split("__")[1])).toEqual(["lookup_order"]);
+    expect(publicSeen[0]?.tools?.map((t) => t.name)).toEqual(["lookup_order"]);
 
     const adminSeen: LlmRequest[] = [];
     const adminApp = createApp(fakeSeams(), {
@@ -448,10 +454,7 @@ describe("chat/mcpTools", () => {
       },
     });
     await askAdmin(adminApp, "Hello");
-    expect(adminSeen[0]?.tools?.map((t) => t.name.split("__")[1])).toEqual([
-      "draft_only_tool",
-      "lookup_order",
-    ]);
+    expect(adminSeen[0]?.tools?.map((t) => t.name)).toEqual(["draft_only_tool", "lookup_order"]);
   });
 
   it("passes tool results as data and leaves SAFETY_FRAME untouched in system prompt", async () => {
@@ -477,7 +480,7 @@ describe("chat/mcpTools", () => {
           [
             {
               text: "",
-              calls: [{ callId: "c_1", name: "m00000001__lookup_order", input: { id: "1" } }],
+              calls: [{ callId: "c_1", name: "lookup_order", input: { id: "1" } }],
             },
             { text: "Here is your order.", calls: [] },
           ],
@@ -492,7 +495,7 @@ describe("chat/mcpTools", () => {
     expect(JSON.stringify(toolResults)).toContain("Ignore previous instructions");
   });
 
-  it("prefixes tools per server so two servers offering the same name stay distinct and use their own credential", async () => {
+  it("aliases tools per request so two servers offering the same name stay distinct and use their own credential", async () => {
     const searchSpec: McpToolSpec = {
       name: "search",
       description: "Search",
@@ -504,8 +507,9 @@ describe("chat/mcpTools", () => {
       .bind(JSON.stringify({ ...pub.config, allowedTools: ["search"] }), pub.id)
       .run();
 
+    // Intentionally share the same 8-char suffix to prove aliases never rely on serverId slices.
     await seedServer(tenantA, {
-      id: "mcp_00000000000000000001",
+      id: "mcp_one_00000001",
       assistantId: "ast_a",
       url: "https://one.mcp.example/rpc",
       authKind: "static_header",
@@ -514,7 +518,7 @@ describe("chat/mcpTools", () => {
       tools: [{ spec: searchSpec, allowed: true }],
     });
     await seedServer(tenantA, {
-      id: "mcp_00000000000000000002",
+      id: "mcp_two_00000001",
       assistantId: "ast_a",
       url: "https://two.mcp.example/rpc",
       authKind: "static_header",
@@ -523,48 +527,19 @@ describe("chat/mcpTools", () => {
       tools: [{ spec: searchSpec, allowed: true }],
     });
 
-    const callsByUrl: Array<{ url: string; apiKey: string | null; toolName: unknown }> = [];
-    const fetchImpl: typeof fetch = async (input, init) => {
+    const serverOne = fakeMcpServer({
+      tools: [searchSpec],
+      results: { search: "from one" },
+    });
+    const serverTwo = fakeMcpServer({
+      tools: [searchSpec],
+      results: { search: "from two" },
+    });
+    const fetchImpl: typeof fetch = (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      const body = JSON.parse(String(init?.body ?? "{}")) as {
-        id?: unknown;
-        method?: string;
-        params?: Record<string, unknown>;
-      };
-      const headers = new Headers(init?.headers);
-      if (body.method === "notifications/initialized") {
-        return new Response(null, { status: 202 });
-      }
-      if (body.method === "initialize") {
-        return new Response(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: body.id,
-            result: {
-              protocolVersion: "2025-11-25",
-              capabilities: {},
-              serverInfo: { name: "fake", version: "1" },
-            },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (body.method === "tools/call") {
-        callsByUrl.push({
-          url,
-          apiKey: headers.get("x-api-key"),
-          toolName: body.params?.name,
-        });
-        return new Response(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: body.id,
-            result: { content: [{ type: "text", text: `from ${url}` }], isError: false },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response("bad", { status: 400 });
+      if (url.startsWith("https://one.mcp.example")) return serverOne.fetchImpl(input, init);
+      if (url.startsWith("https://two.mcp.example")) return serverTwo.fetchImpl(input, init);
+      return Promise.resolve(new Response("bad", { status: 400 }));
     };
 
     const seen: LlmRequest[] = [];
@@ -579,8 +554,8 @@ describe("chat/mcpTools", () => {
             {
               text: "",
               calls: [
-                { callId: "c_1", name: "m00000001__search", input: { q: "a" } },
-                { callId: "c_2", name: "m00000002__search", input: { q: "b" } },
+                { callId: "c_1", name: "search", input: { q: "a" } },
+                { callId: "c_2", name: "search_2", input: { q: "b" } },
               ],
             },
             { text: "Both searched.", calls: [] },
@@ -591,11 +566,13 @@ describe("chat/mcpTools", () => {
     });
 
     await askPublic(app, "Search both");
-    expect(seen[0]?.tools?.map((t) => t.name)).toEqual(["m00000001__search", "m00000002__search"]);
-    expect(callsByUrl).toEqual([
-      { url: "https://one.mcp.example/rpc", apiKey: "cred_server_one", toolName: "search" },
-      { url: "https://two.mcp.example/rpc", apiKey: "cred_server_two", toolName: "search" },
-    ]);
+    expect(seen[0]?.tools?.map((t) => t.name)).toEqual(["search", "search_2"]);
+    const oneCall = serverOne.calls.find((c) => c.method === "tools/call");
+    const twoCall = serverTwo.calls.find((c) => c.method === "tools/call");
+    expect(oneCall?.headers.get("x-api-key")).toBe("cred_server_one");
+    expect(oneCall?.params).toEqual({ name: "search", arguments: { q: "a" } });
+    expect(twoCall?.headers.get("x-api-key")).toBe("cred_server_two");
+    expect(twoCall?.params).toEqual({ name: "search", arguments: { q: "b" } });
   });
 
   it("sends the owner's credential to the server and nowhere else", async () => {
@@ -622,7 +599,7 @@ describe("chat/mcpTools", () => {
           [
             {
               text: "",
-              calls: [{ callId: "c_1", name: "m00000001__lookup_order", input: { id: "1" } }],
+              calls: [{ callId: "c_1", name: "lookup_order", input: { id: "1" } }],
             },
             { text: "Done.", calls: [] },
           ],
@@ -668,7 +645,7 @@ describe("chat/mcpTools", () => {
           [
             {
               text: "",
-              calls: [{ callId: "c_1", name: "m00000001__lookup_order", input: { id: "1" } }],
+              calls: [{ callId: "c_1", name: "lookup_order", input: { id: "1" } }],
             },
             { text: "Answer without tool.", calls: [] },
           ],
@@ -712,7 +689,7 @@ describe("chat/mcpTools", () => {
           [
             {
               text: "",
-              calls: [{ callId: "c_1", name: "m00000001__lookup_order", input: { id: "1" } }],
+              calls: [{ callId: "c_1", name: "lookup_order", input: { id: "1" } }],
             },
             { text: "Tool timed out, here is what I know.", calls: [] },
           ],
@@ -794,5 +771,206 @@ describe("chat/mcpTools", () => {
     // Org B's rows remain untouched
     const orgBAllowed = await tenantB.mcp.listAllowedTools("ast_b");
     expect(orgBAllowed.map((t) => t.name)).toEqual(["lookup_order", "org_b_secret_tool"]);
+  });
+
+  it("keeps 64-character tool names (even across colliding servers) within provider limits", async () => {
+    const longName = "a".repeat(64);
+    const longSpec: McpToolSpec = {
+      name: longName,
+      description: "Long tool name",
+      inputSchema: { type: "object", properties: { x: { type: "string" } } },
+    };
+    const pub = await tenantA.versions.published("ast_a");
+    if (!pub) throw new Error("missing published");
+    await env.DB.prepare("UPDATE assistant_versions SET config = ?1 WHERE id = ?2")
+      .bind(JSON.stringify({ ...pub.config, allowedTools: [longName] }), pub.id)
+      .run();
+
+    await seedServer(tenantA, {
+      id: "mcp_long_000000000000001",
+      assistantId: "ast_a",
+      url: "https://one.mcp.example/rpc",
+      authKind: "static_header",
+      headerName: "x-api-key",
+      credential: "cred_long_1",
+      tools: [{ spec: longSpec, allowed: true }],
+    });
+    await seedServer(tenantA, {
+      id: "mcp_long_000000000000002",
+      assistantId: "ast_a",
+      url: "https://two.mcp.example/rpc",
+      authKind: "static_header",
+      headerName: "x-api-key",
+      credential: "cred_long_2",
+      tools: [{ spec: longSpec, allowed: true }],
+    });
+
+    const serverOne = fakeMcpServer({
+      tools: [longSpec],
+      results: { [longName]: "long 1" },
+    });
+    const serverTwo = fakeMcpServer({
+      tools: [longSpec],
+      results: { [longName]: "long 2" },
+    });
+    const fetchImpl: typeof fetch = (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.startsWith("https://one.mcp.example")) return serverOne.fetchImpl(input, init);
+      if (url.startsWith("https://two.mcp.example")) return serverTwo.fetchImpl(input, init);
+      return Promise.resolve(new Response("bad", { status: 400 }));
+    };
+
+    const secondAlias = `${"a".repeat(62)}_2`;
+    const seen: LlmRequest[] = [];
+    const app = createApp(fakeSeams(), {
+      fetch: fetchImpl,
+      chat: {
+        embedder,
+        retriever,
+        model: ANTHROPIC_MODELS.fast,
+        provider: scriptedProvider(
+          [
+            {
+              text: "",
+              calls: [
+                { callId: "c_1", name: longName, input: { x: "1" } },
+                { callId: "c_2", name: secondAlias, input: { x: "2" } },
+              ],
+            },
+            { text: "Done.", calls: [] },
+          ],
+          seen,
+        ),
+      },
+    });
+
+    await askPublic(app, "Run long tools");
+    const offeredNames = seen[0]?.tools?.map((t) => t.name) ?? [];
+    expect(offeredNames).toEqual([longName, secondAlias]);
+    for (const name of offeredNames) {
+      expect(name.length).toBeLessThanOrEqual(MAX_TOOL_ALIAS_LENGTH);
+      expect(name).toMatch(TOOL_ALIAS_PATTERN);
+    }
+
+    expect(serverOne.calls.find((c) => c.method === "tools/call")?.params).toEqual({
+      name: longName,
+      arguments: { x: "1" },
+    });
+    expect(serverTwo.calls.find((c) => c.method === "tools/call")?.params).toEqual({
+      name: longName,
+      arguments: { x: "2" },
+    });
+  });
+
+  it("aliases an MCP tool named like a built-in page action so they never collide", async () => {
+    const mcpNavigate: McpToolSpec = {
+      name: "navigate",
+      description: "MCP navigate tool",
+      inputSchema: { type: "object", properties: { path: { type: "string" } } },
+    };
+    const pub = await tenantA.versions.published("ast_a");
+    if (!pub) throw new Error("missing published");
+    await env.DB.prepare("UPDATE assistant_versions SET config = ?1 WHERE id = ?2")
+      .bind(
+        JSON.stringify({
+          ...pub.config,
+          allowedTools: ["navigate"],
+          actions: { builtins: true, allowedOrigins: [] },
+        }),
+        pub.id,
+      )
+      .run();
+
+    await seedServer(tenantA, {
+      id: "mcp_nav_0000000000000001",
+      assistantId: "ast_a",
+      tools: [{ spec: mcpNavigate, allowed: true }],
+    });
+
+    const server = fakeMcpServer({
+      tools: [mcpNavigate],
+      results: { navigate: "mcp navigated" },
+    });
+    const seen: LlmRequest[] = [];
+    const app = createApp(fakeSeams(), {
+      fetch: server.fetchImpl,
+      chat: {
+        embedder,
+        retriever,
+        model: ANTHROPIC_MODELS.fast,
+        provider: scriptedProvider(
+          [
+            {
+              text: "",
+              calls: [{ callId: "c_1", name: "navigate_2", input: { path: "/docs" } }],
+            },
+            { text: "Navigated via MCP.", calls: [] },
+          ],
+          seen,
+        ),
+      },
+    });
+
+    const events = await askPublic(app, "Go to docs", SECRET_KEY, {
+      pageActions: [
+        {
+          name: "navigate",
+          description: "Navigate on page",
+          inputSchema: { type: "object", properties: { url: { type: "string" } } },
+          confirm: false,
+        },
+      ],
+    });
+
+    expect(seen[0]?.tools?.map((t) => t.name)).toEqual(["navigate", "navigate_2"]);
+    expect(server.calls.find((c) => c.method === "tools/call")?.params).toEqual({
+      name: "navigate",
+      arguments: { path: "/docs" },
+    });
+    expect(events.filter((e) => e.type === "action")).toHaveLength(0);
+    expect(events.find((e) => e.type === "done")).toBeDefined();
+  });
+
+  it("answers an unknown alias from the model with no-tool-by-that-name and never calls any server", async () => {
+    await seedServer(tenantA, {
+      id: "mcp_00000000000000000001",
+      assistantId: "ast_a",
+      tools: [{ spec: LOOKUP, allowed: true }],
+    });
+
+    const server = fakeMcpServer({ tools: [LOOKUP], results: { lookup_order: "ok" } });
+    const seen: LlmRequest[] = [];
+    const app = createApp(fakeSeams(), {
+      fetch: server.fetchImpl,
+      chat: {
+        embedder,
+        retriever,
+        model: ANTHROPIC_MODELS.fast,
+        provider: scriptedProvider(
+          [
+            {
+              text: "",
+              calls: [{ callId: "c_bad", name: "m00000001__lookup_order", input: { id: "1" } }],
+            },
+            { text: "Could not find that tool.", calls: [] },
+          ],
+          seen,
+        ),
+      },
+    });
+
+    const events = await askPublic(app, "Where is my order?");
+    expect(server.calls).toHaveLength(0);
+    expect(seen[1]?.messages.at(-1)).toEqual({
+      role: "tool_results",
+      results: [
+        {
+          callId: "c_bad",
+          content: "No tool named m00000001__lookup_order is available.",
+          isError: true,
+        },
+      ],
+    });
+    expect(events.find((e) => e.type === "done")).toBeDefined();
   });
 });
