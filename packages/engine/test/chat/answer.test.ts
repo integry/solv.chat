@@ -696,7 +696,10 @@ describe("chat/answer", () => {
     await waitOnExecutionContext(visitorCtx);
 
     expect(seenRequests[1]?.messages).toHaveLength(1);
-    expect(seenRequests[1]?.messages[0]?.content).not.toContain("Injected prior turn");
+    const firstMessage = seenRequests[1]?.messages[0];
+    expect(firstMessage && "content" in firstMessage ? firstMessage.content : "").not.toContain(
+      "Injected prior turn",
+    );
   });
 
   it("meters a failed stream's model usage only when reported, and always the question's embedding", async () => {
@@ -1018,9 +1021,8 @@ describe("chat/answer", () => {
             fetchImpl: async () =>
               eventStreamResponse(
                 [
-                  'data: {"choices":[{"delta":{"content":"Partial"},"finish_reason":null}]}\n\n',
-                  'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
-                  'data: {"choices":[],"usage":{"prompt_tokens":130,"completion_tokens":18}}\n\n',
+                  'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Partial"}\n\n',
+                  'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":130,"output_tokens":18}}}\n\n',
                 ],
                 new Error("connection dropped"),
               ),

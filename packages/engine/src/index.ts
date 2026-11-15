@@ -59,7 +59,16 @@ export {
   type VectorRecord,
   vectorizeRetriever,
 } from "./providers/retrieval.js";
-export type { LlmChunk, LlmMessage, LlmProvider, LlmRequest } from "./providers/types.js";
+export type {
+  LlmChunk,
+  LlmMessage,
+  LlmProvider,
+  LlmRequest,
+  LlmToolResult,
+  StopReason,
+  ToolCall,
+  ToolDefinition,
+} from "./providers/types.js";
 export type {
   AuthProvider,
   KeyProvider,

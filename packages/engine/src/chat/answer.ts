@@ -239,7 +239,7 @@ export async function* answerMessage(
         // Forward immediately rather than buffering: the visible difference
         // between this product and a form is that the answer starts at once.
         yield { type: "token", text: chunk.text };
-      } else {
+      } else if (chunk.kind === "usage") {
         tokensIn = chunk.tokensIn;
         tokensOut = chunk.tokensOut;
         usageReported = true;

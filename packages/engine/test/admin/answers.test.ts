@@ -290,7 +290,10 @@ describe("admin answers API", () => {
       name: "anthropic",
       model: ANTHROPIC_MODELS.fast.id,
       async *stream(req) {
-        capturedContext = [req.system, ...req.messages.map((m) => m.content)].join("\n");
+        capturedContext = [
+          req.system,
+          ...req.messages.map((m) => ("content" in m ? m.content : "")),
+        ].join("\n");
         yield { kind: "text", text: "Students get 50% off." };
         yield { kind: "usage", tokensIn: 20, tokensOut: 10 };
       },

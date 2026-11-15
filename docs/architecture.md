@@ -215,12 +215,10 @@ credential. The rules that follow from that:
 - Per-conversation caps on the number of tool calls and on wall time.
 - Server URLs must be https and must not resolve to private or loopback ranges.
 
-Phase 2 note on OpenAI: the phase 1 provider calls Chat Completions. Per the
-model pages checked on 2026-11-14 (https://developers.openai.com/api/docs/models),
-`gpt-6.1-sol` supports tool calling only through the Responses API, and
-`gpt-6-luna` supports function calling on Chat Completions only with reasoning
-effort `none`. The task that adds tools re-reads those pages and moves the
-OpenAI provider to the Responses API if that is still the case.
+Phase 2 note on OpenAI: the phase 1 provider called Chat Completions. Per the
+model pages checked on 2026-11-15 (https://developers.openai.com/api/docs/models),
+both `gpt-6.1-sol` and `gpt-6-luna` support tool calling through the Responses
+API (`/v1/responses`), so `openaiProvider` uses the Responses API.
 
 The MCP client loop is provider-independent. A provider-native MCP connector may
 be added later behind the same interface.
