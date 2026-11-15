@@ -5,8 +5,13 @@ import {
   defaultVersionConfig,
   Errors,
   fail,
+  MAX_ACTION_DESCRIPTION_LENGTH,
+  MAX_ACTION_NAME_LENGTH,
+  MAX_ACTION_RESULT_BYTES,
+  MAX_ACTION_SCHEMA_BYTES,
   MAX_CHAT_HISTORY_TURNS,
   MAX_DOCUMENT_MARKDOWN_BYTES,
+  MAX_PAGE_ACTIONS,
   ok,
   parseAssistantInput,
   parseChatEventLine,
@@ -278,9 +283,23 @@ describe("parseDocumentInput", () => {
 });
 
 describe("chat schema and protocol", () => {
-  it("exposes protocol version 1", () => {
-    expect(CHAT_PROTOCOL_VERSION).toBe(1);
-    expect(SUPPORTED_CHAT_PROTOCOLS).toEqual([1]);
+  it("exposes protocol version 2 and supports 1 and 2", () => {
+    expect(CHAT_PROTOCOL_VERSION).toBe(2);
+    expect(SUPPORTED_CHAT_PROTOCOLS).toEqual([1, 2]);
+  });
+
+  it("still parses the exact request body the phase 1 widget sends", () => {
+    // Copied from packages/widget/src/element.ts as shipped in phase 1. If this
+    // ever fails, a deployed widget has stopped working.
+    const res = parseChatRequest({
+      protocol: 1,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "How do I reset my password?",
+      conversationId: "cnv_1",
+      pageUrl: "https://example.com/help",
+    });
+    expect(res.ok).toBe(true);
   });
 
   it("parses a valid chat request and drops unknown keys", () => {
@@ -412,7 +431,28 @@ describe("chat schema and protocol", () => {
       { type: "token", text: "Hello " },
       { type: "citation", url: "https://example.com/docs", title: "Docs" },
       { type: "tool", name: "lookup", state: "running" },
+      {
+        type: "tool",
+        name: "lookup_order",
+        state: "done",
+        callId: "call_1",
+        kind: "mcp",
+        ok: true,
+      },
+      {
+        type: "action",
+        callId: "call_2",
+        name: "navigate",
+        input: { path: "/billing" },
+        confirm: false,
+      },
       { type: "done", messageId: "msg_1", conversationId: "cnv_1" },
+      {
+        type: "done",
+        messageId: "msg_2",
+        conversationId: "cnv_1",
+        awaitingActions: ["call_2"],
+      },
       { type: "error", message: "Rate limit exceeded" },
     ];
 
@@ -425,10 +465,207 @@ describe("chat schema and protocol", () => {
     }
   });
 
-  it("returns unknown for unrecognised event names and malformed data without throwing", () => {
-    expect(parseChatEventLine("action", '{"kind":"navigate"}')).toEqual({
+  it("keeps a v2 tool event readable by a v1 reader", () => {
+    const line = serializeChatEvent({
+      type: "tool",
+      name: "lookup_order",
+      state: "done",
+      callId: "call_1",
+      kind: "mcp",
+      ok: true,
+    });
+    const [nameLine, dataLine] = line.trim().split("\n");
+    const parsed = parseChatEventLine(
+      (nameLine ?? "").replace(/^event: /, ""),
+      (dataLine ?? "").replace(/^data: /, ""),
+    );
+    // A v1 widget reads name and state; the detail is additive.
+    expect(parsed).toMatchObject({ type: "tool", name: "lookup_order", state: "done" });
+  });
+
+  it("treats an action event as unknown when the reader does not know the name and drops extra keys on known events", () => {
+    // The forward-compatibility rule the phase 1 comment promised.
+    expect(parseChatEventLine("action_v3", '{"callId":"c1"}')).toEqual({
       type: "unknown",
-      name: "action",
+      name: "action_v3",
+    });
+    expect(
+      parseChatEventLine(
+        "action",
+        '{"callId":"c1","name":"navigate","input":{"path":"/home"},"confirm":true,"extra":"ignored"}',
+      ),
+    ).toEqual({
+      type: "action",
+      callId: "c1",
+      name: "navigate",
+      input: { path: "/home" },
+      confirm: true,
+    });
+  });
+
+  it("parses, trims, and deduplicates pageActions and rejects over-cap values", () => {
+    const valid = parseChatRequest({
+      protocol: 2,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "Take me to billing",
+      pageActions: [
+        {
+          name: "  navigate  ",
+          description: "  Go to a page  ",
+          inputSchema: { type: "object", properties: { path: { type: "string" } } },
+          confirm: true,
+        },
+        {
+          name: "navigate",
+          description: "Duplicate ignored",
+          inputSchema: { type: "object" },
+          confirm: false,
+        },
+      ],
+    });
+    expect(valid.ok).toBe(true);
+    if (valid.ok) {
+      expect(valid.value.pageActions).toEqual([
+        {
+          name: "navigate",
+          description: "Go to a page",
+          inputSchema: { type: "object", properties: { path: { type: "string" } } },
+          confirm: true,
+        },
+      ]);
+    }
+
+    const tooMany = parseChatRequest({
+      protocol: 2,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "hi",
+      pageActions: Array.from({ length: MAX_PAGE_ACTIONS + 1 }, (_, i) => ({
+        name: `act_${i}`,
+        description: "desc",
+        inputSchema: { type: "object" },
+      })),
+    });
+    expect(tooMany.ok).toBe(false);
+    if (!tooMany.ok) {
+      expect(tooMany.errors.some((e) => e.startsWith("pageActions:"))).toBe(true);
+    }
+
+    const badName = parseChatRequest({
+      protocol: 2,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "hi",
+      pageActions: [
+        {
+          name: "a".repeat(MAX_ACTION_NAME_LENGTH + 1),
+          description: "desc",
+          inputSchema: { type: "object" },
+        },
+      ],
+    });
+    expect(badName.ok).toBe(false);
+    if (!badName.ok) {
+      expect(badName.errors.some((e) => e.startsWith("pageActions[0].name:"))).toBe(true);
+    }
+
+    const badDesc = parseChatRequest({
+      protocol: 2,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "hi",
+      pageActions: [
+        {
+          name: "navigate",
+          description: "d".repeat(MAX_ACTION_DESCRIPTION_LENGTH + 1),
+          inputSchema: { type: "object" },
+        },
+      ],
+    });
+    expect(badDesc.ok).toBe(false);
+    if (!badDesc.ok) {
+      expect(badDesc.errors.some((e) => e.startsWith("pageActions[0].description:"))).toBe(true);
+    }
+
+    const bigSchema = parseChatRequest({
+      protocol: 2,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      message: "hi",
+      pageActions: [
+        {
+          name: "navigate",
+          description: "desc",
+          inputSchema: { pad: "x".repeat(MAX_ACTION_SCHEMA_BYTES) },
+        },
+      ],
+    });
+    expect(bigSchema.ok).toBe(false);
+    if (!bigSchema.ok) {
+      expect(bigSchema.errors.some((e) => e.startsWith("pageActions[0].inputSchema:"))).toBe(true);
+    }
+  });
+
+  it("requires resumeMessageId with actionResults, allows absent message, rejects neither, and caps result size", () => {
+    const neither = parseChatRequest({
+      protocol: 2,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+    });
+    expect(neither.ok).toBe(false);
+    if (!neither.ok) {
+      expect(neither.errors.some((e) => e.startsWith("message:"))).toBe(true);
+    }
+
+    const missingResume = parseChatRequest({
+      protocol: 2,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      actionResults: [{ callId: "call_1", ok: true, result: "{}" }],
+    });
+    expect(missingResume.ok).toBe(false);
+    if (!missingResume.ok) {
+      expect(missingResume.errors.some((e) => e.startsWith("resumeMessageId:"))).toBe(true);
+    }
+
+    const valid = parseChatRequest({
+      protocol: 2,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      conversationId: "cnv_1",
+      resumeMessageId: "msg_1",
+      actionResults: [{ callId: "call_1", ok: true, result: "{}" }],
+    });
+    expect(valid.ok).toBe(true);
+    if (valid.ok) expect(valid.value.message).toBeUndefined();
+
+    const oversizedResult = parseChatRequest({
+      protocol: 2,
+      assistant: "pk_abc123",
+      visitorId: "vis_1",
+      conversationId: "cnv_1",
+      resumeMessageId: "msg_1",
+      actionResults: [
+        {
+          callId: "call_1",
+          ok: true,
+          result: "r".repeat(MAX_ACTION_RESULT_BYTES + 1),
+        },
+      ],
+    });
+    expect(oversizedResult.ok).toBe(false);
+    if (!oversizedResult.ok) {
+      expect(oversizedResult.errors.some((e) => e.startsWith("actionResults[0].result:"))).toBe(
+        true,
+      );
+    }
+  });
+
+  it("returns unknown for unrecognised event names and malformed data without throwing", () => {
+    expect(parseChatEventLine("future_event", '{"kind":"navigate"}')).toEqual({
+      type: "unknown",
+      name: "future_event",
     });
     expect(parseChatEventLine("token", "{not valid json")).toEqual({
       type: "unknown",
