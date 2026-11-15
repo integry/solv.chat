@@ -1,7 +1,16 @@
 {
   "name": "@solvchat/cli",
   "version": "0.0.0",
+  "description": "CLI and GitHub Action for pushing content and running answer tests on solv.chat.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/integry/solv.chat.git",
+    "directory": "packages/cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "solv": "./bin/solv.js"

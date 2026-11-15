@@ -84,11 +84,14 @@ export type {
 } from "./providers/types.js";
 export {
   type AuthProvider,
+  type EmbeddingsProviderName,
   type KeyProvider,
   type LimitAction,
   type LimitDecision,
   type Limits,
+  type LlmProviderName,
   type Principal,
+  type ScopeClaim,
   type Seams,
   StoredKeyError,
   type UsageEvent,
