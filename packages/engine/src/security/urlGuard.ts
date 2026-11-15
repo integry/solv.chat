@@ -291,6 +291,12 @@ export interface FollowOptions {
   accept?: string;
   signal?: AbortSignal;
   resolveHost?: HostResolver | undefined;
+  /** Defaults to GET, so every existing caller is unchanged. */
+  method?: "GET" | "POST" | undefined;
+  /** Sent only with a method that takes one. */
+  body?: string | undefined;
+  /** Extra request headers, such as an MCP server's static credential. */
+  headers?: Record<string, string> | undefined;
 }
 
 export interface FetchCappedOptions extends FollowOptions {
@@ -422,17 +428,28 @@ export async function followCheckingEachHop(
         throw new UnsafeUrlError("request timed out");
       }
       await resolveAndAssertPublicIp(current, fetchImpl, options.resolveHost, controller.signal);
+      const method = options.method ?? "GET";
       const init: RequestInit = {
-        method: "GET",
+        method,
         redirect: "manual",
         signal: controller.signal,
-        headers: options.accept ? { accept: options.accept } : {},
+        headers: {
+          ...(options.accept ? { accept: options.accept } : {}),
+          ...(options.headers ?? {}),
+        },
+        ...(options.body !== undefined && method !== "GET" ? { body: options.body } : {}),
       };
       const response = await fetchImpl(current.href, init);
 
       if (REDIRECT_STATUSES.has(response.status)) {
         // Cancel the redirect body so connections are not held open.
         await response.body?.cancel().catch(() => {});
+        if (method !== "GET") {
+          // Following would mean deciding whether to re-send the body and
+          // whether the method survives; both answers are wrong often enough
+          // that the owner is better told to use the final URL.
+          throw new UnsafeUrlError("must not redirect; use the URL it redirects to");
+        }
         if (redirects >= options.maxRedirects) {
           throw new UnsafeUrlError(`exceeded ${options.maxRedirects} redirects`);
         }

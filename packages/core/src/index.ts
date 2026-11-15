@@ -6,6 +6,7 @@ export {
   type ChatEvent,
   type ChatHistoryTurn,
   type ChatRequest,
+  MAX_ACTION_SCHEMA_BYTES,
   MAX_CHAT_HISTORY_TURNS,
   MAX_CHAT_MESSAGE_LENGTH,
   parseChatEventLine,

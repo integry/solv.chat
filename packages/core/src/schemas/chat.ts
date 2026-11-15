@@ -15,6 +15,8 @@ export const CHAT_PROTOCOL_VERSION = 1;
 export const SUPPORTED_CHAT_PROTOCOLS: readonly number[] = [1];
 export const MAX_CHAT_MESSAGE_LENGTH = 4000;
 export const MAX_CHAT_HISTORY_TURNS = 6;
+/** Maximum serialised size in bytes for a single tool or page-action input schema. */
+export const MAX_ACTION_SCHEMA_BYTES = 16 * 1024;
 
 export interface ChatHistoryTurn {
   role: "user" | "assistant";
