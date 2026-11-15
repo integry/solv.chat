@@ -1,8 +1,14 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ApiError } from "./api/client.js";
 import type { Assistant } from "./api/types.js";
 import { useResource } from "./api/useResource.js";
-import { type ScreenId, useRoute } from "./routing.js";
+import {
+  ADMIN_API_HELPERS,
+  type MountAdminOptions,
+  type ResolvedAdminConfig,
+  resolveAdminConfig,
+} from "./extension.js";
+import { type BuiltinScreenId, useRoute } from "./routing.js";
 import { Behaviour } from "./screens/Behaviour.js";
 import { Conversations } from "./screens/Conversations.js";
 import { Gaps } from "./screens/Gaps.js";
@@ -21,7 +27,7 @@ import { TryItPane } from "./shell/TryItPane.js";
 import { AssistantMutationsProvider } from "./shell/useAssistantMutations.js";
 import { useSession } from "./shell/useSession.js";
 
-function renderScreen(screen: ScreenId, assistantId: string) {
+function renderBuiltinScreen(screen: BuiltinScreenId, assistantId: string) {
   switch (screen) {
     case "overview":
       return <Overview key={assistantId} assistantId={assistantId} />;
@@ -48,8 +54,14 @@ function renderScreen(screen: ScreenId, assistantId: string) {
   }
 }
 
-function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
-  const { screen, navigate } = useRoute();
+function AdminShell({
+  config,
+  onSignOut,
+}: {
+  config: ResolvedAdminConfig;
+  onSignOut: () => Promise<void>;
+}) {
+  const { screen, navigate } = useRoute(config.navItems);
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -74,6 +86,7 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
       ? selectedId
       : (assistants[0]?.id ?? null);
   const selectedAssistant = assistants.find((a) => a.id === effectiveSelectedId) ?? null;
+  const ExtraScreen = config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
 
   return (
     <div className="shell">
@@ -104,11 +117,17 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
       )}
 
       <div className="shell-body">
-        <Navigation current={screen} onNavigate={navigate} />
+        <Navigation current={screen} onNavigate={navigate} items={config.navItems} />
 
         <AssistantMutationsProvider>
           <main className="shell-main">
-            {screen === "providers" ? (
+            {ExtraScreen ? (
+              <ExtraScreen
+                assistant={selectedAssistant}
+                assistantId={selectedAssistant?.id ?? null}
+                api={ADMIN_API_HELPERS}
+              />
+            ) : screen === "providers" ? (
               <Providers />
             ) : assistantsRes.status === "loading" && assistants.length === 0 ? (
               <p className="muted">Loading assistants…</p>
@@ -121,7 +140,7 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
                 <p className="muted">Create an assistant to begin.</p>
               </div>
             ) : (
-              renderScreen(screen, selectedAssistant.id)
+              renderBuiltinScreen(screen as BuiltinScreenId, selectedAssistant.id)
             )}
           </main>
         </AssistantMutationsProvider>
@@ -133,15 +152,26 @@ function AdminShell({ onSignOut }: { onSignOut: () => Promise<void> }) {
   );
 }
 
-export function App() {
-  const session = useSession();
+export interface AppProps {
+  options?: MountAdminOptions;
+  /** @internal Pre-resolved config passed by `mountAdmin`. */
+  config?: ResolvedAdminConfig;
+}
+
+export function App({ options, config: preResolved }: AppProps = {}) {
+  const resolved = useMemo(
+    () => preResolved ?? resolveAdminConfig(options),
+    [preResolved, options],
+  );
+  const session = useSession(resolved.onSignOut);
 
   if (session.state === "loading") {
     return <p className="loading-screen">Loading…</p>;
   }
 
   if (session.state === "signed-out") {
-    return <Login onSignedIn={session.refresh} />;
+    const SignIn = resolved.signIn ?? Login;
+    return <SignIn onSignedIn={session.refresh} />;
   }
 
   if (session.state === "unavailable") {
@@ -155,5 +185,5 @@ export function App() {
     );
   }
 
-  return <AdminShell onSignOut={session.signOut} />;
+  return <AdminShell config={resolved} onSignOut={session.signOut} />;
 }
