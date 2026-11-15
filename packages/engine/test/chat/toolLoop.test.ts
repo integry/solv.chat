@@ -14,6 +14,7 @@ import {
 } from "../../src/chat/toolLoop.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { ANTHROPIC_MODELS, costMicros } from "../../src/models.js";
+import { ProviderError } from "../../src/providers/error.js";
 import type {
   LlmProvider,
   LlmRequest,
@@ -684,5 +685,439 @@ describe("chat/toolLoop", () => {
       expect(parsed[0]?.resultBytes).toBe(new TextEncoder().encode(hugeBody).byteLength);
       expect(parsed[0]?.resultPreview).toBe("A".repeat(200));
     }
+  });
+
+  it("enforces the wall-time deadline when a runner ignores AbortSignal and skips remaining calls in the batch", async () => {
+    vi.useFakeTimers();
+    try {
+      const seenRequests: LlmRequest[] = [];
+      let runs = 0;
+      const hangingRunner: ToolRunner = {
+        kind: "mcp",
+        definitions: [LOOKUP_TOOL],
+        run() {
+          runs += 1;
+          return new Promise(() => {});
+        },
+      };
+      const provider = scriptedProvider(
+        [
+          {
+            text: "",
+            calls: [
+              { callId: "c_hang", name: "lookup_order", input: { id: "1" } },
+              { callId: "c_skip", name: "lookup_order", input: { id: "2" } },
+            ],
+          },
+          { text: "Finished after timeout.", calls: [] },
+        ],
+        seenRequests,
+      );
+
+      const loop = runToolLoop(
+        {
+          provider,
+          model: ANTHROPIC_MODELS.fast,
+          runners: [hangingRunner],
+          priorCalls: 0,
+          onModelUsage: async () => {},
+        },
+        { system: SAFETY_FRAME, messages: [{ role: "user", content: "q" }], maxTokens: 100 },
+      );
+
+      const events: unknown[] = [];
+      const donePromise = (async () => {
+        for (;;) {
+          const step = await loop.next();
+          if (step.done) return step.value;
+          events.push(step.value);
+        }
+      })();
+
+      await vi.advanceTimersByTimeAsync(TOOL_WALL_TIME_MS + 10);
+      const outcome = await donePromise;
+
+      expect(runs).toBe(1);
+      expect(outcome.text).toBe("Finished after timeout.");
+      expect(outcome.calls).toHaveLength(2);
+      expect(outcome.calls.every((c) => c.ok === false)).toBe(true);
+      expect(seenRequests[1]?.messages.at(-1)).toEqual({
+        role: "tool_results",
+        results: [
+          { callId: "c_hang", content: "The tool did not answer in time.", isError: true },
+          { callId: "c_skip", content: "The tool did not answer in time.", isError: true },
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains reserved conversation tool budget when an answer fails with ProviderError", async () => {
+    await tenant.conversations.create({
+      id: "cnv_fail",
+      assistantId: "ast_1",
+      visitorId: "vis_1",
+      startedAt: 1000,
+      pageUrl: "https://site.example/",
+    });
+    await tenant.messages.create({
+      id: "msg_q0",
+      conversationId: "cnv_fail",
+      role: "user",
+      content: "Earlier question",
+      citations: [],
+      toolCalls: null,
+      tokensIn: 0,
+      tokensOut: 0,
+      answered: true,
+      createdAt: 1100,
+    });
+    const priorCalls: StoredToolCall[] = Array.from(
+      { length: MAX_TOOL_CALLS_PER_CONVERSATION - 1 },
+      (_, i) => ({
+        callId: `prior_${i}`,
+        name: "lookup_order",
+        kind: "mcp",
+        ok: true,
+        ms: 5,
+        input: { id: `${i}` },
+        resultBytes: 2,
+        resultPreview: "{}",
+      }),
+    );
+    await tenant.messages.create({
+      id: "msg_a0",
+      conversationId: "cnv_fail",
+      role: "assistant",
+      content: "Earlier answer",
+      citations: [],
+      toolCalls: priorCalls,
+      tokensIn: 10,
+      tokensOut: 10,
+      answered: true,
+      createdAt: 1200,
+      replyTo: "msg_q0",
+    });
+
+    let toolRuns = 0;
+    const runner: ToolRunner = {
+      kind: "mcp",
+      definitions: [LOOKUP_TOOL],
+      async run() {
+        toolRuns += 1;
+        return { content: "{}", isError: false };
+      },
+    };
+
+    let failCall = 0;
+    const failingProvider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        if (failCall++ === 0) {
+          yield {
+            kind: "tool_call",
+            call: { callId: "c_20", name: "lookup_order", input: { id: "20" } },
+          };
+          yield { kind: "usage", tokensIn: 10, tokensOut: 5, stopReason: "tools" };
+          return;
+        }
+        throw new ProviderError("upstream error", true, 502);
+      },
+    };
+
+    const eventsA = await collectEvents(
+      answerMessage(
+        {
+          tenant,
+          embedder,
+          retriever,
+          provider: failingProvider,
+          model: ANTHROPIC_MODELS.fast,
+          usage: { record: async () => {} },
+          runners: [runner],
+        },
+        {
+          orgId: TEST_ORG_ID,
+          assistantId: "ast_1",
+          visitorId: "vis_1",
+          conversationId: "cnv_fail",
+          message: "Check order status in your account.",
+          behaviour,
+        },
+      ),
+    );
+    expect(toolRuns).toBe(1);
+    expect(eventsA.some((e) => e.type === "error")).toBe(true);
+
+    const seenB: LlmRequest[] = [];
+    const eventsB = await collectEvents(
+      answerMessage(
+        {
+          tenant,
+          embedder,
+          retriever,
+          provider: scriptedProvider(
+            [
+              { text: "", calls: [{ callId: "c_21", name: "lookup_order", input: { id: "21" } }] },
+              { text: "Cap reached.", calls: [] },
+            ],
+            seenB,
+          ),
+          model: ANTHROPIC_MODELS.fast,
+          usage: { record: async () => {} },
+          runners: [runner],
+        },
+        {
+          orgId: TEST_ORG_ID,
+          assistantId: "ast_1",
+          visitorId: "vis_1",
+          conversationId: "cnv_fail",
+          message: "Check order status in your account.",
+          behaviour,
+        },
+      ),
+    );
+    expect(toolRuns).toBe(1);
+    expect(seenB.at(-1)?.tools).toBeUndefined();
+    expect(eventsB.filter((e) => e.type === "token")).toEqual([
+      { type: "token", text: "Cap reached." },
+    ]);
+  });
+
+  it("prevents overlapping requests from exceeding the per-conversation tool cap", async () => {
+    await tenant.conversations.create({
+      id: "cnv_race",
+      assistantId: "ast_1",
+      visitorId: "vis_1",
+      startedAt: 1000,
+      pageUrl: "https://site.example/",
+    });
+    await tenant.messages.create({
+      id: "msg_q0",
+      conversationId: "cnv_race",
+      role: "user",
+      content: "Earlier question",
+      citations: [],
+      toolCalls: null,
+      tokensIn: 0,
+      tokensOut: 0,
+      answered: true,
+      createdAt: 1100,
+    });
+    const priorCalls: StoredToolCall[] = Array.from(
+      { length: MAX_TOOL_CALLS_PER_CONVERSATION - 1 },
+      (_, i) => ({
+        callId: `prior_${i}`,
+        name: "lookup_order",
+        kind: "mcp",
+        ok: true,
+        ms: 5,
+        input: { id: `${i}` },
+        resultBytes: 2,
+        resultPreview: "{}",
+      }),
+    );
+    await tenant.messages.create({
+      id: "msg_a0",
+      conversationId: "cnv_race",
+      role: "assistant",
+      content: "Earlier answer",
+      citations: [],
+      toolCalls: priorCalls,
+      tokensIn: 10,
+      tokensOut: 10,
+      answered: true,
+      createdAt: 1200,
+      replyTo: "msg_q0",
+    });
+
+    let toolRuns = 0;
+    const runner: ToolRunner = {
+      kind: "mcp",
+      definitions: [LOOKUP_TOOL],
+      async run() {
+        toolRuns += 1;
+        await new Promise((r) => setTimeout(r, 20));
+        return { content: "{}", isError: false };
+      },
+    };
+
+    const reqA: LlmRequest[] = [];
+    const reqB: LlmRequest[] = [];
+    const [eventsA, eventsB] = await Promise.all([
+      collectEvents(
+        answerMessage(
+          {
+            tenant,
+            embedder,
+            retriever,
+            provider: scriptedProvider(
+              [
+                { text: "", calls: [{ callId: "c_a", name: "lookup_order", input: { id: "a" } }] },
+                { text: "Done A.", calls: [] },
+              ],
+              reqA,
+            ),
+            model: ANTHROPIC_MODELS.fast,
+            usage: { record: async () => {} },
+            runners: [runner],
+          },
+          {
+            orgId: TEST_ORG_ID,
+            assistantId: "ast_1",
+            visitorId: "vis_1",
+            conversationId: "cnv_race",
+            message: "Check order status in your account.",
+            behaviour,
+          },
+        ),
+      ),
+      collectEvents(
+        answerMessage(
+          {
+            tenant,
+            embedder,
+            retriever,
+            provider: scriptedProvider(
+              [
+                { text: "", calls: [{ callId: "c_b", name: "lookup_order", input: { id: "b" } }] },
+                { text: "Done B.", calls: [] },
+              ],
+              reqB,
+            ),
+            model: ANTHROPIC_MODELS.fast,
+            usage: { record: async () => {} },
+            runners: [runner],
+          },
+          {
+            orgId: TEST_ORG_ID,
+            assistantId: "ast_1",
+            visitorId: "vis_1",
+            conversationId: "cnv_race",
+            message: "Check order status in your account.",
+            behaviour,
+          },
+        ),
+      ),
+    ]);
+
+    expect(toolRuns).toBe(1);
+    expect(eventsA.at(-1)?.type).toBe("done");
+    expect(eventsB.at(-1)?.type).toBe("done");
+  });
+
+  it("strips caller-supplied tools when runners are empty or tools are disabled after a cap", async () => {
+    const emptyRunnerReqs: LlmRequest[] = [];
+    const emptyLoop = runToolLoop(
+      {
+        provider: scriptedProvider([{ text: "No tools.", calls: [] }], emptyRunnerReqs),
+        model: ANTHROPIC_MODELS.fast,
+        runners: [],
+        priorCalls: 0,
+        onModelUsage: async () => {},
+      },
+      {
+        system: SAFETY_FRAME,
+        messages: [{ role: "user", content: "q" }],
+        maxTokens: 100,
+        tools: [LOOKUP_TOOL],
+      },
+    );
+    await collectEvents(emptyLoop);
+    expect(emptyRunnerReqs).toHaveLength(1);
+    expect(emptyRunnerReqs[0] && "tools" in emptyRunnerReqs[0]).toBe(false);
+
+    const cappedReqs: LlmRequest[] = [];
+    const runner: ToolRunner = {
+      kind: "mcp",
+      definitions: [LOOKUP_TOOL],
+      async run() {
+        return { content: "{}", isError: false };
+      },
+    };
+    const cappedLoop = runToolLoop(
+      {
+        provider: scriptedProvider(
+          [
+            { text: "", calls: [{ callId: "c1", name: "lookup_order", input: { id: "1" } }] },
+            { text: "Final without tools.", calls: [] },
+          ],
+          cappedReqs,
+        ),
+        model: ANTHROPIC_MODELS.fast,
+        runners: [runner],
+        priorCalls: MAX_TOOL_CALLS_PER_CONVERSATION,
+        onModelUsage: async () => {},
+      },
+      {
+        system: SAFETY_FRAME,
+        messages: [{ role: "user", content: "q" }],
+        maxTokens: 100,
+        tools: [NAVIGATE_TOOL],
+      },
+    );
+    const iter = cappedLoop[Symbol.asyncIterator]();
+    let finalOutcome: { text: string; calls: StoredToolCall[] } | undefined;
+    for (;;) {
+      const step = await iter.next();
+      if (step.done) {
+        finalOutcome = step.value;
+        break;
+      }
+    }
+    expect(finalOutcome?.text).toBe("Final without tools.");
+    expect(cappedReqs).toHaveLength(2);
+    expect(cappedReqs[0]?.tools).toEqual([LOOKUP_TOOL]);
+    expect(cappedReqs[1] && "tools" in cappedReqs[1]).toBe(false);
+  });
+
+  it("normalizes ProviderError thrown by a runner into an error tool result", async () => {
+    const seenRequests: LlmRequest[] = [];
+    const runner: ToolRunner = {
+      kind: "mcp",
+      definitions: [LOOKUP_TOOL],
+      async run() {
+        throw new ProviderError("secret upstream failure", true, 502);
+      },
+    };
+
+    const events = await collectEvents(
+      answerMessage(
+        {
+          tenant,
+          embedder,
+          retriever,
+          provider: scriptedProvider(
+            [
+              { text: "", calls: [{ callId: "c_pe", name: "lookup_order", input: { id: "1" } }] },
+              { text: "Handled tool error.", calls: [] },
+            ],
+            seenRequests,
+          ),
+          model: ANTHROPIC_MODELS.fast,
+          usage: { record: async () => {} },
+          runners: [runner],
+        },
+        {
+          orgId: TEST_ORG_ID,
+          assistantId: "ast_1",
+          visitorId: "vis_1",
+          message: "Check order status in your account.",
+          behaviour,
+        },
+      ),
+    );
+
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(events.filter((e) => e.type === "token")).toEqual([
+      { type: "token", text: "Handled tool error." },
+    ]);
+    expect(seenRequests[1]?.messages.at(-1)).toEqual({
+      role: "tool_results",
+      results: [{ callId: "c_pe", content: "The tool could not be called.", isError: true }],
+    });
+    expect(events.at(-1)?.type).toBe("done");
   });
 });

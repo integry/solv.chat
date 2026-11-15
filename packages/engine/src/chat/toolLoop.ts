@@ -1,6 +1,5 @@
 import { MAX_ACTION_RESULT_BYTES } from "@solvchat/core";
 import { costMicros, type ModelInfo } from "../models.js";
-import { ProviderError } from "../providers/error.js";
 import type {
   LlmChunk,
   LlmMessage,
@@ -71,6 +70,11 @@ export interface ToolLoopDeps {
   runners: readonly ToolRunner[];
   /** Calls already stored in this conversation, for the per-conversation cap. */
   priorCalls: number;
+  /**
+   * Atomically reserves `count` tool calls before dispatch. When omitted
+   * (previews or standalone callers), the loop checks `priorCalls + calls.length`.
+   */
+  reserveCalls?: ((count: number) => Promise<boolean>) | undefined;
   /** Recorded per model call so the spend cap sees real spend, not one event. */
   onModelUsage: (tokensIn: number, tokensOut: number, costMicros: number) => Promise<void>;
   now?: (() => number) | undefined;
@@ -98,6 +102,37 @@ function capResult(content: string): { content: string; bytes: number } {
 }
 
 /**
+ * Races runner completion against the shared AbortSignal so a runner that
+ * ignores `signal` cannot suspend the loop past the wall-time deadline.
+ */
+async function runWithDeadline(
+  runner: ToolRunner,
+  call: ToolCall,
+  signal: AbortSignal,
+): Promise<ToolRunResult> {
+  if (signal.aborted) {
+    throw new Error("Tool deadline exceeded");
+  }
+  const runPromise = Promise.resolve().then(() => runner.run(call, signal));
+  // Prevent unhandled rejection if the deadline fires first and the runner rejects later.
+  runPromise.catch(() => {});
+
+  let onAbort: (() => void) | undefined;
+  const deadlinePromise = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new Error("Tool deadline exceeded"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([runPromise, deadlinePromise]);
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
+/**
  * Streams an answer, running tools the model asks for until it stops asking or
  * a cap is reached. Provider-independent and tool-source-independent: the only
  * things it knows are the LlmProvider interface and the ToolRunner list.
@@ -122,6 +157,9 @@ export async function* runToolLoop(
     }
   }
 
+  // Strip any caller-supplied `tools` so disabling tools truly omits `tools`
+  // from subsequent provider requests and only offered runner definitions apply.
+  const { tools: _ignoredTools, ...baseRequest } = request;
   const messages: LlmMessage[] = [...request.messages];
   const calls: StoredToolCall[] = [];
   let text = "";
@@ -130,7 +168,7 @@ export async function* runToolLoop(
 
   for (let iteration = 0; ; iteration++) {
     const stream = deps.provider.stream({
-      ...request,
+      ...baseRequest,
       messages: [...messages],
       // Omitted once tools are exhausted or never offered, so a no-tools answer
       // serialises exactly as it did in phase 1.
@@ -178,9 +216,14 @@ export async function* runToolLoop(
     // Caps are checked after the model asked, not before: the model is allowed
     // to want a tool, it is just not allowed to get one.
     const overIterations = iteration >= MAX_TOOL_ITERATIONS;
-    const overConversation =
-      deps.priorCalls + calls.length + asked.length > MAX_TOOL_CALLS_PER_CONVERSATION;
     const overTime = clock() - startedAt >= TOOL_WALL_TIME_MS;
+    let overConversation = deps.reserveCalls
+      ? false
+      : deps.priorCalls + calls.length + asked.length > MAX_TOOL_CALLS_PER_CONVERSATION;
+
+    if (!overIterations && !overTime && !overConversation && deps.reserveCalls) {
+      overConversation = !(await deps.reserveCalls(asked.length));
+    }
 
     if (overIterations || overConversation || overTime) {
       if (budgetNoticeSent) return { text, calls };
@@ -206,25 +249,36 @@ export async function* runToolLoop(
 
     const controller = new AbortController();
     const remaining = Math.max(0, TOOL_WALL_TIME_MS - (clock() - startedAt));
-    const timer = setTimeout(() => controller.abort(), remaining);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (remaining === 0) {
+      controller.abort();
+    } else {
+      timer = setTimeout(() => controller.abort(), remaining);
+    }
     const results: LlmToolResult[] = [];
 
     try {
       for (const call of asked) {
         const runner = byName.get(call.name);
+        const timedOutBeforeStart =
+          controller.signal.aborted || clock() - startedAt >= TOOL_WALL_TIME_MS;
+        if (timedOutBeforeStart) {
+          controller.abort();
+        }
         yield { kind: "tool", call, state: "running", source: runner?.kind ?? "mcp" };
         const callStarted = clock();
         let outcome: ToolRunResult;
         try {
-          if (!runner) {
+          if (timedOutBeforeStart) {
+            outcome = { content: "The tool did not answer in time.", isError: true };
+          } else if (!runner) {
             // The model named a tool nobody offered. A result, not a throw: the
             // answer is still worth finishing.
             outcome = { content: `No tool named ${call.name} is available.`, isError: true };
           } else {
-            outcome = await runner.run(call, controller.signal);
+            outcome = await runWithDeadline(runner, call, controller.signal);
           }
-        } catch (err) {
-          if (err instanceof ProviderError) throw err;
+        } catch {
           // Nothing from the failure is forwarded: a server's error body can
           // quote the request, and this string reaches a prompt.
           outcome = {
@@ -257,7 +311,9 @@ export async function* runToolLoop(
         };
       }
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
     }
 
     messages.push(

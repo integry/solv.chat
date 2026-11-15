@@ -151,6 +151,34 @@ export function conversationsFor(db: D1Database, orgId: string) {
       };
     },
 
+    /**
+     * Atomically reserves `count` tool calls against `limit` for this
+     * conversation. Returns true if the reservation succeeded, false if it
+     * would exceed the cap (or the conversation does not exist in this org).
+     * Counts the higher of `tool_calls_used` and stored `messages.tool_calls`
+     * so pre-existing or seeded messages are never bypassed.
+     */
+    async reserveToolCalls(conversationId: string, count: number, limit: number): Promise<boolean> {
+      if (count <= 0) return true;
+      const priorSql = `COALESCE((
+        SELECT SUM(CASE WHEN (tool_calls IS NULL OR json_valid(tool_calls) = 0)
+                        THEN 0 ELSE json_array_length(tool_calls) END)
+          FROM messages
+         WHERE org_id = ?1 AND conversation_id = ?2
+      ), 0)`;
+      const res = await prepare(
+        db,
+        `UPDATE conversations
+            SET tool_calls_used = MAX(tool_calls_used, ${priorSql}) + ?3
+          WHERE org_id = ?1
+            AND id = ?2
+            AND MAX(tool_calls_used, ${priorSql}) + ?3 <= ?4`,
+      )
+        .bind(orgId, conversationId, count, limit)
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
     async updatePageUrl(id: string, pageUrl: string): Promise<boolean> {
       const res = await prepare(
         db,

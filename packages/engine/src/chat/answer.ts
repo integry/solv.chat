@@ -7,7 +7,12 @@ import { type Embedder, embeddingCostMicros, type Retriever } from "../providers
 import type { LlmMessage, LlmProvider } from "../providers/types.js";
 import type { UsageSink } from "../seams/types.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
-import { runToolLoop, type StoredToolCall, type ToolRunner } from "./toolLoop.js";
+import {
+  MAX_TOOL_CALLS_PER_CONVERSATION,
+  runToolLoop,
+  type StoredToolCall,
+  type ToolRunner,
+} from "./toolLoop.js";
 
 // A chunk below the floor is noise; including it would make the model answer
 // from unrelated pages, which is worse than admitting the gap. The numbers are
@@ -234,9 +239,17 @@ export async function* answerMessage(
     question: input.message,
   });
 
-  // Calls already stored in this conversation bound what this answer may add.
-  // Zero for a preview: nothing is stored, so nothing is counted.
-  const priorCalls = input.preview ? 0 : await deps.tenant.messages.countToolCalls(conversationId);
+  // Atomically reserve conversation tool budget before dispatch so failed
+  // answers and concurrent requests cannot exceed the per-conversation cap.
+  // Previews have no stored conversation row and stay bounded in-memory.
+  const reserveCalls = input.preview
+    ? undefined
+    : (count: number) =>
+        deps.tenant.conversations.reserveToolCalls(
+          conversationId,
+          count,
+          MAX_TOOL_CALLS_PER_CONVERSATION,
+        );
 
   let text = "";
   let toolCalls: StoredToolCall[] = [];
@@ -250,7 +263,8 @@ export async function* answerMessage(
         provider: deps.provider,
         model: deps.model,
         runners: deps.runners ?? [],
-        priorCalls,
+        priorCalls: 0,
+        reserveCalls,
         // One usage event per model call, so a three-call answer is three
         // events and the spend cap sees the real total; only the first counts
         // toward `usage_daily.messages` so Overview still counts answers.
