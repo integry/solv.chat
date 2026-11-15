@@ -1,6 +1,6 @@
 export type LlmChunk =
   | { kind: "text"; text: string }
-  | { kind: "usage"; tokensIn: number; tokensOut: number };
+  | { kind: "usage"; tokensIn: number; tokensOut: number; costMicros?: number | undefined };
 
 export interface LlmMessage {
   role: "user" | "assistant";
@@ -14,7 +14,7 @@ export interface LlmRequest {
 }
 
 export interface LlmProvider {
-  readonly name: "anthropic" | "openai";
+  readonly name: "anthropic" | "openai" | "openrouter";
   readonly model: string;
   /**
    * Streaming only. A non-streaming method would be a second code path to

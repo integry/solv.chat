@@ -19,7 +19,7 @@ export interface AnswerDeps {
   embedder: Embedder;
   retriever: Retriever;
   provider: LlmProvider;
-  model: ModelInfo;
+  model?: ModelInfo | undefined;
   usage: UsageSink;
   now?: (() => number) | undefined;
 }
@@ -100,7 +100,7 @@ async function recordMessageUsage(
   at: number,
   tokensIn: number,
   tokensOut: number,
-  cost: number,
+  cost: number | null,
 ): Promise<void> {
   // Usage goes through the seam, never straight into usage_daily: the hosted
   // service meters and bills from these events.
@@ -111,7 +111,8 @@ async function recordMessageUsage(
     messages: 1,
     tokensIn,
     tokensOut,
-    costMicros: cost,
+    costMicros: cost ?? 0,
+    ...(cost === null ? { costUnknown: true } : {}),
   });
 }
 
@@ -211,6 +212,7 @@ export async function* answerMessage(
         toolCalls: null,
         tokensIn: 0,
         tokensOut: 0,
+        costMicros: 0,
         answered: false,
         createdAt: clock(),
         replyTo: questionId,
@@ -230,7 +232,14 @@ export async function* answerMessage(
   let text = "";
   let tokensIn = 0;
   let tokensOut = 0;
+  let reportedCostMicros: number | undefined;
   let usageReported = false;
+
+  const resolveCost = (): number | null => {
+    if (reportedCostMicros !== undefined) return reportedCostMicros;
+    if (deps.model !== undefined) return costMicros(deps.model, tokensIn, tokensOut);
+    return null;
+  };
 
   try {
     for await (const chunk of deps.provider.stream(request)) {
@@ -242,6 +251,7 @@ export async function* answerMessage(
       } else {
         tokensIn = chunk.tokensIn;
         tokensOut = chunk.tokensOut;
+        reportedCostMicros = chunk.costMicros;
         usageReported = true;
       }
     }
@@ -249,14 +259,7 @@ export async function* answerMessage(
     // Whatever ended the stream, tokens the provider already reported are
     // billed and must reach the usage sink.
     if (usageReported) {
-      await recordMessageUsage(
-        deps,
-        input,
-        clock(),
-        tokensIn,
-        tokensOut,
-        costMicros(deps.model, tokensIn, tokensOut),
-      );
+      await recordMessageUsage(deps, input, clock(), tokensIn, tokensOut, resolveCost());
     }
     if (err instanceof ProviderError) {
       yield { type: "error", message: "The assistant could not complete this response." };
@@ -269,14 +272,8 @@ export async function* answerMessage(
   // is recorded before anything else can fail: emitting citations and storing
   // the reply both come after, and a rejected D1 write must not leave spend
   // out of Overview or the cap check. Recorded exactly once on this path.
-  await recordMessageUsage(
-    deps,
-    input,
-    clock(),
-    tokensIn,
-    tokensOut,
-    costMicros(deps.model, tokensIn, tokensOut),
-  );
+  const messageCost = resolveCost();
+  await recordMessageUsage(deps, input, clock(), tokensIn, tokensOut, messageCost);
 
   // Citations after the text: the widget renders them under the answer, and
   // emitting them first would show links before there is anything to link to.
@@ -297,6 +294,7 @@ export async function* answerMessage(
       toolCalls: null,
       tokensIn,
       tokensOut,
+      costMicros: messageCost,
       answered: true,
       createdAt: clock(),
       replyTo: questionId,

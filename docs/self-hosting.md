@@ -1,6 +1,6 @@
 # Self-hosting solv.chat
 
-You need a Cloudflare account, Node 24, an OpenAI key (always needed for embeddings), and an Anthropic key when answers come from Anthropic (the default).
+You need a Cloudflare account, Node 24, and keys for the providers you configure: by default, an Anthropic key for answers and an OpenAI key for embeddings (or a single OpenRouter key when both `SOLV_LLM_PROVIDER` and `SOLV_EMBEDDINGS_PROVIDER` are set to `"openrouter"`).
 
 ## 1. Clone, create Cloudflare resources, and migrate
 
@@ -32,9 +32,22 @@ Four secrets. Run `npx wrangler secret put <name>` inside `packages/engine` for 
 | `SOLV_ADMIN_PASSWORD` | The one password that signs you in to `/admin`.                                                  | You choose it (or generate one with `openssl rand -base64 24`).  |
 | `SOLV_SECRET_KEY`     | Signs session cookies today; will also encrypt stored MCP tool credentials in phase 2 (planned). | `openssl rand -base64 32`. Changing it signs you out everywhere. |
 | `SOLV_ANTHROPIC_KEY`  | Your Anthropic key, if the instance uses Anthropic.                                              | console.anthropic.com                                            |
-| `SOLV_OPENAI_KEY`     | Your OpenAI key. Needed for embeddings even when answers come from Anthropic.                    | platform.openai.com                                              |
+| `SOLV_OPENAI_KEY`     | Your OpenAI key. Needed for embeddings by default even when answers come from Anthropic.         | platform.openai.com                                              |
+| `SOLV_OPENROUTER_KEY` | Your OpenRouter key, if `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`.     | openrouter.ai                                                    |
 
 By default, `packages/engine/wrangler.jsonc` sets `SOLV_LLM_PROVIDER` to `"anthropic"` and `SOLV_LLM_TIER` to `"fast"`. To answer with OpenAI or switch tiers (`"fast"` or `"balanced"`), edit those two values under `vars` in `packages/engine/wrangler.jsonc`.
+
+To answer with any model on OpenRouter instead, set `SOLV_LLM_PROVIDER` to `"openrouter"` and `SOLV_LLM_MODEL` to the OpenRouter model slug (`SOLV_LLM_TIER` is ignored). You can also set `SOLV_EMBEDDINGS_PROVIDER` to `"openrouter"` to embed with `openai/text-embedding-3-small` (1536 dimensions) using `SOLV_OPENROUTER_KEY` so no OpenAI key is needed:
+
+```jsonc
+"vars": {
+  "SOLV_LLM_PROVIDER": "openrouter",
+  "SOLV_LLM_MODEL": "anthropic/claude-sonnet-4",
+  "SOLV_EMBEDDINGS_PROVIDER": "openrouter"
+}
+```
+
+For OpenRouter, the daily spend cap is counted in OpenRouter credits.
 
 ## 3. Build and deploy
 
