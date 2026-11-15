@@ -49,6 +49,11 @@ const COLUMNS = "id, org_id, assistant_id, state, config, created_at, published_
  */
 const storedConfig = new WeakMap<VersionRow, string>();
 
+/** Returns the exact stored config JSON bytes for optimistic concurrency checks. */
+export function expectedVersionConfig(row: VersionRow): string {
+  return storedConfig.get(row) ?? JSON.stringify(row.config);
+}
+
 const map = (row: Row): VersionRow => {
   const parsed = parseVersionConfig(safeJson(row.config));
   const mapped: VersionRow = {
