@@ -51,7 +51,10 @@ from the auth seam and pass it down.
 - `assistant_versions` — id, assistant_id, state (`draft` | `published` | `archived`),
   config JSON (behaviour, widget, tool allowlist), created_at, published_at.
   Exactly one draft and at most one published version per assistant. Publishing
-  copies the draft; rollback republishes an archived version.
+  promotes the draft row itself to `published` (it keeps its id, so a "Try it"
+  conversation started against the draft still resolves), archives the previous
+  published version, and inserts a fresh draft with the same config; rollback
+  republishes an archived version.
 - `sources` — id, assistant_id, kind (`push` | `sitemap` | `entry`), label, settings.
 - `documents` — id, source_id, external_id, url, title, content_hash, updated_at.
 - `chunks` — id, document_id, ordinal, text, heading_path. Vectors live in Vectorize
@@ -75,9 +78,10 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
 ## Public API (called by the widget)
 
 - `POST /v1/chat` — body: assistant public key, conversation id (optional), message.
-  Responds with server-sent events: `token`, `citation`, `tool`, `done`, `error`
-  (and `action` from phase 2). The request carries a protocol version; unknown
-  event types are ignored by the widget.
+  The body also carries a protocol version; the engine refuses a version it does
+  not support with an `error` event, and clients ignore event types they do not
+  know. Responds with server-sent events: `token`, `citation`, `tool`, `done`,
+  `error` (and `action` from phase 2).
 - `POST /v1/feedback` — thumbs up or down on a message.
 - `GET /v1/assistants/:publicKey` — published widget config (title, colours, greeting,
   suggested questions). No secrets, no prompts.
@@ -93,10 +97,26 @@ that fails one gets a plain error event and costs nothing.
   documents (external id, url, title, Markdown). Unchanged `content_hash` is a no-op.
 - `DELETE /v1/ingest/:assistantId/documents` — by external id, or everything not in
   the pushed set (`prune`).
+- `GET /v1/ingest/:assistantId/config` — bearer ingest key. Returns the current
+  draft config.
+- `PUT /v1/ingest/:assistantId/config` — bearer ingest key. Validates and updates
+  the draft config only (never publishes, rolls back, or reads history).
 
 Ingest writes the document row, enqueues it, and a Queue consumer chunks, embeds
 and upserts vectors. There is no crawler in v1: content is pushed (CLI, GitHub
 Action), imported once from a sitemap, or written by hand as an entry.
+
+Sitemap import validates every URL and redirect hop as `https:` and checks
+the hostname via DNS-over-HTTPS before fetching, refusing private, loopback, or
+link-local addresses. Because Workers `fetch` resolves the hostname separately
+from that pre-check, a host that changes its DNS answer between the check and
+the fetch is not caught; that is an accepted limitation for an action only the
+signed-in owner can trigger.
+
+D1 is the only source of truth for live chunks; readers resolve retrieved vector
+ids through D1, so leftover vectors and R2 objects can accumulate after failures.
+They cost storage only and never affect an answer. A later task adds a reindex
+command that rebuilds an assistant's index from D1.
 
 ## Admin API
 
@@ -113,9 +133,9 @@ numbers, install snippet.
 
 1. Load the published version (or the draft, for the admin "Try it" pane).
 2. Retrieve: embed the question, query the retriever for the assistant, keep the
-   top chunks above a score floor.
+   top chunks above a score floor (top 6, floor 0.3; chosen for v1, not tuned).
 3. Build the prompt: fixed safety frame, the owner's behaviour fields, retrieved
-   chunks with their URLs, recent turns.
+   chunks with their URLs (capped at 2000 characters each), the last 6 turns.
 4. Call the model through the provider interface, streaming. If tools are allowed,
    run the MCP loop: the model asks for a tool, the Worker calls the MCP server,
    the result goes back as untrusted data.
@@ -136,7 +156,13 @@ carries a comment with the source URL and the date checked. Never fill it from
 memory.
 
 The admin does not expose model or temperature pickers per assistant. The
-instance picks a provider and a model tier in configuration.
+instance picks a provider and a model tier in configuration via plain Worker
+environment variables (`vars` in `wrangler.jsonc`):
+
+- `SOLV_LLM_PROVIDER` — `anthropic` or `openai` (default `anthropic`).
+- `SOLV_LLM_TIER` — `fast` or `balanced` (default `fast`).
+
+An unrecognised value falls back to its default and is logged once.
 
 ## MCP tools
 
@@ -259,8 +285,11 @@ Install
 ## Config as code
 
 `solv.config.json` in a site's repository describes an assistant's behaviour,
-widget and tests. `solv apply` pushes it to the draft; `solv push` sends content;
-`solv test` runs the tests. The admin and the file edit the same draft.
+widget and tests. `solv apply` writes the draft with the ingest key
+(`SOLV_INGEST_KEY`); publishing always happens in the admin. `solv push` sends
+content; `solv test` runs the tests. The admin and the file edit the same draft.
+Because an ingest key can change an assistant's draft behaviour as well as its
+content, it must be kept as a secret.
 
 ## Extension seams
 

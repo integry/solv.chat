@@ -1,0 +1,143 @@
+import {
+  createExecutionContext,
+  createMessageBatch,
+  env,
+  getQueueResult,
+  waitOnExecutionContext,
+} from "cloudflare:test";
+import { describe, expect, it, vi } from "vitest";
+import { createTestApp } from "./helpers/app.js";
+
+describe("health and routing", () => {
+  it("returns 200 { ok: true } on GET /health", async () => {
+    const app = createTestApp();
+    const ctx = createExecutionContext();
+    const response = await app.fetch(new Request("https://example.com/health"), env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+  });
+
+  it("returns 404 with a plain message for unknown paths", async () => {
+    const app = createTestApp();
+    const ctx = createExecutionContext();
+    const response = await app.fetch(new Request("https://example.com/nope"), env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "Not found." });
+  });
+});
+
+describe("admin same-origin check", () => {
+  it("rejects POST to /api/admin/* with missing Origin without calling handler", async () => {
+    const login = vi.fn(async () => Response.json({ ok: true }));
+    const app = createTestApp({
+      auth: {
+        authenticate: async () => null,
+        login,
+        logout: async () => Response.json({ ok: true }),
+      },
+    });
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request("https://example.com/api/admin/login", { method: "POST" }),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(403);
+    expect(login).not.toHaveBeenCalled();
+  });
+
+  it("rejects POST to /api/admin/* with foreign Origin without calling handler", async () => {
+    const logout = vi.fn(async () => Response.json({ ok: true }));
+    const app = createTestApp({
+      auth: {
+        authenticate: async () => null,
+        login: async () => Response.json({ ok: true }),
+        logout,
+      },
+    });
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request("https://example.com/api/admin/logout", {
+        method: "POST",
+        headers: { Origin: "https://evil.example" },
+      }),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(403);
+    expect(logout).not.toHaveBeenCalled();
+  });
+
+  it("allows POST to /api/admin/* with matching Origin", async () => {
+    const login = vi.fn(async () => Response.json({ ok: true }));
+    const app = createTestApp({
+      auth: {
+        authenticate: async () => null,
+        login,
+        logout: async () => Response.json({ ok: true }),
+      },
+    });
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request("https://example.com/api/admin/login", {
+        method: "POST",
+        headers: { Origin: "https://example.com" },
+      }),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(200);
+    expect(login).toHaveBeenCalledOnce();
+  });
+
+  it("allows GET to /api/admin/* without Origin", async () => {
+    const app = createTestApp();
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request("https://example.com/api/admin/unknown", { method: "GET" }),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(404);
+  });
+});
+
+describe("queue consumer", () => {
+  it("acknowledges messages for unknown or deleted documents", async () => {
+    const app = createTestApp();
+    const ctx = createExecutionContext();
+    const batch = createMessageBatch("solvchat-ingest", [
+      {
+        id: "msg-1",
+        timestamp: new Date(),
+        attempts: 1,
+        body: { documentId: "doc_1", orgId: "org_00000000000000000000", contentHash: "h1" },
+      },
+      {
+        id: "msg-2",
+        timestamp: new Date(),
+        attempts: 1,
+        body: { documentId: "doc_2", orgId: "org_00000000000000000000", contentHash: "h2" },
+      },
+    ]);
+
+    await app.queue(batch, env, ctx);
+    const result = await getQueueResult(batch, ctx);
+
+    expect(result.outcome).toBe("ok");
+    expect(result.explicitAcks).toEqual(["msg-1", "msg-2"]);
+    expect(result.retryBatch.retry).toBe(false);
+  });
+});

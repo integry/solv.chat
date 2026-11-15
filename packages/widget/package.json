@@ -1,0 +1,30 @@
+{
+  "name": "@solvchat/widget",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/widget.js",
+  "types": "./dist/widget.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/widget.d.ts",
+      "default": "./dist/widget.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {},
+  "devDependencies": {
+    "@solvchat/core": "^0.0.0",
+    "esbuild": "^0.25.0",
+    "happy-dom": "^17.0.0"
+  },
+  "scripts": {
+    "pretypecheck": "npm run build -w @solvchat/core --if-present",
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm run build -w @solvchat/core --if-present",
+    "test": "vitest run",
+    "build": "node scripts/build.mjs && node scripts/check-size.mjs"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "@solvchat/engine",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "migrations"
+  ],
+  "scripts": {
+    "pretypecheck": "node scripts/sync-widget.mjs && node scripts/sync-admin.mjs",
+    "typecheck": "tsc --noEmit",
+    "pretest": "node scripts/sync-widget.mjs && node scripts/sync-admin.mjs",
+    "test": "vitest run",
+    "prebuild": "node scripts/sync-widget.mjs --rebuild && node scripts/sync-admin.mjs --rebuild",
+    "build": "tsc -p tsconfig.build.json",
+    "migrations:apply": "wrangler d1 migrations apply solvchat --remote"
+  },
+  "dependencies": {
+    "@solvchat/core": "^0.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.21",
+    "@cloudflare/workers-types": "^5.20261114.1",
+    "wrangler": "^4.162.0"
+  }
+}
