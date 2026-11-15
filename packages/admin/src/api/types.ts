@@ -133,6 +133,10 @@ export interface AssistantOverview {
   answeredShare: number;
   topQuestions: TopQuestion[];
   todayCostMicros: number;
+  todayCostUnknown?: boolean;
+  dailyCostCapMicros?: number;
+  costUnit?: "usd" | "credits";
+  configError?: string | null;
 }
 
 export interface InstallInfo {

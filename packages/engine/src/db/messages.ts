@@ -17,6 +17,7 @@ interface Row {
   tool_calls: string | null;
   tokens_in: number;
   tokens_out: number;
+  cost_micros: number | null;
   answered: number;
   created_at: number;
   reply_to: string | null;
@@ -32,6 +33,7 @@ export interface MessageRow {
   toolCalls: unknown[] | null;
   tokensIn: number;
   tokensOut: number;
+  costMicros: number | null;
   answered: boolean;
   createdAt: number;
   /** For an assistant reply, the visitor message it answers. */
@@ -52,6 +54,8 @@ export interface CreateMessageInput {
   toolCalls: unknown[] | null;
   tokensIn: number;
   tokensOut: number;
+  /** Micro-dollars for this message, `0` when known free, or `null` when unknown / not applicable. */
+  costMicros?: number | null | undefined;
   answered: boolean;
   createdAt: number;
   /**
@@ -86,10 +90,10 @@ export function normalizeQuestionText(text: string): string {
 }
 
 const COLUMNS =
-  "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at, reply_to";
+  "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to";
 
 const QUALIFIED_COLUMNS =
-  "m.id, m.org_id, m.conversation_id, m.role, m.content, m.citations, m.tool_calls, m.tokens_in, m.tokens_out, m.answered, m.created_at, m.reply_to";
+  "m.id, m.org_id, m.conversation_id, m.role, m.content, m.citations, m.tool_calls, m.tokens_in, m.tokens_out, m.cost_micros, m.answered, m.created_at, m.reply_to";
 
 /**
  * Unanswered replies joined to the question each one answers, through the
@@ -129,6 +133,7 @@ const map = (row: Row): MessageRow => ({
   toolCalls: row.tool_calls === null ? null : safeJsonArray<unknown>(row.tool_calls),
   tokensIn: row.tokens_in,
   tokensOut: row.tokens_out,
+  costMicros: row.cost_micros,
   answered: row.answered === 1,
   createdAt: row.created_at,
   replyTo: row.reply_to,
@@ -317,6 +322,8 @@ export function messagesFor(db: D1Database, orgId: string) {
       resumeContext: unknown | null;
       tokensIn: number;
       tokensOut: number;
+      /** Added to the stored cost; null marks it unknown. Omitted leaves it as is. */
+      costMicros?: number | null | undefined;
     }): Promise<boolean> {
       const res = await prepare(
         db,
@@ -327,6 +334,7 @@ export function messagesFor(db: D1Database, orgId: string) {
                 resume_context = ?6,
                 tokens_in = tokens_in + ?7,
                 tokens_out = tokens_out + ?8,
+                cost_micros = cost_micros + ?11,
                 resume_claim = NULL,
                 resume_claimed_at = NULL,
                 resume_revision = resume_revision + 1
@@ -335,8 +343,9 @@ export function messagesFor(db: D1Database, orgId: string) {
             AND resume_claim = ?9
             AND resume_revision = ?10`,
       )
-        // Token counts accumulate: the pause and the resume are two model calls on
-        // one message, and the owner's cost figure must include both.
+        // Token counts and cost accumulate: the pause and the resume are two model
+        // calls on one message, and the owner's cost figure must include both.
+        // SQL NULL arithmetic keeps an unknown cost unknown.
         .bind(
           orgId,
           params.id,
@@ -348,6 +357,7 @@ export function messagesFor(db: D1Database, orgId: string) {
           params.tokensOut,
           params.claimToken,
           params.revision,
+          params.costMicros === undefined ? 0 : params.costMicros,
         )
         .run();
       return (res.meta.changes ?? 0) > 0;
@@ -373,8 +383,8 @@ export function messagesFor(db: D1Database, orgId: string) {
       const questionKey = input.role === "user" ? normalizeQuestionText(input.content) : null;
       await prepareInsert(
         db,
-        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, answered, created_at, reply_to, question_key, resume_context)
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, question_key, resume_context)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
       )
         .bind(
           orgId,
@@ -386,6 +396,7 @@ export function messagesFor(db: D1Database, orgId: string) {
           input.toolCalls === null ? null : JSON.stringify(input.toolCalls),
           input.tokensIn,
           input.tokensOut,
+          input.costMicros ?? null,
           input.answered ? 1 : 0,
           input.createdAt,
           replyTo,
@@ -404,6 +415,7 @@ export function messagesFor(db: D1Database, orgId: string) {
         toolCalls: input.toolCalls === null ? null : [...input.toolCalls],
         tokensIn: input.tokensIn,
         tokensOut: input.tokensOut,
+        costMicros: input.costMicros ?? null,
         answered: input.answered,
         createdAt: input.createdAt,
         replyTo,

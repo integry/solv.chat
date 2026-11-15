@@ -106,7 +106,7 @@ export interface RunDeps {
   embedder: Embedder;
   retriever: Retriever;
   provider: LlmProvider;
-  model: ModelInfo;
+  model?: ModelInfo | undefined;
   usage: UsageSink;
   limits: Limits;
   now?: (() => number) | undefined;

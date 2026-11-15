@@ -90,7 +90,7 @@ export function askToConfirm(
   panel.setAttribute("aria-describedby", detail.id);
   for (const line of detailLines(request)) {
     const item = document.createElement("li");
-    // textContent, never innerHTML: this string came from the model.
+    // textContent, never parsed as HTML: this string came from the model.
     item.textContent = line;
     detail.append(item);
   }

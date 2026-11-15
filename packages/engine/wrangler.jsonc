@@ -9,6 +9,7 @@
   //   SOLV_SECRET_KEY
   //   SOLV_ANTHROPIC_KEY
   //   SOLV_OPENAI_KEY
+  //   SOLV_OPENROUTER_KEY
   "vars": {
     "SOLV_LLM_PROVIDER": "anthropic",
     "SOLV_LLM_TIER": "fast"

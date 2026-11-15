@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { ANTHROPIC_MODELS, OPENAI_MODELS } from "../../src/models.js";
 import { llmProviderFor } from "../../src/providers/factory.js";
+import { secretKeys } from "../../src/seams/open/secretKeys.js";
 import type { KeyProvider } from "../../src/seams/types.js";
 
 const mockKeys: KeyProvider = {
   async modelKey(_orgId, provider) {
-    return provider === "anthropic" ? "test-ant-key" : "test-oai-key";
+    return `test-${provider}-key`;
   },
   async embeddingKey() {
     return "test-oai-key";
@@ -41,5 +42,46 @@ describe("llmProviderFor", () => {
     );
     expect(oaiBalanced.name).toBe("openai");
     expect(oaiBalanced.model).toBe(OPENAI_MODELS.balanced.id);
+  });
+
+  it("selects OpenRouter with configured model unchanged and ignores tier", async () => {
+    const fast = await llmProviderFor(
+      { orgId: "org_1", provider: "openrouter", tier: "fast", model: "qwen/qwen3-32b:free" },
+      mockKeys,
+    );
+    const balanced = await llmProviderFor(
+      { orgId: "org_1", provider: "openrouter", tier: "balanced", model: "qwen/qwen3-32b:free" },
+      mockKeys,
+    );
+    expect(fast.name).toBe("openrouter");
+    expect(fast.model).toBe("qwen/qwen3-32b:free");
+    expect(balanced.model).toBe("qwen/qwen3-32b:free");
+  });
+
+  it("throws on missing, empty, or oversized SOLV_LLM_MODEL and missing SOLV_OPENROUTER_KEY", async () => {
+    await expect(
+      llmProviderFor({ orgId: "org_1", provider: "openrouter", tier: "fast" }, mockKeys),
+    ).rejects.toThrow("SOLV_LLM_MODEL");
+
+    await expect(
+      llmProviderFor(
+        { orgId: "org_1", provider: "openrouter", tier: "fast", model: "   " },
+        mockKeys,
+      ),
+    ).rejects.toThrow("SOLV_LLM_MODEL");
+
+    await expect(
+      llmProviderFor(
+        { orgId: "org_1", provider: "openrouter", tier: "fast", model: "a".repeat(257) },
+        mockKeys,
+      ),
+    ).rejects.toThrow("SOLV_LLM_MODEL");
+
+    await expect(
+      llmProviderFor(
+        { orgId: "org_1", provider: "openrouter", tier: "fast", model: "vendor/model" },
+        secretKeys({}),
+      ),
+    ).rejects.toThrow("SOLV_OPENROUTER_KEY");
   });
 });

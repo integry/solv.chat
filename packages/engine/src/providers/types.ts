@@ -29,7 +29,13 @@ export type LlmChunk =
   | { kind: "tool_call"; call: ToolCall }
   // stopReason is optional so a provider that cannot report one stays valid
   // and phase 1 callers, which ignore the field, are unaffected.
-  | { kind: "usage"; tokensIn: number; tokensOut: number; stopReason?: StopReason };
+  | {
+      kind: "usage";
+      tokensIn: number;
+      tokensOut: number;
+      stopReason?: StopReason;
+      costMicros?: number | undefined;
+    };
 
 /**
  * A turn in the conversation. The first two shapes are phase 1 and unchanged,
@@ -66,7 +72,7 @@ export interface LlmRequest {
 }
 
 export interface LlmProvider {
-  readonly name: "anthropic" | "openai";
+  readonly name: "anthropic" | "openai" | "openrouter";
   readonly model: string;
   /**
    * Streaming only. A non-streaming method would be a second code path to

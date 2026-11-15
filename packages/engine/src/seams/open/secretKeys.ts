@@ -3,6 +3,7 @@ import type { KeyProvider } from "../types.js";
 export interface SecretKeyEnv {
   SOLV_ANTHROPIC_KEY?: string | undefined;
   SOLV_OPENAI_KEY?: string | undefined;
+  SOLV_OPENROUTER_KEY?: string | undefined;
 }
 
 function requireSecret(value: string | undefined, name: string): string {
@@ -19,9 +20,15 @@ export function secretKeys(env: SecretKeyEnv): KeyProvider {
       if (provider === "anthropic") {
         return requireSecret(env.SOLV_ANTHROPIC_KEY, "SOLV_ANTHROPIC_KEY");
       }
+      if (provider === "openrouter") {
+        return requireSecret(env.SOLV_OPENROUTER_KEY, "SOLV_OPENROUTER_KEY");
+      }
       return requireSecret(env.SOLV_OPENAI_KEY, "SOLV_OPENAI_KEY");
     },
-    async embeddingKey(_orgId) {
+    async embeddingKey(_orgId, provider = "openai") {
+      if (provider === "openrouter") {
+        return requireSecret(env.SOLV_OPENROUTER_KEY, "SOLV_OPENROUTER_KEY");
+      }
       return requireSecret(env.SOLV_OPENAI_KEY, "SOLV_OPENAI_KEY");
     },
   };

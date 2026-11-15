@@ -1191,7 +1191,8 @@ describe("chat/toolLoop", () => {
 
   it("F6: records already-reported model usage even when the lease is lost before completion", async () => {
     let leaseOwned = true;
-    const usageEvents: Array<{ tokensIn: number; tokensOut: number; costMicros: number }> = [];
+    const usageEvents: Array<{ tokensIn: number; tokensOut: number; costMicros: number | null }> =
+      [];
     const provider: LlmProvider = {
       name: "anthropic",
       model: ANTHROPIC_MODELS.fast.id,

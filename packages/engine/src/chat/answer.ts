@@ -37,7 +37,7 @@ export interface AnswerDeps {
   embedder: Embedder;
   retriever: Retriever;
   provider: LlmProvider;
-  model: ModelInfo;
+  model?: ModelInfo | undefined;
   usage: UsageSink;
   now?: (() => number) | undefined;
   /**
@@ -162,7 +162,7 @@ async function recordMessageUsage(
   at: number,
   tokensIn: number,
   tokensOut: number,
-  cost: number,
+  cost: number | null,
   messages = 1,
 ): Promise<void> {
   // Usage goes through the seam, never straight into usage_daily: the hosted
@@ -174,7 +174,8 @@ async function recordMessageUsage(
     messages,
     tokensIn,
     tokensOut,
-    costMicros: cost,
+    costMicros: cost ?? 0,
+    ...(cost === null ? { costUnknown: true } : {}),
   });
 }
 
@@ -274,6 +275,7 @@ export async function* answerMessage(
         toolCalls: null,
         tokensIn: 0,
         tokensOut: 0,
+        costMicros: 0,
         answered: false,
         createdAt: clock(),
         replyTo: questionId,
@@ -309,6 +311,9 @@ export async function* answerMessage(
   let tokensIn = 0;
   let tokensOut = 0;
   let modelCalls = 0;
+  // The stored reply's cost: the sum over its model calls, or null once any
+  // call's cost is unknown.
+  let messageCost: number | null = 0;
 
   try {
     const loop = runToolLoop(
@@ -326,6 +331,7 @@ export async function* answerMessage(
           modelCalls += 1;
           tokensIn += callTokensIn;
           tokensOut += callTokensOut;
+          messageCost = messageCost === null || cost === null ? null : messageCost + cost;
           await recordMessageUsage(
             deps,
             input,
@@ -391,6 +397,7 @@ export async function* answerMessage(
         toolCalls,
         tokensIn,
         tokensOut,
+        costMicros: messageCost,
         // Not a gap: the answer is in progress, and Gaps is for questions the
         // assistant could not answer at all.
         answered: true,
@@ -436,6 +443,7 @@ export async function* answerMessage(
       toolCalls: toolCalls.length > 0 ? toolCalls : null,
       tokensIn,
       tokensOut,
+      costMicros: messageCost,
       answered: true,
       createdAt: clock(),
       replyTo: questionId,
@@ -663,6 +671,7 @@ export async function* answerWithActionResults(
     let nextContinuation: ToolLoopContinuation | undefined;
     let tokensIn = 0;
     let tokensOut = 0;
+    let resumeCost: number | null = 0;
 
     let abortedByLease = false;
 
@@ -677,6 +686,7 @@ export async function* answerWithActionResults(
           onModelUsage: async (callTokensIn, callTokensOut, cost) => {
             tokensIn += callTokensIn;
             tokensOut += callTokensOut;
+            resumeCost = resumeCost === null || cost === null ? null : resumeCost + cost;
             // The pause already counted this answer as 1 message; resuming
             // continues the same message, so `messages` stays 0.
             await recordMessageUsage(deps, input, clock(), callTokensIn, callTokensOut, cost, 0);
@@ -747,6 +757,7 @@ export async function* answerWithActionResults(
       resumeContext: nextPending.length > 0 ? (nextContinuation ?? null) : null,
       tokensIn,
       tokensOut,
+      costMicros: resumeCost,
     });
     if (!saved) {
       yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };

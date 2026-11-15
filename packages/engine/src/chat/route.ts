@@ -12,57 +12,29 @@ import {
 import { assistantByPublicKey, assistantForMessage, originAllowedInOrg } from "../db/public.js";
 import { forPublicScope } from "../db/tenant.js";
 import { ANTHROPIC_MODELS, type ModelInfo, OPENAI_MODELS, type Tier } from "../models.js";
+import {
+  embedderFor,
+  type ProviderEnv,
+  resolveEmbeddingsProvider,
+  resolveLlmProvider,
+  resolveTier,
+} from "../providers/config.js";
 import { ProviderError } from "../providers/error.js";
 import { llmProviderFor } from "../providers/factory.js";
-import {
-  type Embedder,
-  openAIEmbedder,
-  type Retriever,
-  vectorizeRetriever,
-} from "../providers/retrieval.js";
+import { type Embedder, type Retriever, vectorizeRetriever } from "../providers/retrieval.js";
 import type { LlmProvider } from "../providers/types.js";
-import type { AuthProvider, Principal, Seams } from "../seams/types.js";
+import type { AuthProvider, LlmProviderName, Principal, Seams } from "../seams/types.js";
 import { actionRunnerFor } from "./actionRunner.js";
 import { answerMessage, answerWithActionResults } from "./answer.js";
 import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
 import { mcpRunnerFor } from "./mcpRunner.js";
 import type { ToolRunner } from "./toolLoop.js";
 
-export interface ChatEnv {
+export interface ChatEnv extends ProviderEnv {
   DB: D1Database;
   VECTORS: VectorizeIndex;
-  SOLV_LLM_PROVIDER?: string | undefined;
-  SOLV_LLM_TIER?: string | undefined;
   /** Opens stored MCP credentials at call time. */
   SOLV_SECRET_KEY?: string | undefined;
-}
-
-const DEFAULT_PROVIDER = "anthropic" as const;
-const DEFAULT_TIER: Tier = "fast";
-const warnedConfigVars = new Set<string>();
-
-function warnInvalidConfigOnce(
-  name: "SOLV_LLM_PROVIDER" | "SOLV_LLM_TIER",
-  fallback: string,
-): void {
-  if (warnedConfigVars.has(name)) return;
-  warnedConfigVars.add(name);
-  // Do not log or otherwise trust the unrecognised value's content.
-  console.warn(`Unrecognised ${name} configuration; falling back to default (${fallback}).`);
-}
-
-function resolveProvider(raw: string | undefined): "anthropic" | "openai" {
-  if (raw === undefined) return DEFAULT_PROVIDER;
-  if (raw === "anthropic" || raw === "openai") return raw;
-  warnInvalidConfigOnce("SOLV_LLM_PROVIDER", DEFAULT_PROVIDER);
-  return DEFAULT_PROVIDER;
-}
-
-function resolveTier(raw: string | undefined): Tier {
-  if (raw === undefined) return DEFAULT_TIER;
-  if (raw === "fast" || raw === "balanced") return raw;
-  warnInvalidConfigOnce("SOLV_LLM_TIER", DEFAULT_TIER);
-  return DEFAULT_TIER;
 }
 
 export interface ChatRouteOverrides {
@@ -70,7 +42,7 @@ export interface ChatRouteOverrides {
   retriever?: Retriever | undefined;
   provider?: LlmProvider | undefined;
   model?: ModelInfo | undefined;
-  providerKind?: "anthropic" | "openai" | undefined;
+  providerKind?: LlmProviderName | undefined;
   tier?: Tier | undefined;
   fetch?: typeof fetch | undefined;
 }
@@ -209,20 +181,29 @@ export async function resolveChatProviders(
   embedder: Embedder;
   retriever: Retriever;
   provider: LlmProvider;
-  model: ModelInfo;
+  model: ModelInfo | undefined;
 }> {
-  const providerKind = overrides?.providerKind ?? resolveProvider(env.SOLV_LLM_PROVIDER);
-  const tier = overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER);
+  const providerKind = overrides?.providerKind ?? resolveLlmProvider(env.SOLV_LLM_PROVIDER);
+  const tier =
+    providerKind === "openrouter" ? "fast" : (overrides?.tier ?? resolveTier(env.SOLV_LLM_TIER));
   const model =
     overrides?.model ??
-    (providerKind === "anthropic" ? ANTHROPIC_MODELS[tier] : OPENAI_MODELS[tier]);
+    (providerKind === "anthropic"
+      ? ANTHROPIC_MODELS[tier]
+      : providerKind === "openai"
+        ? OPENAI_MODELS[tier]
+        : undefined);
+  const embeddingsProvider = resolveEmbeddingsProvider(env.SOLV_EMBEDDINGS_PROVIDER);
 
   const embedder =
-    overrides?.embedder ?? openAIEmbedder({ apiKey: await seams.keys.embeddingKey(orgId) });
+    overrides?.embedder ?? (await embedderFor(orgId, embeddingsProvider, seams.keys));
   const retriever = overrides?.retriever ?? vectorizeRetriever(env.VECTORS);
   const provider =
     overrides?.provider ??
-    (await llmProviderFor({ orgId, provider: providerKind, tier }, seams.keys));
+    (await llmProviderFor(
+      { orgId, provider: providerKind, tier, model: env.SOLV_LLM_MODEL },
+      seams.keys,
+    ));
 
   return { embedder, retriever, provider, model };
 }

@@ -1,3 +1,4 @@
+import { defaultVersionConfig } from "@solvchat/core";
 import type { TopQuestionRow } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
 import { utcDay } from "../util/time.js";
@@ -8,6 +9,10 @@ export interface AssistantOverview {
   answeredShare: number;
   topQuestions: TopQuestionRow[];
   todayCostMicros: number;
+  todayCostUnknown: boolean;
+  dailyCostCapMicros: number;
+  costUnit?: "usd" | "credits" | undefined;
+  configError: string | null;
 }
 
 /**
@@ -21,17 +26,29 @@ export interface AssistantOverview {
 export async function overviewFor(
   tenant: Tenant,
   assistantId: string,
-  today: string = utcDay(Date.now()),
+  options?: {
+    today?: string | undefined;
+    costUnit?: "usd" | "credits" | undefined;
+    checkConfigError?: (() => Promise<string | null>) | undefined;
+  },
 ): Promise<AssistantOverview> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
 
-  const [messages, answeredShare, topQuestions, todayCost] = await Promise.all([
-    tenant.messages.countFor(assistantId),
-    tenant.messages.answeredShareFor(assistantId),
-    tenant.messages.topQuestionsFor(assistantId, 5),
-    tenant.usage.costMicrosFor(assistantId, today),
-  ]);
+  const today = options?.today ?? utcDay(Date.now());
+  const [messages, answeredShare, topQuestions, todayUsage, published, configError] =
+    await Promise.all([
+      tenant.messages.countFor(assistantId),
+      tenant.messages.answeredShareFor(assistantId),
+      tenant.messages.topQuestionsFor(assistantId, 5),
+      tenant.usage.summaryFor(assistantId, today),
+      tenant.versions.published(assistantId),
+      options?.checkConfigError ? options.checkConfigError() : Promise.resolve(null),
+    ]);
+
+  const dailyCostCapMicros = published
+    ? published.config.limits.dailyCostCapMicros
+    : defaultVersionConfig().limits.dailyCostCapMicros;
 
   // A day with no messages reads zero rather than null: the screen shows a
   // number with a plain sentence, and "—" would make an owner wonder if it is
@@ -40,6 +57,10 @@ export async function overviewFor(
     messages,
     answeredShare,
     topQuestions,
-    todayCostMicros: todayCost ?? 0,
+    todayCostMicros: todayUsage?.costMicros ?? 0,
+    todayCostUnknown: todayUsage?.costUnknown ?? false,
+    dailyCostCapMicros,
+    ...(options?.costUnit !== undefined ? { costUnit: options.costUnit } : {}),
+    configError,
   };
 }

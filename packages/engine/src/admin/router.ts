@@ -55,6 +55,8 @@ export interface AdminRouteDeps {
   retriever: Pick<Retriever, "remove">;
   publicBaseUrl: string;
   fetchImpl?: typeof fetch | undefined;
+  costUnit?: "usd" | "credits" | undefined;
+  checkConfigError?: (() => Promise<string | null>) | undefined;
   /**
    * SOLV_SECRET_KEY, passed down from app.ts. Not read through a seam: the
    * Biome rule in biome.json forbids importing seams/open outside worker.ts,
@@ -221,7 +223,12 @@ async function assistantRoutes(
       return Response.json(result, { status: 201 });
     }
     if (action === "overview" && method === "GET") {
-      return Response.json(await overviewFor(tenant, assistantId));
+      return Response.json(
+        await overviewFor(tenant, assistantId, {
+          costUnit: deps.costUnit,
+          checkConfigError: deps.checkConfigError,
+        }),
+      );
     }
     if (action === "install" && method === "GET") {
       return Response.json(await getInstallInfo(tenant, assistantId, deps.publicBaseUrl));
