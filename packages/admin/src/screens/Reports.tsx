@@ -110,7 +110,11 @@ export function Reports({ assistantId }: ReportsProps) {
     URL.revokeObjectURL(url);
   }
 
-  const empty = report !== undefined && report.questions === 0 && report.replies === 0;
+  const empty =
+    report !== undefined &&
+    report.questions === 0 &&
+    report.replies === 0 &&
+    report.costMicros === 0;
 
   return (
     <div className="screen">

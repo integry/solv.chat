@@ -238,6 +238,53 @@ describe("Reports screen", () => {
     expect(screen.queryByRole("button", { name: "Download CSV" })).toBeNull();
   });
 
+  it("preserves cost figure and CSV export when message counts are zero and cost is positive", async () => {
+    installFakeServer({
+      report: {
+        ...SEEDED_REPORT,
+        questions: 0,
+        replies: 0,
+        answeredShare: 0,
+        thumbsDownShare: 0,
+        costMicros: 250_000,
+        topQuestions: [],
+        topGaps: [],
+        topSources: [],
+      },
+    });
+    const blobs: Blob[] = [];
+    const origCreateObjectURL = URL.createObjectURL;
+    const origRevokeObjectURL = URL.revokeObjectURL;
+    URL.createObjectURL = (blob: Blob) => {
+      blobs.push(blob);
+      return "blob:report-cost-only";
+    };
+    URL.revokeObjectURL = () => {};
+
+    try {
+      render(<App />);
+
+      fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+      expect(await screen.findByText("$0.25")).toBeTruthy();
+      expect(
+        screen.queryByText(
+          "Nothing yet for this period. Once visitors ask questions, their answers show up here.",
+        ),
+      ).toBeNull();
+
+      const downloadBtn = screen.getByRole("button", { name: "Download CSV" });
+      fireEvent.click(downloadBtn);
+
+      expect(blobs).toHaveLength(1);
+      const text = await blobs[0]?.text();
+      expect(text).toContain(`"Questions asked","0"`);
+      expect(text).toContain(`"Cost","$0.25"`);
+    } finally {
+      URL.createObjectURL = origCreateObjectURL;
+      URL.revokeObjectURL = origRevokeObjectURL;
+    }
+  });
+
   it("shows loading and error states", async () => {
     let resolveReport!: (res: Response) => void;
     installFakeServer({
