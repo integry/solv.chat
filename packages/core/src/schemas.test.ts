@@ -178,6 +178,20 @@ describe("parseVersionConfig", () => {
       expect(res.errors.some((e) => e.startsWith("limits.dailyCostCapMicros:"))).toBe(true);
     }
   });
+
+  it("parses actions.builtins boolean and rejects invalid actions config", () => {
+    const enabled = parseVersionConfig({ actions: { builtins: true } });
+    expect(enabled.ok).toBe(true);
+    if (enabled.ok) {
+      expect(enabled.value.actions).toEqual({ builtins: true });
+    }
+
+    const bad = parseVersionConfig({ actions: { builtins: "yes" } });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) {
+      expect(bad.errors.some((e) => e.startsWith("actions.builtins:"))).toBe(true);
+    }
+  });
 });
 
 describe("parseSourceInput", () => {

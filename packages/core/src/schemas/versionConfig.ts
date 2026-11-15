@@ -20,11 +20,16 @@ export interface LimitsConfig {
   dailyCostCapMicros: number;
 }
 
+export interface ActionsConfig {
+  builtins: boolean;
+}
+
 export interface VersionConfig {
   behaviour: BehaviourConfig;
   widget: WidgetConfig;
   limits: LimitsConfig;
   allowedTools: string[];
+  actions?: ActionsConfig;
 }
 
 const MAX_SUGGESTED_QUESTIONS = 6;
@@ -48,6 +53,7 @@ export const defaultVersionConfig = (): VersionConfig => ({
   // Phase 1 never reads this; it exists so the stored shape does not change
   // when phase 2 adds MCP tools.
   allowedTools: [],
+  actions: { builtins: false },
 });
 
 function parseBehaviourSection(raw: unknown, target: BehaviourConfig, errors: Errors): void {
@@ -138,6 +144,20 @@ function parseLimitsSection(raw: unknown, target: LimitsConfig, errors: Errors):
   }
 }
 
+function parseActionsSection(raw: unknown, target: ActionsConfig, errors: Errors): void {
+  if (!isPlainObject(raw)) {
+    errors.add("actions", "must be an object");
+    return;
+  }
+  if (raw.builtins !== undefined) {
+    if (typeof raw.builtins !== "boolean") {
+      errors.add("actions.builtins", "must be a boolean");
+    } else {
+      target.builtins = raw.builtins;
+    }
+  }
+}
+
 function cloneVersionConfig(config: VersionConfig): VersionConfig {
   return {
     behaviour: {
@@ -147,6 +167,7 @@ function cloneVersionConfig(config: VersionConfig): VersionConfig {
     widget: { ...config.widget },
     limits: { ...config.limits },
     allowedTools: [...config.allowedTools],
+    actions: { builtins: config.actions?.builtins === true },
   };
 }
 
@@ -166,6 +187,10 @@ export function parseVersionConfig(value: unknown, base?: VersionConfig): Result
     parseBehaviourSection(value.behaviour, config.behaviour, errors);
   if (value.widget !== undefined) parseWidgetSection(value.widget, config.widget, errors);
   if (value.limits !== undefined) parseLimitsSection(value.limits, config.limits, errors);
+  if (value.actions !== undefined) {
+    config.actions ??= { builtins: false };
+    parseActionsSection(value.actions, config.actions, errors);
+  }
 
   if (value.allowedTools !== undefined) {
     if (!Array.isArray(value.allowedTools)) {

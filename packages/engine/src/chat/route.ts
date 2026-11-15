@@ -508,6 +508,10 @@ export async function publicConfigRoute(
       position: published.config.widget.position,
       greeting: published.config.behaviour.greeting,
       suggestedQuestions: [...published.config.behaviour.suggestedQuestions],
+      actions: {
+        builtins: published.config.actions?.builtins === true,
+        allowedOrigins: [...assistant.allowedOrigins],
+      },
     },
     { status: 200, headers: corsHeaders(origin) },
   );

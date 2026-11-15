@@ -247,6 +247,16 @@ textarea:focus-visible {
   margin-top: 8px;
 }
 
+.solv-nav-status {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--solv-muted);
+}
+
+.solv-nav-external {
+  margin-top: 8px;
+}
+
 .solv-action {
   display: inline-block;
   padding: 2px 8px;
@@ -374,6 +384,22 @@ textarea:focus-visible {
 .solv-send:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+.solv-highlight-note {
+  position: fixed;
+  z-index: 2147483647;
+  max-width: 260px;
+  padding: 6px 10px;
+  border: 1px solid var(--solv-border);
+  border-radius: 8px;
+  background: var(--solv-bg);
+  color: var(--solv-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: var(--solv-shadow);
+  pointer-events: none;
 }
 
 .sr-only {

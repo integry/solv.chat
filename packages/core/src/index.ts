@@ -41,6 +41,7 @@ export {
   type SourceKind,
 } from "./schemas/source.js";
 export {
+  type ActionsConfig,
   type BehaviourConfig,
   defaultVersionConfig,
   type LimitsConfig,
