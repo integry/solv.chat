@@ -45,6 +45,7 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const DROPPED_RESUME_TIMEOUT_MS = 5_000;
 
 function buildMovedOnResults(pending: PendingResume): ActionResult[] {
   return pending.actionResults.map((entry) =>
@@ -740,8 +741,9 @@ export class SolvChat extends HTMLElement {
 
     try {
       if (pending) {
-        await this.#reportDroppedResume(pending, signal);
-        if (signal.aborted) return;
+        // Best-effort notification: dispatch without awaiting so a stalled
+        // reporting request or stream never blocks the visitor's new message.
+        void this.#reportDroppedResume(pending, signal);
       }
       const requestBody: Record<string, unknown> = {
         // Sent on every request so the engine can refuse a version it does not
@@ -908,18 +910,8 @@ export class SolvChat extends HTMLElement {
     pending: PendingResume,
     target: { bubble: HTMLDivElement; textEl: HTMLDivElement; turn: SavedTurn },
   ): Promise<void> {
-    await this.#loadConfig();
-    if (!this.isConnected) return;
-
-    const actionResults =
-      pending.navigateCallId && typeof location !== "undefined"
-        ? pending.actionResults.map((entry) =>
-            entry.callId === pending.navigateCallId
-              ? { ...entry, ok: true as const, result: serialiseResult({ opened: location.href }) }
-              : entry,
-          )
-        : pending.actionResults;
-
+    // Reserve sending state synchronously before awaiting config so a visitor
+    // cannot submit a competing message while configuration is in flight.
     const controller = new AbortController();
     this.#abortController = controller;
     this.#sending = true;
@@ -927,6 +919,22 @@ export class SolvChat extends HTMLElement {
     const { signal } = controller;
 
     try {
+      await this.#loadConfig();
+      if (!this.isConnected || signal.aborted) return;
+
+      const actionResults =
+        pending.navigateCallId && typeof location !== "undefined"
+          ? pending.actionResults.map((entry) =>
+              entry.callId === pending.navigateCallId
+                ? {
+                    ...entry,
+                    ok: true as const,
+                    result: serialiseResult({ opened: location.href }),
+                  }
+                : entry,
+            )
+          : pending.actionResults;
+
       const response = await this.#sendActionResumeRequest(
         pending.conversationId,
         pending.resumeMessageId,
@@ -970,12 +978,17 @@ export class SolvChat extends HTMLElement {
   }
 
   async #reportDroppedResume(pending: PendingResume, signal?: AbortSignal): Promise<void> {
-    try {
-      const controller = new AbortController();
-      if (signal) {
-        if (signal.aborted) return;
-        signal.addEventListener("abort", () => controller.abort(), { once: true });
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    const timer = setTimeout(onAbort, DROPPED_RESUME_TIMEOUT_MS);
+    if (signal) {
+      if (signal.aborted) {
+        clearTimeout(timer);
+        return;
       }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    try {
       const response = await this.#sendActionResumeRequest(
         pending.conversationId,
         pending.resumeMessageId,
@@ -985,6 +998,9 @@ export class SolvChat extends HTMLElement {
       await response.text().catch(() => {});
     } catch {
       // Best-effort notification; never block a new message or connect.
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
     }
   }
 

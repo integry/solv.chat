@@ -1286,4 +1286,248 @@ describe("built-in page actions", () => {
       expect(bubbles[1]?.querySelector(".solv-feedback")).not.toBeNull();
     });
   });
+
+  describe("F16 & F17: resume sending guard and non-blocking dropped-resume reporting", () => {
+    it("F16: reserves sending state before config loads so a new message cannot compete with resume", async () => {
+      sessionStorage.setItem(
+        "solv-chat-open:pk_f16",
+        JSON.stringify({
+          conversationId: "conv_f16",
+          open: true,
+          turns: [
+            { role: "user", text: "Go to pricing" },
+            {
+              role: "assistant",
+              text: "Taking you there",
+              messageId: "msg_f16",
+              awaiting: ["call_f16"],
+            },
+          ],
+          pendingResume: {
+            conversationId: "conv_f16",
+            resumeMessageId: "msg_f16",
+            actionResults: [
+              {
+                callId: "call_f16",
+                ok: true,
+                result: JSON.stringify({ opened: "https://example.com/pricing" }),
+              },
+            ],
+            depth: 1,
+            createdAt: Date.now(),
+            navigateCallId: "call_f16",
+          },
+        }),
+      );
+
+      let resolveConfig!: (res: Response) => void;
+      const configPromise = new Promise<Response>((resolve) => {
+        resolveConfig = resolve;
+      });
+      const chatBodies: Array<Record<string, unknown>> = [];
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_f16")) {
+          return configPromise;
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":" — resumed!"}\n\n',
+              'event: done\ndata: {"messageId":"msg_f16_done","conversationId":"conv_f16"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_f16");
+      document.body.append(el);
+
+      const root = el.shadowRoot as ShadowRoot;
+      const sendBtn = root.querySelector(".solv-send") as HTMLButtonElement;
+      const inputEl = root.querySelector("#solv-input") as HTMLTextAreaElement;
+
+      // Send must already be disabled while config is still loading.
+      expect(sendBtn.disabled).toBe(true);
+
+      // Attempting to submit a new message while config is in flight must be ignored.
+      inputEl.value = "Competing message";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await flushAsync();
+
+      expect(chatBodies).toHaveLength(0);
+      expect(inputEl.value).toBe("Competing message");
+
+      // Now finish config load; only the resumed request should run.
+      resolveConfig(
+        Response.json({
+          title: "Helper",
+          accentColor: "#2563eb",
+          position: "right",
+          greeting: "Hi!",
+          suggestedQuestions: [],
+          actions: { builtins: true, allowedOrigins: [] },
+        }),
+      );
+      await flushAsync();
+
+      expect(chatBodies).toHaveLength(1);
+      expect(chatBodies[0]?.resumeMessageId).toBe("msg_f16");
+      expect(sendBtn.disabled).toBe(false);
+    });
+
+    it("F16: cleans up reserved sending state on disconnect and does not resume after reconnect", async () => {
+      sessionStorage.setItem(
+        "solv-chat-open:pk_f16_disc",
+        JSON.stringify({
+          conversationId: "conv_f16_d",
+          open: true,
+          turns: [
+            { role: "user", text: "Go" },
+            {
+              role: "assistant",
+              text: "Leaving",
+              messageId: "msg_f16_d",
+              awaiting: ["call_f16_d"],
+            },
+          ],
+          pendingResume: {
+            conversationId: "conv_f16_d",
+            resumeMessageId: "msg_f16_d",
+            actionResults: [{ callId: "call_f16_d", ok: true, result: "{}" }],
+            depth: 1,
+            createdAt: Date.now(),
+            navigateCallId: "call_f16_d",
+          },
+        }),
+      );
+
+      let resolveConfig!: (res: Response) => void;
+      const configPromise = new Promise<Response>((resolve) => {
+        resolveConfig = resolve;
+      });
+      const chatBodies: Array<Record<string, unknown>> = [];
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_f16_disc")) {
+          return configPromise;
+        }
+        if (url.endsWith("/v1/chat")) {
+          chatBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          return new Response("Not found", { status: 404 });
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_f16_disc");
+      document.body.append(el);
+
+      const root = el.shadowRoot as ShadowRoot;
+      const sendBtn = root.querySelector(".solv-send") as HTMLButtonElement;
+      expect(sendBtn.disabled).toBe(true);
+
+      // Disconnect while config is still loading, then reconnect.
+      el.remove();
+      expect(sendBtn.disabled).toBe(false);
+      document.body.append(el);
+
+      resolveConfig(
+        Response.json({
+          title: "Helper",
+          accentColor: "#2563eb",
+          position: "right",
+          greeting: "Hi!",
+          suggestedQuestions: [],
+          actions: { builtins: true, allowedOrigins: [] },
+        }),
+      );
+      await flushAsync();
+
+      expect(chatBodies).toHaveLength(0);
+      expect(sendBtn.disabled).toBe(false);
+    });
+
+    it("F17: does not block a new message when dropped-resume reporting stream stalls", async () => {
+      vi.spyOn(location, "assign").mockImplementation(() => {});
+      const chatBodies: Array<Record<string, unknown>> = [];
+
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/v1/assistants/pk_f17")) {
+          return Response.json({
+            title: "Helper",
+            accentColor: "#2563eb",
+            position: "right",
+            greeting: "Hi!",
+            suggestedQuestions: [],
+            actions: { builtins: true, allowedOrigins: [] },
+          });
+        }
+        if (url.endsWith("/v1/chat")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          chatBodies.push(body);
+          if (body.message === "Go to pricing") {
+            return new Response(
+              sseStream([
+                'event: token\ndata: {"text":"Taking you to pricing"}\n\n',
+                'event: action\ndata: {"callId":"call_f17","name":"navigate","input":{"url":"/pricing"},"confirm":false}\n\n',
+                'event: done\ndata: {"messageId":"msg_f17","conversationId":"conv_f17","awaitingActions":["call_f17"]}\n\n',
+              ]),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }
+          if (body.resumeMessageId === "msg_f17") {
+            // Simulate a stalled reporting response stream that never closes on its own.
+            const stalledStream = new ReadableStream<Uint8Array>({
+              start() {},
+            });
+            return new Response(stalledStream, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
+          }
+          return new Response(
+            sseStream([
+              'event: token\ndata: {"text":"Here is the FAQ instead."}\n\n',
+              'event: done\ndata: {"messageId":"msg_f17_2","conversationId":"conv_f17"}\n\n',
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      }) as typeof fetch;
+
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_f17");
+      document.body.append(el);
+      await flushAsync();
+
+      const root = el.shadowRoot as ShadowRoot;
+      (root.querySelector(".solv-launcher") as HTMLButtonElement).click();
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Go to pricing";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await flushAsync();
+
+      (root.querySelector("#solv-input") as HTMLTextAreaElement).value = "Actually, show FAQ";
+      (root.querySelector(".solv-form") as HTMLFormElement).requestSubmit();
+      await flushAsync();
+
+      expect(chatBodies).toHaveLength(3);
+      expect(chatBodies[1]?.resumeMessageId).toBe("msg_f17");
+      expect(chatBodies[2]?.message).toBe("Actually, show FAQ");
+
+      const bubbles = root.querySelectorAll(".solv-bubble--assistant");
+      expect(bubbles[2]?.querySelector(".solv-bubble-text")?.textContent).toBe(
+        "Here is the FAQ instead.",
+      );
+      expect((root.querySelector(".solv-send") as HTMLButtonElement).disabled).toBe(false);
+    });
+  });
 });
