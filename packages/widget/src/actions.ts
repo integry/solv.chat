@@ -19,6 +19,16 @@ const PRIMITIVE_TYPES = new Set(["string", "number", "integer", "boolean"]);
 
 /** One action gets this long to finish before the answer continues without it. */
 export const ACTION_TIMEOUT_MS = 5000;
+export const NAVIGATION_NOT_ALLOWED_ERROR = "That destination is not allowed.";
+export const ACTION_TIMED_OUT_ERROR = "That action timed out and may still finish in the page.";
+
+/** Error thrown by built-in actions to surface a safe, fixed refusal message to the model. */
+export class ActionRefusalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ActionRefusalError";
+  }
+}
 
 export interface RegisteredAction {
   name: string;
@@ -334,16 +344,27 @@ export async function runAction(
   }
   const timeoutMs = options.timeoutMs ?? ACTION_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   try {
     const value = await Promise.race([
       Promise.resolve().then(() => action.run(request.input)),
       new Promise((_resolve, reject) => {
         // A page action that never resolves must not hold the answer forever.
-        timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+        // Timing out does not cancel the underlying call, so it may still complete in the page.
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error("timeout"));
+        }, timeoutMs);
       }),
     ]);
     return { callId: request.callId, ok: true, result: serialiseResult(value) };
-  } catch {
+  } catch (err) {
+    if (timedOut) {
+      return { callId: request.callId, ok: false, error: ACTION_TIMED_OUT_ERROR };
+    }
+    if (err instanceof ActionRefusalError) {
+      return { callId: request.callId, ok: false, error: err.message };
+    }
     // The page's error is not forwarded: it can contain anything, and this
     // string becomes part of a model prompt.
     return { callId: request.callId, ok: false, error: "That action did not finish." };

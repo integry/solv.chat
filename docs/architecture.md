@@ -225,7 +225,8 @@ built-in providers; the tiers above stay the default.
 
 Owners add an MCP server by URL (Streamable HTTP). The Worker lists its tools and
 stores them with `allowed = false`. Nothing is callable until the owner switches
-a tool on.
+a tool on (`allowed = true`) **and** publishes a version whose `allowedTools`
+includes it (the "Try it" pane uses the draft's `allowedTools`).
 
 Every visitor is anonymous, and every tool call runs with the owner's
 credential. The rules that follow from that:
@@ -387,6 +388,8 @@ Install
 widget and tests. `solv apply` writes the draft with the ingest key
 (`SOLV_INGEST_KEY`); publishing always happens in the admin. `solv push` sends
 content; `solv test` runs the tests. The admin and the file edit the same draft.
+A `tests` array in `solv.config.json` **replaces** the assistant's stored tests
+rather than merging with them.
 Because an ingest key can change an assistant's draft behaviour as well as its
 content, it must be kept as a secret.
 
@@ -409,7 +412,8 @@ with the open implementations.
 
 ## Phases
 
-1. Engine, widget and admin without tools: sources, behaviour, widget, draft and
-   publish, conversations, gaps. First install: propr.dev.
-2. MCP tools, page actions, tests, reports. Second install: mcptest.io.
+1. Done. Engine, widget and admin without tools: sources, behaviour, widget,
+   draft and publish, conversations, gaps. First install: propr.dev.
+2. Done. MCP tools, page actions, answer tests, reports. Second install:
+   mcptest.io.
 3. Cloud layer in the closed repo.

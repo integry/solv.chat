@@ -4,15 +4,15 @@ Pushes a folder of Markdown files and/or applies `solv.config.json` to an assist
 
 ## Inputs
 
-| Input       | Required | Default   | Description                                                                     |
-| ----------- | -------- | --------- | ------------------------------------------------------------------------------- |
-| `endpoint`  | Yes      | —         | The Worker's base URL (e.g. `https://chat.example.com`)                         |
-| `assistant` | Yes      | —         | The assistant ID (`ast_...`)                                                    |
-| `base-url`  | No       | —         | The site URL that document paths are joined to (required when `content` is set) |
-| `content`   | No       | —         | Folder of Markdown files to push                                                |
-| `prune`     | No       | `"false"` | Set to `"true"` to delete documents removed from the folder                     |
-| `config`    | No       | —         | Path to `solv.config.json` to apply to the assistant's draft                    |
-| `test`      | No       | `"false"` | Set to `"true"` to run the assistant's answer tests after pushing and applying  |
+| Input       | Required | Default   | Description                                                                                                                 |
+| ----------- | -------- | --------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `endpoint`  | Yes      | —         | The Worker's base URL (e.g. `https://chat.example.com`)                                                                     |
+| `assistant` | Yes      | —         | The assistant ID (`ast_...`)                                                                                                |
+| `base-url`  | No       | —         | The site URL that document paths are joined to (required when `content` is set)                                             |
+| `content`   | No       | —         | Folder of Markdown files to push                                                                                            |
+| `prune`     | No       | `"false"` | Set to `"true"` to delete documents removed from the folder                                                                 |
+| `config`    | No       | —         | Path to `solv.config.json` to apply to the assistant's draft                                                                |
+| `test`      | No       | `"false"` | Set to `"true"` to run the assistant's answer tests after pushing and applying (at most 25 tests per assistant and per run) |
 
 Provide at least one of `content`, `config`, or `test: "true"`.
 

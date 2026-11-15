@@ -66,7 +66,8 @@ Environment variables:
   SOLV_INGEST_KEY     Bearer key used to authenticate ingest requests
 
 Exits non-zero if any test fails or does not run. A "tests" array in the file
-replaces the assistant's tests, including any added in the admin.`;
+replaces the assistant's tests, including any added in the admin. At most 25
+tests may be declared and run per assistant.`;
 
 function readString(
   values: Record<string, string | boolean | (string | boolean)[] | undefined>,

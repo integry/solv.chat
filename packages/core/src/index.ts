@@ -3,7 +3,6 @@ export { Errors, fail, ok, type Result } from "./result.js";
 export {
   MAX_TEST_PHRASE_LENGTH,
   MAX_TEST_QUESTION_LENGTH,
-  MAX_TESTS_PER_ASSISTANT,
   MAX_TESTS_PER_RUN,
   parseTestInput,
   type TestExpectation,

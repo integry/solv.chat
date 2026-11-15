@@ -1,7 +1,6 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import {
   defaultVersionConfig,
-  MAX_TESTS_PER_ASSISTANT,
   MAX_TESTS_PER_RUN,
   newId,
   type TestExpectation,
@@ -225,8 +224,8 @@ describe("admin answer tests", () => {
     expect(delRes.status).toBe(200);
     expect(await delRes.json()).toEqual({ deleted: true });
 
-    // Per-assistant cap: 50 succeed, 51st is 400 naming the limit.
-    for (let i = 0; i < MAX_TESTS_PER_ASSISTANT; i++) {
+    // Per-assistant cap: MAX_TESTS_PER_RUN (25) succeed, 26th is 400 naming the limit.
+    for (let i = 0; i < MAX_TESTS_PER_RUN; i++) {
       const r = await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
         question: `Question ${i}`,
         expectation: { kind: "declines" },
@@ -234,12 +233,12 @@ describe("admin answer tests", () => {
       expect(r.status).toBe(201);
     }
     const overCap = await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
-      question: "Question 51",
+      question: "Question over cap",
       expectation: { kind: "declines" },
     });
     expect(overCap.status).toBe(400);
     const overBody = (await overCap.json()) as { fields: string[] };
-    expect(overBody.fields[0]).toContain(String(MAX_TESTS_PER_ASSISTANT));
+    expect(overBody.fields[0]).toContain(String(MAX_TESTS_PER_RUN));
   });
 
   it("evaluates all four expectation kinds, including the cites host trap and declines", async () => {
@@ -878,7 +877,7 @@ describe("admin answer tests", () => {
     const { assistantId } = await seedAssistant(ORG_A);
     const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
 
-    for (let i = 0; i < MAX_TESTS_PER_ASSISTANT - 1; i++) {
+    for (let i = 0; i < MAX_TESTS_PER_RUN - 1; i++) {
       await tenant.tests.create({
         id: newId("tst"),
         assistantId,
@@ -903,7 +902,7 @@ describe("admin answer tests", () => {
     expect(statuses).toEqual([201, 400]);
     const rejected = resA.status === 400 ? resA : resB;
     const rejectedBody = (await rejected.json()) as { fields: string[] };
-    expect(rejectedBody.fields[0]).toContain(String(MAX_TESTS_PER_ASSISTANT));
-    expect(await tenant.tests.countFor(assistantId)).toBe(MAX_TESTS_PER_ASSISTANT);
+    expect(rejectedBody.fields[0]).toContain(String(MAX_TESTS_PER_RUN));
+    expect(await tenant.tests.countFor(assistantId)).toBe(MAX_TESTS_PER_RUN);
   });
 });

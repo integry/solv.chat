@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultVersionConfig, MAX_TESTS_PER_ASSISTANT } from "@solvchat/core";
+import { defaultVersionConfig, MAX_TESTS_PER_RUN } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { apply } from "../src/apply.js";
 
@@ -260,12 +260,12 @@ describe("solv apply", () => {
       expected: "tests[0].expectation.kind",
     },
     {
-      name: `more than ${MAX_TESTS_PER_ASSISTANT} tests`,
-      tests: Array.from({ length: MAX_TESTS_PER_ASSISTANT + 1 }, (_, i) => ({
+      name: `more than ${MAX_TESTS_PER_RUN} tests`,
+      tests: Array.from({ length: MAX_TESTS_PER_RUN + 1 }, (_, i) => ({
         question: `Question ${i + 1}?`,
         expectation: { kind: "declines" },
       })),
-      expected: String(MAX_TESTS_PER_ASSISTANT),
+      expected: String(MAX_TESTS_PER_RUN),
     },
   ])("rejects $name before sending any config or test mutation", async ({ tests, expected }) => {
     const configPath = join(root, "solv.config.json");
