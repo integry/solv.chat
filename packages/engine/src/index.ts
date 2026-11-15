@@ -83,6 +83,18 @@ export type {
   ToolDefinition,
 } from "./providers/types.js";
 export {
+  basicLimits,
+  type CapMicrosResolver,
+  DEFAULT_DAILY_CAP_MICROS,
+} from "./seams/open/basicLimits.js";
+export {
+  type PasswordAuthEnv,
+  passwordAuth,
+  SINGLE_ORG_ID,
+} from "./seams/open/passwordAuth.js";
+export { type SecretKeyEnv, secretKeys } from "./seams/open/secretKeys.js";
+export { usageDaily } from "./seams/open/usageDaily.js";
+export {
   type AuthProvider,
   type EmbeddingsProviderName,
   type KeyProvider,

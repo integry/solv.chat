@@ -16,6 +16,7 @@
     {
       "includes": [
         "packages/engine/src/**",
+        "!packages/engine/src/index.ts",
         "!packages/engine/src/worker.ts",
         "!packages/engine/src/seams/open/**"
       ],
