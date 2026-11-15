@@ -128,6 +128,7 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
       let sawToolCall = false;
       let stopReason: StopReason | undefined;
       let failure: ProviderError | undefined;
+      let toolInputFailure: ProviderError | undefined;
       // Tool arguments arrive as fragments keyed by the Responses API `item_id`.
       // Buffer per item and parse once the call is complete.
       const pending = new Map<string, { callId: string; name: string; json: string }>();
@@ -198,10 +199,17 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
               eventType === "response.function_call_arguments.done"
                 ? payload.arguments
                 : payload.item?.arguments;
-            const call = consumePendingToolCall(pending, itemId, fallbackArgs);
-            if (call) {
-              sawToolCall = true;
-              yield { kind: "tool_call", call };
+            // Defer input-parse failures until terminal metadata arrives:
+            // max_output_tokens truncation can close a call mid-JSON, and
+            // completed malformed calls still owe the caller any reported usage.
+            try {
+              const call = consumePendingToolCall(pending, itemId, fallbackArgs);
+              if (call) {
+                sawToolCall = true;
+                yield { kind: "tool_call", call };
+              }
+            } catch (err) {
+              toolInputFailure ??= toProviderError(err, "openai stream failed");
             }
             continue;
           }
@@ -226,6 +234,12 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
         }
       } catch (err) {
         failure = toProviderError(err, "openai stream failed");
+      }
+
+      // Token-limit truncation explains an incomplete tool input, so suppress
+      // the deferred parse error and surface stopReason: "length" instead.
+      if (stopReason !== "length" && toolInputFailure !== undefined) {
+        failure ??= toolInputFailure;
       }
 
       // A stream stopping without its terminal event truncated the answer;

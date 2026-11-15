@@ -507,5 +507,49 @@ describe("openaiProvider", () => {
       expect((error as ProviderError).retryable).toBe(false);
       expect(chunks).toEqual([]);
     });
+
+    it("suppresses truncated tool calls and preserves usage and length stopReason on max_output_tokens", async () => {
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async () =>
+          sseResponse(
+            [
+              'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_cut","call_id":"call_cut","name":"lookup_order","arguments":""}}\n\n',
+              'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_cut","delta":"{\\"id\\":\\"A"}\n\n',
+              'event: response.function_call_arguments.done\ndata: {"type":"response.function_call_arguments.done","item_id":"fc_cut","arguments":"{\\"id\\":\\"A"}\n\n',
+              'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":14,"output_tokens":256}}}\n\n',
+            ].join(""),
+          ),
+      });
+
+      const chunks = await collect(provider.stream({ ...SAMPLE_REQUEST, tools: [SAMPLE_TOOL] }));
+      expect(chunks).toEqual([
+        { kind: "usage", tokensIn: 14, tokensOut: 256, stopReason: "length" },
+      ]);
+    });
+
+    it("reports final usage before throwing on a completed malformed tool call", async () => {
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async () =>
+          sseResponse(
+            [
+              'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_bad","call_id":"call_bad","name":"lookup_order","arguments":""}}\n\n',
+              'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_bad","delta":"{not-json"}\n\n',
+              'event: response.function_call_arguments.done\ndata: {"type":"response.function_call_arguments.done","item_id":"fc_bad","arguments":"{not-json"}\n\n',
+              'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call"}],"usage":{"input_tokens":14,"output_tokens":9}}}\n\n',
+            ].join(""),
+          ),
+      });
+
+      const { chunks, error } = await collectUntilThrow(
+        provider.stream({ ...SAMPLE_REQUEST, tools: [SAMPLE_TOOL] }),
+      );
+      expect(error).toBeInstanceOf(ProviderError);
+      expect((error as ProviderError).retryable).toBe(false);
+      expect(chunks).toEqual([{ kind: "usage", tokensIn: 14, tokensOut: 9, stopReason: "tools" }]);
+    });
   });
 });

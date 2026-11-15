@@ -101,6 +101,7 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
       let tokensOut: number | undefined;
       let sawTerminal = false;
       let failure: ProviderError | undefined;
+      let toolInputFailure: ProviderError | undefined;
       let stopReason: StopReason | undefined;
       // Tool input arrives as a stream of JSON fragments, keyed by the
       // content block index. Buffer per block and parse once at the block
@@ -161,14 +162,22 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
             const open = pending.get(payload.index);
             if (open) {
               pending.delete(payload.index);
-              yield {
-                kind: "tool_call",
-                call: {
-                  callId: open.callId,
-                  name: open.name,
-                  input: parseToolInput("anthropic", open.json),
-                },
-              };
+              // Defer input-parse failures until terminal metadata arrives:
+              // max_tokens truncation can close a tool block mid-JSON, and
+              // completed malformed calls still owe the caller any reported usage.
+              try {
+                const input = parseToolInput("anthropic", open.json);
+                yield {
+                  kind: "tool_call",
+                  call: {
+                    callId: open.callId,
+                    name: open.name,
+                    input,
+                  },
+                };
+              } catch (err) {
+                toolInputFailure ??= toProviderError(err, "anthropic stream failed");
+              }
             }
             continue;
           }
@@ -191,6 +200,12 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
         }
       } catch (err) {
         failure = toProviderError(err, "anthropic stream failed");
+      }
+
+      // Token-limit truncation explains an incomplete tool input, so suppress
+      // the deferred parse error and surface stopReason: "length" instead.
+      if (stopReason !== "length" && toolInputFailure !== undefined) {
+        failure ??= toolInputFailure;
       }
 
       // A stream stopping without its terminal event truncated the answer;

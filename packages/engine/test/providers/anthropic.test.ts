@@ -529,5 +529,53 @@ describe("anthropicProvider", () => {
       expect((error as ProviderError).retryable).toBe(false);
       expect(chunks).toEqual([{ kind: "usage", tokensIn: 10, tokensOut: 0 }]);
     });
+
+    it("suppresses truncated tool calls and preserves usage and length stopReason on max_tokens", async () => {
+      const provider = anthropicProvider({
+        apiKey: "test-key",
+        model: "claude-haiku-5-5",
+        fetchImpl: async () =>
+          sseResponse(
+            [
+              'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":14}}}\n\n',
+              'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_cut","name":"lookup_order"}}\n\n',
+              'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"id\\":\\"A"}}\n\n',
+              'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+              'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":256}}\n\n',
+              'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+            ].join(""),
+          ),
+      });
+
+      const chunks = await collect(provider.stream({ ...SAMPLE_REQUEST, tools: [SAMPLE_TOOL] }));
+      expect(chunks).toEqual([
+        { kind: "usage", tokensIn: 14, tokensOut: 256, stopReason: "length" },
+      ]);
+    });
+
+    it("reports final usage before throwing on a completed malformed tool call", async () => {
+      const provider = anthropicProvider({
+        apiKey: "test-key",
+        model: "claude-haiku-5-5",
+        fetchImpl: async () =>
+          sseResponse(
+            [
+              'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":14}}}\n\n',
+              'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_bad","name":"lookup_order"}}\n\n',
+              'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{not-json"}}\n\n',
+              'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+              'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}\n\n',
+              'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+            ].join(""),
+          ),
+      });
+
+      const { chunks, error } = await collectUntilThrow(
+        provider.stream({ ...SAMPLE_REQUEST, tools: [SAMPLE_TOOL] }),
+      );
+      expect(error).toBeInstanceOf(ProviderError);
+      expect((error as ProviderError).retryable).toBe(false);
+      expect(chunks).toEqual([{ kind: "usage", tokensIn: 14, tokensOut: 9, stopReason: "tools" }]);
+    });
   });
 });
