@@ -413,6 +413,59 @@ describe("openaiProvider", () => {
       });
     });
 
+    it("distinguishes failed tool results from successful ones with identical content", async () => {
+      const bodies: Array<Record<string, unknown>> = [];
+      const provider = openaiProvider({
+        apiKey: "test-key",
+        model: "gpt-6.1-sol",
+        fetchImpl: async (_input, init) => {
+          bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return sseResponse(COMPLETE_TEXT_STREAM);
+        },
+      });
+
+      for (const isError of [false, true]) {
+        await collect(
+          provider.stream({
+            system: "You are helpful.",
+            maxTokens: 256,
+            tools: [SAMPLE_TOOL],
+            messages: [
+              { role: "user", content: "Check order A-1" },
+              {
+                role: "assistant",
+                content: "",
+                toolCalls: [{ callId: "call_1", name: "lookup_order", input: { id: "A-1" } }],
+              },
+              {
+                role: "tool_results",
+                results: [
+                  { callId: "call_1", content: "Unavailable", isError },
+                  { callId: "call_2", content: "", isError },
+                ],
+              },
+            ],
+          }),
+        );
+      }
+
+      const okInputs = bodies[0]?.input as Array<{ type?: string; output?: string }>;
+      const errInputs = bodies[1]?.input as Array<{ type?: string; output?: string }>;
+      const okOutputs = okInputs.filter((item) => item.type === "function_call_output");
+      const errOutputs = errInputs.filter((item) => item.type === "function_call_output");
+
+      expect(okOutputs).toEqual([
+        { type: "function_call_output", call_id: "call_1", output: "Unavailable" },
+        { type: "function_call_output", call_id: "call_2", output: "" },
+      ]);
+      expect(errOutputs).toEqual([
+        { type: "function_call_output", call_id: "call_1", output: "[error] Unavailable" },
+        { type: "function_call_output", call_id: "call_2", output: "[error]" },
+      ]);
+      expect(errOutputs[0]?.output).not.toBe(okOutputs[0]?.output);
+      expect(errOutputs[1]?.output).not.toBe(okOutputs[1]?.output);
+    });
+
     it("reassembles a tool call split across function_call_arguments.delta fragments and surfaces tools stopReason", async () => {
       const provider = openaiProvider({
         apiKey: "test-key",

@@ -1,7 +1,13 @@
 import { isRetryableStatus, ProviderError, toProviderError } from "./error.js";
 import { readEventStream } from "./sse.js";
 import { parseToolInput } from "./toolInput.js";
-import type { LlmMessage, LlmProvider, StopReason, ToolDefinition } from "./types.js";
+import type {
+  LlmMessage,
+  LlmProvider,
+  LlmToolResult,
+  StopReason,
+  ToolDefinition,
+} from "./types.js";
 
 export interface OpenAiOptions {
   apiKey: string;
@@ -279,6 +285,14 @@ function toResponsesTool(tool: ToolDefinition) {
   };
 }
 
+function formatToolOutput(result: LlmToolResult): string {
+  if (!result.isError) return result.content;
+  // Responses API function_call_output has no separate is_error field; prefix
+  // errors with a fixed tag so failure status is explicit without escaping or
+  // inflating caller-truncated content.
+  return result.content.length > 0 ? `[error] ${result.content}` : "[error]";
+}
+
 /**
  * Translates the shared message list into Responses API `input` items.
  * Tool calls and their outputs are top-level items matched by `call_id`.
@@ -291,7 +305,7 @@ function toResponsesInput(messages: readonly LlmMessage[]) {
         items.push({
           type: "function_call_output",
           call_id: result.callId,
-          output: result.content,
+          output: formatToolOutput(result),
         });
       }
       continue;
