@@ -15,7 +15,7 @@ describe("solv CLI", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("--help lists only push and apply and names env vars without values", async () => {
+  it("--help lists push, apply, and test and names env vars without values", async () => {
     const logs: string[] = [];
     const code = await runCli(["--help"], {
       log: (line) => logs.push(line),
@@ -26,11 +26,11 @@ describe("solv CLI", () => {
     const help = logs.join("\n");
     expect(help).toContain("push");
     expect(help).toContain("apply");
+    expect(help).toMatch(/\btest\b/);
     expect(help).toContain("SOLV_INGEST_KEY");
     expect(help).not.toContain("SOLV_ADMIN_TOKEN");
     expect(help).not.toContain("SOLV_SESSION");
     expect(help).not.toContain("super-secret-value");
-    expect(help).not.toMatch(/\btest\b/);
   });
 
   it("fails with a message naming SOLV_INGEST_KEY when missing", async () => {

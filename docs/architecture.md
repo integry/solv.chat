@@ -369,7 +369,7 @@ React, served by the Worker. One screen per item:
 
 ```
 [assistant switcher]
-Overview · Conversations · Gaps
+Overview · Reports · Conversations · Gaps
 Sources · Tools · Behaviour · Widget · Tests
 Install
 ```

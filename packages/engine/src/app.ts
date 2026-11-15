@@ -8,9 +8,9 @@ import {
   publicConfigRoute,
   resolveChatProviders,
 } from "./chat/route.js";
-import { forPrincipal } from "./db/tenant.js";
+import { forPrincipal, type Tenant } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
-import { ingestRoutes } from "./ingest/router.js";
+import { type IngestResource, ingestRoutes } from "./ingest/router.js";
 import {
   checkLlmConfigError,
   embedderFor,
@@ -101,17 +101,32 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         // making owners bust a cache.
         return widgetAsset();
       }
-      const ingestMatch = /^\/v1\/ingest\/([^/]+)\/(documents|config)$/.exec(url.pathname);
+      const resolveRunDeps = async (orgId: string, tenant: Tenant) => {
+        const providers = await resolveChatProviders(env, seams, orgId, chatOverrides);
+        return {
+          tenant,
+          orgId,
+          ...providers,
+          usage: seams.usage,
+          limits: seams.limits,
+          secretKey: env.SOLV_SECRET_KEY ?? "",
+          fetchImpl: chatOverrides?.fetch,
+        };
+      };
+      const ingestMatch = /^\/v1\/ingest\/([^/]+)\/(documents|config|tests|test-runs)$/.exec(
+        url.pathname,
+      );
       if (ingestMatch?.[1] && ingestMatch[2]) {
         const assistantId = decodeSegment(ingestMatch[1]);
         if (assistantId === null) return notFound();
-        return ingestRoutes(request, assistantId, ingestMatch[2] as "documents" | "config", {
+        return ingestRoutes(request, assistantId, ingestMatch[2] as IngestResource, {
           db: env.DB,
           docs: env.DOCS,
           queue: env.INGEST_QUEUE,
           retriever: vectorizeRetriever(env.VECTORS),
           limits: seams.limits,
           auth: seams.auth,
+          resolveRunDeps,
         });
       }
       if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
@@ -156,23 +171,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           resolveSettings: () => resolveProviderSettings(env.DB, env, principal.orgId),
           checkConfigError: (resolved) =>
             checkLlmConfigError(env.DB, env, seams.keys, principal.orgId, resolved),
-          resolveRunDeps: async () => {
-            const providers = await resolveChatProviders(
-              env,
-              seams,
-              principal.orgId,
-              chatOverrides,
-            );
-            return {
-              tenant,
-              orgId: principal.orgId,
-              ...providers,
-              usage: seams.usage,
-              limits: seams.limits,
-              secretKey: env.SOLV_SECRET_KEY ?? "",
-              fetchImpl: chatOverrides?.fetch,
-            };
-          },
+          resolveRunDeps: () => resolveRunDeps(principal.orgId, tenant),
         });
       }
       if (

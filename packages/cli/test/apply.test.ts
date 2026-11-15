@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultVersionConfig } from "@solvchat/core";
+import { defaultVersionConfig, MAX_TESTS_PER_ASSISTANT } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { apply } from "../src/apply.js";
 
@@ -162,5 +162,142 @@ describe("solv apply", () => {
 
     expect(called).toBe(false);
     expect(logs.join("\n")).toContain("widget.accentColor");
+  });
+
+  it("syncs declared tests and strips the tests key from the config PUT", async () => {
+    const configPath = join(root, "solv.config.json");
+    const declaredTests = [
+      { question: "Where do you ship?", expectation: { kind: "contains", phrase: "worldwide" } },
+    ];
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        behaviour: { greeting: "Hello from CI" },
+        tests: declaredTests,
+      }),
+      "utf8",
+    );
+
+    const current = defaultVersionConfig();
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      calls.push({ url, method, ...(body !== undefined ? { body } : {}) });
+      if (url.endsWith("/config") && method === "GET") {
+        return Response.json({ config: current });
+      }
+      if (url.endsWith("/config") && method === "PUT") {
+        return Response.json({ config: { ...current, ...body } });
+      }
+      return Response.json({ created: 1, removed: 2 });
+    };
+
+    const logs: string[] = [];
+    await apply(
+      {
+        file: configPath,
+        endpoint: "https://chat.example.com",
+        assistant: "ast_123",
+        ingestKey: "ik_secret",
+      },
+      { fetchImpl, log: (line) => logs.push(line) },
+    );
+
+    expect(calls).toHaveLength(3);
+    expect(calls[1]?.url).toBe("https://chat.example.com/v1/ingest/ast_123/config");
+    expect(calls[1]?.method).toBe("PUT");
+    expect(calls[1]?.body).toEqual({ behaviour: { greeting: "Hello from CI" } });
+    expect(calls[1]?.body).not.toHaveProperty("tests");
+
+    expect(calls[2]?.url).toBe("https://chat.example.com/v1/ingest/ast_123/tests");
+    expect(calls[2]?.method).toBe("PUT");
+    expect(calls[2]?.body).toEqual({ tests: declaredTests });
+
+    const output = logs.join("\n");
+    expect(output).toContain("removed");
+    expect(output).toContain("Tests: 1 declared, 2 removed.");
+  });
+
+  it("leaves stored tests untouched when solv.config.json has no tests key", async () => {
+    const configPath = join(root, "solv.config.json");
+    await writeFile(configPath, JSON.stringify({ behaviour: { greeting: "Only config" } }), "utf8");
+
+    const current = defaultVersionConfig();
+    const urls: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      urls.push(url);
+      if ((init?.method ?? "GET") === "GET") {
+        return Response.json({ config: current });
+      }
+      return Response.json({ config: current });
+    };
+
+    await apply(
+      {
+        file: configPath,
+        endpoint: "https://chat.example.com",
+        assistant: "ast_123",
+        ingestKey: "ik_secret",
+      },
+      { fetchImpl, log: () => {} },
+    );
+
+    expect(urls.every((u) => u.endsWith("/config"))).toBe(true);
+  });
+
+  it.each([
+    {
+      name: "an empty question",
+      tests: [{ question: "", expectation: { kind: "declines" } }],
+      expected: "tests[0].question",
+    },
+    {
+      name: "an invalid expectation",
+      tests: [{ question: "Do you ship?", expectation: { kind: "unknown" } }],
+      expected: "tests[0].expectation.kind",
+    },
+    {
+      name: `more than ${MAX_TESTS_PER_ASSISTANT} tests`,
+      tests: Array.from({ length: MAX_TESTS_PER_ASSISTANT + 1 }, (_, i) => ({
+        question: `Question ${i + 1}?`,
+        expectation: { kind: "declines" },
+      })),
+      expected: String(MAX_TESTS_PER_ASSISTANT),
+    },
+  ])("rejects $name before sending any config or test mutation", async ({ tests, expected }) => {
+    const configPath = join(root, "solv.config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        behaviour: { greeting: "Valid change" },
+        tests,
+      }),
+      "utf8",
+    );
+
+    let called = false;
+    const fetchImpl: typeof fetch = async () => {
+      called = true;
+      return Response.json({});
+    };
+
+    const logs: string[] = [];
+    await expect(
+      apply(
+        {
+          file: configPath,
+          endpoint: "https://chat.example.com",
+          assistant: "ast_123",
+          ingestKey: "ik_secret",
+        },
+        { fetchImpl, log: (line) => logs.push(line) },
+      ),
+    ).rejects.toThrow(expected);
+
+    expect(called).toBe(false);
+    expect(logs.join("\n")).toContain(expected);
   });
 });

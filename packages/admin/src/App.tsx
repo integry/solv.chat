@@ -10,6 +10,7 @@ import { Install } from "./screens/Install.js";
 import { Login } from "./screens/Login.js";
 import { Overview } from "./screens/Overview.js";
 import { Providers } from "./screens/Providers.js";
+import { Reports } from "./screens/Reports.js";
 import { Sources } from "./screens/Sources.js";
 import { Tools } from "./screens/Tools.js";
 import { Widget } from "./screens/Widget.js";
@@ -23,6 +24,8 @@ function renderScreen(screen: ScreenId, assistantId: string) {
   switch (screen) {
     case "overview":
       return <Overview key={assistantId} assistantId={assistantId} />;
+    case "reports":
+      return <Reports key={assistantId} assistantId={assistantId} />;
     case "conversations":
       return <Conversations key={assistantId} assistantId={assistantId} />;
     case "gaps":
