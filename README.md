@@ -79,6 +79,56 @@ Page actions time out after 5 seconds so an answer is not held indefinitely;
 timing out does not cancel the call, so an action that timed out may still
 complete in the page.
 
+## Mounting and extending the admin
+
+`@solvchat/admin` can be mounted into another app with `mountAdmin(root, options)`.
+Import `@solvchat/admin/styles.css` alongside it. A host can add screens, replace
+sign-in and sign-out, hide built-in screens, put its own controls in the top bar,
+and choose where `/admin/` lands:
+
+```tsx
+import "@solvchat/admin/styles.css";
+import { type HeaderSlotProps, mountAdmin } from "@solvchat/admin";
+
+function OrgName({ api }: HeaderSlotProps) {
+  const org = api.useResource<{ name: string }>("/api/account/org");
+  return <span>{org.value?.name}</span>;
+}
+
+mountAdmin(document.getElementById("root")!, {
+  extraNavItems: [
+    // Not about one assistant: no assistant switcher or Try it pane, and it
+    // renders before the first assistant exists.
+    {
+      id: "account",
+      label: "Account",
+      path: "/admin/account",
+      section: "Account",
+      assistantScoped: false,
+    },
+  ],
+  extraScreens: { account: AccountScreen },
+  headerStart: OrgName,
+  headerEnd: OrgSwitcher,
+  defaultScreen: "account",
+});
+```
+
+- `headerStart` / `headerEnd` — components rendered in the top bar after the
+  product name and before the Sign out button. They receive `{ api }`, the same
+  same-origin API helpers extra screens get. Leave them out for the default header.
+- `assistantScoped` on an extra nav item — defaults to `true`. Set it to `false`
+  for screens that are not about the selected assistant: the assistant switcher,
+  "New assistant" and the Try it pane are hidden there, and the screen renders even
+  when no assistant exists. Extra sections are listed after the built-in ones.
+- `defaultScreen` — the screen `/admin/` (and any unknown admin path) opens: a
+  built-in screen id or an extra nav item id. Defaults to Overview. An unknown or
+  hidden id throws at mount time.
+
+With no assistant yet, every built-in screen shows a first-run state with the
+"New assistant" form; after creating one the admin opens its Sources screen.
+The full option list is in [docs/architecture.md](docs/architecture.md#extending-the-admin).
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).

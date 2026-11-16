@@ -671,3 +671,37 @@ body {
     border-top: 1px solid var(--border);
   }
 }
+
+.shell-header-slot {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.shell-header-spacer {
+  flex: 1;
+}
+
+.shell-body-unscoped {
+  grid-template-columns: 200px minmax(0, 1fr);
+}
+
+.first-run-subtitle {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.first-run-steps {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.9375rem;
+}
+
+@media (max-width: 960px) {
+  .shell-body-unscoped {
+    grid-template-columns: 1fr;
+  }
+}

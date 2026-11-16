@@ -21,8 +21,10 @@ import { Sources } from "./screens/Sources.js";
 import { Tests } from "./screens/Tests.js";
 import { Tools } from "./screens/Tools.js";
 import { Widget } from "./screens/Widget.js";
-import { AssistantSwitcher } from "./shell/AssistantSwitcher.js";
+import { AssistantSwitcher, type CreatedIngestKey } from "./shell/AssistantSwitcher.js";
+import { FirstRun } from "./shell/FirstRun.js";
 import { Navigation } from "./shell/Navigation.js";
+import type { CreatedAssistant } from "./shell/NewAssistantForm.js";
 import { TryItPane } from "./shell/TryItPane.js";
 import { AssistantMutationsProvider } from "./shell/useAssistantMutations.js";
 import { useSession } from "./shell/useSession.js";
@@ -61,12 +63,25 @@ function AdminShell({
   config: ResolvedAdminConfig;
   onSignOut: () => Promise<void>;
 }) {
-  const { screen, navigate } = useRoute(config.navItems);
+  const { screen, navigate } = useRoute(config.navItems, config.defaultScreen);
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
+  const [createdKey, setCreatedKey] = useState<CreatedIngestKey | null>(null);
+
+  function handleCreated({ assistant, ingestKey }: CreatedAssistant) {
+    assistantsRes.setValue({ assistants: [...assistants, assistant] });
+    setSelectedId(assistant.id);
+    setCreatedKey(ingestKey ? { assistantId: assistant.id, ingestKey } : null);
+  }
+
+  function handleFirstRunCreated(created: CreatedAssistant) {
+    handleCreated(created);
+    const sources = config.navItems.find((item) => item.id === "sources");
+    if (sources) navigate(sources.path);
+  }
 
   async function handleSignOut() {
     if (signingOut) return;
@@ -88,20 +103,37 @@ function AdminShell({
   const selectedAssistant = assistants.find((a) => a.id === effectiveSelectedId) ?? null;
   const ExtraScreen =
     screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
+  // Host screens registered with `assistantScoped: false` hide the assistant chrome.
+  const assistantChrome = !(ExtraScreen && screen !== null && config.unscopedScreenIds.has(screen));
+  const HeaderStart = config.headerStart;
+  const HeaderEnd = config.headerEnd;
 
   return (
     <div className="shell">
       <header className="shell-header">
         <div className="shell-brand">solv.chat</div>
-        <AssistantSwitcher
-          assistants={assistants}
-          selectedId={effectiveSelectedId}
-          onSelect={setSelectedId}
-          onCreated={(created) => {
-            assistantsRes.setValue({ assistants: [...assistants, created] });
-            setSelectedId(created.id);
-          }}
-        />
+        {HeaderStart && (
+          <div className="shell-header-slot">
+            <HeaderStart api={ADMIN_API_HELPERS} />
+          </div>
+        )}
+        {assistantChrome ? (
+          <AssistantSwitcher
+            assistants={assistants}
+            selectedId={effectiveSelectedId}
+            onSelect={setSelectedId}
+            onCreated={handleCreated}
+            createdKey={createdKey}
+            onDismissKey={() => setCreatedKey(null)}
+          />
+        ) : (
+          <div className="shell-header-spacer" />
+        )}
+        {HeaderEnd && (
+          <div className="shell-header-slot">
+            <HeaderEnd api={ADMIN_API_HELPERS} />
+          </div>
+        )}
         <button
           type="button"
           className="btn btn-secondary btn-sm"
@@ -117,7 +149,7 @@ function AdminShell({
         </div>
       )}
 
-      <div className="shell-body">
+      <div className={assistantChrome ? "shell-body" : "shell-body shell-body-unscoped"}>
         <Navigation current={screen} onNavigate={navigate} items={config.navItems} />
 
         <AssistantMutationsProvider>
@@ -141,9 +173,7 @@ function AdminShell({
                 {assistantsRes.error}
               </p>
             ) : selectedAssistant === null ? (
-              <div className="screen">
-                <p className="muted">Create an assistant to begin.</p>
-              </div>
+              <FirstRun onCreated={handleFirstRunCreated} />
             ) : (
               renderBuiltinScreen(screen as BuiltinScreenId, selectedAssistant.id)
             )}
@@ -151,7 +181,9 @@ function AdminShell({
         </AssistantMutationsProvider>
 
         {/* Mounted once outside <main> so moving between screens keeps the transcript. */}
-        {selectedAssistant !== null && <TryItPane assistant={selectedAssistant} />}
+        {assistantChrome && selectedAssistant !== null && (
+          <TryItPane assistant={selectedAssistant} />
+        )}
       </div>
     </div>
   );
