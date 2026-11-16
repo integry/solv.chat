@@ -15,6 +15,8 @@ export interface AssistantSwitcherProps {
   /** One-time ingest key of the assistant just created, shown until dismissed. */
   createdKey: CreatedIngestKey | null;
   onDismissKey: () => void;
+  /** Hides the switcher without unmounting it, so an unsent form is kept. */
+  hidden?: boolean;
 }
 
 function IngestKeyNotice({
@@ -70,11 +72,12 @@ export function AssistantSwitcher({
   onCreated,
   createdKey,
   onDismissKey,
+  hidden = false,
 }: AssistantSwitcherProps) {
   const [creating, setCreating] = useState(false);
 
   return (
-    <div className="switcher">
+    <div className="switcher" hidden={hidden}>
       <div className="switcher-bar">
         <label htmlFor="assistant-select" className="switcher-label">
           Assistant

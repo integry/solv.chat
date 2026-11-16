@@ -72,7 +72,12 @@ function AdminShell({
   const [createdKey, setCreatedKey] = useState<CreatedIngestKey | null>(null);
 
   function handleCreated({ assistant, ingestKey }: CreatedAssistant) {
-    assistantsRes.setValue({ assistants: [...assistants, assistant] });
+    // Merge into the latest list: two create forms can have requests in flight at once.
+    assistantsRes.setValue((prev) => {
+      const current = prev?.assistants ?? [];
+      if (current.some((a) => a.id === assistant.id)) return prev ?? { assistants: current };
+      return { assistants: [...current, assistant] };
+    });
     setSelectedId(assistant.id);
     setCreatedKey(ingestKey ? { assistantId: assistant.id, ingestKey } : null);
   }
@@ -117,18 +122,17 @@ function AdminShell({
             <HeaderStart api={ADMIN_API_HELPERS} />
           </div>
         )}
-        {assistantChrome ? (
-          <AssistantSwitcher
-            assistants={assistants}
-            selectedId={effectiveSelectedId}
-            onSelect={setSelectedId}
-            onCreated={handleCreated}
-            createdKey={createdKey}
-            onDismissKey={() => setCreatedKey(null)}
-          />
-        ) : (
-          <div className="shell-header-spacer" />
-        )}
+        {/* Hidden, not unmounted, on unscoped screens so a half-filled form survives. */}
+        <AssistantSwitcher
+          assistants={assistants}
+          selectedId={effectiveSelectedId}
+          onSelect={setSelectedId}
+          onCreated={handleCreated}
+          createdKey={createdKey}
+          onDismissKey={() => setCreatedKey(null)}
+          hidden={!assistantChrome}
+        />
+        {!assistantChrome && <div className="shell-header-spacer" />}
         {HeaderEnd && (
           <div className="shell-header-slot">
             <HeaderEnd api={ADMIN_API_HELPERS} />
@@ -180,9 +184,10 @@ function AdminShell({
           </main>
         </AssistantMutationsProvider>
 
-        {/* Mounted once outside <main> so moving between screens keeps the transcript. */}
-        {assistantChrome && selectedAssistant !== null && (
-          <TryItPane assistant={selectedAssistant} />
+        {/* Mounted once outside <main> so moving between screens keeps the transcript.
+            Unscoped screens hide it rather than unmount it, for the same reason. */}
+        {selectedAssistant !== null && (
+          <TryItPane assistant={selectedAssistant} hidden={!assistantChrome} />
         )}
       </div>
     </div>

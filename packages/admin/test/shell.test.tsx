@@ -30,9 +30,27 @@ interface Call {
   body: unknown;
 }
 
-function installServer(initial: Assistant[] = []) {
+interface ServerOptions {
+  /** Holds each create request until `releaseCreate()` is called. */
+  holdCreates?: boolean;
+  /** Answers `POST /api/admin/chat`; the default is a one-token reply. */
+  chat?: (body: { message: string }) => Response;
+}
+
+function sseResponse(events: Array<{ event: string; data: unknown }>): Response {
+  const payload = events
+    .map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`)
+    .join("");
+  return new Response(payload, {
+    status: 200,
+    headers: { "content-type": "text/event-stream; charset=utf-8" },
+  });
+}
+
+function installServer(initial: Assistant[] = [], options: ServerOptions = {}) {
   const assistants = [...initial];
   const calls: Call[] = [];
+  const heldCreates: Array<() => void> = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
       typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
@@ -45,6 +63,9 @@ function installServer(initial: Assistant[] = []) {
       return Response.json({ assistants });
     }
     if (path === "/api/admin/assistants" && method === "POST") {
+      if (options.holdCreates) {
+        await new Promise<void>((resolve) => heldCreates.push(resolve));
+      }
       const input = body as { name: string; allowedOrigins: string[] };
       for (let i = 0; i < input.allowedOrigins.length; i++) {
         const origin = input.allowedOrigins[i] ?? "";
@@ -66,6 +87,14 @@ function installServer(initial: Assistant[] = []) {
       assistants.push(created);
       return Response.json({ assistant: created, ingestKey: "ik_test_once" }, { status: 201 });
     }
+    if (path === "/api/admin/chat" && method === "POST") {
+      const chatBody = body as { message: string };
+      if (options.chat) return options.chat(chatBody);
+      return sseResponse([
+        { event: "token", data: { text: `Reply to: ${chatBody.message}` } },
+        { event: "done", data: { messageId: "msg_1", conversationId: "conv_1" } },
+      ]);
+    }
     if (path === "/api/admin/account") {
       return Response.json({ org: "Acme" });
     }
@@ -78,7 +107,16 @@ function installServer(initial: Assistant[] = []) {
     return Response.json({});
   });
   vi.stubGlobal("fetch", fetchMock);
-  return { assistants, calls };
+  return {
+    assistants,
+    calls,
+    heldCreateCount: () => heldCreates.length,
+    releaseCreate: () => {
+      const release = heldCreates.shift();
+      if (!release) throw new Error("no create request is held");
+      release();
+    },
+  };
 }
 
 let activeMount: AdminMount | null = null;
@@ -212,9 +250,11 @@ describe("assistantScoped", () => {
     await waitFor(() => {
       expect(screen.getByTestId("account-assistant").textContent).toBe("ast_1");
     });
-    expect(screen.queryByLabelText("Assistant")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Assistant" })).toBeNull();
     expect(screen.queryByRole("button", { name: "New assistant" })).toBeNull();
     expect(screen.queryByRole("complementary", { name: "Try it" })).toBeNull();
+    expect((document.querySelector(".switcher") as HTMLElement).hidden).toBe(true);
+    expect((document.querySelector(".try-it") as HTMLElement).hidden).toBe(true);
     expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
 
     // Back on a built-in screen the chrome returns.
@@ -222,6 +262,116 @@ describe("assistantScoped", () => {
     await screen.findByRole("heading", { name: "Overview" });
     expect(screen.getByLabelText("Assistant")).toBeTruthy();
     expect(screen.getByRole("complementary", { name: "Try it" })).toBeTruthy();
+  });
+
+  it("keeps the Try it conversation and unsent question across an unscoped screen", async () => {
+    let closeStream: (() => void) | null = null;
+    const server = installServer([makeAssistant("ast_1", "Docs Bot")], {
+      chat: (body) => {
+        if (body.message === "First question") {
+          return sseResponse([
+            { event: "token", data: { text: "First answer" } },
+            { event: "done", data: { messageId: "msg_1", conversationId: "conv_1" } },
+          ]);
+        }
+        if (body.message !== "Second question") {
+          return sseResponse([
+            { event: "token", data: { text: `Reply to: ${body.message}` } },
+            { event: "done", data: { messageId: "msg_3", conversationId: "conv_1" } },
+          ]);
+        }
+        // The second answer streams until the test closes it.
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(`event: token\ndata: ${JSON.stringify({ text: "Second " })}\n\n`),
+            );
+            closeStream = () => {
+              controller.enqueue(
+                encoder.encode(
+                  `event: token\ndata: ${JSON.stringify({ text: "answer" })}\n\n` +
+                    `event: done\ndata: ${JSON.stringify({ messageId: "msg_2", conversationId: "conv_1" })}\n\n`,
+                ),
+              );
+              controller.close();
+            };
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream; charset=utf-8" },
+        });
+      },
+    });
+    mountIntoDom(accountOptions);
+
+    const pane = await screen.findByRole("complementary", { name: "Try it" });
+    const input = within(pane).getByLabelText("Ask a question") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "First question" } });
+    fireEvent.click(within(pane).getByRole("button", { name: "Send" }));
+    await within(pane).findByText("First answer");
+
+    // An answer is still streaming when the owner leaves.
+    fireEvent.change(input, { target: { value: "Second question" } });
+    fireEvent.click(within(pane).getByRole("button", { name: "Send" }));
+    await within(pane).findByText("Second");
+    expect(input.disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("link", { name: "Account" }));
+    await screen.findByRole("heading", { name: "Account" });
+    // Hidden: out of layout, the tab order and the accessibility tree, but still mounted.
+    expect(screen.queryByRole("complementary", { name: "Try it" })).toBeNull();
+    expect(pane.isConnected).toBe(true);
+    expect(pane.hidden).toBe(true);
+
+    act(() => closeStream?.());
+    await waitFor(() => {
+      expect(pane.textContent).toContain("Second answer");
+    });
+
+    fireEvent.click(screen.getByRole("link", { name: "Overview" }));
+    await screen.findByRole("heading", { name: "Overview" });
+    expect(screen.getByRole("complementary", { name: "Try it" })).toBe(pane);
+    expect(pane.hidden).toBe(false);
+    expect(within(pane).getByText("First question")).toBeTruthy();
+    expect(within(pane).getByText("First answer")).toBeTruthy();
+    expect(within(pane).getByText("Second question")).toBeTruthy();
+    expect(pane.textContent).toContain("Second answer");
+
+    // An unsent question survives a round trip too.
+    fireEvent.change(input, { target: { value: "Third question" } });
+    fireEvent.click(screen.getByRole("link", { name: "Account" }));
+    await screen.findByRole("heading", { name: "Account" });
+    fireEvent.click(screen.getByRole("link", { name: "Overview" }));
+    await screen.findByRole("heading", { name: "Overview" });
+    expect(input.isConnected).toBe(true);
+    expect(input.value).toBe("Third question");
+
+    fireEvent.click(within(pane).getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(pane.textContent).toContain("Reply to: Third question");
+    });
+    const chats = server.calls.filter((c) => c.method === "POST" && c.path === "/api/admin/chat");
+    expect(chats).toHaveLength(3);
+    expect(chats[2]?.body).toMatchObject({ conversationId: "conv_1" });
+  });
+
+  it("keeps a half-filled New assistant form across an unscoped screen", async () => {
+    installServer([makeAssistant("ast_1", "Docs Bot")]);
+    mountIntoDom(accountOptions);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New assistant" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Half typed" } });
+
+    fireEvent.click(screen.getByRole("link", { name: "Account" }));
+    await screen.findByRole("heading", { name: "Account" });
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("link", { name: "Overview" }));
+    await screen.findByRole("heading", { name: "Overview" });
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Half typed");
   });
 
   it("keeps the assistant chrome on extra screens by default", async () => {
@@ -242,7 +392,8 @@ describe("assistantScoped", () => {
 
     await screen.findByRole("heading", { name: "Account" });
     expect(screen.getByTestId("account-assistant").textContent).toBe("none");
-    expect(screen.queryByText("No assistants yet")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Assistant" })).toBeNull();
+    expect(screen.queryByRole("option", { name: "No assistants yet" })).toBeNull();
     expect(screen.queryByRole("button", { name: "New assistant" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Create your first assistant" })).toBeNull();
   });
@@ -369,5 +520,33 @@ describe("first-run state", () => {
 
     await screen.findByRole("heading", { name: "Overview" });
     expect(window.location.pathname).toBe("/admin/overview");
+  });
+
+  it("keeps both assistants when the first-run and header forms create at once", async () => {
+    const server = installServer([], { holdCreates: true });
+    window.history.replaceState(null, "", "/admin/overview");
+    render(<App />);
+
+    const firstRun = await screen.findByRole("form", { name: "Create your first assistant" });
+    fireEvent.change(within(firstRun).getByLabelText("Name"), { target: { value: "First" } });
+    fireEvent.click(screen.getByRole("button", { name: "New assistant" }));
+    const headerForm = document.querySelector("header form");
+    if (!(headerForm instanceof HTMLElement)) throw new Error("no header form");
+    fireEvent.change(within(headerForm).getByLabelText("Name"), { target: { value: "Second" } });
+
+    fireEvent.click(within(firstRun).getByRole("button", { name: "Create assistant" }));
+    fireEvent.click(within(headerForm).getByRole("button", { name: "Create assistant" }));
+    await waitFor(() => expect(server.heldCreateCount()).toBe(2));
+
+    await act(async () => server.releaseCreate());
+    await screen.findByRole("heading", { name: "Sources" });
+    await act(async () => server.releaseCreate());
+
+    const select = screen.getByLabelText("Assistant") as HTMLSelectElement;
+    await waitFor(() => {
+      expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["First", "Second"]);
+    });
+    expect(select.value).toBe("ast_2");
+    expect(server.assistants.map((a) => a.name)).toEqual(["First", "Second"]);
   });
 });

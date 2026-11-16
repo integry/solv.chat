@@ -678,6 +678,11 @@ body {
   gap: 0.5rem;
 }
 
+.switcher[hidden],
+.try-it[hidden] {
+  display: none;
+}
+
 .shell-header-spacer {
   flex: 1;
 }
