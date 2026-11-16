@@ -39,41 +39,50 @@ export const NAV_ITEMS: readonly NavItem[] = [
 export function matchScreen(
   pathname: string,
   navItems: readonly NavItem[] = NAV_ITEMS,
+  defaultScreen?: string,
 ): string | null {
   const first = navItems[0];
   if (!first) return null;
   const normalized = pathname.replace(/\/+$/, "") || "/";
-  const fallback = navItems.some((item) => item.id === "overview") ? "overview" : first.id;
+  const fallback =
+    defaultScreen !== undefined && navItems.some((item) => item.id === defaultScreen)
+      ? defaultScreen
+      : navItems.some((item) => item.id === "overview")
+        ? "overview"
+        : first.id;
   if (normalized === "/admin" || normalized === "/") return fallback;
   const found = navItems.find((item) => item.path === normalized);
   return found ? found.id : fallback;
 }
 
-export function useRoute(navItems: readonly NavItem[] = NAV_ITEMS): {
+export function useRoute(
+  navItems: readonly NavItem[] = NAV_ITEMS,
+  defaultScreen?: string,
+): {
   screen: string | null;
   navigate: (path: string) => void;
 } {
   const [screen, setScreen] = useState<string | null>(() =>
-    matchScreen(window.location.pathname, navItems),
+    matchScreen(window.location.pathname, navItems, defaultScreen),
   );
 
   useEffect(() => {
-    setScreen(matchScreen(window.location.pathname, navItems));
+    setScreen(matchScreen(window.location.pathname, navItems, defaultScreen));
     const onPopState = () => {
-      setScreen(matchScreen(window.location.pathname, navItems));
+      setScreen(matchScreen(window.location.pathname, navItems, defaultScreen));
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [navItems]);
+  }, [navItems, defaultScreen]);
 
   const navigate = useCallback(
     (path: string) => {
       if (window.location.pathname !== path) {
         window.history.pushState(null, "", path);
       }
-      setScreen(matchScreen(window.location.pathname, navItems));
+      setScreen(matchScreen(window.location.pathname, navItems, defaultScreen));
     },
-    [navItems],
+    [navItems, defaultScreen],
   );
 
   return { screen, navigate };

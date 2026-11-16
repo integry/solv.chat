@@ -25,6 +25,8 @@ interface Turn {
 
 export interface TryItPaneProps {
   assistant: Assistant;
+  /** Hides the pane without unmounting it, so the conversation is kept. */
+  hidden?: boolean;
 }
 
 function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
@@ -38,7 +40,7 @@ function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
  * Mounted once in the shell outside `<main>` so the owner keeps their draft
  * conversation while moving between screens.
  */
-export function TryItPane({ assistant }: TryItPaneProps) {
+export function TryItPane({ assistant, hidden = false }: TryItPaneProps) {
   const [turnsByAssistant, setTurnsByAssistant] = useState<Record<string, Turn[]>>({});
   const [conversationIds, setConversationIds] = useState<Record<string, string>>({});
   const [inputsByAssistant, setInputsByAssistant] = useState<Record<string, string>>({});
@@ -232,7 +234,7 @@ export function TryItPane({ assistant }: TryItPaneProps) {
   }
 
   return (
-    <aside className="try-it" aria-label="Try it">
+    <aside className="try-it" aria-label="Try it" hidden={hidden}>
       <div className="try-it-header">
         <div>
           <h2 className="try-it-title">Try it</h2>

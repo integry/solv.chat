@@ -420,6 +420,19 @@ Options accepted by `mountAdmin`:
   request.
 - `hideScreens` — built-in screen ids to omit from navigation and routing (for
   example, when keys are fully managed).
+- `headerStart` / `headerEnd` — optional components rendered in the top bar after
+  the product name and before the Sign out button, with `{ api }`. Absent, the
+  header is unchanged.
+- `assistantScoped` (on an extra nav item, default `true`) — `false` hides the
+  assistant switcher, "New assistant" and the Try it pane on that screen, and
+  renders it even when no assistant exists.
+- `defaultScreen` — the screen `/admin/` and unknown admin paths land on (a
+  visible built-in id or an extra nav item id; default Overview). Unknown or
+  hidden ids throw at mount time.
+
+With no assistant, every built-in screen except Providers shows one first-run
+state: what an assistant is, the "New assistant" form inline, and the next steps
+(add sources, try it, install the snippet). Creating one opens its Sources screen.
 
 This extension point is for **adding** screens and replacing sign-in, not for
 changing or shadowing engine screens. Built-in ids and routes cannot be

@@ -1,28 +1,35 @@
-import { type FormEvent, useState } from "react";
-import { ApiError, postJson } from "../api/client.js";
+import { useState } from "react";
 import type { Assistant } from "../api/types.js";
+import { type CreatedAssistant, NewAssistantForm } from "./NewAssistantForm.js";
+
+export interface CreatedIngestKey {
+  assistantId: string;
+  ingestKey: string;
+}
 
 export interface AssistantSwitcherProps {
   assistants: Assistant[];
   selectedId: string | null;
   onSelect: (id: string) => void;
-  onCreated: (assistant: Assistant) => void;
+  onCreated: (created: CreatedAssistant) => void;
+  /** Oldest undismissed one-time ingest key, shown until dismissed. */
+  createdKey: CreatedIngestKey | null;
+  /** How many more new keys wait behind `createdKey`. */
+  pendingKeyCount?: number;
+  onDismissKey: (assistantId: string) => void;
+  /** Hides the switcher without unmounting it, so an unsent form is kept. */
+  hidden?: boolean;
 }
 
-export function AssistantSwitcher({
-  assistants,
-  selectedId,
-  onSelect,
-  onCreated,
-}: AssistantSwitcherProps) {
-  const [creating, setCreating] = useState(false);
-  const [name, setName] = useState("");
-  const [originsText, setOriginsText] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [createdKey, setCreatedKey] = useState<{ assistantId: string; ingestKey: string } | null>(
-    null,
-  );
+function IngestKeyNotice({
+  createdKey,
+  pendingCount,
+  onDismiss,
+}: {
+  createdKey: CreatedIngestKey;
+  pendingCount: number;
+  onDismiss: () => void;
+}) {
   const [copiedKey, setCopiedKey] = useState(false);
 
   async function handleCopyKey(key: string) {
@@ -34,46 +41,55 @@ export function AssistantSwitcher({
     }
   }
 
-  async function handleCreate(event: FormEvent) {
-    event.preventDefault();
-    setError(null);
-    setSubmitting(true);
+  return (
+    <div className="switcher-form" role="status" aria-label="New ingest key">
+      <p className="warning-banner">Copy your ingest key now. It is shown once.</p>
+      <div className="field">
+        <label htmlFor="created-assistant-id">Assistant ID</label>
+        <input id="created-assistant-id" type="text" readOnly value={createdKey.assistantId} />
+      </div>
+      <div className="field">
+        <label htmlFor="created-ingest-key">Ingest key</label>
+        <input id="created-ingest-key" type="text" readOnly value={createdKey.ingestKey} />
+      </div>
+      <div className="actions">
+        <button
+          type="button"
+          className="btn btn-primary btn-sm"
+          onClick={() => void handleCopyKey(createdKey.ingestKey)}
+        >
+          Copy key
+        </button>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={onDismiss}>
+          Done
+        </button>
+        {copiedKey && <span className="notice-text">Copied.</span>}
+      </div>
+      {pendingCount > 0 && (
+        <p className="notice-text">
+          {pendingCount === 1
+            ? "1 more new key is next."
+            : `${pendingCount} more new keys are next.`}
+        </p>
+      )}
+    </div>
+  );
+}
 
-    const allowedOrigins = originsText
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-
-    try {
-      const res = await postJson<{ assistant: Assistant; ingestKey?: string }>(
-        "/api/admin/assistants",
-        {
-          name,
-          allowedOrigins,
-        },
-      );
-      setName("");
-      setOriginsText("");
-      setCreating(false);
-      setCopiedKey(false);
-      if (typeof res.ingestKey === "string" && res.ingestKey.length > 0) {
-        setCreatedKey({ assistantId: res.assistant.id, ingestKey: res.ingestKey });
-      }
-      onCreated(res.assistant);
-    } catch (err) {
-      if (err instanceof ApiError) {
-        const firstField = Object.values(err.fields)[0];
-        setError(firstField ?? err.message);
-      } else {
-        setError("Could not create assistant.");
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }
+export function AssistantSwitcher({
+  assistants,
+  selectedId,
+  onSelect,
+  onCreated,
+  createdKey,
+  pendingKeyCount = 0,
+  onDismissKey,
+  hidden = false,
+}: AssistantSwitcherProps) {
+  const [creating, setCreating] = useState(false);
 
   return (
-    <div className="switcher">
+    <div className="switcher" hidden={hidden}>
       <div className="switcher-bar">
         <label htmlFor="assistant-select" className="switcher-label">
           Assistant
@@ -98,80 +114,30 @@ export function AssistantSwitcher({
         <button
           type="button"
           className="btn btn-secondary"
-          onClick={() => {
-            setCreating((prev) => !prev);
-            setError(null);
-          }}
+          onClick={() => setCreating((prev) => !prev)}
         >
           {creating ? "Cancel" : "New assistant"}
         </button>
       </div>
 
       {creating && (
-        <form className="switcher-form" onSubmit={handleCreate}>
-          <div className="field">
-            <label htmlFor="new-assistant-name">Name</label>
-            <input
-              id="new-assistant-name"
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="My website"
-              required
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="new-assistant-origins">Allowed origins (optional, one per line)</label>
-            <textarea
-              id="new-assistant-origins"
-              rows={2}
-              value={originsText}
-              onChange={(e) => setOriginsText(e.target.value)}
-              placeholder="https://example.com"
-            />
-          </div>
-          {error && (
-            <p className="error-text" role="alert">
-              {error}
-            </p>
-          )}
-          <div className="actions">
-            <button type="submit" className="btn btn-primary" disabled={submitting}>
-              {submitting ? "Creating…" : "Create assistant"}
-            </button>
-          </div>
-        </form>
+        <NewAssistantForm
+          idPrefix="new-assistant"
+          className="switcher-form"
+          onCreated={(created) => {
+            setCreating(false);
+            onCreated(created);
+          }}
+        />
       )}
 
       {createdKey && (
-        <div className="switcher-form" role="status" aria-label="New ingest key">
-          <p className="warning-banner">Copy your ingest key now. It is shown once.</p>
-          <div className="field">
-            <label htmlFor="created-assistant-id">Assistant ID</label>
-            <input id="created-assistant-id" type="text" readOnly value={createdKey.assistantId} />
-          </div>
-          <div className="field">
-            <label htmlFor="created-ingest-key">Ingest key</label>
-            <input id="created-ingest-key" type="text" readOnly value={createdKey.ingestKey} />
-          </div>
-          <div className="actions">
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              onClick={() => void handleCopyKey(createdKey.ingestKey)}
-            >
-              Copy key
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => setCreatedKey(null)}
-            >
-              Done
-            </button>
-            {copiedKey && <span className="notice-text">Copied.</span>}
-          </div>
-        </div>
+        <IngestKeyNotice
+          key={createdKey.assistantId}
+          createdKey={createdKey}
+          pendingCount={pendingKeyCount}
+          onDismiss={() => onDismissKey(createdKey.assistantId)}
+        />
       )}
     </div>
   );

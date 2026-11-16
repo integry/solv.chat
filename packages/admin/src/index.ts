@@ -15,6 +15,7 @@ export {
   type AdminApiHelpers,
   type ExtraNavItem,
   type ExtraScreenProps,
+  type HeaderSlotProps,
   type MountAdminOptions,
   type SignInProps,
 } from "./extension.js";

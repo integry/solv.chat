@@ -21,8 +21,10 @@ import { Sources } from "./screens/Sources.js";
 import { Tests } from "./screens/Tests.js";
 import { Tools } from "./screens/Tools.js";
 import { Widget } from "./screens/Widget.js";
-import { AssistantSwitcher } from "./shell/AssistantSwitcher.js";
+import { AssistantSwitcher, type CreatedIngestKey } from "./shell/AssistantSwitcher.js";
+import { FirstRun } from "./shell/FirstRun.js";
 import { Navigation } from "./shell/Navigation.js";
+import type { CreatedAssistant } from "./shell/NewAssistantForm.js";
 import { TryItPane } from "./shell/TryItPane.js";
 import { AssistantMutationsProvider } from "./shell/useAssistantMutations.js";
 import { useSession } from "./shell/useSession.js";
@@ -61,12 +63,38 @@ function AdminShell({
   config: ResolvedAdminConfig;
   onSignOut: () => Promise<void>;
 }) {
-  const { screen, navigate } = useRoute(config.navItems);
+  const { screen, navigate } = useRoute(config.navItems, config.defaultScreen);
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
+  // A queue, not one slot: two create forms can finish close together, and each key is
+  // shown once by the API, so every key stays until the user dismisses it.
+  const [createdKeys, setCreatedKeys] = useState<CreatedIngestKey[]>([]);
+
+  function handleCreated({ assistant, ingestKey }: CreatedAssistant) {
+    // Merge into the latest list: two create forms can have requests in flight at once.
+    assistantsRes.setValue((prev) => {
+      const current = prev?.assistants ?? [];
+      if (current.some((a) => a.id === assistant.id)) return prev ?? { assistants: current };
+      return { assistants: [...current, assistant] };
+    });
+    setSelectedId(assistant.id);
+    if (ingestKey) {
+      setCreatedKeys((prev) =>
+        prev.some((k) => k.assistantId === assistant.id)
+          ? prev
+          : [...prev, { assistantId: assistant.id, ingestKey }],
+      );
+    }
+  }
+
+  function handleFirstRunCreated(created: CreatedAssistant) {
+    handleCreated(created);
+    const sources = config.navItems.find((item) => item.id === "sources");
+    if (sources) navigate(sources.path);
+  }
 
   async function handleSignOut() {
     if (signingOut) return;
@@ -88,20 +116,39 @@ function AdminShell({
   const selectedAssistant = assistants.find((a) => a.id === effectiveSelectedId) ?? null;
   const ExtraScreen =
     screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
+  // Host screens registered with `assistantScoped: false` hide the assistant chrome.
+  const assistantChrome = !(ExtraScreen && screen !== null && config.unscopedScreenIds.has(screen));
+  const HeaderStart = config.headerStart;
+  const HeaderEnd = config.headerEnd;
 
   return (
     <div className="shell">
       <header className="shell-header">
         <div className="shell-brand">solv.chat</div>
+        {HeaderStart && (
+          <div className="shell-header-slot">
+            <HeaderStart api={ADMIN_API_HELPERS} />
+          </div>
+        )}
+        {/* Hidden, not unmounted, on unscoped screens so a half-filled form survives. */}
         <AssistantSwitcher
           assistants={assistants}
           selectedId={effectiveSelectedId}
           onSelect={setSelectedId}
-          onCreated={(created) => {
-            assistantsRes.setValue({ assistants: [...assistants, created] });
-            setSelectedId(created.id);
-          }}
+          onCreated={handleCreated}
+          createdKey={createdKeys[0] ?? null}
+          pendingKeyCount={Math.max(createdKeys.length - 1, 0)}
+          onDismissKey={(assistantId) =>
+            setCreatedKeys((prev) => prev.filter((k) => k.assistantId !== assistantId))
+          }
+          hidden={!assistantChrome}
         />
+        {!assistantChrome && <div className="shell-header-spacer" />}
+        {HeaderEnd && (
+          <div className="shell-header-slot">
+            <HeaderEnd api={ADMIN_API_HELPERS} />
+          </div>
+        )}
         <button
           type="button"
           className="btn btn-secondary btn-sm"
@@ -117,7 +164,7 @@ function AdminShell({
         </div>
       )}
 
-      <div className="shell-body">
+      <div className={assistantChrome ? "shell-body" : "shell-body shell-body-unscoped"}>
         <Navigation current={screen} onNavigate={navigate} items={config.navItems} />
 
         <AssistantMutationsProvider>
@@ -141,17 +188,18 @@ function AdminShell({
                 {assistantsRes.error}
               </p>
             ) : selectedAssistant === null ? (
-              <div className="screen">
-                <p className="muted">Create an assistant to begin.</p>
-              </div>
+              <FirstRun onCreated={handleFirstRunCreated} />
             ) : (
               renderBuiltinScreen(screen as BuiltinScreenId, selectedAssistant.id)
             )}
           </main>
         </AssistantMutationsProvider>
 
-        {/* Mounted once outside <main> so moving between screens keeps the transcript. */}
-        {selectedAssistant !== null && <TryItPane assistant={selectedAssistant} />}
+        {/* Mounted once outside <main> so moving between screens keeps the transcript.
+            Unscoped screens hide it rather than unmount it, for the same reason. */}
+        {selectedAssistant !== null && (
+          <TryItPane assistant={selectedAssistant} hidden={!assistantChrome} />
+        )}
       </div>
     </div>
   );
