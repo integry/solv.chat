@@ -85,7 +85,10 @@ function installServer(initial: Assistant[] = [], options: ServerOptions = {}) {
         input.allowedOrigins,
       );
       assistants.push(created);
-      return Response.json({ assistant: created, ingestKey: "ik_test_once" }, { status: 201 });
+      // Distinct per creation so tests can tell which key the notice shows.
+      const ingestKey =
+        assistants.length === 1 ? "ik_test_once" : `ik_test_once_${assistants.length}`;
+      return Response.json({ assistant: created, ingestKey }, { status: 201 });
     }
     if (path === "/api/admin/chat" && method === "POST") {
       const chatBody = body as { message: string };
@@ -548,5 +551,46 @@ describe("first-run state", () => {
     });
     expect(select.value).toBe("ast_2");
     expect(server.assistants.map((a) => a.name)).toEqual(["First", "Second"]);
+  });
+
+  it("keeps each one-time key until dismissed when two creations finish close together", async () => {
+    const server = installServer([], { holdCreates: true });
+    window.history.replaceState(null, "", "/admin/overview");
+    render(<App />);
+
+    const firstRun = await screen.findByRole("form", { name: "Create your first assistant" });
+    fireEvent.change(within(firstRun).getByLabelText("Name"), { target: { value: "First" } });
+    fireEvent.click(screen.getByRole("button", { name: "New assistant" }));
+    const headerForm = document.querySelector("header form");
+    if (!(headerForm instanceof HTMLElement)) throw new Error("no header form");
+    fireEvent.change(within(headerForm).getByLabelText("Name"), { target: { value: "Second" } });
+
+    fireEvent.click(within(firstRun).getByRole("button", { name: "Create assistant" }));
+    fireEvent.click(within(headerForm).getByRole("button", { name: "Create assistant" }));
+    await waitFor(() => expect(server.heldCreateCount()).toBe(2));
+
+    await act(async () => server.releaseCreate());
+    await screen.findByRole("heading", { name: "Sources" });
+    await act(async () => server.releaseCreate());
+    await waitFor(() => expect(server.assistants).toHaveLength(2));
+
+    // The second key must not replace the first one before the user has copied it.
+    const notice = await screen.findByRole("status", { name: "New ingest key" });
+    await waitFor(() => expect(notice.textContent).toMatch(/1 more new key is next/));
+    expect((within(notice).getByLabelText("Assistant ID") as HTMLInputElement).value).toBe("ast_1");
+    expect((within(notice).getByLabelText("Ingest key") as HTMLInputElement).value).toBe(
+      "ik_test_once",
+    );
+
+    fireEvent.click(within(notice).getByRole("button", { name: "Done" }));
+    const next = screen.getByRole("status", { name: "New ingest key" });
+    expect((within(next).getByLabelText("Assistant ID") as HTMLInputElement).value).toBe("ast_2");
+    expect((within(next).getByLabelText("Ingest key") as HTMLInputElement).value).toBe(
+      "ik_test_once_2",
+    );
+    expect(next.textContent).not.toMatch(/more new key/);
+
+    fireEvent.click(within(next).getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("status", { name: "New ingest key" })).toBeNull();
   });
 });

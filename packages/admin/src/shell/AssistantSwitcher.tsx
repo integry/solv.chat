@@ -12,18 +12,22 @@ export interface AssistantSwitcherProps {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onCreated: (created: CreatedAssistant) => void;
-  /** One-time ingest key of the assistant just created, shown until dismissed. */
+  /** Oldest undismissed one-time ingest key, shown until dismissed. */
   createdKey: CreatedIngestKey | null;
-  onDismissKey: () => void;
+  /** How many more new keys wait behind `createdKey`. */
+  pendingKeyCount?: number;
+  onDismissKey: (assistantId: string) => void;
   /** Hides the switcher without unmounting it, so an unsent form is kept. */
   hidden?: boolean;
 }
 
 function IngestKeyNotice({
   createdKey,
+  pendingCount,
   onDismiss,
 }: {
   createdKey: CreatedIngestKey;
+  pendingCount: number;
   onDismiss: () => void;
 }) {
   const [copiedKey, setCopiedKey] = useState(false);
@@ -61,6 +65,13 @@ function IngestKeyNotice({
         </button>
         {copiedKey && <span className="notice-text">Copied.</span>}
       </div>
+      {pendingCount > 0 && (
+        <p className="notice-text">
+          {pendingCount === 1
+            ? "1 more new key is next."
+            : `${pendingCount} more new keys are next.`}
+        </p>
+      )}
     </div>
   );
 }
@@ -71,6 +82,7 @@ export function AssistantSwitcher({
   onSelect,
   onCreated,
   createdKey,
+  pendingKeyCount = 0,
   onDismissKey,
   hidden = false,
 }: AssistantSwitcherProps) {
@@ -123,7 +135,8 @@ export function AssistantSwitcher({
         <IngestKeyNotice
           key={createdKey.assistantId}
           createdKey={createdKey}
-          onDismiss={onDismissKey}
+          pendingCount={pendingKeyCount}
+          onDismiss={() => onDismissKey(createdKey.assistantId)}
         />
       )}
     </div>

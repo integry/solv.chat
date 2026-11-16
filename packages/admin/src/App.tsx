@@ -69,7 +69,9 @@ function AdminShell({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
-  const [createdKey, setCreatedKey] = useState<CreatedIngestKey | null>(null);
+  // A queue, not one slot: two create forms can finish close together, and each key is
+  // shown once by the API, so every key stays until the user dismisses it.
+  const [createdKeys, setCreatedKeys] = useState<CreatedIngestKey[]>([]);
 
   function handleCreated({ assistant, ingestKey }: CreatedAssistant) {
     // Merge into the latest list: two create forms can have requests in flight at once.
@@ -79,7 +81,13 @@ function AdminShell({
       return { assistants: [...current, assistant] };
     });
     setSelectedId(assistant.id);
-    setCreatedKey(ingestKey ? { assistantId: assistant.id, ingestKey } : null);
+    if (ingestKey) {
+      setCreatedKeys((prev) =>
+        prev.some((k) => k.assistantId === assistant.id)
+          ? prev
+          : [...prev, { assistantId: assistant.id, ingestKey }],
+      );
+    }
   }
 
   function handleFirstRunCreated(created: CreatedAssistant) {
@@ -128,8 +136,11 @@ function AdminShell({
           selectedId={effectiveSelectedId}
           onSelect={setSelectedId}
           onCreated={handleCreated}
-          createdKey={createdKey}
-          onDismissKey={() => setCreatedKey(null)}
+          createdKey={createdKeys[0] ?? null}
+          pendingKeyCount={Math.max(createdKeys.length - 1, 0)}
+          onDismissKey={(assistantId) =>
+            setCreatedKeys((prev) => prev.filter((k) => k.assistantId !== assistantId))
+          }
           hidden={!assistantChrome}
         />
         {!assistantChrome && <div className="shell-header-spacer" />}
