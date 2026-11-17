@@ -7,69 +7,28 @@ export interface WidgetPreviewConfig {
 
 export interface WidgetPreviewProps {
   config: WidgetPreviewConfig;
-  /** Where the widget script is served; default this origin's `/widget.js`. */
-  widgetUrl?: string;
-}
-
-const READY = "solv-preview-ready";
-
-function randomNonce(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /**
- * The page inside the frame. The frame is sandboxed without same-origin, and
- * its policy allows only the widget script and the small inline listener:
- * no `connect-src`, so the widget cannot make a request even if it tried.
+ * The page inside the frame: static files in the admin build (`public/`, so
+ * `dist/preview.html`, `preview.js` and `preview.css`), served next to the
+ * other admin files. Loaded by URL, not `srcdoc`, because a `srcdoc` frame
+ * inherits the admin's policy, which allows no inline script or style. The
+ * page loads this origin's `/widget.js` and carries its own policy with no
+ * `connect-src`.
  */
-export function previewDocument(widgetUrl: string, nonce: string): string {
-  const csp = [
-    "default-src 'none'",
-    `script-src ${widgetUrl} 'nonce-${nonce}'`,
-    "style-src 'unsafe-inline'",
-  ].join("; ");
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="${csp}">
-<style>html,body{margin:0;height:100%;background:#e2e8f0;}</style>
-</head>
-<body>
-<solv-chat></solv-chat>
-<script src="${widgetUrl}"></script>
-<script nonce="${nonce}">
-var latest = null;
-function show() {
-  var el = document.querySelector("solv-chat");
-  if (latest !== null && el && typeof el.preview === "function") el.preview(latest);
-}
-addEventListener("message", function (event) {
-  if (event.source !== parent) return;
-  latest = event.data;
-  customElements.whenDefined("solv-chat").then(show);
-});
-parent.postMessage("${READY}", "*");
-</script>
-</body>
-</html>`;
-}
+export const PREVIEW_PAGE = "/admin/preview.html";
+
+const READY = "solv-preview-ready";
 
 /**
  * The real widget package, showing the form's values as they change. It
  * runs in a sandboxed frame with no network access and no assistant key, so
  * typing in it sends nothing anywhere.
  */
-export function WidgetPreview({ config, widgetUrl }: WidgetPreviewProps) {
+export function WidgetPreview({ config }: WidgetPreviewProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [ready, setReady] = useState(false);
-  const src = useMemo(
-    () => widgetUrl ?? new URL("/widget.js", window.location.href).href,
-    [widgetUrl],
-  );
-  const srcDoc = useMemo(() => previewDocument(src, randomNonce()), [src]);
 
   useEffect(() => {
     function onMessage(event: MessageEvent) {
@@ -95,7 +54,7 @@ export function WidgetPreview({ config, widgetUrl }: WidgetPreviewProps) {
         className="widget-preview-frame"
         title="Preview of the chat on your site"
         sandbox="allow-scripts"
-        srcDoc={srcDoc}
+        src={PREVIEW_PAGE}
       />
       <figcaption className="field-hint">
         Preview of your unsaved settings. Typing here sends nothing.

@@ -384,8 +384,15 @@ It sets no cookies and loads nothing from third parties.
 The element's `preview(config)` method (same shape as the public config
 response) shows a config with the panel open and from then on makes no
 requests. The admin's Widget screen uses it for a live preview: the real
-`/widget.js` runs in a sandboxed `srcdoc` frame (no same-origin, a policy with
-no `connect-src`) and receives the unsaved form values by `postMessage`.
+`/widget.js` runs in a frame sandboxed with `allow-scripts` only (no
+same-origin, no assistant key) and receives the unsaved form values by
+`postMessage`. The frame loads `/admin/preview.html`, a static page with its
+script and stylesheet in separate files (`preview.js`, `preview.css`), because
+the admin's policy (`script-src 'self'; style-src 'self'`, no nonce) allows no
+inline script or style. The admin policy adds `frame-src 'self'` for it. The
+page's own policy (`ADMIN_PREVIEW_CSP` in `@solvchat/core`, sent as a header
+and repeated in a `<meta>` tag) allows only scripts and styles from this origin
+and has no `connect-src`, so nothing in the frame can make a request.
 
 ## Admin
 
@@ -441,6 +448,14 @@ if (root) {
   });
 }
 ```
+
+The Widget screen's preview frame loads `/admin/preview.html`, which loads
+`/admin/preview.js`, `/admin/preview.css` and `/widget.js` from the same origin.
+A consumer serves the three preview files from the package's `dist/`
+(exported as `@solvchat/admin/preview.html`, `preview.js` and `preview.css`)
+at those paths. The admin page's policy needs `frame-src 'self'`; the preview
+page's policy must allow framing by the admin (`frame-ancestors 'self'`, no
+`X-Frame-Options: DENY`).
 
 Options accepted by `mountAdmin`:
 

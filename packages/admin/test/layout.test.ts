@@ -1,13 +1,19 @@
 // @vitest-environment node
 
-import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultVersionConfig } from "@solvchat/core";
+import { ADMIN_CSP, ADMIN_PREVIEW_CSP, defaultVersionConfig } from "@solvchat/core";
 import axe from "axe-core";
-import { createServer, type ViteDevServer } from "vite";
+import { build, createServer, type ViteDevServer } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type {
   AnswerTest,
@@ -244,6 +250,12 @@ function findChromeBinary(): string {
   );
 }
 
+interface CdpEvent {
+  method: string;
+  params: Record<string, unknown>;
+  sessionId?: string | undefined;
+}
+
 class CdpClient {
   private ws: WebSocket;
   private nextId = 1;
@@ -252,15 +264,30 @@ class CdpClient {
     { resolve: (value: unknown) => void; reject: (err: Error) => void }
   >();
 
+  private listeners = new Set<(event: CdpEvent) => void>();
+
   private constructor(ws: WebSocket) {
     this.ws = ws;
     this.ws.addEventListener("message", (event) => {
       const msg = JSON.parse(String(event.data)) as {
         id?: number;
+        method?: string;
+        params?: Record<string, unknown>;
+        sessionId?: string;
         result?: unknown;
         error?: { message?: string };
       };
-      if (msg.id === undefined) return;
+      if (msg.id === undefined) {
+        if (msg.method) {
+          const cdpEvent: CdpEvent = {
+            method: msg.method,
+            params: msg.params ?? {},
+            sessionId: msg.sessionId,
+          };
+          for (const listener of this.listeners) listener(cdpEvent);
+        }
+        return;
+      }
       const entry = this.pending.get(msg.id);
       if (!entry) return;
       this.pending.delete(msg.id);
@@ -283,26 +310,44 @@ class CdpClient {
     return new CdpClient(ws);
   }
 
-  send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  /** Events from the page and from any attached session (flattened). */
+  onEvent(listener: (event: CdpEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  send<T = unknown>(
+    method: string,
+    params: Record<string, unknown> = {},
+    sessionId?: string,
+  ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolveMsg, rejectMsg) => {
       this.pending.set(id, {
         resolve: resolveMsg as (value: unknown) => void,
         reject: rejectMsg,
       });
-      this.ws.send(JSON.stringify({ id, method, params }));
+      this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
 
-  async evaluate<T>(expression: string): Promise<T> {
+  async evaluate<T>(
+    expression: string,
+    target: { sessionId?: string; contextId?: number } = {},
+  ): Promise<T> {
     const res = await this.send<{
       result?: { value?: T };
       exceptionDetails?: { text?: string; exception?: { description?: string } };
-    }>("Runtime.evaluate", {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-    });
+    }>(
+      "Runtime.evaluate",
+      {
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+        ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
+      },
+      target.sessionId,
+    );
     if (res.exceptionDetails) {
       throw new Error(
         res.exceptionDetails.exception?.description ??
@@ -438,6 +483,129 @@ async function launchChromium(): Promise<{
   }
 }
 
+/** The admin API the screens read, answered from the fixtures above. `url` is relative to /api/admin. */
+function answerAdminApi(req: IncomingMessage, res: ServerResponse): void {
+  const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+  res.setHeader("Content-Type", "application/json");
+  if (pathname === "/assistants") {
+    res.end(JSON.stringify({ assistants: [ASSISTANT] }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/mcp-servers`) {
+    res.end(JSON.stringify({ servers: SERVERS }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/report`) {
+    res.end(JSON.stringify(REPORT));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}`) {
+    res.end(JSON.stringify({ assistant: ASSISTANT }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/sources`) {
+    res.end(JSON.stringify({ sources: SOURCES }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/install`) {
+    res.end(JSON.stringify(INSTALL));
+    return;
+  }
+  if (pathname === "/providers") {
+    res.end(JSON.stringify(PROVIDERS));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/test-runs`) {
+    res.end(JSON.stringify({ runs: [] }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/tests`) {
+    res.end(JSON.stringify({ tests: TESTS }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/versions`) {
+    res.end(
+      JSON.stringify({
+        versions: [versionRow("draft", DRAFT_CONFIG), versionRow("published", PUBLISHED_CONFIG)],
+      }),
+    );
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/draft`) {
+    res.end(JSON.stringify({ draft: versionRow("draft", DRAFT_CONFIG) }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/overview`) {
+    res.end(
+      JSON.stringify({
+        messages: 120,
+        answeredShare: 0.82,
+        todayCostMicros: 41_000,
+        topQuestions: [{ question: "How do I install the widget?", count: 14 }],
+      }),
+    );
+    return;
+  }
+  res.end(JSON.stringify({}));
+}
+
+const WORKSPACE_ROOT = resolve(ADMIN_ROOT, "../..");
+const WIDGET_BUNDLE = resolve(WORKSPACE_ROOT, "packages/widget/dist/widget.js");
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+};
+
+/**
+ * Serves a production build of the admin the way the engine Worker does
+ * (`packages/engine/src/admin/assets.ts`): the shell with the admin policy,
+ * the preview page with its own, plus `/widget.js` and the fake API. The Vite
+ * dev server cannot stand in here: its inline React preamble breaks under
+ * the policy, and it sends none.
+ */
+function serveBuiltAdmin(distDir: string): Server {
+  const indexHtml = readFileSync(resolve(distDir, "index.html"));
+  return createHttpServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname.startsWith("/api/admin/")) {
+      req.url = url.pathname.slice("/api/admin".length) + url.search;
+      answerAdminApi(req, res);
+      return;
+    }
+    if (url.pathname === "/widget.js") {
+      res.writeHead(200, { "content-type": CONTENT_TYPES[".js"] });
+      res.end(readFileSync(WIDGET_BUNDLE));
+      return;
+    }
+    if (url.pathname.startsWith("/admin/")) {
+      const file = resolve(distDir, url.pathname.slice("/admin/".length));
+      if (file.startsWith(distDir + sep) && existsSync(file) && statSync(file).isFile()) {
+        const headers: Record<string, string> = {
+          "content-type": CONTENT_TYPES[extname(file)] ?? "application/octet-stream",
+        };
+        if (url.pathname === "/admin/preview.html") {
+          headers["content-security-policy"] = `${ADMIN_PREVIEW_CSP}; frame-ancestors 'self'`;
+        }
+        res.writeHead(200, headers);
+        res.end(readFileSync(file));
+        return;
+      }
+    }
+    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
+      res.writeHead(200, {
+        "content-type": CONTENT_TYPES[".html"],
+        "x-frame-options": "DENY",
+        "content-security-policy": ADMIN_CSP,
+      });
+      res.end(indexHtml);
+      return;
+    }
+    res.writeHead(404).end();
+  });
+}
+
 describe("Admin layout regressions (Chromium)", () => {
   let viteServer: ViteDevServer;
   let baseUrl: string;
@@ -454,73 +622,7 @@ describe("Admin layout regressions (Chromium)", () => {
         {
           name: "admin-layout-test-api-stub",
           configureServer(server) {
-            server.middlewares.use("/api/admin", (req, res) => {
-              const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
-              res.setHeader("Content-Type", "application/json");
-              if (pathname === "/assistants") {
-                res.end(JSON.stringify({ assistants: [ASSISTANT] }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/mcp-servers`) {
-                res.end(JSON.stringify({ servers: SERVERS }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/report`) {
-                res.end(JSON.stringify(REPORT));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}`) {
-                res.end(JSON.stringify({ assistant: ASSISTANT }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/sources`) {
-                res.end(JSON.stringify({ sources: SOURCES }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/install`) {
-                res.end(JSON.stringify(INSTALL));
-                return;
-              }
-              if (pathname === "/providers") {
-                res.end(JSON.stringify(PROVIDERS));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/test-runs`) {
-                res.end(JSON.stringify({ runs: [] }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/tests`) {
-                res.end(JSON.stringify({ tests: TESTS }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/versions`) {
-                res.end(
-                  JSON.stringify({
-                    versions: [
-                      versionRow("draft", DRAFT_CONFIG),
-                      versionRow("published", PUBLISHED_CONFIG),
-                    ],
-                  }),
-                );
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/draft`) {
-                res.end(JSON.stringify({ draft: versionRow("draft", DRAFT_CONFIG) }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/overview`) {
-                res.end(
-                  JSON.stringify({
-                    messages: 120,
-                    answeredShare: 0.82,
-                    todayCostMicros: 41_000,
-                    topQuestions: [{ question: "How do I install the widget?", count: 14 }],
-                  }),
-                );
-                return;
-              }
-              res.end(JSON.stringify({}));
-            });
+            server.middlewares.use("/api/admin", answerAdminApi);
           },
         },
       ],
@@ -1093,4 +1195,168 @@ describe("Admin layout regressions (Chromium)", () => {
     })()`);
     expect(back).toEqual({ same: true, value: "Half typed" });
   }, 20_000);
+
+  describe("Widget preview under the admin's real policy", () => {
+    let builtDir: string;
+    let builtServer: Server;
+    let builtUrl: string;
+
+    beforeAll(async () => {
+      if (!existsSync(WIDGET_BUNDLE)) {
+        execFileSync("npm", ["run", "build", "-w", "@solvchat/widget"], {
+          cwd: WORKSPACE_ROOT,
+          stdio: "pipe",
+        });
+      }
+      builtDir = mkdtempSync(resolve(tmpdir(), "solvchat-admin-built-"));
+      await build({
+        root: ADMIN_ROOT,
+        logLevel: "silent",
+        build: { outDir: builtDir, emptyOutDir: true },
+      });
+      builtServer = serveBuiltAdmin(builtDir);
+      await new Promise<void>((r) => builtServer.listen(0, "127.0.0.1", r));
+      const addr = builtServer.address();
+      if (!addr || typeof addr === "string") throw new Error("no built admin server port");
+      builtUrl = `http://127.0.0.1:${addr.port}`;
+    }, 120_000);
+
+    afterAll(async () => {
+      builtServer?.closeAllConnections();
+      await new Promise((r) => builtServer?.close(r));
+      if (builtDir) rmSync(builtDir, { recursive: true, force: true });
+    });
+
+    it("shows title and accent edits inside the preview frame with no policy violation", async () => {
+      const violations: string[] = [];
+      // The sandboxed frame may run in its own process; then it is a
+      // separate target and is evaluated through its session.
+      let frameSession: string | undefined;
+      const RECORDER = `addEventListener("securitypolicyviolation", (e) =>
+        globalThis.__reportCsp(location.href + " " + e.violatedDirective + " " + e.blockedURI), true);`;
+      const watch = async (sessionId?: string) => {
+        await cdp.send("Log.enable", {}, sessionId);
+        await cdp.send("Runtime.enable", {}, sessionId);
+        await cdp.send("Runtime.addBinding", { name: "__reportCsp" }, sessionId);
+        return cdp.send<{ identifier: string }>(
+          "Page.addScriptToEvaluateOnNewDocument",
+          { source: RECORDER },
+          sessionId,
+        );
+      };
+      const off = cdp.onEvent((event) => {
+        if (event.method === "Log.entryAdded") {
+          const text = (event.params.entry as { text?: string }).text ?? "";
+          if (/Content Security Policy|Refused to/i.test(text)) violations.push(text);
+        } else if (event.method === "Runtime.bindingCalled") {
+          if (event.params.name === "__reportCsp") violations.push(String(event.params.payload));
+        } else if (event.method === "Target.attachedToTarget") {
+          const sessionId = event.params.sessionId as string;
+          const info = event.params.targetInfo as { type: string };
+          if (info.type === "iframe") frameSession = sessionId;
+          void watch(sessionId)
+            .catch(() => {})
+            .finally(() => cdp.send("Runtime.runIfWaitingForDebugger", {}, sessionId));
+        }
+      });
+      const { identifier } = await watch();
+      await cdp.send("Target.setAutoAttach", {
+        autoAttach: true,
+        waitForDebuggerOnStart: true,
+        flatten: true,
+      });
+
+      const frameTarget = async (): Promise<{ sessionId?: string; contextId?: number } | null> => {
+        if (frameSession) return { sessionId: frameSession };
+        const { frameTree } = await cdp.send<{
+          frameTree: { childFrames?: Array<{ frame: { id: string; url: string } }> };
+        }>("Page.getFrameTree");
+        const child = frameTree.childFrames?.find((f) =>
+          f.frame.url.endsWith("/admin/preview.html"),
+        );
+        if (!child) return null;
+        const { executionContextId } = await cdp.send<{ executionContextId: number }>(
+          "Page.createIsolatedWorld",
+          { frameId: child.frame.id, worldName: "preview-check" },
+        );
+        return { contextId: executionContextId };
+      };
+      interface Shown {
+        title: string | null;
+        accent: string | null;
+        background: string;
+      }
+      const shown = async (): Promise<Shown | null> => {
+        const target = await frameTarget();
+        if (!target) return null;
+        return cdp
+          .evaluate<Shown>(
+            `(() => {
+              const el = document.querySelector("solv-chat");
+              return {
+                title: el?.shadowRoot?.querySelector(".solv-title")?.textContent ?? null,
+                accent: el?.style.getPropertyValue("--solv-accent") || null,
+                background: getComputedStyle(document.body).backgroundColor,
+              };
+            })()`,
+            target,
+          )
+          .catch(() => null);
+      };
+      const waitForShown = async (want: Partial<Shown>) => {
+        let last: Shown | null = null;
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          last = await shown();
+          if (last && Object.entries(want).every(([k, v]) => last?.[k as keyof Shown] === v)) {
+            return last;
+          }
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        throw new Error(
+          `Preview never showed ${JSON.stringify(want)}; last ${JSON.stringify(last)}; ` +
+            `violations ${JSON.stringify(violations)}`,
+        );
+      };
+      const typeInto = async (id: string, text: string) => {
+        await cdp.evaluate<void>(`(() => {
+          const el = document.getElementById(${JSON.stringify(id)});
+          el.focus();
+          el.select();
+        })()`);
+        await cdp.send("Input.insertText", { text });
+      };
+
+      try {
+        await cdp.send("Emulation.setDeviceMetricsOverride", {
+          width: 1280,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        await cdp.send("Page.navigate", { url: `${builtUrl}/admin/widget` });
+        // The saved settings reach the frame, and its stylesheet applies.
+        await waitForShown({
+          title: "Ask a question",
+          accent: "#2563eb",
+          background: "rgb(226, 232, 240)",
+        });
+
+        await typeInto("widget-title", "Help desk");
+        await typeInto("widget-accent", "#0f766e");
+        await waitForShown({ title: "Help desk", accent: "#0f766e" });
+        expect(violations).toEqual([]);
+      } finally {
+        off();
+        await cdp.send("Target.setAutoAttach", {
+          autoAttach: false,
+          waitForDebuggerOnStart: false,
+          flatten: true,
+        });
+        await cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
+        await cdp.send("Runtime.removeBinding", { name: "__reportCsp" });
+        await cdp.send("Log.disable");
+      }
+    }, 30_000);
+  });
 });

@@ -1,4 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import { ADMIN_PREVIEW_CSP } from "@solvchat/core";
 import { describe, expect, it } from "vitest";
 import { assetBody } from "../../src/admin/assets.js";
 import { createTestApp, fakeSeams } from "../helpers/app.js";
@@ -100,6 +101,8 @@ describe("admin static assets", () => {
     expect(csp).toContain("style-src 'self'");
     expect(csp).toContain("connect-src 'self'");
     expect(csp).toContain("frame-ancestors 'none'");
+    // The Widget screen frames /admin/preview.html, and nothing else.
+    expect(csp).toContain("frame-src 'self'");
 
     const html = await shellRes.text();
     const jsMatch = /src="(\/admin\/assets\/[^"]+\.js)"/.exec(html);
@@ -125,5 +128,40 @@ describe("admin static assets", () => {
     );
     await waitOnExecutionContext(missingCtx);
     expect(missingRes.status).toBe(404);
+  });
+
+  it("serves the Widget preview page with its own policy and revalidates the unhashed preview files", async () => {
+    const app = unauthenticatedApp();
+    const get = async (path: string) => {
+      const ctx = createExecutionContext();
+      const res = await app.fetch(new Request(`https://example.com${path}`), env, ctx);
+      await waitOnExecutionContext(ctx);
+      return res;
+    };
+
+    const page = await get("/admin/preview.html");
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(page.headers.get("cache-control")).toBe("no-cache");
+    expect(page.headers.get("x-frame-options")).toBeNull();
+    const csp = page.headers.get("content-security-policy") ?? "";
+    expect(csp).toBe(`${ADMIN_PREVIEW_CSP}; frame-ancestors 'self'`);
+    expect(csp).not.toContain("connect-src");
+    expect(csp).not.toContain("unsafe-inline");
+    const html = await page.text();
+    // The static page, not the app shell the SPA fallback would return.
+    expect(html).toContain("<solv-chat></solv-chat>");
+    expect(html).toContain('<script src="preview.js">');
+    expect(html).not.toContain('<div id="root">');
+
+    for (const [path, type] of [
+      ["/admin/preview.js", "application/javascript"],
+      ["/admin/preview.css", "text/css"],
+    ] as const) {
+      const res = await get(path);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain(type);
+      expect(res.headers.get("cache-control")).toBe("no-cache");
+    }
   });
 });

@@ -197,4 +197,23 @@ describe("@solvchat/admin packed package", () => {
     const indexHtml = path.join(consumerDir, "node_modules/@solvchat/admin/dist/index.html");
     expect(existsSync(indexHtml)).toBe(true);
   });
+
+  it("exports the Widget preview page, script and stylesheet an embedder serves under /admin/", () => {
+    for (const name of ["preview.html", "preview.js", "preview.css"]) {
+      const resolvedUrl = execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `console.log(import.meta.resolve("@solvchat/admin/${name}"))`,
+        ],
+        { cwd: consumerDir, encoding: "utf8" },
+      ).trim();
+      const resolvedPath = fileURLToPath(resolvedUrl);
+      expect(resolvedPath.endsWith(path.join("@solvchat", "admin", "dist", name))).toBe(true);
+      expect(readFileSync(resolvedPath, "utf8")).toBe(
+        readFileSync(path.join(adminDir, "public", name), "utf8"),
+      );
+    }
+  });
 });

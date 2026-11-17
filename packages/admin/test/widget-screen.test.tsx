@@ -1,6 +1,9 @@
 /**
  * @vitest-environment-options {"settings": {"disableJavaScriptFileLoading": true, "handleDisabledFileLoadingAsSuccess": true, "navigation": {"disableChildFrameNavigation": true}}}
  */
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { ADMIN_PREVIEW_CSP } from "@solvchat/core";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import axe from "axe-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -92,14 +95,29 @@ describe("Widget screen", () => {
 
     expect(frame.getAttribute("sandbox")).toBe("allow-scripts");
     expect(frame.getAttribute("title")).toBe("Preview of the chat on your site");
-    const doc = frame.getAttribute("srcdoc") ?? "";
-    const csp = /content="([^"]*default-src[^"]*)"/.exec(doc)?.[1] ?? "";
-    expect(csp).toContain("default-src 'none'");
+    // A same-origin static page, not srcdoc: a srcdoc frame inherits the
+    // admin's policy, which blocks inline script and style.
+    expect(frame.hasAttribute("srcdoc")).toBe(false);
+    expect(frame.getAttribute("src")).toBe("/admin/preview.html");
+  });
+
+  it("ships a preview page with no inline script or style and a policy that allows no requests", () => {
+    const publicDir = path.resolve(import.meta.dirname, "../public");
+    const page = readFileSync(path.join(publicDir, "preview.html"), "utf8");
+    const csp = /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(page)?.[1];
+    expect(csp).toBe(ADMIN_PREVIEW_CSP);
     expect(csp).not.toContain("connect-src");
-    expect(csp).toMatch(/script-src \S*\/widget\.js 'nonce-[0-9a-f]+'/);
-    expect(doc).toContain("<solv-chat></solv-chat>");
+    expect(csp).not.toContain("unsafe-inline");
+    // Every script and stylesheet is a file, so script-src/style-src 'self' allow them.
+    expect(page).not.toMatch(/<style/);
+    expect(page.match(/<script\b[^>]*>/g)).toEqual([
+      '<script src="/widget.js">',
+      '<script src="preview.js">',
+    ]);
+    expect(page).toContain('<link rel="stylesheet" href="preview.css">');
     // No assistant key in the frame, so the widget has nothing to send.
-    expect(doc).not.toContain("assistant=");
+    expect(page).toContain("<solv-chat></solv-chat>");
+    expect(page).not.toContain("assistant=");
   });
 
   it("sends the form's values to the preview once it is ready, and again on each change", async () => {
