@@ -333,6 +333,137 @@ describe("leaving a screen with unsaved edits", () => {
     );
   });
 
+  /** Widget, then Behaviour with a save held, then Back: the address is Widget's again. */
+  async function backDuringSave(text: string) {
+    window.history.replaceState(null, "", "/admin/widget");
+    const history = browserHistory();
+    const saves = holdSaves();
+    render(<App />);
+    await screen.findByLabelText("Title");
+    fireEvent.click(navLink("Behaviour"));
+    await startBehaviourSave(text);
+    await popTo(() => window.history.back());
+    expect(window.location.pathname).toBe("/admin/widget");
+    // Behaviour stays on show while the save runs.
+    expect(screen.getByLabelText("First thing it says")).toBeTruthy();
+    return { history, saves };
+  }
+
+  it("Back during a save, then the link Back went to: goes there once saved", async () => {
+    installBuildScreensFake();
+    const { history, saves } = await backDuringSave("Saved, then Widget");
+
+    // The address already reads Widget, but Behaviour is the screen on show.
+    fireEvent.click(navLink("Widget"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByLabelText("First thing it says")).toBeTruthy();
+
+    saves.release();
+    expect(await screen.findByLabelText("Title")).toBeTruthy();
+    expect(window.location.pathname).toBe("/admin/widget");
+    expect(history.position()).toBe(0);
+
+    // Forward still leads back to the Behaviour entry.
+    await popTo(() => window.history.forward());
+    expect(await screen.findByLabelText("First thing it says")).toBeTruthy();
+    expect(window.location.pathname).toBe("/admin/behaviour");
+    expect(history.position()).toBe(1);
+  });
+
+  it.each([
+    ["its link", () => fireEvent.click(navLink("Behaviour"))],
+    ["the assistant already picked", () => pickAssistant("ast_1")],
+  ])("Back during a save, then %s: the address comes back at once", async (_, stay) => {
+    installBuildScreensFake();
+    const { history, saves } = await backDuringSave("Staying on Behaviour");
+
+    stay();
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/behaviour"));
+    expect(history.position()).toBe(1);
+
+    saves.release();
+    await waitFor(() =>
+      expect((screen.getByLabelText("First thing it says") as HTMLInputElement).disabled).toBe(
+        false,
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(window.location.pathname).toBe("/admin/behaviour");
+    expect(screen.queryByLabelText("Title")).toBeNull();
+
+    // History still lines up: Back asks again, and Stay here returns to this entry.
+    fireEvent.change(screen.getByLabelText("First thing it says"), {
+      target: { value: "Edited again" },
+    });
+    await popTo(() => window.history.back());
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stay here" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/behaviour"));
+    expect(history.position()).toBe(1);
+    expect((screen.getByLabelText("First thing it says") as HTMLInputElement).value).toBe(
+      "Edited again",
+    );
+  });
+
+  it("Back during a save, then another screen: the new entry follows the one Back went to", async () => {
+    window.history.replaceState(null, "", "/admin/install");
+    const history = browserHistory();
+    installBuildScreensFake();
+    const saves = holdSaves();
+    render(<App />);
+    await screen.findByRole("heading", { name: "Copy the snippet" });
+    fireEvent.click(navLink("Behaviour"));
+    await startBehaviourSave("Saved, then Widget");
+    await popTo(() => window.history.back());
+    expect(window.location.pathname).toBe("/admin/install");
+
+    fireEvent.click(navLink("Widget"));
+    saves.release();
+    const title = await screen.findByLabelText("Title");
+    expect(window.location.pathname).toBe("/admin/widget");
+    // Pushed from the Install entry, replacing Behaviour as the next one.
+    expect(history.position()).toBe(1);
+
+    fireEvent.change(title, { target: { value: "Edited title" } });
+    await popTo(() => window.history.back());
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stay here" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/widget"));
+    expect(history.position()).toBe(1);
+    expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe("Edited title");
+  });
+
+  it("Back during a save, then another screen, and the save fails: Stay here puts the address back", async () => {
+    installBuildScreensFake();
+    const { history, saves } = await backDuringSave("Rejected on save");
+
+    fireEvent.click(navLink("Install"));
+    saves.release(true);
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stay here" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/behaviour"));
+    expect(history.position()).toBe(1);
+    expect((screen.getByLabelText("First thing it says") as HTMLInputElement).value).toBe(
+      "Rejected on save",
+    );
+    expect(screen.getByText("That greeting is too long.")).toBeTruthy();
+  });
+
+  it("Back during a save, then another assistant: it opens on the screen on show, at its address", async () => {
+    installBuildScreensFake({
+      assistants: [makeAssistant("ast_1", "First Bot"), makeAssistant("ast_2", "Second Bot")],
+    });
+    const { history, saves } = await backDuringSave("First bot edit");
+
+    pickAssistant("ast_2");
+    saves.release();
+    await waitFor(() => expect(selectedAssistantId()).toBe("ast_2"));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/behaviour"));
+    expect(history.position()).toBe(1);
+    expect(screen.getByLabelText("First thing it says")).toBeTruthy();
+    expect(screen.queryByLabelText("Title")).toBeNull();
+  });
+
   it("asks before Forward leaves, and Stay here returns to the same entry", async () => {
     const history = browserHistory();
     installBuildScreensFake();

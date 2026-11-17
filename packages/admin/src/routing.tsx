@@ -92,8 +92,11 @@ export function matchScreen(
   return found ? found.id : fallback;
 }
 
-/** Asks whether to leave the current screen; calls exactly one of the two. */
-export type ConfirmLeave = (leave: () => void, stay: () => void) => void;
+/**
+ * Asks whether to leave the current screen, and calls `leave` to go ahead. To
+ * stay, the caller calls `restore`, which also undoes a Back or Forward.
+ */
+export type ConfirmLeave = (leave: () => void) => void;
 
 const HISTORY_INDEX_KEY = "solvAdminIndex";
 
@@ -116,6 +119,16 @@ export function useRoute(
 ): {
   screen: string | null;
   navigate: (path: string) => void;
+  /**
+   * Whether `path` leads to the screen on show. While a Back or Forward waits
+   * for an answer, the address belongs to another screen.
+   */
+  shows: (path: string) => boolean;
+  /**
+   * Puts the address back on the entry of the screen on show, if a Back or
+   * Forward that is no longer going ahead moved it. Otherwise does nothing.
+   */
+  restore: () => void;
 } {
   const [screen, setScreen] = useState<string | null>(() =>
     matchScreen(window.location.pathname, navItems, defaultScreen),
@@ -156,21 +169,7 @@ export function useRoute(
         show(next);
         return;
       }
-      confirmRef.current(commit, () => {
-        const index = historyIndex(window.history.state);
-        const committed = indexRef.current;
-        if (index !== null && index !== committed) {
-          // Step back to the entry the owner is still on.
-          window.history.go(committed - index);
-        } else if (index === null) {
-          // An entry we did not create: put the current screen's address back.
-          const path = navItems.find((item) => item.id === screenRef.current)?.path;
-          if (path) {
-            window.history.pushState(withHistoryIndex(null, committed + 1), "", path);
-            indexRef.current = committed + 1;
-          }
-        }
-      });
+      confirmRef.current(commit);
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -178,16 +177,46 @@ export function useRoute(
 
   const navigate = useCallback(
     (path: string) => {
+      // Count from the entry the browser is on. A Back or Forward still waiting
+      // for an answer has moved it away from the screen on show.
+      const current = historyIndex(window.history.state) ?? indexRef.current;
       if (window.location.pathname !== path) {
-        indexRef.current += 1;
+        indexRef.current = current + 1;
         window.history.pushState(withHistoryIndex(null, indexRef.current), "", path);
+      } else {
+        // Already at that address (a waiting Back or Forward went there): use its entry.
+        indexRef.current = current;
       }
       show(matchScreen(window.location.pathname, navItems, defaultScreen));
     },
     [navItems, defaultScreen, show],
   );
 
-  return { screen, navigate };
+  const shows = useCallback(
+    (path: string) => matchScreen(path, navItems, defaultScreen) === screenRef.current,
+    [navItems, defaultScreen],
+  );
+
+  const restore = useCallback(() => {
+    const index = historyIndex(window.history.state);
+    const committed = indexRef.current;
+    if (index !== null) {
+      // Step back to the entry the owner is still on.
+      if (index !== committed) window.history.go(committed - index);
+      return;
+    }
+    if (matchScreen(window.location.pathname, navItems, defaultScreen) === screenRef.current) {
+      return;
+    }
+    // An entry we did not create: put the current screen's address back.
+    const path = navItems.find((item) => item.id === screenRef.current)?.path;
+    if (path) {
+      window.history.pushState(withHistoryIndex(null, committed + 1), "", path);
+      indexRef.current = committed + 1;
+    }
+  }, [navItems, defaultScreen]);
+
+  return { screen, navigate, shows, restore };
 }
 
 /** How a screen moves to another screen: through the shell, so its checks apply. */

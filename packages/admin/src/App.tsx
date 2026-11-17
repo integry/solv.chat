@@ -147,7 +147,6 @@ function useTryItOpen(screen: string | null, narrow: boolean) {
 
 interface PendingLeave {
   leave: () => void;
-  stay?: (() => void) | undefined;
 }
 
 function AdminShell({
@@ -164,31 +163,65 @@ function AdminShell({
   // A move asked for while a save runs. It waits for the save: the save can
   // still fail, and leaving then would lose both the edits and the error.
   const deferredLeaveRef = useRef<PendingLeave | null>(null);
+  // The router's `restore`, set once the router below exists.
+  const restoreRef = useRef<() => void>(() => {});
+
+  /**
+   * Runs a move, then puts the address back if a Back or Forward moved it and
+   * this move replaced that one (switching assistant keeps the screen on show).
+   */
+  const proceed = useCallback((pending: PendingLeave) => {
+    pending.leave();
+    restoreRef.current();
+  }, []);
 
   /**
    * Runs `leave` now, or after the owner agrees to drop unsaved edits.
-   * `stay` runs if they choose to stay (Back/Forward use it to undo the move).
    * While a save runs, the move waits until the save finishes and is decided then.
+   * Staying, whatever the move was, puts the address back with `restore`.
    */
-  const guardLeave = useCallback((leave: () => void, stay?: () => void) => {
-    if (savingRef.current) {
-      // The newest move replaces an older one still waiting, as below.
-      deferredLeaveRef.current = { leave, stay };
-    } else if (unsavedRef.current) {
-      // A newer request replaces one still on screen. Back/Forward's `stay`
-      // reads the live address, so the newest one still returns to this screen.
-      setPendingLeave({ leave, stay });
-    } else {
-      leave();
-    }
-  }, []);
+  const guardLeave = useCallback(
+    (leave: () => void) => {
+      if (savingRef.current) {
+        // The newest move replaces an older one still waiting, as below.
+        deferredLeaveRef.current = { leave };
+      } else if (unsavedRef.current) {
+        // A newer request replaces one still on screen.
+        setPendingLeave({ leave });
+      } else {
+        proceed({ leave });
+      }
+    },
+    [proceed],
+  );
 
-  /** Asking for the place already on show drops a move still waiting for a save. */
+  const { screen, navigate, shows, restore } = useRoute(
+    config.navItems,
+    config.defaultScreen,
+    guardLeave,
+  );
+  restoreRef.current = restore;
+
+  /**
+   * Asking for the place already on show drops a move still waiting for a
+   * save, and undoes a Back or Forward that was waiting with it.
+   */
   const stayPut = useCallback(() => {
     deferredLeaveRef.current = null;
-  }, []);
+    restore();
+  }, [restore]);
 
-  const { screen, navigate } = useRoute(config.navItems, config.defaultScreen, guardLeave);
+  /**
+   * Moves to another screen once the leave check allows it. The screen on show
+   * is not always the one at the address: a Back or Forward can be waiting.
+   */
+  const moveTo = useCallback(
+    (path: string) => {
+      if (shows(path)) stayPut();
+      else guardLeave(() => navigate(path));
+    },
+    [shows, stayPut, guardLeave, navigate],
+  );
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -214,11 +247,7 @@ function AdminShell({
 
   function handleNavigate(path: string) {
     setDrawerOpen(false);
-    if (path === window.location.pathname) {
-      stayPut();
-      return;
-    }
-    guardLeave(() => navigate(path));
+    moveTo(path);
   }
 
   function handleCreated({ assistant, ingestKey }: CreatedAssistant) {
@@ -283,8 +312,8 @@ function AdminShell({
     if (!deferred) return;
     deferredLeaveRef.current = null;
     if (isUnsavedNow()) setPendingLeave(deferred);
-    else deferred.leave();
-  }, [saving, isUnsavedNow]);
+    else proceed(deferred);
+  }, [saving, isUnsavedNow, proceed]);
   // Closing the tab is different: it can cancel a save that has not reached the
   // server, so the browser asks until every save has finished.
   const anySaveRunning = useAnySaveRunning();
@@ -303,16 +332,10 @@ function AdminShell({
 
   const navigation: AdminNavigation = useMemo(
     () => ({
-      navigate: (path: string) => {
-        if (path === window.location.pathname) {
-          stayPut();
-          return;
-        }
-        guardLeave(() => navigate(path));
-      },
+      navigate: moveTo,
       pathFor: (id: string) => config.navItems.find((item) => item.id === id)?.path ?? null,
     }),
-    [config.navItems, guardLeave, navigate, stayPut],
+    [config.navItems, moveTo],
   );
   const ExtraScreen =
     screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
@@ -569,14 +592,13 @@ function AdminShell({
           cancelLabel="Stay here"
           tone="danger"
           onCancel={() => {
-            const pending = pendingLeave;
             setPendingLeave(null);
-            pending?.stay?.();
+            restore();
           }}
           onConfirm={() => {
             const pending = pendingLeave;
             setPendingLeave(null);
-            pending?.leave();
+            if (pending) proceed(pending);
           }}
         />
       </div>
