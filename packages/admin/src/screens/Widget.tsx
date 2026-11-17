@@ -1,14 +1,26 @@
-import type { ActionsConfig, WidgetConfig, WidgetPosition } from "@solvchat/core";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import {
+  type ActionsConfig,
+  CONFIG_LIMITS,
+  checkOrigin,
+  type WidgetConfig,
+  type WidgetPosition,
+} from "@solvchat/core";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, patchJson, putJson } from "../api/client.js";
 import { FailedTestsError, publishAssistant } from "../api/publish.js";
 import type { Assistant, TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { useAssistantMutation, useReportUnsavedEdits } from "../shell/useAssistantMutations.js";
+import { CharCount } from "../ui/CharCount.js";
+import { contrastRatio, MIN_TEXT_CONTRAST } from "../ui/color.js";
+import { ErrorState } from "../ui/ErrorState.js";
 import { formatDateTime } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
+import { Skeleton } from "../ui/Skeleton.js";
+import { Notice, useToast } from "../ui/Toast.js";
 import { FailedTestsPanel } from "./FailedTestsPanel.js";
 import { History } from "./History.js";
+import { WidgetPreview } from "./WidgetPreview.js";
 
 export interface WidgetProps {
   assistantId: string;
@@ -19,6 +31,44 @@ function parseOrigins(text: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+const HEX_COLOUR = /^#[0-9a-fA-F]{6}$/;
+
+/** Plain words shared with Install, which shows the same list read-only. */
+export const ORIGINS_LABEL = "Websites that may show the chat";
+export const ORIGINS_HINT =
+  "One address per line, for example https://www.example.com. List each one visitors use, such as with and without www.";
+
+export interface LineProblem {
+  line: number;
+  value: string;
+  error: string;
+}
+
+/** Checks each non-empty line the way the API will. */
+export function checkOriginLines(text: string): LineProblem[] {
+  const problems: LineProblem[] = [];
+  text.split("\n").forEach((raw, index) => {
+    const value = raw.trim();
+    if (value === "") return;
+    const result = checkOrigin(value);
+    if (!result.ok) problems.push({ line: index + 1, value, error: result.error });
+  });
+  return problems;
+}
+
+function LineProblems({ id, problems }: { id: string; problems: LineProblem[] }) {
+  if (problems.length === 0) return null;
+  return (
+    <ul id={id} className="field-error line-problems">
+      {problems.map((p) => (
+        <li key={`${p.line}:${p.value}`}>
+          Line {p.line} ({p.value}): {p.error}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 function widgetEqual(a: WidgetConfig, b: WidgetConfig): boolean {
@@ -40,6 +90,8 @@ function findPrefixedError(fields: Record<string, string>, prefix: string): stri
   }
   return undefined;
 }
+
+const DESCRIPTION = "Choose how the chat button and window look on your site.";
 
 export function Widget({ assistantId }: WidgetProps) {
   const assistantRes = useResource<{ assistant: Assistant }>(
@@ -64,7 +116,8 @@ export function Widget({ assistantId }: WidgetProps) {
   const [historyTick, setHistoryTick] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const toast = useToast();
+  const [checkedOrigins, setCheckedOrigins] = useState(false);
   const [failedRun, setFailedRun] = useState<TestRunSummary | null>(null);
 
   const mutation = useAssistantMutation(assistantId);
@@ -279,24 +332,48 @@ export function Widget({ assistantId }: WidgetProps) {
   // The header's Publish sends the saved draft too, so it waits for a save.
   useReportUnsavedEdits(assistantId, unsaved);
 
+  const savedBehaviour = draftRes.value?.draft.config.behaviour;
+  const previewConfig = useMemo(
+    () => ({
+      widget: {
+        title: title.trim() || "Ask a question",
+        accentColor: HEX_COLOUR.test(accentColor.trim()) ? accentColor.trim() : "#2563eb",
+        position,
+      },
+      behaviour: {
+        greeting: savedBehaviour?.greeting ?? "",
+        suggestedQuestions: savedBehaviour?.suggestedQuestions ?? [],
+      },
+    }),
+    [title, accentColor, position, savedBehaviour],
+  );
+  const originProblems = checkOriginLines(originsText);
+  const actionOriginProblems = checkOriginLines(actionOriginsText);
+
+  if (draftRes.status === "error" || assistantRes.status === "error") {
+    return (
+      <div className="screen">
+        <PageHeader title="Widget" description={DESCRIPTION} />
+        <ErrorState
+          title="Could not load your widget settings."
+          detail={draftRes.error ?? assistantRes.error}
+          onRetry={() => {
+            if (draftRes.status === "error") draftRes.reload();
+            if (assistantRes.status === "error") assistantRes.reload();
+          }}
+        />
+      </div>
+    );
+  }
   if (
     (draftRes.status === "loading" && !savedWidget) ||
     (assistantRes.status === "loading" && !savedAssistant)
   ) {
-    return <p className="muted">Loading widget settings…</p>;
-  }
-  if (draftRes.status === "error") {
     return (
-      <p className="error-text" role="alert">
-        {draftRes.error}
-      </p>
-    );
-  }
-  if (assistantRes.status === "error") {
-    return (
-      <p className="error-text" role="alert">
-        {assistantRes.error}
-      </p>
+      <div className="screen">
+        <PageHeader title="Widget" description={DESCRIPTION} />
+        <Skeleton label="Loading widget settings…" lines={6} />
+      </div>
     );
   }
   if (!savedWidget || !savedActions || !savedAssistant) {
@@ -306,10 +383,16 @@ export function Widget({ assistantId }: WidgetProps) {
   async function handleSave(event: FormEvent) {
     event.preventDefault();
     if (!savedAssistant || busy) return;
+    setCheckedOrigins(true);
+    if (originProblems.length > 0 || actionOriginProblems.length > 0) {
+      document
+        .getElementById(originProblems.length > 0 ? "widget-origins" : "action-origins")
+        ?.focus();
+      return;
+    }
 
     setFieldErrors({});
     setFormError(null);
-    setStatusMessage(null);
     setFailedRun(null);
 
     const submittedOriginsText = originsText;
@@ -379,7 +462,7 @@ export function Widget({ assistantId }: WidgetProps) {
         setFieldErrors(nextFieldErrors);
         setFormError(generalError);
       } else {
-        setStatusMessage("Draft saved.");
+        toast.success("Draft saved.");
       }
     });
   }
@@ -389,7 +472,6 @@ export function Widget({ assistantId }: WidgetProps) {
     // owner would publish something other than what they see.
     if (busy || unsaved) return;
     setFormError(null);
-    setStatusMessage(null);
     setFailedRun(null);
     const {
       title: t,
@@ -407,7 +489,7 @@ export function Widget({ assistantId }: WidgetProps) {
         const res = await publishAssistant(assistantId, force, runId);
         publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
-        setStatusMessage(`Published (${formatDateTime(res.version.publishedAt ?? Date.now())}).`);
+        toast.success(`Published (${formatDateTime(res.version.publishedAt ?? Date.now())}).`);
         setHistoryTick((n) => n + 1);
         draftRes.reload();
       });
@@ -423,17 +505,23 @@ export function Widget({ assistantId }: WidgetProps) {
   const originsError = findPrefixedError(fieldErrors, "allowedOrigins");
   const actionOriginsError = findPrefixedError(fieldErrors, "actions.allowedOrigins");
 
+  const contrast = contrastRatio(accentColor, "#ffffff");
+  const lowContrast = contrast !== null && contrast < MIN_TEXT_CONTRAST;
+  const showOriginProblems = checkedOrigins || originsChanged;
+  const showActionOriginProblems = checkedOrigins || actionsChanged;
+
   return (
-    <div className="screen">
+    <div className="screen screen-wide">
       <PageHeader
         title="Widget"
-        description="Choose how the chat button and window look on your site."
+        description={DESCRIPTION}
         actions={
           <>
             {unsaved && <span className="unsaved-badge">Unsaved changes</span>}
             <button
               type="button"
               className="btn btn-secondary"
+              aria-expanded={showHistory}
               onClick={() => setShowHistory((prev) => !prev)}
             >
               History
@@ -456,16 +544,7 @@ export function Widget({ assistantId }: WidgetProps) {
         </p>
       )}
 
-      {statusMessage && (
-        <p className="notice-text" role="status">
-          {statusMessage}
-        </p>
-      )}
-      {formError && (
-        <p className="error-text" role="alert">
-          {formError}
-        </p>
-      )}
+      {formError && <Notice tone="error">{formError}</Notice>}
       {failedRun && (
         <FailedTestsPanel
           run={failedRun}
@@ -476,140 +555,215 @@ export function Widget({ assistantId }: WidgetProps) {
         />
       )}
 
-      <form className="stack" onSubmit={handleSave}>
-        <div className="field">
-          <label htmlFor="widget-title">Title</label>
-          <input
-            id="widget-title"
-            type="text"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            disabled={saving}
-          />
-          {fieldErrors["widget.title"] && (
-            <p className="field-error" role="alert">
-              {fieldErrors["widget.title"]}
-            </p>
-          )}
-        </div>
+      <div className="widget-layout">
+        <form className="stack form-groups" onSubmit={handleSave}>
+          <section className="field-group" aria-labelledby="widget-look-heading">
+            <div className="field-group-text">
+              <h2 id="widget-look-heading" className="section-heading">
+                Look
+              </h2>
+              <p className="field-hint">The preview shows each change as you make it.</p>
+            </div>
+            <div className="stack">
+              <div className="field">
+                <label htmlFor="widget-title">Title</label>
+                <input
+                  id="widget-title"
+                  type="text"
+                  value={title}
+                  aria-describedby="widget-title-count"
+                  onChange={(e) => setTitle(e.target.value)}
+                  disabled={saving}
+                />
+                <CharCount id="widget-title-count" value={title} max={CONFIG_LIMITS.title} />
+                {fieldErrors["widget.title"] && (
+                  <p className="field-error" role="alert">
+                    {fieldErrors["widget.title"]}
+                  </p>
+                )}
+              </div>
 
-        <div className="field">
-          <label htmlFor="widget-accent">Accent colour</label>
-          <div className="color-input-row">
-            <input
-              id="widget-accent"
-              type="text"
-              value={accentColor}
-              onChange={(e) => setAccentColor(e.target.value)}
-              placeholder="#2563eb"
-              disabled={saving}
-            />
-            <span
-              className="color-swatch"
-              style={{
-                backgroundColor: /^#[0-9a-fA-F]{6}$/.test(accentColor)
-                  ? accentColor
-                  : "transparent",
-              }}
-              aria-hidden="true"
-            />
+              <div className="field">
+                <label htmlFor="widget-accent">Accent colour</label>
+                <div className="color-input-row">
+                  <input
+                    type="color"
+                    className="color-picker"
+                    aria-label="Pick accent colour"
+                    value={HEX_COLOUR.test(accentColor) ? accentColor.toLowerCase() : "#2563eb"}
+                    onChange={(e) => setAccentColor(e.target.value)}
+                    disabled={saving}
+                  />
+                  <input
+                    id="widget-accent"
+                    type="text"
+                    value={accentColor}
+                    onChange={(e) => setAccentColor(e.target.value)}
+                    placeholder="#2563eb"
+                    aria-describedby="widget-accent-hint"
+                    spellCheck={false}
+                    disabled={saving}
+                  />
+                </div>
+                <span id="widget-accent-hint" className="field-hint">
+                  Used for the chat button, links and the visitor's messages, with white text on
+                  top.
+                </span>
+                {lowContrast && (
+                  <p className="contrast-warning" role="status">
+                    White text on this colour is hard to read (contrast {contrast?.toFixed(1)}:1,
+                    aim for at least {MIN_TEXT_CONTRAST}:1). Try a darker shade.
+                  </p>
+                )}
+                {fieldErrors["widget.accentColor"] && (
+                  <p className="field-error" role="alert">
+                    {fieldErrors["widget.accentColor"]}
+                  </p>
+                )}
+              </div>
+
+              <div className="field">
+                <label htmlFor="widget-position">Position</label>
+                <select
+                  id="widget-position"
+                  className="select"
+                  value={position}
+                  onChange={(e) => setPosition(e.target.value as WidgetPosition)}
+                  disabled={saving}
+                >
+                  <option value="right">Bottom right</option>
+                  <option value="left">Bottom left</option>
+                </select>
+                {fieldErrors["widget.position"] && (
+                  <p className="field-error" role="alert">
+                    {fieldErrors["widget.position"]}
+                  </p>
+                )}
+              </div>
+            </div>
+          </section>
+
+          <section className="field-group" aria-labelledby="widget-sites-heading">
+            <div className="field-group-text">
+              <h2 id="widget-sites-heading" className="section-heading">
+                Where it appears
+              </h2>
+              <p className="field-hint">
+                The chat refuses to answer on any website not listed here.
+              </p>
+            </div>
+            <div className="field">
+              <label htmlFor="widget-origins">{ORIGINS_LABEL}</label>
+              <textarea
+                id="widget-origins"
+                rows={4}
+                value={originsText}
+                onChange={(e) => setOriginsText(e.target.value)}
+                placeholder="https://www.example.com"
+                aria-describedby={
+                  showOriginProblems && originProblems.length > 0
+                    ? "widget-origins-hint widget-origins-problems"
+                    : "widget-origins-hint"
+                }
+                aria-invalid={showOriginProblems && originProblems.length > 0}
+                spellCheck={false}
+                disabled={saving}
+              />
+              <span id="widget-origins-hint" className="field-hint">
+                {ORIGINS_HINT}
+              </span>
+              {showOriginProblems && (
+                <LineProblems id="widget-origins-problems" problems={originProblems} />
+              )}
+              {originsError && (
+                <p className="field-error" role="alert">
+                  {originsError}
+                </p>
+              )}
+            </div>
+          </section>
+
+          <section className="field-group" aria-labelledby="widget-actions-heading">
+            <div className="field-group-text">
+              <h2 id="widget-actions-heading" className="section-heading">
+                Help on the page
+              </h2>
+              <p className="field-hint">
+                When this is on, the assistant can act on the page the visitor is reading, in their
+                own browser. It never sends, buys or deletes anything: the visitor always makes the
+                final click.
+              </p>
+            </div>
+            <div className="stack">
+              <div className="field">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={builtins}
+                    disabled={saving}
+                    onChange={(e) => setBuiltins(e.target.checked)}
+                  />
+                  <span>Let the assistant help on the page</span>
+                </label>
+                {/* The plain-language list the specification asks for: the owner should be
+                    able to read what they just allowed without knowing the word "action". */}
+                <ul className="field-hint plain-list">
+                  <li>Take a visitor to another page on your site.</li>
+                  <li>Point at a button or field and explain it.</li>
+                  <li>
+                    Fill in form fields you have marked, after the visitor agrees. It never sends,
+                    buys or deletes anything.
+                  </li>
+                </ul>
+              </div>
+
+              <div className="field">
+                <label htmlFor="action-origins">Other sites it may send visitors to</label>
+                <textarea
+                  id="action-origins"
+                  rows={3}
+                  value={actionOriginsText}
+                  disabled={saving}
+                  onChange={(e) => setActionOriginsText(e.target.value)}
+                  placeholder="https://shop.example.com"
+                  aria-describedby={
+                    showActionOriginProblems && actionOriginProblems.length > 0
+                      ? "action-origins-hint action-origins-problems"
+                      : "action-origins-hint"
+                  }
+                  aria-invalid={showActionOriginProblems && actionOriginProblems.length > 0}
+                  spellCheck={false}
+                />
+                {/* Said explicitly because the screen already has a list of websites that
+                    means something else, and confusing the two would widen either the
+                    embed list or the navigation list by accident. */}
+                <span id="action-origins-hint" className="field-hint">
+                  One per line. Your own site is always allowed. This is not the same as the list of
+                  sites that may show the chat.
+                </span>
+                {showActionOriginProblems && (
+                  <LineProblems id="action-origins-problems" problems={actionOriginProblems} />
+                )}
+                {actionOriginsError && (
+                  <p className="field-error" role="alert">
+                    {actionOriginsError}
+                  </p>
+                )}
+              </div>
+            </div>
+          </section>
+
+          <div className="actions form-footer">
+            <button type="submit" className="btn btn-primary" disabled={!unsaved || busy}>
+              {saving ? "Saving…" : "Save"}
+            </button>
           </div>
-          {fieldErrors["widget.accentColor"] && (
-            <p className="field-error" role="alert">
-              {fieldErrors["widget.accentColor"]}
-            </p>
-          )}
-        </div>
+        </form>
 
-        <div className="field">
-          <label htmlFor="widget-position">Position</label>
-          <select
-            id="widget-position"
-            className="select"
-            value={position}
-            onChange={(e) => setPosition(e.target.value as WidgetPosition)}
-            disabled={saving}
-          >
-            <option value="right">Right</option>
-            <option value="left">Left</option>
-          </select>
-          {fieldErrors["widget.position"] && (
-            <p className="field-error" role="alert">
-              {fieldErrors["widget.position"]}
-            </p>
-          )}
-        </div>
-
-        <div className="field">
-          <label htmlFor="widget-origins">Allowed origins</label>
-          <textarea
-            id="widget-origins"
-            rows={4}
-            value={originsText}
-            onChange={(e) => setOriginsText(e.target.value)}
-            placeholder="https://example.com"
-            disabled={saving}
-          />
-          <span className="field-hint">Websites allowed to embed this widget, one per line.</span>
-          {originsError && (
-            <p className="field-error" role="alert">
-              {originsError}
-            </p>
-          )}
-        </div>
-
-        <div className="field">
-          <label className="checkbox-label">
-            <input
-              type="checkbox"
-              checked={builtins}
-              disabled={saving}
-              onChange={(e) => setBuiltins(e.target.checked)}
-            />
-            <span>Let the assistant help on the page</span>
-          </label>
-          {/* The plain-language list the specification asks for: the owner should be
-              able to read what they just allowed without knowing the word "action". */}
-          <ul className="field-hint">
-            <li>Take a visitor to another page on your site.</li>
-            <li>Point at a button or field and explain it.</li>
-            <li>
-              Fill in form fields you have marked, after the visitor agrees. It never sends, buys or
-              deletes anything.
-            </li>
-          </ul>
-        </div>
-
-        <div className="field">
-          <label htmlFor="action-origins">Other sites it may send visitors to</label>
-          <textarea
-            id="action-origins"
-            rows={3}
-            value={actionOriginsText}
-            disabled={saving}
-            onChange={(e) => setActionOriginsText(e.target.value)}
-            placeholder="https://shop.example.com"
-          />
-          {/* Said explicitly because the screen already has an "Allowed origins" box
-              that means something else, and confusing the two would widen either the
-              embed list or the navigation list by accident. */}
-          <span className="field-hint">
-            One per line. Your own site is always allowed. This is not the same as the list of sites
-            that may show the chat.
-          </span>
-          {actionOriginsError && (
-            <p className="field-error" role="alert">
-              {actionOriginsError}
-            </p>
-          )}
-        </div>
-
-        <div className="actions">
-          <button type="submit" className="btn btn-primary" disabled={!unsaved || busy}>
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </form>
+        <aside className="widget-preview-column" aria-label="Preview">
+          <WidgetPreview config={previewConfig} />
+        </aside>
+      </div>
 
       {showHistory && <History assistantId={assistantId} refreshKey={historyTick} />}
     </div>

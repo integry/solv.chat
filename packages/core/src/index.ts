@@ -8,7 +8,7 @@ export {
   type TestExpectation,
   type TestInput,
 } from "./schemas/answerTest.js";
-export { type AssistantInput, parseAssistantInput } from "./schemas/assistant.js";
+export { type AssistantInput, checkOrigin, parseAssistantInput } from "./schemas/assistant.js";
 export {
   type ActionResult,
   CHAT_PROTOCOL_VERSION,
@@ -51,6 +51,7 @@ export {
 export {
   type ActionsConfig,
   type BehaviourConfig,
+  CONFIG_LIMITS,
   defaultVersionConfig,
   type LimitsConfig,
   parseVersionConfig,

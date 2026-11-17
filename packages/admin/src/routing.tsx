@@ -1,4 +1,12 @@
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import {
+  createContext,
+  type MouseEvent,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 
 export type BuiltinScreenId =
   | "overview"
@@ -114,4 +122,61 @@ export function useRoute(
   );
 
   return { screen, navigate };
+}
+
+/** How a screen moves to another screen: through the shell, so its checks apply. */
+export interface AdminNavigation {
+  navigate: (path: string) => void;
+  /** The path of a visible screen, or null when it is hidden or unknown. */
+  pathFor: (id: string) => string | null;
+}
+
+export const AdminNavigationContext = createContext<AdminNavigation | null>(null);
+
+const FALLBACK_NAVIGATION: AdminNavigation = {
+  navigate: (path) => window.location.assign(path),
+  pathFor: (id) => NAV_ITEMS.find((item) => item.id === id)?.path ?? null,
+};
+
+export function useAdminNavigation(): AdminNavigation {
+  return useContext(AdminNavigationContext) ?? FALLBACK_NAVIGATION;
+}
+
+/**
+ * A link to another admin screen. Renders its children as plain text when
+ * that screen is hidden, so a screen never points at something missing.
+ */
+export function ScreenLink({
+  to,
+  children,
+  className,
+}: {
+  to: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  const { navigate, pathFor } = useAdminNavigation();
+  const path = pathFor(to);
+  if (path === null) return <>{children}</>;
+  return (
+    <a
+      href={path}
+      className={className}
+      onClick={(event: MouseEvent<HTMLAnchorElement>) => {
+        if (
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey ||
+          event.button !== 0
+        ) {
+          return;
+        }
+        event.preventDefault();
+        navigate(path);
+      }}
+    >
+      {children}
+    </a>
+  );
 }

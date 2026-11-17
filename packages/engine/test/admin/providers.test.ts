@@ -17,7 +17,7 @@ function appFor(
   orgId: string,
   runtimeEnv: Partial<Env> = {},
   options?: AppOptions,
-  managedKeys = false,
+  managedKeys: boolean | "own-keys-allowed" = false,
 ): { app: App; testEnv: Env } {
   const testEnv: Env = {
     ...env,
@@ -35,6 +35,7 @@ function appFor(
     keys: managedKeys
       ? {
           managed: true,
+          ...(managedKeys === "own-keys-allowed" ? { ownKeysAllowed: true } : {}),
           modelKey: baseKeys.modelKey,
           embeddingKey: baseKeys.embeddingKey,
         }
@@ -488,6 +489,36 @@ describe("admin provider settings & keys", () => {
       body: JSON.stringify({ key: TEST_KEY_CANARY }),
     });
     expect(putKeyRes.status).toBe(404);
+  });
+
+  it("lets the owner store their own key when the host manages keys but allows own keys", async () => {
+    const { app, testEnv } = appFor(ORG_A, {}, undefined, "own-keys-allowed");
+    const before = (await (await call(app, testEnv, "/api/admin/providers")).json()) as {
+      keysManaged: boolean;
+      ownKeysAllowed: boolean;
+      keys: Record<string, { source: string }>;
+    };
+    expect(before.keysManaged).toBe(true);
+    expect(before.ownKeysAllowed).toBe(true);
+
+    const putKeyRes = await call(app, testEnv, "/api/admin/providers/keys/anthropic", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ key: TEST_KEY_CANARY }),
+    });
+    expect(putKeyRes.status).toBe(200);
+    const raw = await (await call(app, testEnv, "/api/admin/providers")).text();
+    expect(raw).not.toContain(TEST_KEY_CANARY);
+    const after = JSON.parse(raw) as { keys: Record<string, { source: string }> };
+    expect(after.keys.anthropic?.source).toBe("stored");
+  });
+
+  it("says own keys are not allowed when keys are managed without the host's permission", async () => {
+    const { app, testEnv } = appFor(ORG_A, {}, undefined, true);
+    const body = (await (await call(app, testEnv, "/api/admin/providers")).json()) as {
+      ownKeysAllowed: boolean;
+    };
+    expect(body.ownKeysAllowed).toBe(false);
   });
 
   it("reports missing embedding credentials even when the answering key is configured", async () => {

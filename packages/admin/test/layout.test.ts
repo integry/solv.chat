@@ -13,7 +13,10 @@ import type {
   AnswerTest,
   Assistant,
   AssistantReport,
+  InstallInfo,
   McpServerSummary,
+  ProviderSettingsView,
+  SourceSummary,
   VersionRow,
 } from "../src/api/types.js";
 
@@ -135,6 +138,76 @@ const TESTS: AnswerTest[] = [
     },
   },
 ];
+
+const SOURCES: SourceSummary[] = [
+  {
+    id: "src_push",
+    orgId: ASSISTANT.orgId,
+    assistantId: ASSISTANT.id,
+    kind: "push",
+    label: "Push",
+    settings: {},
+    createdAt: 1_700_000_000_000,
+    documentCount: 128,
+    lastUpdatedAt: 1_700_000_100_000,
+    indexingCount: 0,
+    failedCount: 0,
+    indexError: null,
+  },
+  {
+    id: "src_entry",
+    orgId: ASSISTANT.orgId,
+    assistantId: ASSISTANT.id,
+    kind: "entry",
+    label: "Answers you wrote",
+    settings: {},
+    createdAt: 1_700_000_000_000,
+    documentCount: 6,
+    lastUpdatedAt: 1_700_000_100_000,
+    indexingCount: 0,
+    failedCount: 0,
+    indexError: null,
+  },
+  {
+    id: "src_map",
+    orgId: ASSISTANT.orgId,
+    assistantId: ASSISTANT.id,
+    kind: "sitemap",
+    label: "a-rather-long-blog-hostname-for-wrapping.example.com",
+    settings: { url: "https://blog.example.com/sitemap.xml" },
+    createdAt: 1_700_000_000_000,
+    documentCount: 24,
+    lastUpdatedAt: 1_700_000_100_000,
+    indexingCount: 0,
+    failedCount: 2,
+    indexError: "too_long",
+  },
+];
+
+const INSTALL: InstallInfo = {
+  assistantId: ASSISTANT.id,
+  publicKey: ASSISTANT.publicKey,
+  allowedOrigins: ASSISTANT.allowedOrigins,
+  snippet: `<script src="https://chat.example.com/widget.js" defer></script>\n<solv-chat assistant="${ASSISTANT.publicKey}"></solv-chat>`,
+  lastSeen: { pageUrl: "https://docs.example.com/a/very/long/path/to/getting-started", at: 1 },
+};
+
+const PROVIDERS: ProviderSettingsView = {
+  settings: {
+    llmProvider: { value: "anthropic", source: "none" },
+    llmTier: { value: "fast", source: "environment" },
+    llmModel: { value: null, source: "none" },
+    embeddingsProvider: { value: "openai", source: "stored" },
+  },
+  keysManaged: false,
+  ownKeysAllowed: true,
+  keys: {
+    anthropic: { source: "stored", updatedAt: 1_700_000_000_000, unreadable: false },
+    openai: { source: "environment", updatedAt: null, unreadable: false },
+    openrouter: { source: "none", updatedAt: null, unreadable: false },
+  },
+  configError: null,
+};
 
 const PUBLISHED_CONFIG = defaultVersionConfig();
 const DRAFT_CONFIG = defaultVersionConfig();
@@ -274,6 +347,9 @@ async function launchChromium(): Promise<{
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
+      // Its own process group, so cleanup can stop the renderer and GPU
+      // helpers too; they keep writing to the profile after the parent dies.
+      detached: true,
       env: {
         ...process.env,
         DBUS_SESSION_BUS_ADDRESS: "/dev/null",
@@ -393,6 +469,26 @@ describe("Admin layout regressions (Chromium)", () => {
                 res.end(JSON.stringify(REPORT));
                 return;
               }
+              if (pathname === `/assistants/${ASSISTANT.id}`) {
+                res.end(JSON.stringify({ assistant: ASSISTANT }));
+                return;
+              }
+              if (pathname === `/assistants/${ASSISTANT.id}/sources`) {
+                res.end(JSON.stringify({ sources: SOURCES }));
+                return;
+              }
+              if (pathname === `/assistants/${ASSISTANT.id}/install`) {
+                res.end(JSON.stringify(INSTALL));
+                return;
+              }
+              if (pathname === "/providers") {
+                res.end(JSON.stringify(PROVIDERS));
+                return;
+              }
+              if (pathname === `/assistants/${ASSISTANT.id}/test-runs`) {
+                res.end(JSON.stringify({ runs: [] }));
+                return;
+              }
               if (pathname === `/assistants/${ASSISTANT.id}/tests`) {
                 res.end(JSON.stringify({ tests: TESTS }));
                 return;
@@ -448,11 +544,28 @@ describe("Admin layout regressions (Chromium)", () => {
       const exited = new Promise<void>((resolveExit) => {
         chromeProc.once("exit", () => resolveExit());
       });
-      chromeProc.kill("SIGKILL");
+      try {
+        if (chromeProc.pid !== undefined) process.kill(-chromeProc.pid, "SIGKILL");
+      } catch {
+        chromeProc.kill("SIGKILL");
+      }
       await Promise.race([exited, new Promise((r) => setTimeout(r, 2000))]);
     }
     if (userDataDir) {
-      rmSync(userDataDir, { recursive: true, force: true });
+      // A helper can still be flushing its cache as it exits: retry for a few
+      // seconds, then leave the folder to the OS rather than fail the run.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          rmSync(userDataDir, { recursive: true, force: true });
+          break;
+        } catch (err) {
+          if (attempt >= 20) {
+            console.warn(`Could not remove ${userDataDir}:`, err);
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
     }
     await viteServer?.close();
   });
@@ -616,40 +729,6 @@ describe("Admin layout regressions (Chromium)", () => {
     }
   }, 15_000);
 
-  it("vertically centers Tests status badges with Edit and Delete buttons at 1440px and 390px", async () => {
-    interface AlignmentMetrics {
-      badgeHeight: number;
-      buttonHeight: number;
-      badgeCenterY: number;
-      buttonCenterY: number;
-    }
-
-    const measureAlignment = () =>
-      cdp.evaluate<AlignmentMetrics[]>(`(() => {
-        return Array.from(document.querySelectorAll(".actions"))
-          .filter((actions) => actions.querySelector(".badge") && actions.querySelector("button"))
-          .map((actions) => {
-            const badge = actions.querySelector(".badge").getBoundingClientRect();
-            const button = actions.querySelector("button").getBoundingClientRect();
-            return {
-              badgeHeight: badge.height,
-              buttonHeight: button.height,
-              badgeCenterY: badge.top + badge.height / 2,
-              buttonCenterY: button.top + button.height / 2,
-            };
-          });
-      })()`);
-
-    for (const width of [1440, 390]) {
-      await openScreen("/admin/tests", width, ".actions .badge");
-      const rows = await measureAlignment();
-      expect(rows).toHaveLength(3);
-      for (const row of rows) {
-        expect(row.badgeHeight).toBeLessThan(row.buttonHeight - 2);
-        expect(Math.abs(row.badgeCenterY - row.buttonCenterY)).toBeLessThanOrEqual(1.5);
-      }
-    }
-  }, 15_000);
   async function waitFor(expression: string, what: string) {
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
@@ -668,6 +747,60 @@ describe("Admin layout regressions (Chromium)", () => {
     cdp.evaluate<number>(
       "document.documentElement.scrollWidth - document.documentElement.clientWidth",
     );
+
+  it("keeps each Tests result badge level with its row's buttons, Edit and Delete on one line, at 1440px and 390px", async () => {
+    interface RowMetrics {
+      badgeHeight: number;
+      buttonHeight: number;
+      badgeTop: number;
+      badgeBottom: number;
+      editTop: number;
+      editBottom: number;
+      deleteTop: number;
+      rowRight: number;
+      deleteRight: number;
+    }
+
+    const measureRows = () =>
+      cdp.evaluate<RowMetrics[]>(`(() => {
+        return Array.from(document.querySelectorAll(".tests-table tbody tr")).map((row) => {
+          const badge = row.querySelector(".status-badge").getBoundingClientRect();
+          const [edit, del] = Array.from(row.querySelectorAll(".actions button")).map((b) =>
+            b.getBoundingClientRect(),
+          );
+          const tr = row.getBoundingClientRect();
+          return {
+            badgeHeight: badge.height,
+            buttonHeight: edit.height,
+            badgeTop: badge.top,
+            badgeBottom: badge.bottom,
+            editTop: edit.top,
+            editBottom: edit.bottom,
+            deleteTop: del.top,
+            rowRight: tr.right,
+            deleteRight: del.right,
+          };
+        });
+      })()`);
+
+    for (const width of [1440, 390]) {
+      await openScreen("/admin/tests", width, ".tests-table tbody tr .status-badge");
+      const rows = await measureRows();
+      expect(rows).toHaveLength(3);
+      for (const row of rows) {
+        expect(row.badgeHeight).toBeLessThan(row.buttonHeight - 2);
+        // Edit and Delete share one line and stay inside the row.
+        expect(Math.abs(row.editTop - row.deleteTop)).toBeLessThanOrEqual(1);
+        expect(row.deleteRight).toBeLessThanOrEqual(row.rowRight + 0.5);
+        if (width >= 600) {
+          // On a wide screen the badge sits on the same line as the buttons.
+          expect(row.badgeTop).toBeLessThan(row.editBottom);
+          expect(row.badgeBottom).toBeGreaterThan(row.editTop);
+        }
+      }
+      expect(await horizontalOverflow()).toBe(0);
+    }
+  }, 20_000);
 
   it("has no horizontal scroll at 320px on any shell screen, drawer open or closed", async () => {
     for (const path of [
@@ -716,6 +849,58 @@ describe("Admin layout regressions (Chromium)", () => {
     expect(metrics.current).toBe("Overview");
   }, 15_000);
 
+  it("shows the Build, Go live and Settings screens without sideways scroll and passes axe, contrast included, at 1280px and 380px", async () => {
+    await cdp.evaluate<void>(axe.source);
+    const screens: Array<[string, string]> = [
+      ["/admin/sources", ".sources-table"],
+      ["/admin/behaviour", "#behaviour-greeting"],
+      ["/admin/widget", ".widget-preview-frame"],
+      ["/admin/tools", "ul.source-list"],
+      ["/admin/tests", ".tests-table"],
+      ["/admin/install", ".install-steps"],
+      ["/admin/providers", "#llm-provider"],
+    ];
+    for (const width of [1280, 380]) {
+      for (const [path, ready] of screens) {
+        await openScreen(path, width, ready);
+        expect({ path, width, overflow: await horizontalOverflow() }).toEqual({
+          path,
+          width,
+          overflow: 0,
+        });
+        await cdp.evaluate<void>(axe.source);
+        const violations = await cdp.evaluate<string[]>(`axe
+          .run(document.querySelector(".shell-main"), { resultTypes: ["violations"] })
+          .then((r) =>
+            r.violations
+              .filter((v) => v.impact === "serious" || v.impact === "critical")
+              .map((v) => v.id + ": " + v.nodes.map((n) => n.target.join(" ")).join(", ")),
+          )`);
+        expect({ path, width, violations }).toEqual({ path, width, violations: [] });
+      }
+    }
+  }, 90_000);
+
+  it("puts the widget preview beside the form when there is room, and under it at 380px", async () => {
+    const layout = () =>
+      cdp.evaluate<{
+        formRight: number;
+        previewLeft: number;
+        formBottom: number;
+        previewTop: number;
+      }>(`(() => {
+        const form = document.querySelector(".widget-layout > form").getBoundingClientRect();
+        const preview = document.querySelector(".widget-preview-column").getBoundingClientRect();
+        return { formRight: form.right, previewLeft: preview.left, formBottom: form.bottom, previewTop: preview.top };
+      })()`);
+    await openScreen("/admin/widget", 1280, ".widget-preview-frame");
+    const wide = await layout();
+    expect(wide.previewLeft).toBeGreaterThanOrEqual(wide.formRight);
+    await openScreen("/admin/widget", 380, ".widget-preview-frame");
+    const narrow = await layout();
+    expect(narrow.previewTop).toBeGreaterThanOrEqual(narrow.formBottom);
+  }, 20_000);
+
   it("lays out sidebar, content and Try it at 1280px", async () => {
     const columns = () =>
       cdp.evaluate<{ nav: number; main: number; tryIt: number }>(`(() => {
@@ -732,10 +917,17 @@ describe("Admin layout regressions (Chromium)", () => {
     expect(overview.nav).toBe(220);
     expect(overview.main).toBe(1280 - 220);
 
-    await openScreen("/admin/behaviour", 1280, ".try-it:not([hidden])");
-    const behaviour = await columns();
+    await openScreen("/admin/behaviour", 1280, "#behaviour-greeting");
+    await waitFor(`document.querySelector(".try-it:not([hidden])")`, "Try it");
+    // Measured together: a screen taller than the window gets the page's
+    // scrollbar, which comes out of the main column.
+    const behaviour = await cdp.evaluate<{ main: number; tryIt: number; scrollbar: number }>(`({
+      main: document.querySelector(".shell-main").getBoundingClientRect().width,
+      tryIt: document.querySelector(".try-it").getBoundingClientRect().width,
+      scrollbar: window.innerWidth - document.documentElement.clientWidth,
+    })`);
     expect(behaviour.tryIt).toBe(360);
-    expect(behaviour.main).toBe(1280 - 220 - 360);
+    expect(behaviour.main + behaviour.scrollbar).toBe(1280 - 220 - 360);
     expect(await horizontalOverflow()).toBe(0);
   }, 15_000);
 

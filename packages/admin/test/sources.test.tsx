@@ -1,7 +1,30 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
 import type { Assistant, DocumentSummary, SourceSummary } from "../src/api/types.js";
+import { INDEXING_POLL_MS } from "../src/screens/Sources.js";
+import { expectNoSeriousA11yViolations } from "./support/axe.js";
+
+/** Opens a source's row menu and chooses an item. */
+async function chooseRowAction(sourceName: string, item: string) {
+  fireEvent.click(await screen.findByRole("button", { name: `Actions for ${sourceName}` }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: item }));
+}
+
+/** Opens "Add content" and picks one of its three choices. */
+async function openAddContent(choice?: "Import from a sitemap" | "Push from your build") {
+  const [headerButton] = await screen.findAllByRole("button", { name: "Add content" });
+  if (!headerButton) throw new Error("Expected an Add content button");
+  fireEvent.click(headerButton);
+  if (choice) fireEvent.click(await screen.findByRole("radio", { name: new RegExp(choice) }));
+}
+
+/** The table row that names `sourceName`. */
+function sourceRow(sourceName: string): HTMLElement {
+  const row = screen.getByText(sourceName, { selector: ".source-label" }).closest("tr");
+  if (!row) throw new Error(`No row for ${sourceName}`);
+  return row as HTMLElement;
+}
 
 function makeAssistant(): Assistant {
   return {
@@ -30,21 +53,28 @@ function installSourcesFakeServer(options?: {
     urls: string[];
     sourceId?: string;
   }) => Promise<Response> | Response | null;
+  onSitemapPreview?: (body: { url: string }) => Promise<Response> | Response | null;
+  onSourcesGet?: (count: number) => Promise<Response | null> | Response | null;
   previewUrls?: string[];
+  noPush?: boolean;
 }) {
   const assistant = makeAssistant();
   const sources: SourceSummary[] = [
-    {
-      id: "src_push_1",
-      orgId: assistant.orgId,
-      assistantId: assistant.id,
-      kind: "push",
-      label: "Push",
-      settings: {},
-      createdAt: 1_700_000_000_000,
-      documentCount: 3,
-      lastUpdatedAt: 1_700_000_100_000,
-    },
+    ...(options?.noPush
+      ? []
+      : [
+          {
+            id: "src_push_1",
+            orgId: assistant.orgId,
+            assistantId: assistant.id,
+            kind: "push",
+            label: "Push",
+            settings: {},
+            createdAt: 1_700_000_000_000,
+            documentCount: 3,
+            lastUpdatedAt: 1_700_000_100_000,
+          } satisfies SourceSummary,
+        ]),
     ...(options?.extraSources ?? []),
   ];
   const documentsBySource = new Map<string, Array<DocumentSummary & { markdown: string }>>([
@@ -67,6 +97,8 @@ function installSourcesFakeServer(options?: {
 
   const importedPayloads: Array<{ sitemapUrl?: string; urls: string[]; sourceId?: string }> = [];
   let createdSitemapSources = 0;
+  let sourcesGets = 0;
+  const previewBodies: Array<{ url: string }> = [];
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -79,7 +111,10 @@ function installSourcesFakeServer(options?: {
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/sources` && method === "GET") {
-      return Response.json({ sources: [...sources] });
+      sourcesGets++;
+      const intercepted = await options?.onSourcesGet?.(sourcesGets);
+      if (intercepted) return intercepted;
+      return Response.json({ sources: sources.map((source) => ({ ...source })) });
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/sources` && method === "POST") {
@@ -140,6 +175,10 @@ function installSourcesFakeServer(options?: {
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/sitemap-preview` && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { url: string };
+      previewBodies.push(body);
+      const intercepted = await options?.onSitemapPreview?.(body);
+      if (intercepted) return intercepted;
       return Response.json({
         urls: options?.previewUrls ?? [
           "https://docs.example.com/getting-started",
@@ -264,7 +303,13 @@ function installSourcesFakeServer(options?: {
 
   vi.stubGlobal("fetch", fetchMock);
   return {
+    fetchMock,
+    sources,
     importedPayloads,
+    previewBodies,
+    get sourcesGets() {
+      return sourcesGets;
+    },
     get createdSitemapSourceCount() {
       return createdSitemapSources;
     },
@@ -272,6 +317,7 @@ function installSourcesFakeServer(options?: {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
@@ -285,10 +331,16 @@ describe("admin Sources screen", () => {
     const { container } = render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Sources" })).toBeTruthy();
-    expect(screen.getByText("Pushed from your site")).toBeTruthy();
-    expect(screen.getByText(/Read-only\./)).toBeTruthy();
+    expect(await screen.findByText("Your site")).toBeTruthy();
+    expect(screen.getByText("Pushed with the CLI")).toBeTruthy();
+    expect(screen.getByText(/read-only here/)).toBeTruthy();
     expect(screen.getByText("solv push")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+
+    // A pushed source can be viewed but not deleted by hand.
+    fireEvent.click(screen.getByRole("button", { name: "Actions for Your site" }));
+    expect(await screen.findByRole("menuitem", { name: "View documents" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Re-import" })).toBeNull();
 
     // Every interactive control has an accessible name.
     const controls = container.querySelectorAll("button, input, textarea, select");
@@ -312,7 +364,12 @@ describe("admin Sources screen", () => {
     window.history.replaceState(null, "", "/admin/sources");
 
     render(<App />);
-    await screen.findByRole("heading", { name: "Sources" });
+    await screen.findByText("Your site");
+    await openAddContent();
+    // Writing an answer is the default choice.
+    expect(
+      (screen.getByRole("radio", { name: /Write an answer/ }) as HTMLInputElement).checked,
+    ).toBe(true);
 
     fireEvent.change(screen.getByLabelText("Question"), {
       target: { value: "Do you offer refunds?" },
@@ -322,9 +379,12 @@ describe("admin Sources screen", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
 
-    expect(await screen.findByText("Answer saved.")).toBeTruthy();
-    expect((await screen.findAllByText("Answers you wrote")).length).toBeGreaterThan(0);
-    expect(screen.getByText(/1 document/)).toBeTruthy();
+    expect(
+      await screen.findByText("Answer saved. Your assistant can use it in a minute or two."),
+    ).toBeTruthy();
+    expect(await screen.findByText("Answers you wrote")).toBeTruthy();
+    const docsCell = sourceRow("Answers you wrote").querySelector('td[data-label="Documents"]');
+    expect(docsCell?.textContent).toBe("1");
   });
 
   it("previews sitemap URLs and imports only the selected ones", async () => {
@@ -332,7 +392,8 @@ describe("admin Sources screen", () => {
     window.history.replaceState(null, "", "/admin/sources");
 
     render(<App />);
-    await screen.findByRole("heading", { name: "Sources" });
+    await screen.findByText("Your site");
+    await openAddContent("Import from a sitemap");
 
     fireEvent.change(screen.getByLabelText("Sitemap URL"), {
       target: { value: "https://docs.example.com/sitemap.xml" },
@@ -351,7 +412,7 @@ describe("admin Sources screen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Imported 2 pages.")).toBeTruthy();
+      expect(screen.getByText(/^Imported 2 pages\./)).toBeTruthy();
     });
     expect(server.importedPayloads).toEqual([
       {
@@ -369,7 +430,8 @@ describe("admin Sources screen", () => {
     window.history.replaceState(null, "", "/admin/sources");
 
     render(<App />);
-    await screen.findByRole("heading", { name: "Sources" });
+    await screen.findByText("Your site");
+    await openAddContent("Import from a sitemap");
     fireEvent.change(screen.getByLabelText("Sitemap URL"), {
       target: { value: "https://docs.example.com/sitemap.xml" },
     });
@@ -377,7 +439,7 @@ describe("admin Sources screen", () => {
     await screen.findByLabelText("https://docs.example.com/p11");
 
     fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
-    expect(await screen.findByText("Imported 12 pages.")).toBeTruthy();
+    expect(await screen.findByText(/^Imported 12 pages\./)).toBeTruthy();
     expect(server.importedPayloads.map((p) => p.urls.length)).toEqual([5, 5, 2]);
     expect(server.importedPayloads.flatMap((p) => p.urls)).toEqual(previewUrls);
     expect(new Set(server.importedPayloads.map((p) => p.sourceId)).size).toBe(1);
@@ -397,7 +459,8 @@ describe("admin Sources screen", () => {
     window.history.replaceState(null, "", "/admin/sources");
 
     render(<App />);
-    await screen.findByRole("heading", { name: "Sources" });
+    await screen.findByText("Your site");
+    await openAddContent("Import from a sitemap");
 
     fireEvent.change(screen.getByLabelText("Sitemap URL"), {
       target: { value: "https://docs.example.com/sitemap.xml" },
@@ -412,7 +475,7 @@ describe("admin Sources screen", () => {
     // Retry without re-fetching: must reuse the same sourceId and not create a second source.
     fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
     await waitFor(() => {
-      expect(screen.getByText("Imported 3 pages.")).toBeTruthy();
+      expect(screen.getByText(/^Imported 3 pages\./)).toBeTruthy();
     });
     expect(server.createdSitemapSourceCount).toBe(1);
     expect(server.importedPayloads).toHaveLength(2);
@@ -450,12 +513,11 @@ describe("admin Sources screen", () => {
     window.history.replaceState(null, "", "/admin/sources");
 
     render(<App />);
-    await screen.findAllByText("Answers you wrote");
+    await chooseRowAction("Answers you wrote", "View documents");
 
-    const [, entryViewButton] = screen.getAllByRole("button", { name: "View documents" });
-    if (!entryViewButton) throw new Error("Expected entry View documents button");
-    fireEvent.click(entryViewButton);
-
+    expect(
+      await screen.findByRole("heading", { name: "Documents in Answers you wrote" }),
+    ).toBeTruthy();
     expect(await screen.findByText("Question 1")).toBeTruthy();
     expect(screen.getByText("Showing 1–20 of 21")).toBeTruthy();
     expect(screen.queryByText("Question 21")).toBeNull();
@@ -469,7 +531,7 @@ describe("admin Sources screen", () => {
 
     expect(await screen.findByText("Question 21")).toBeTruthy();
     expect(screen.getByText("Showing 21–21 of 21")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit Question 21" })).toBeTruthy();
     expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Previous" }) as HTMLButtonElement).disabled).toBe(
       false,
@@ -533,17 +595,10 @@ describe("admin Sources screen", () => {
     window.history.replaceState(null, "", "/admin/sources");
 
     render(<App />);
-    await screen.findAllByText("Answers you wrote");
-
-    const [pushViewButton, entryViewButton] = screen.getAllByRole("button", {
-      name: "View documents",
-    });
-    if (!pushViewButton || !entryViewButton)
-      throw new Error("Expected both View documents buttons");
     // Expand source A (src_push_1) whose response stays pending.
-    fireEvent.click(pushViewButton);
+    await chooseRowAction("Your site", "View documents");
     // Switch to source B (src_entry_1) whose response resolves immediately.
-    fireEvent.click(entryViewButton);
+    await chooseRowAction("Answers you wrote", "View documents");
 
     expect(await screen.findByText("Entry B Question")).toBeTruthy();
 
@@ -572,8 +627,8 @@ describe("admin Sources screen", () => {
     });
 
     // Also verify a late error from a superseded request does not overwrite source B.
-    fireEvent.click(screen.getByRole("button", { name: "View documents" })); // expand A again (2nd call)
-    fireEvent.click(screen.getByRole("button", { name: "View documents" })); // switch back to B
+    await chooseRowAction("Your site", "View documents"); // expand A again (2nd call)
+    await chooseRowAction("Answers you wrote", "View documents"); // switch back to B
     expect(await screen.findByText("Entry B Question")).toBeTruthy();
 
     rejectStaleA2(new Error("Network error from A"));
@@ -588,7 +643,8 @@ describe("admin Sources screen", () => {
     window.history.replaceState(null, "", "/admin/sources");
 
     render(<App />);
-    await screen.findByText("Import once from a sitemap");
+    await screen.findByText("Your site");
+    await openAddContent("Import from a sitemap");
 
     const urlInput = screen.getByLabelText("Sitemap URL");
     fireEvent.change(urlInput, {
@@ -672,19 +728,14 @@ describe("admin Sources screen", () => {
     window.history.replaceState(null, "", "/admin/sources");
 
     render(<App />);
-    await screen.findAllByText("Answers you wrote");
-
     // Expand the entry source.
-    const viewButtons = screen.getAllByRole("button", { name: "View documents" });
-    const entryViewBtn = viewButtons[1];
-    if (!entryViewBtn) throw new Error("Expected entry View documents button");
-    fireEvent.click(entryViewBtn);
+    await chooseRowAction("Answers you wrote", "View documents");
 
     expect(await screen.findByText("Question A")).toBeTruthy();
     expect(screen.getByText("Question B")).toBeTruthy();
 
-    const [editA, editB] = screen.getAllByRole("button", { name: "Edit" });
-    if (!editA || !editB) throw new Error("Expected both Edit buttons");
+    const editA = screen.getByRole("button", { name: "Edit Question A" });
+    const editB = screen.getByRole("button", { name: "Edit Question B" });
 
     // 1. Click Edit for entry A (remains pending), then click Edit for entry B (resolves first).
     fireEvent.click(editA);
@@ -724,7 +775,9 @@ describe("admin Sources screen", () => {
     // 4. Cancel editing, start loading A again, then delete the source before A resolves.
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     fireEvent.click(editA);
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await chooseRowAction("Answers you wrote", "Delete");
+    const dialog = await screen.findByRole("dialog", { name: "Delete Answers you wrote?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete source" }));
 
     await waitFor(() => {
       expect(screen.queryByText("Answers you wrote")).toBeNull();
@@ -746,7 +799,7 @@ describe("admin Sources screen", () => {
 
     await waitFor(() => {
       expect(screen.queryByRole("heading", { name: "Edit answer" })).toBeNull();
-      expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("");
+      expect(screen.queryByLabelText("Question")).toBeNull();
     });
   });
 
@@ -806,17 +859,12 @@ describe("admin Sources screen", () => {
     window.history.replaceState(null, "", "/admin/sources");
 
     render(<App />);
-    await screen.findAllByText("Answers you wrote");
-
     // Expand the entry source.
-    const viewButtons = screen.getAllByRole("button", { name: "View documents" });
-    const entryViewBtn = viewButtons[1];
-    if (!entryViewBtn) throw new Error("Expected entry View documents button");
-    fireEvent.click(entryViewBtn);
+    await chooseRowAction("Answers you wrote", "View documents");
     expect(await screen.findByText("Question A")).toBeTruthy();
 
-    const [editA, editB] = screen.getAllByRole("button", { name: "Edit" });
-    if (!editA || !editB) throw new Error("Expected both Edit buttons");
+    const editA = screen.getByRole("button", { name: "Edit Question A" });
+    const editB = screen.getByRole("button", { name: "Edit Question B" });
 
     // 1. Load entry A, modify it, and click Save (PUT remains pending).
     fireEvent.click(editA);
@@ -845,7 +893,7 @@ describe("admin Sources screen", () => {
     expect(screen.getByRole("heading", { name: "Edit answer" })).toBeTruthy();
     expect(questionInput.value).toBe("Question B");
     expect(answerInput.value).toBe("Draft Answer B");
-    expect(screen.queryByText("Answer saved.")).toBeNull();
+    expect(screen.queryByText(/Answer saved/)).toBeNull();
   });
 
   it("selects at most 100 URLs by default and shows the 100-page import limit", async () => {
@@ -857,7 +905,8 @@ describe("admin Sources screen", () => {
     window.history.replaceState(null, "", "/admin/sources");
 
     render(<App />);
-    await screen.findByRole("heading", { name: "Sources" });
+    await screen.findByText("Your site");
+    await openAddContent("Import from a sitemap");
 
     fireEvent.change(screen.getByLabelText("Sitemap URL"), {
       target: { value: "https://docs.example.com/sitemap.xml" },
@@ -886,5 +935,218 @@ describe("admin Sources screen", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Select all" }));
     expect(screen.getByText("100 of 150 selected · Up to 100 pages per import")).toBeTruthy();
+  });
+
+  function source(overrides: Partial<SourceSummary> & { id: string }): SourceSummary {
+    return {
+      orgId: "org_00000000000000000000",
+      assistantId: "ast_1",
+      kind: "entry",
+      label: "Answers you wrote",
+      settings: {},
+      createdAt: 1_700_000_000_000,
+      documentCount: 2,
+      lastUpdatedAt: 1_700_000_200_000,
+      indexingCount: 0,
+      failedCount: 0,
+      indexError: null,
+      ...overrides,
+    };
+  }
+
+  it("shows Indexing…, Ready and Failed with the reason, and passes axe", async () => {
+    installSourcesFakeServer({
+      extraSources: [
+        source({ id: "src_entry_1", indexingCount: 1 }),
+        source({
+          id: "src_map_1",
+          kind: "sitemap",
+          label: "blog.example.com",
+          settings: { url: "https://blog.example.com/sitemap.xml" },
+          documentCount: 24,
+          failedCount: 2,
+          indexError: "too_long",
+        }),
+        source({
+          id: "src_map_2",
+          kind: "sitemap",
+          label: "help.example.com",
+          settings: { url: "https://help.example.com/sitemap.xml" },
+          documentCount: 0,
+        }),
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    const { container } = render(<App />);
+    await screen.findByText("blog.example.com");
+
+    expect(within(sourceRow("Your site")).getByText("Ready")).toBeTruthy();
+    const indexing = sourceRow("Answers you wrote");
+    expect(within(indexing).getByText("Indexing…")).toBeTruthy();
+    expect(within(indexing).getByText(/1 page not searchable yet/)).toBeTruthy();
+    const failed = sourceRow("blog.example.com");
+    expect(within(failed).getByText("Failed")).toBeTruthy();
+    expect(
+      within(failed).getByText(/2 pages could not be indexed: a page is too long to index/),
+    ).toBeTruthy();
+    expect(within(sourceRow("help.example.com")).getByText("Empty")).toBeTruthy();
+
+    await expectNoSeriousA11yViolations(container);
+  });
+
+  it("checks again while something is indexing and stops once it is ready", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const server = installSourcesFakeServer({
+      extraSources: [source({ id: "src_entry_1", indexingCount: 1 })],
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+    expect(await screen.findByText("Indexing…")).toBeTruthy();
+    const before = server.sourcesGets;
+
+    // Indexing finishes on the server; the next check shows it.
+    const entry = server.sources.find((s) => s.id === "src_entry_1");
+    if (entry) entry.indexingCount = 0;
+    await vi.advanceTimersByTimeAsync(INDEXING_POLL_MS + 50);
+    await waitFor(() => expect(server.sourcesGets).toBe(before + 1));
+    expect(await within(sourceRow("Answers you wrote")).findByText("Ready")).toBeTruthy();
+
+    // Nothing is indexing any more, so no further checks.
+    await vi.advanceTimersByTimeAsync(INDEXING_POLL_MS * 3);
+    expect(server.sourcesGets).toBe(before + 1);
+  });
+
+  it("asks before deleting a source, and Cancel deletes nothing", async () => {
+    const server = installSourcesFakeServer({ extraSources: [source({ id: "src_entry_1" })] });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+
+    await chooseRowAction("Answers you wrote", "Delete");
+    let dialog = await screen.findByRole("dialog", { name: "Delete Answers you wrote?" });
+    expect(within(dialog).getByText(/2 documents stop being used in answers/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const deletes = () =>
+      server.fetchMock.mock.calls.filter(([, init]) => (init?.method ?? "GET") === "DELETE");
+    expect(deletes()).toHaveLength(0);
+    expect(screen.getByText("Answers you wrote")).toBeTruthy();
+
+    await chooseRowAction("Answers you wrote", "Delete");
+    dialog = await screen.findByRole("dialog", { name: "Delete Answers you wrote?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete source" }));
+    expect(await screen.findByText("Deleted Answers you wrote.")).toBeTruthy();
+    expect(deletes()).toHaveLength(1);
+    await waitFor(() => expect(screen.queryByText("Answers you wrote")).toBeNull());
+  });
+
+  it("re-imports a sitemap source from its saved address, in batches, into the same source", async () => {
+    const previewUrls = Array.from({ length: 7 }, (_, i) => `https://blog.example.com/p${i}`);
+    const server = installSourcesFakeServer({
+      previewUrls,
+      extraSources: [
+        source({
+          id: "src_map_1",
+          kind: "sitemap",
+          label: "blog.example.com",
+          settings: { url: "https://blog.example.com/sitemap.xml" },
+        }),
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+
+    await chooseRowAction("blog.example.com", "Re-import");
+    expect(await screen.findByText(/^blog\.example\.com: Imported 7 pages\./)).toBeTruthy();
+    expect(server.previewBodies).toEqual([{ url: "https://blog.example.com/sitemap.xml" }]);
+    expect(server.importedPayloads.map((p) => p.urls.length)).toEqual([5, 2]);
+    expect(server.importedPayloads.every((p) => p.sourceId === "src_map_1")).toBe(true);
+    expect(server.createdSitemapSourceCount).toBe(0);
+  });
+
+  it("shows import progress, then a summary with the unchanged pages", async () => {
+    const previewUrls = Array.from({ length: 8 }, (_, i) => `https://docs.example.com/p${i}`);
+    let release!: () => void;
+    let calls = 0;
+    installSourcesFakeServer({
+      previewUrls,
+      async onSitemapImport(body) {
+        calls++;
+        if (calls === 2) await new Promise<void>((resolve) => (release = resolve));
+        return Response.json(
+          { written: 1, unchanged: body.urls.length - 1, total: body.urls.length },
+          { status: 201 },
+        );
+      },
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+    await screen.findByText("Your site");
+    await openAddContent("Import from a sitemap");
+    fireEvent.change(screen.getByLabelText("Sitemap URL"), {
+      target: { value: "https://docs.example.com/sitemap.xml" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch URLs" }));
+    await screen.findByLabelText("https://docs.example.com/p7");
+    fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
+
+    expect(await screen.findByText("Importing 5 of 8 pages…")).toBeTruthy();
+    const bar = screen.getByRole("progressbar", { name: "Importing" }) as HTMLProgressElement;
+    expect(bar.value).toBe(5);
+    expect(bar.max).toBe(8);
+    release();
+    expect(
+      await screen.findByText(/^Imported 8 pages\. 2 new or changed, 6 unchanged\./),
+    ).toBeTruthy();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+
+  it("shows a placeholder while loading, then an error with Try again that reloads", async () => {
+    let releaseFirst!: () => void;
+    const server = installSourcesFakeServer({
+      async onSourcesGet(count) {
+        if (count === 1) {
+          await new Promise<void>((resolve) => (releaseFirst = resolve));
+          return Response.json({ error: "The database is busy." }, { status: 503 });
+        }
+        return null;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+
+    expect(await screen.findByText("Loading sources…")).toBeTruthy();
+    releaseFirst();
+    expect(await screen.findByText("Could not load your sources.")).toBeTruthy();
+    expect(screen.getByText("The database is busy.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Your site")).toBeTruthy();
+    expect(server.sourcesGets).toBe(2);
+    expect(screen.queryByText("Could not load your sources.")).toBeNull();
+  });
+
+  it("offers Add content from the empty state, with the three ways to add", async () => {
+    installSourcesFakeServer({ noPush: true });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+
+    expect(await screen.findByText("No sources yet")).toBeTruthy();
+    const buttons = screen.getAllByRole("button", { name: "Add content" });
+    expect(buttons).toHaveLength(2);
+    fireEvent.click(buttons[1] as HTMLElement);
+
+    const group = await screen.findByRole("group", { name: "What would you like to add?" });
+    const radios = within(group).getAllByRole("radio") as HTMLInputElement[];
+    expect(
+      radios.map((r) => r.closest("label")?.querySelector(".choice-card-title")?.textContent),
+    ).toEqual(["Write an answer", "Import from a sitemap", "Push from your build"]);
+    expect(radios[0]?.checked).toBe(true);
+    expect(screen.getByLabelText("Question")).toBeTruthy();
+
+    fireEvent.click(within(group).getByRole("radio", { name: /Push from your build/ }));
+    expect(
+      await screen.findByText(/npx @solvchat\/cli push \.\/docs --endpoint .* --assistant ast_1/),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("Question")).toBeNull();
   });
 });

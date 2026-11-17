@@ -179,6 +179,23 @@ export function conversationsFor(db: D1Database, orgId: string) {
       return (res.meta.changes ?? 0) > 0;
     },
 
+    /**
+     * The page and time of the newest conversation that recorded a page, or
+     * null. A conversation only exists once a visitor sends a message, so
+     * this proves the widget loaded there; it misses loads with no message.
+     */
+    async latestPageSeen(assistantId: string): Promise<{ pageUrl: string; at: number } | null> {
+      const row = await prepare(
+        db,
+        `SELECT page_url, started_at FROM conversations
+         WHERE org_id = ?1 AND assistant_id = ?2 AND page_url != ''
+         ORDER BY started_at DESC LIMIT 1`,
+      )
+        .bind(orgId, assistantId)
+        .first<{ page_url: string; started_at: number }>();
+      return row ? { pageUrl: row.page_url, at: row.started_at } : null;
+    },
+
     async updatePageUrl(id: string, pageUrl: string): Promise<boolean> {
       const res = await prepare(
         db,

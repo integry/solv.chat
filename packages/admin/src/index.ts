@@ -26,6 +26,7 @@ export { DataTable, type DataTableColumn, type DataTableProps } from "./ui/DataT
 export { RelativeTime, type RelativeTimeProps } from "./ui/DateText.js";
 export { ConfirmDialog, type ConfirmDialogProps, Dialog, type DialogProps } from "./ui/Dialog.js";
 export { EmptyState, type EmptyStateProps } from "./ui/EmptyState.js";
+export { ErrorState, type ErrorStateProps } from "./ui/ErrorState.js";
 export {
   type DateFormatOptions,
   type DateInput,

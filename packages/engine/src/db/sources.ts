@@ -1,4 +1,5 @@
 import type { SourceKind } from "@solvchat/core";
+import type { IndexErrorCode } from "./documents.js";
 import { prepare, prepareInsert, safeJsonObject } from "./sql.js";
 
 interface Row {
@@ -24,12 +25,27 @@ export interface SourceRow {
 export interface SourceWithStatsRow extends SourceRow {
   documentCount: number;
   lastUpdatedAt: number | null;
+  /** Documents whose current content is not searchable yet and has not failed. */
+  indexingCount: number;
+  /** Documents whose current content could not be indexed. */
+  failedCount: number;
+  /** One of the failed documents' error codes, or null when none failed. */
+  indexError: IndexErrorCode | null;
 }
 
 interface StatsRow extends Row {
   document_count: number;
   last_updated_at: number | null;
+  indexing_count: number | null;
+  failed_count: number | null;
+  index_error: string | null;
 }
+
+const INDEX_ERROR_CODES: ReadonlySet<string> = new Set<IndexErrorCode>([
+  "too_long",
+  "missing_body",
+  "embedding_failed",
+]);
 
 export interface CreateSourceInput {
   id: string;
@@ -113,7 +129,17 @@ export function sourcesFor(db: D1Database, orgId: string) {
         db,
         `SELECT s.id, s.org_id, s.assistant_id, s.kind, s.label, s.settings, s.created_at,
                 COUNT(d.id) AS document_count,
-                MAX(d.updated_at) AS last_updated_at
+                MAX(d.updated_at) AS last_updated_at,
+                SUM(CASE WHEN d.id IS NOT NULL
+                          AND (d.indexed_hash IS NULL OR d.indexed_hash != d.content_hash)
+                          AND (d.index_error_hash IS NULL OR d.index_error_hash != d.content_hash)
+                         THEN 1 ELSE 0 END) AS indexing_count,
+                SUM(CASE WHEN d.index_error_hash = d.content_hash
+                          AND (d.indexed_hash IS NULL OR d.indexed_hash != d.content_hash)
+                         THEN 1 ELSE 0 END) AS failed_count,
+                MAX(CASE WHEN d.index_error_hash = d.content_hash
+                          AND (d.indexed_hash IS NULL OR d.indexed_hash != d.content_hash)
+                         THEN d.index_error END) AS index_error
          FROM sources s
          LEFT JOIN documents d ON d.org_id = s.org_id AND d.source_id = s.id
          WHERE s.org_id = ?1 AND s.assistant_id = ?2
@@ -126,6 +152,12 @@ export function sourcesFor(db: D1Database, orgId: string) {
         ...map(row),
         documentCount: Number(row.document_count ?? 0),
         lastUpdatedAt: row.last_updated_at ?? null,
+        indexingCount: Number(row.indexing_count ?? 0),
+        failedCount: Number(row.failed_count ?? 0),
+        indexError:
+          row.index_error !== null && INDEX_ERROR_CODES.has(row.index_error)
+            ? (row.index_error as IndexErrorCode)
+            : null,
       }));
     },
 

@@ -1,11 +1,23 @@
 import type { SourceKind } from "@solvchat/core";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, deleteJson, getJson, postJson } from "../api/client.js";
-import type { DocumentSummary, SourceSummary } from "../api/types.js";
+import type { DocumentSummary, IndexErrorCode, SourceSummary } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { ScreenLink } from "../routing.js";
+import { CopyButton } from "../ui/CopyButton.js";
+import { DataTable, type DataTableColumn } from "../ui/DataTable.js";
+import { RelativeTime } from "../ui/DateText.js";
+import { ConfirmDialog } from "../ui/Dialog.js";
 import { EmptyState } from "../ui/EmptyState.js";
+import { ErrorState } from "../ui/ErrorState.js";
 import { formatDateTime } from "../ui/format.js";
+import { Icon, type IconName } from "../ui/Icon.js";
 import { PageHeader } from "../ui/PageHeader.js";
+import { RowMenu, type RowMenuItem } from "../ui/RowMenu.js";
+import { Skeleton } from "../ui/Skeleton.js";
+import { StatusBadge, type StatusTone } from "../ui/StatusBadge.js";
+import { useToast } from "../ui/Toast.js";
+import { cliPushCommand } from "./cliCommand.js";
 import { EntryEditor } from "./EntryEditor.js";
 
 export interface SourcesProps {
@@ -17,20 +29,35 @@ const MAX_IMPORT_URLS = 100;
 // The engine imports at most this many pages per request so one request
 // stays inside the Workers subrequest limit; a selection goes in batches.
 export const IMPORT_BATCH_URLS = 5;
+/** How often the list is checked while something is being indexed. */
+export const INDEXING_POLL_MS = 5000;
 
-const KIND_LABELS: Record<SourceKind, string> = {
-  push: "Pushed from your site",
-  entry: "Answers you wrote",
-  sitemap: "Imported once from a sitemap",
+const KIND_TEXT: Record<SourceKind, { icon: IconName; type: string }> = {
+  push: { icon: "terminal", type: "Pushed with the CLI" },
+  entry: { icon: "pencil", type: "Written here" },
+  sitemap: { icon: "globe", type: "Imported from a sitemap" },
 };
+
+const INDEX_ERROR_TEXT: Record<IndexErrorCode, string> = {
+  too_long: "a page is too long to index. Split it into smaller pages.",
+  missing_body: "a page's text is missing. Push or save it again.",
+  embedding_failed: "the search service did not answer. It will try again.",
+};
+
+type AddChoice = "write" | "sitemap" | "cli";
 
 function formatCount(count: number): string {
   return count === 1 ? "1 document" : `${count} documents`;
 }
 
-function formatDate(timestamp: number | null): string {
-  if (timestamp === null) return "Never";
-  return formatDateTime(timestamp);
+function formatPages(count: number): string {
+  return count === 1 ? "1 page" : `${count} pages`;
+}
+
+/** The row's name: a pushed source's stored label ("Push") says nothing on its own. */
+function sourceName(source: SourceSummary): string {
+  if (source.kind === "push" && source.label === "Push") return "Your site";
+  return source.label;
 }
 
 function stripLeadingHeading(markdown: string, title: string): string {
@@ -39,6 +66,85 @@ function stripLeadingHeading(markdown: string, title: string): string {
     return markdown.slice(prefix.length);
   }
   return markdown;
+}
+
+export interface IndexStatus {
+  tone: StatusTone;
+  label: string;
+  hint: string | null;
+}
+
+/** "Indexing…", "Ready" or "Failed: reason", from a source's counts. */
+export function indexStatus(source: SourceSummary): IndexStatus {
+  const failed = source.failedCount ?? 0;
+  const indexing = source.indexingCount ?? 0;
+  if (failed > 0) {
+    const reason = source.indexError ? INDEX_ERROR_TEXT[source.indexError] : null;
+    return {
+      tone: "danger",
+      label: "Failed",
+      hint: `${failed === 1 ? "1 page" : `${failed} pages`} could not be indexed${
+        reason ? `: ${reason}` : "."
+      }`,
+    };
+  }
+  if (indexing > 0) {
+    return {
+      tone: "info",
+      label: "Indexing…",
+      hint: `${formatPages(indexing)} not searchable yet. This usually takes a minute or two.`,
+    };
+  }
+  if (source.documentCount === 0) {
+    return { tone: "neutral", label: "Empty", hint: null };
+  }
+  return { tone: "success", label: "Ready", hint: null };
+}
+
+/**
+ * Imports `urls` into a sitemap source in batches, reporting progress. Throws
+ * on the first failed batch; `onBatchDone` has already been called for the
+ * ones that finished, so a retry can skip them.
+ */
+async function importInBatches(
+  assistantId: string,
+  sitemapUrl: string,
+  sourceId: string,
+  urls: readonly string[],
+  onBatchDone: (batch: string[], done: number) => void,
+): Promise<{ written: number; unchanged: number; total: number }> {
+  let written = 0;
+  let unchanged = 0;
+  let total = 0;
+  for (let at = 0; at < urls.length; at += IMPORT_BATCH_URLS) {
+    const batch = urls.slice(at, at + IMPORT_BATCH_URLS);
+    const res = await postJson<{ total: number; written?: number; unchanged?: number }>(
+      `/api/admin/assistants/${assistantId}/sitemap-import`,
+      { sitemapUrl, urls: batch, sourceId },
+    );
+    total += res.total;
+    written += res.written ?? res.total;
+    unchanged += res.unchanged ?? 0;
+    onBatchDone(batch, at + batch.length);
+  }
+  return { written, unchanged, total };
+}
+
+function importSummary(result: { written: number; unchanged: number; total: number }): string {
+  const head = `Imported ${formatPages(result.total)}.`;
+  if (result.unchanged === 0) return head;
+  return `${head} ${result.written} new or changed, ${result.unchanged} unchanged.`;
+}
+
+function ImportProgress({ done, total, label }: { done: number; total: number; label: string }) {
+  return (
+    <div className="import-progress" role="status">
+      <span>
+        {label} {done} of {formatPages(total)}…
+      </span>
+      <progress max={total} value={done} aria-label={label} />
+    </div>
+  );
 }
 
 function SitemapImport({
@@ -53,9 +159,10 @@ function SitemapImport({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [importSourceId, setImportSourceId] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
-  const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const importing = progress !== null;
 
   async function handlePreview(event: FormEvent) {
     event.preventDefault();
@@ -105,12 +212,12 @@ function SitemapImport({
 
   async function handleImport() {
     if (fetching || importing || !preview || selected.size === 0) return;
-    setImporting(true);
+    const chosen = preview.urls.filter((u) => selected.has(u));
+    setProgress({ done: 0, total: chosen.length });
     setError(null);
     setNotice(null);
 
     try {
-      const chosen = preview.urls.filter((u) => selected.has(u));
       let sourceId = importSourceId;
       if (sourceId === null) {
         const targetUrl = preview.url || chosen[0] || "";
@@ -126,29 +233,33 @@ function SitemapImport({
         );
         sourceId = created.source.id;
         setImportSourceId(sourceId);
+        // The new source shows in the list straight away, marked as indexing.
+        onImported();
       }
 
-      let total = 0;
-      for (let at = 0; at < chosen.length; at += IMPORT_BATCH_URLS) {
-        const batch = chosen.slice(at, at + IMPORT_BATCH_URLS);
-        const res = await postJson<{ total: number }>(
-          `/api/admin/assistants/${assistantId}/sitemap-import`,
-          { sitemapUrl: preview.url, urls: batch, sourceId },
-        );
-        total += res.total;
-        // A failure later on leaves only the pages not yet imported selected,
-        // so trying again does not fetch the finished ones twice.
-        setSelected((prev) => {
-          const next = new Set(prev);
-          for (const url of batch) next.delete(url);
-          return next;
-        });
-      }
+      const result = await importInBatches(
+        assistantId,
+        preview.url,
+        sourceId,
+        chosen,
+        (batch, done) => {
+          setProgress({ done, total: chosen.length });
+          // A failure later on leaves only the pages not yet imported selected,
+          // so trying again does not fetch the finished ones twice.
+          setSelected((prev) => {
+            const next = new Set(prev);
+            for (const url of batch) next.delete(url);
+            return next;
+          });
+        },
+      );
       setPreview(null);
       setSelected(new Set());
       setImportSourceId(null);
       setSitemapUrl("");
-      setNotice(total === 1 ? "Imported 1 page." : `Imported ${total} pages.`);
+      setNotice(
+        `${importSummary(result)} Your assistant can use them once indexing finishes, usually within a few minutes.`,
+      );
       onImported();
     } catch (err) {
       if (err instanceof ApiError) {
@@ -163,21 +274,16 @@ function SitemapImport({
         setError("Could not import those pages. Try again.");
       }
     } finally {
-      setImporting(false);
+      setProgress(null);
     }
   }
 
   return (
-    <section className="source-card stack" aria-labelledby="sitemap-import-heading">
-      <div>
-        <h2 id="sitemap-import-heading" className="section-heading">
-          Import once from a sitemap
-        </h2>
-        <p className="field-hint">
-          Enter a sitemap URL to list its pages and choose which ones to import once. This is a
-          one-off import, not a crawl.
-        </p>
-      </div>
+    <div className="stack">
+      <p className="field-hint">
+        Lists the pages in a sitemap so you can choose which to copy in. This is a one-off import,
+        not a crawl: run it again from the source's menu when the pages change.
+      </p>
 
       <form className="stack" onSubmit={(e) => void handlePreview(e)}>
         <div className="field">
@@ -252,6 +358,10 @@ function SitemapImport({
             ))}
           </ul>
 
+          {progress && (
+            <ImportProgress done={progress.done} total={progress.total} label="Importing" />
+          )}
+
           <div className="actions">
             <button
               type="button"
@@ -275,16 +385,64 @@ function SitemapImport({
           {notice}
         </p>
       )}
-    </section>
+    </div>
   );
 }
 
+function CliInstructions({ assistantId }: { assistantId: string }) {
+  return (
+    <div className="stack">
+      <p className="field-hint">
+        Send pages from your site's build, so the assistant stays in step with every deploy. Each
+        push replaces what changed and leaves the rest.
+      </p>
+      <ol className="numbered-steps">
+        <li>
+          Keep your ingest key as a secret in your build, named <code>SOLV_INGEST_KEY</code>. You
+          can rotate it on <ScreenLink to="install">Install</ScreenLink>, under "For developers".
+        </li>
+        <li>
+          After your site builds, push its folder of Markdown files:
+          <pre className="code-block">
+            <code>{cliPushCommand(assistantId)}</code>
+          </pre>
+          <CopyButton value={cliPushCommand(assistantId)} label="Copy command" />
+        </li>
+      </ol>
+    </div>
+  );
+}
+
+const ADD_CHOICES: ReadonlyArray<{ id: AddChoice; icon: IconName; title: string; text: string }> = [
+  {
+    id: "write",
+    icon: "pencil",
+    title: "Write an answer",
+    text: "A question and its answer, in your own words.",
+  },
+  {
+    id: "sitemap",
+    icon: "globe",
+    title: "Import from a sitemap",
+    text: "Copy pages from your site once.",
+  },
+  {
+    id: "cli",
+    icon: "terminal",
+    title: "Push from your build",
+    text: "Keep pages in step with every deploy.",
+  },
+];
+
 export function Sources({ assistantId }: SourcesProps) {
+  const toast = useToast();
   const sourcesRes = useResource<{ sources: SourceSummary[] }>(
     `/api/admin/assistants/${assistantId}/sources`,
   );
   const sources = sourcesRes.value?.sources ?? [];
+  const anyIndexing = sources.some((s) => (s.indexingCount ?? 0) > 0);
 
+  const [addChoice, setAddChoice] = useState<AddChoice | null>(null);
   const [expandedSourceId, setExpandedSourceId] = useState<string | null>(null);
   const [docsState, setDocsState] = useState<{
     sourceId: string | null;
@@ -303,6 +461,8 @@ export function Sources({ assistantId }: SourcesProps) {
     controller: AbortController;
   } | null>(null);
   const entryRequestSeqRef = useRef(0);
+  const docsPanelRef = useRef<HTMLElement>(null);
+  const addPanelRef = useRef<HTMLElement>(null);
 
   function cancelEntryLoad(onlySourceId?: string) {
     if (onlySourceId !== undefined && entryRequestRef.current?.sourceId !== onlySourceId) {
@@ -322,8 +482,15 @@ export function Sources({ assistantId }: SourcesProps) {
   const editingEntryRef = useRef(editingEntry);
   editingEntryRef.current = editingEntry;
 
+  const [confirmDelete, setConfirmDelete] = useState<SourceSummary | null>(null);
   const [busySourceId, setBusySourceId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [reimport, setReimport] = useState<{
+    sourceId: string;
+    done: number;
+    total: number;
+  } | null>(null);
 
   useEffect(() => {
     void assistantId;
@@ -351,6 +518,15 @@ export function Sources({ assistantId }: SourcesProps) {
       entryRequestRef.current?.controller.abort();
     };
   }, []);
+
+  // New content is not searchable for a short while: check again until it is.
+  const reloadSources = sourcesRes.reload;
+  const sourcesReady = sourcesRes.status === "ready";
+  useEffect(() => {
+    if (!anyIndexing || !sourcesReady) return;
+    const timer = setTimeout(reloadSources, INDEXING_POLL_MS);
+    return () => clearTimeout(timer);
+  }, [anyIndexing, sourcesReady, reloadSources]);
 
   async function loadDocuments(sourceId: string, offset = 0) {
     docsRequestRef.current?.controller.abort();
@@ -398,16 +574,26 @@ export function Sources({ assistantId }: SourcesProps) {
     }
   }
 
-  function handleToggleDocuments(sourceId: string) {
+  function closeDocuments() {
+    docsRequestRef.current?.controller.abort();
+    docsRequestRef.current = null;
+    docsRequestSeqRef.current++;
+    setExpandedSourceId(null);
+  }
+
+  function showDocuments(sourceId: string) {
     if (expandedSourceId === sourceId) {
-      docsRequestRef.current?.controller.abort();
-      docsRequestRef.current = null;
-      docsRequestSeqRef.current++;
-      setExpandedSourceId(null);
+      docsPanelRef.current?.focus();
       return;
     }
     setExpandedSourceId(sourceId);
     void loadDocuments(sourceId, 0);
+    requestAnimationFrame(() => docsPanelRef.current?.focus());
+  }
+
+  function chooseAdd(choice: AddChoice) {
+    setAddChoice(choice);
+    requestAnimationFrame(() => addPanelRef.current?.focus());
   }
 
   async function handleEditEntry(sourceId: string, doc: DocumentSummary) {
@@ -441,42 +627,186 @@ export function Sources({ assistantId }: SourcesProps) {
     }
   }
 
-  async function handleDeleteSource(sourceId: string) {
+  async function handleDeleteSource(source: SourceSummary) {
     if (busySourceId !== null) return;
+    const sourceId = source.id;
     setBusySourceId(sourceId);
-    setActionError(null);
+    setDeleteError(null);
     try {
       await deleteJson(`/api/admin/sources/${sourceId}`);
-      if (expandedSourceId === sourceId) {
-        docsRequestRef.current?.controller.abort();
-        docsRequestRef.current = null;
-        docsRequestSeqRef.current++;
-        setExpandedSourceId(null);
-      }
+      if (expandedSourceId === sourceId) closeDocuments();
       cancelEntryLoad(sourceId);
       setEditingEntry((prev) => (prev?.sourceId === sourceId ? null : prev));
+      setConfirmDelete(null);
+      toast.success(`Deleted ${sourceName(source)}.`);
       sourcesRes.reload();
     } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : "Could not delete source.");
+      setDeleteError(err instanceof ApiError ? err.message : "Could not delete source.");
     } finally {
       setBusySourceId(null);
     }
   }
 
+  async function handleReimport(source: SourceSummary) {
+    const url = typeof source.settings.url === "string" ? source.settings.url : "";
+    if (reimport !== null || url === "") return;
+    setActionError(null);
+    setReimport({ sourceId: source.id, done: 0, total: 0 });
+    try {
+      const preview = await postJson<{ urls: string[] }>(
+        `/api/admin/assistants/${assistantId}/sitemap-preview`,
+        { url },
+      );
+      const urls = preview.urls.slice(0, MAX_IMPORT_URLS);
+      if (urls.length === 0) {
+        setActionError(`No pages found in ${url}.`);
+        return;
+      }
+      setReimport({ sourceId: source.id, done: 0, total: urls.length });
+      const result = await importInBatches(assistantId, url, source.id, urls, (_batch, done) =>
+        setReimport({ sourceId: source.id, done, total: urls.length }),
+      );
+      toast.success(`${sourceName(source)}: ${importSummary(result)}`);
+      sourcesRes.reload();
+      if (expandedSourceId === source.id) void loadDocuments(source.id, 0);
+    } catch (err) {
+      setActionError(
+        err instanceof ApiError
+          ? `Could not re-import ${sourceName(source)}: ${err.fields.url ?? err.fields.urls ?? err.message}`
+          : `Could not re-import ${sourceName(source)}. Try again.`,
+      );
+      sourcesRes.reload();
+    } finally {
+      setReimport(null);
+    }
+  }
+
   if (sourcesRes.status === "loading" && !sourcesRes.value) {
-    return <p className="muted">Loading sources…</p>;
+    return (
+      <div className="screen">
+        <PageHeader title="Sources" description="Where your assistant's answers come from." />
+        <Skeleton label="Loading sources…" lines={4} />
+      </div>
+    );
   }
   if (sourcesRes.status === "error") {
     return (
-      <p className="error-text" role="alert">
-        {sourcesRes.error}
-      </p>
+      <div className="screen">
+        <PageHeader title="Sources" description="Where your assistant's answers come from." />
+        <ErrorState
+          title="Could not load your sources."
+          detail={sourcesRes.error}
+          onRetry={sourcesRes.reload}
+        />
+      </div>
     );
   }
 
+  const columns: DataTableColumn<SourceSummary>[] = [
+    {
+      key: "name",
+      header: "Source",
+      render: (source) => (
+        <div className="source-name-cell">
+          <span className="source-type-icon" aria-hidden="true">
+            <Icon name={KIND_TEXT[source.kind].icon} />
+          </span>
+          <span>
+            <span className="source-label">{sourceName(source)}</span>
+            <span className="source-type">{KIND_TEXT[source.kind].type}</span>
+          </span>
+        </div>
+      ),
+    },
+    {
+      key: "documents",
+      header: "Documents",
+      align: "end",
+      render: (source) => source.documentCount.toLocaleString(),
+    },
+    {
+      key: "status",
+      header: "Status",
+      render: (source) => {
+        if (reimport?.sourceId === source.id) {
+          return reimport.total === 0 ? (
+            <StatusBadge tone="info">Reading sitemap…</StatusBadge>
+          ) : (
+            <ImportProgress done={reimport.done} total={reimport.total} label="Re-importing" />
+          );
+        }
+        const status = indexStatus(source);
+        return (
+          <div className="source-status">
+            <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+            {status.hint && <span className="source-status-hint">{status.hint}</span>}
+          </div>
+        );
+      },
+    },
+    {
+      key: "updated",
+      header: "Last updated",
+      render: (source) =>
+        source.lastUpdatedAt === null ? (
+          <span className="muted">Never</span>
+        ) : (
+          <RelativeTime value={source.lastUpdatedAt} />
+        ),
+    },
+    {
+      key: "actions",
+      header: "Actions",
+      hideHeader: true,
+      align: "end",
+      render: (source) => {
+        const items: RowMenuItem[] = [
+          { label: "View documents", onSelect: () => showDocuments(source.id) },
+        ];
+        if (source.kind === "sitemap" && typeof source.settings.url === "string") {
+          items.push({
+            label: "Re-import",
+            disabled: reimport !== null,
+            onSelect: () => void handleReimport(source),
+          });
+        }
+        if (source.kind !== "push") {
+          items.push({
+            label: "Delete",
+            tone: "danger",
+            disabled: busySourceId !== null,
+            onSelect: () => {
+              setDeleteError(null);
+              setConfirmDelete(source);
+            },
+          });
+        }
+        return <RowMenu label={`Actions for ${sourceName(source)}`} items={items} />;
+      },
+    },
+  ];
+
+  const expandedSource = sources.find((s) => s.id === expandedSourceId) ?? null;
+  const pushSource = sources.find((s) => s.kind === "push" && s.documentCount > 0);
+
   return (
     <div className="screen">
-      <PageHeader title="Sources" description="Where your assistant's answers come from." />
+      <PageHeader
+        title="Sources"
+        description="Where your assistant's answers come from."
+        actions={
+          <button
+            type="button"
+            className="btn btn-primary"
+            aria-expanded={addChoice !== null}
+            aria-controls="add-content"
+            onClick={() => (addChoice === null ? chooseAdd("write") : setAddChoice(null))}
+          >
+            <Icon name="plus" />
+            Add content
+          </button>
+        }
+      />
 
       {actionError && (
         <p className="error-text" role="alert">
@@ -485,184 +815,252 @@ export function Sources({ assistantId }: SourcesProps) {
       )}
 
       {sources.length === 0 ? (
-        <EmptyState
-          icon="sources"
-          title="No sources yet"
-          description={
-            <>
-              Push your site with <code>solv push</code>, write an answer below, or import once from
-              a sitemap.
-            </>
-          }
-        />
+        addChoice === null && (
+          <EmptyState
+            icon="sources"
+            title="No sources yet"
+            description="Write an answer, import pages from a sitemap, or push them from your site's build."
+            action={
+              <button type="button" className="btn btn-primary" onClick={() => chooseAdd("write")}>
+                Add content
+              </button>
+            }
+          />
+        )
       ) : (
-        <ul className="source-list">
-          {sources.map((source) => {
-            const expanded = expandedSourceId === source.id;
-            const isPush = source.kind === "push";
+        <>
+          <DataTable
+            className="sources-table"
+            caption="Sources"
+            columns={columns}
+            rows={sources}
+            rowKey={(source) => source.id}
+          />
+          {pushSource && (
+            <p className="field-hint">
+              Pages pushed from your site are read-only here. Update them with{" "}
+              <code>solv push</code>.
+            </p>
+          )}
+        </>
+      )}
+
+      {expandedSource && (
+        <section
+          ref={docsPanelRef}
+          className="source-card stack"
+          aria-labelledby="source-docs-heading"
+          tabIndex={-1}
+        >
+          <div className="source-row-header">
+            <h2 id="source-docs-heading" className="section-heading">
+              Documents in {sourceName(expandedSource)}
+            </h2>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={closeDocuments}>
+              Close
+            </button>
+          </div>
+          {expandedSource.kind === "push" && (
+            <p className="field-hint">
+              Read-only. Update pushed pages from your site with <code>solv push</code>.
+            </p>
+          )}
+          {(() => {
+            const activeDocs = docsState.sourceId === expandedSource.id ? docsState : null;
+            const start = activeDocs ? activeDocs.offset + 1 : 0;
+            const end = activeDocs ? activeDocs.offset + activeDocs.documents.length : 0;
+            const hasPrev = activeDocs ? activeDocs.offset > 0 : false;
+            const hasNext = activeDocs ? end < activeDocs.total : false;
+            if (!activeDocs || (activeDocs.loading && activeDocs.documents.length === 0)) {
+              return <Skeleton label="Loading documents…" lines={3} />;
+            }
+            if (activeDocs.error) {
+              return (
+                <ErrorState
+                  title="Could not load the documents."
+                  detail={activeDocs.error}
+                  onRetry={() => void loadDocuments(expandedSource.id, activeDocs.offset)}
+                />
+              );
+            }
+            if (activeDocs.documents.length === 0) {
+              return <p className="muted">No documents in this source yet.</p>;
+            }
             return (
-              <li key={source.id} className="source-card stack">
-                <div className="source-row-header">
-                  <div>
-                    <div className="source-kind">{KIND_LABELS[source.kind]}</div>
-                    <div className="source-label">{source.label}</div>
-                    <div className="muted">
-                      {formatCount(source.documentCount)} · Updated{" "}
-                      {formatDate(source.lastUpdatedAt)}
-                    </div>
-                  </div>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => handleToggleDocuments(source.id)}
-                    >
-                      {expanded ? "Hide documents" : "View documents"}
-                    </button>
-                    {!isPush && (
+              <>
+                <ul className="source-doc-list">
+                  {activeDocs.documents.map((doc) => (
+                    <li key={doc.id} className="source-doc-item">
+                      <div>
+                        <div className="source-doc-title">{doc.title}</div>
+                        <div className="muted source-doc-meta">
+                          {doc.url} · {formatDateTime(doc.updatedAt)}
+                        </div>
+                      </div>
+                      {expandedSource.kind === "entry" && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          aria-label={`Edit ${doc.title}`}
+                          onClick={() => void handleEditEntry(expandedSource.id, doc)}
+                        >
+                          Edit
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                {(activeDocs.total > DOCS_PAGE_SIZE || hasPrev) && (
+                  <div className="sitemap-toolbar">
+                    <span className="muted">
+                      Showing {start}–{end} of {activeDocs.total}
+                    </span>
+                    <div className="actions">
                       <button
                         type="button"
                         className="btn btn-secondary btn-sm"
-                        disabled={busySourceId === source.id}
-                        onClick={() => void handleDeleteSource(source.id)}
+                        disabled={activeDocs.loading || !hasPrev}
+                        onClick={() =>
+                          void loadDocuments(
+                            expandedSource.id,
+                            Math.max(0, activeDocs.offset - DOCS_PAGE_SIZE),
+                          )
+                        }
                       >
-                        {busySourceId === source.id ? "Deleting…" : "Delete"}
+                        Previous
                       </button>
-                    )}
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        disabled={activeDocs.loading || !hasNext}
+                        onClick={() =>
+                          void loadDocuments(expandedSource.id, activeDocs.offset + DOCS_PAGE_SIZE)
+                        }
+                      >
+                        Next
+                      </button>
+                    </div>
                   </div>
-                </div>
-
-                {isPush && (
-                  <p className="field-hint">
-                    Read-only. Update pushed pages from your site with <code>solv push</code>.
-                  </p>
                 )}
-
-                {expanded &&
-                  (() => {
-                    const activeDocs = docsState.sourceId === source.id ? docsState : null;
-                    const start = activeDocs ? activeDocs.offset + 1 : 0;
-                    const end = activeDocs ? activeDocs.offset + activeDocs.documents.length : 0;
-                    const hasPrev = activeDocs ? activeDocs.offset > 0 : false;
-                    const hasNext = activeDocs ? end < activeDocs.total : false;
-                    return (
-                      <div className="source-docs stack">
-                        {!activeDocs ||
-                        (activeDocs.loading && activeDocs.documents.length === 0) ? (
-                          <p className="muted">Loading documents…</p>
-                        ) : activeDocs.error ? (
-                          <p className="error-text" role="alert">
-                            {activeDocs.error}
-                          </p>
-                        ) : activeDocs.documents.length === 0 ? (
-                          <p className="muted">No documents in this source yet.</p>
-                        ) : (
-                          <>
-                            <ul className="source-doc-list">
-                              {activeDocs.documents.map((doc) => (
-                                <li key={doc.id} className="source-doc-item">
-                                  <div>
-                                    <div className="source-doc-title">{doc.title}</div>
-                                    <div className="muted">
-                                      {doc.url} · {formatDate(doc.updatedAt)}
-                                    </div>
-                                  </div>
-                                  {source.kind === "entry" && (
-                                    <button
-                                      type="button"
-                                      className="btn btn-secondary btn-sm"
-                                      onClick={() => void handleEditEntry(source.id, doc)}
-                                    >
-                                      Edit
-                                    </button>
-                                  )}
-                                </li>
-                              ))}
-                            </ul>
-                            {(activeDocs.total > DOCS_PAGE_SIZE || hasPrev) && (
-                              <div className="sitemap-toolbar">
-                                <span className="muted">
-                                  Showing {start}–{end} of {activeDocs.total}
-                                </span>
-                                <div className="actions">
-                                  <button
-                                    type="button"
-                                    className="btn btn-secondary btn-sm"
-                                    disabled={activeDocs.loading || !hasPrev}
-                                    onClick={() =>
-                                      void loadDocuments(
-                                        source.id,
-                                        Math.max(0, activeDocs.offset - DOCS_PAGE_SIZE),
-                                      )
-                                    }
-                                  >
-                                    Previous
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn btn-secondary btn-sm"
-                                    disabled={activeDocs.loading || !hasNext}
-                                    onClick={() =>
-                                      void loadDocuments(
-                                        source.id,
-                                        activeDocs.offset + DOCS_PAGE_SIZE,
-                                      )
-                                    }
-                                  >
-                                    Next
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    );
-                  })()}
-              </li>
+              </>
             );
-          })}
-        </ul>
+          })()}
+        </section>
       )}
 
-      <EntryEditor
-        assistantId={assistantId}
-        sourceId={editingEntry?.sourceId}
-        documentId={editingEntry?.documentId}
-        initialQuestion={editingEntry?.question}
-        initialAnswer={editingEntry?.answer}
-        onCancel={
-          editingEntry
-            ? () => {
-                cancelEntryLoad();
-                setEditingEntry(null);
-              }
-            : undefined
-        }
-        onSaved={(result, session) => {
-          if (session.assistantId !== assistantId) return;
-          const current = editingEntryRef.current;
-          const sameSession =
-            session.documentId !== undefined
-              ? current?.sourceId === session.sourceId && current?.documentId === session.documentId
-              : current === null;
-          if (sameSession) {
+      {editingEntry && (
+        <EntryEditor
+          assistantId={assistantId}
+          sourceId={editingEntry.sourceId}
+          documentId={editingEntry.documentId}
+          initialQuestion={editingEntry.question}
+          initialAnswer={editingEntry.answer}
+          onCancel={() => {
+            cancelEntryLoad();
             setEditingEntry(null);
-          }
-          sourcesRes.reload();
-          if (expandedSourceId === result.sourceId) {
-            void loadDocuments(
-              result.sourceId,
-              docsState.sourceId === result.sourceId ? docsState.offset : 0,
-            );
-          }
-        }}
-      />
+          }}
+          onSaved={(result, session) => {
+            if (session.assistantId !== assistantId) return;
+            const current = editingEntryRef.current;
+            if (
+              current?.sourceId === session.sourceId &&
+              current?.documentId === session.documentId
+            ) {
+              setEditingEntry(null);
+            }
+            sourcesRes.reload();
+            if (expandedSourceId === result.sourceId) {
+              void loadDocuments(
+                result.sourceId,
+                docsState.sourceId === result.sourceId ? docsState.offset : 0,
+              );
+            }
+          }}
+        />
+      )}
 
-      <SitemapImport
-        assistantId={assistantId}
-        onImported={() => {
-          sourcesRes.reload();
+      {addChoice !== null && (
+        <section
+          ref={addPanelRef}
+          id="add-content"
+          className="source-card stack add-content"
+          aria-labelledby="add-content-heading"
+          tabIndex={-1}
+        >
+          <div className="source-row-header">
+            <h2 id="add-content-heading" className="section-heading">
+              Add content
+            </h2>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => setAddChoice(null)}
+            >
+              Close
+            </button>
+          </div>
+          <fieldset className="choice-group">
+            <legend className="sr-only">What would you like to add?</legend>
+            {ADD_CHOICES.map((choice) => (
+              <label
+                key={choice.id}
+                className={addChoice === choice.id ? "choice-card is-selected" : "choice-card"}
+              >
+                <input
+                  type="radio"
+                  name="add-content-choice"
+                  value={choice.id}
+                  checked={addChoice === choice.id}
+                  onChange={() => setAddChoice(choice.id)}
+                />
+                <Icon name={choice.icon} size={20} />
+                <span className="choice-card-text">
+                  <span className="choice-card-title">{choice.title}</span>
+                  <span className="choice-card-hint">{choice.text}</span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+
+          {addChoice === "write" && (
+            <EntryEditor
+              embedded
+              assistantId={assistantId}
+              onSaved={(result, session) => {
+                if (session.assistantId !== assistantId) return;
+                sourcesRes.reload();
+                if (expandedSourceId === result.sourceId) {
+                  void loadDocuments(
+                    result.sourceId,
+                    docsState.sourceId === result.sourceId ? docsState.offset : 0,
+                  );
+                }
+              }}
+            />
+          )}
+          {addChoice === "sitemap" && (
+            <SitemapImport assistantId={assistantId} onImported={() => sourcesRes.reload()} />
+          )}
+          {addChoice === "cli" && <CliInstructions assistantId={assistantId} />}
+        </section>
+      )}
+
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title={confirmDelete ? `Delete ${sourceName(confirmDelete)}?` : "Delete source?"}
+        description={
+          confirmDelete
+            ? `Its ${formatCount(confirmDelete.documentCount)} stop being used in answers straight away. This cannot be undone.`
+            : ""
+        }
+        confirmLabel="Delete source"
+        busyLabel="Deleting…"
+        tone="danger"
+        busy={confirmDelete !== null && busySourceId === confirmDelete.id}
+        error={deleteError}
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={() => {
+          if (confirmDelete) void handleDeleteSource(confirmDelete);
         }}
       />
     </div>

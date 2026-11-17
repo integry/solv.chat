@@ -19,6 +19,8 @@ export interface EntryEditorProps {
     | ((result: { documentId: string; sourceId: string }, session: EntrySaveSession) => void)
     | undefined;
   onCancel?: (() => void) | undefined;
+  /** Inside another card that already names it: no card or heading of its own. */
+  embedded?: boolean | undefined;
 }
 
 export function EntryEditor({
@@ -30,6 +32,7 @@ export function EntryEditor({
   initialAnswer = "",
   onSaved,
   onCancel,
+  embedded = false,
 }: EntryEditorProps) {
   const [question, setQuestion] = useState(initialQuestion);
   const [answer, setAnswer] = useState(initialAnswer);
@@ -92,7 +95,7 @@ export function EntryEditor({
               );
 
       if (sessionRef.current === submitSession) {
-        setStatusMessage("Answer saved.");
+        setStatusMessage("Answer saved. Your assistant can use it in a minute or two.");
         if (!isEditing) {
           setQuestion("");
           setAnswer("");
@@ -116,8 +119,14 @@ export function EntryEditor({
   }
 
   return (
-    <form className="source-card stack" onSubmit={(e) => void handleSubmit(e)}>
-      <h2 className="section-heading">{isEditing ? "Edit answer" : "Write an answer"}</h2>
+    <form
+      className={embedded ? "stack" : "source-card stack"}
+      aria-label={embedded ? "Write an answer" : undefined}
+      onSubmit={(e) => void handleSubmit(e)}
+    >
+      {!embedded && (
+        <h2 className="section-heading">{isEditing ? "Edit answer" : "Write an answer"}</h2>
+      )}
       <div className="field">
         <label htmlFor="entry-question">Question</label>
         <input

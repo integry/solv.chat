@@ -94,6 +94,37 @@ describe("admin install API", () => {
     expect(body.snippet).toContain("<solv-chat");
   });
 
+  it("reports the page of the newest conversation as where the widget was last seen, per org", async () => {
+    const appA = appForOrg(ORG_A);
+    const createRes = await call(appA, "POST", "/api/admin/assistants", {
+      name: "Seen Bot",
+      allowedOrigins: ["https://docs.example.com"],
+    });
+    const { assistant } = (await createRes.json()) as { assistant: AssistantRow };
+
+    const before = (await (
+      await call(appA, "GET", `/api/admin/assistants/${assistant.id}/install`)
+    ).json()) as { lastSeen: unknown };
+    expect(before.lastSeen).toBeNull();
+
+    const insert = (id: string, orgId: string, at: number, pageUrl: string) =>
+      env.DB.prepare(
+        `INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url)
+         VALUES (?1, ?2, ?3, 'v_1', ?4, ?5)`,
+      ).bind(id, orgId, assistant.id, at, pageUrl);
+    await env.DB.batch([
+      insert("cnv_old", ORG_A, 1000, "https://docs.example.com/old"),
+      insert("cnv_new", ORG_A, 3000, "https://docs.example.com/pricing"),
+      insert("cnv_blank", ORG_A, 4000, ""),
+    ]);
+
+    const after = (await (
+      await call(appA, "GET", `/api/admin/assistants/${assistant.id}/install`)
+    ).json()) as { lastSeen: { pageUrl: string; at: number } | null };
+    expect(after.lastSeen).toEqual({ pageUrl: "https://docs.example.com/pricing", at: 3000 });
+    await env.DB.prepare("DELETE FROM conversations").run();
+  });
+
   it("returns 404 for another org's assistant", async () => {
     const appB = appForOrg(ORG_B);
     const createRes = await call(appB, "POST", "/api/admin/assistants", {

@@ -32,7 +32,15 @@ export interface SourceSummary {
   createdAt: number;
   documentCount: number;
   lastUpdatedAt: number | null;
+  /** Documents not searchable yet. Absent from engines older than this admin. */
+  indexingCount?: number;
+  /** Documents that could not be indexed. */
+  failedCount?: number;
+  /** Why (one of the failed documents), as a code the admin words. */
+  indexError?: IndexErrorCode | null;
 }
+
+export type IndexErrorCode = "too_long" | "missing_body" | "embedding_failed";
 
 export interface DocumentSummary {
   id: string;
@@ -166,6 +174,8 @@ export interface InstallInfo {
   publicKey: string;
   allowedOrigins: string[];
   snippet: string;
+  /** Page and time of the newest conversation; null until a visitor writes. */
+  lastSeen?: { pageUrl: string; at: number } | null;
 }
 
 export type McpAuthKind = "none" | "static_header";
@@ -220,6 +230,14 @@ export interface TestRunSummary {
   stopped?: string | null;
 }
 
+export interface TestRunRow {
+  id: string;
+  versionId: string;
+  startedAt: number;
+  results: TestResult[];
+  passed: boolean;
+}
+
 export interface TestRunResponse {
   runId: string;
   passed: boolean;
@@ -251,6 +269,8 @@ export interface ProviderSettingsView {
     embeddingsProvider: ResolvedSetting<EmbeddingsProviderName>;
   };
   keysManaged: boolean;
+  /** With managed keys: whether the owner may still enter their own. */
+  ownKeysAllowed?: boolean;
   keys: Record<LlmProviderName, ProviderKeyStatus>;
   configError: string | null;
 }

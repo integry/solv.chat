@@ -29,6 +29,8 @@ export interface ProviderKeyStatus {
 export interface ProviderSettingsView {
   settings: EffectiveProviderSettings;
   keysManaged: boolean;
+  /** With managed keys, whether the owner may still enter their own. */
+  ownKeysAllowed: boolean;
   keys: Record<LlmProviderName, ProviderKeyStatus>;
   configError: string | null;
 }
@@ -42,6 +44,11 @@ export interface ProviderAdminDeps {
   fetchImpl?: typeof fetch | undefined;
   resolveSettings: () => Promise<EffectiveProviderSettings>;
   checkConfigError: (resolved?: EffectiveProviderSettings) => Promise<string | null>;
+}
+
+/** Key entry is refused only when the host manages keys and does not allow own keys. */
+function keyEntryAllowed(keys: KeyProvider): boolean {
+  return keys.managed !== true || keys.ownKeysAllowed === true;
 }
 
 export function parseProviderName(raw: string | undefined): LlmProviderName | null {
@@ -77,12 +84,14 @@ export async function getProviderSettingsView(
 ): Promise<ProviderSettingsView> {
   const settings = await deps.resolveSettings();
   const keysManaged = deps.keys.managed === true;
+  const ownKeysAllowed = !keysManaged || deps.keys.ownKeysAllowed === true;
   const configError = await deps.checkConfigError(settings);
 
-  if (keysManaged) {
+  if (!ownKeysAllowed) {
     return {
       settings,
       keysManaged: true,
+      ownKeysAllowed: false,
       keys: {
         anthropic: { source: "none", updatedAt: null, unreadable: false },
         openai: { source: "none", updatedAt: null, unreadable: false },
@@ -100,7 +109,8 @@ export async function getProviderSettingsView(
 
   return {
     settings,
-    keysManaged: false,
+    keysManaged,
+    ownKeysAllowed: true,
     keys: {
       anthropic: anthropic ?? { source: "none", updatedAt: null, unreadable: false },
       openai: openai ?? { source: "none", updatedAt: null, unreadable: false },
@@ -188,7 +198,7 @@ export async function setProviderKey(
   provider: LlmProviderName,
   body: unknown,
 ): Promise<{ ok: true; provider: LlmProviderName; status: ProviderKeyStatus }> {
-  if (deps.keys.managed === true) throw new NotFound();
+  if (!keyEntryAllowed(deps.keys)) throw new NotFound();
   if (!isPlainObject(body) || typeof body.key !== "string") {
     throw new BadRequest(["key: must be a non-empty API key"]);
   }
@@ -217,7 +227,7 @@ export async function removeProviderKey(
   deps: ProviderAdminDeps,
   provider: LlmProviderName,
 ): Promise<{ ok: true; provider: LlmProviderName; status: ProviderKeyStatus }> {
-  if (deps.keys.managed === true) throw new NotFound();
+  if (!keyEntryAllowed(deps.keys)) throw new NotFound();
   await deps.tenant.providerSettings.deleteKey(provider);
   return {
     ok: true,
@@ -235,7 +245,7 @@ export async function testProviderKey(
   provider: LlmProviderName,
   timeoutMs = KEY_TEST_TIMEOUT_MS,
 ): Promise<Response> {
-  if (deps.keys.managed === true) throw new NotFound();
+  if (!keyEntryAllowed(deps.keys)) throw new NotFound();
 
   const allowed = await deps.tenant.providerSettings.checkKeyTestRateLimit();
   if (!allowed) {

@@ -152,6 +152,8 @@ export class SolvChat extends HTMLElement {
   #pendingResume: PendingResume | null = null;
   #resumedBubble: { bubble: HTMLDivElement; textEl: HTMLDivElement; turn: SavedTurn } | null = null;
   #config: WidgetPublicConfig = { ...DEFAULT_CONFIG };
+  /** Set by `preview()`: the element then loads and sends nothing. */
+  #previewing = false;
 
   #launcher!: HTMLButtonElement;
   #panel!: HTMLDivElement;
@@ -375,9 +377,26 @@ export class SolvChat extends HTMLElement {
     this.#launcher = launcher;
   }
 
+  /**
+   * Shows `config` (the shape `GET /v1/assistants/:publicKey` returns) with
+   * the panel open, for the admin's live preview. From then on the element
+   * makes no requests: config is not fetched, messages are not sent, and
+   * page actions stay off. Call it again to update what is shown.
+   */
+  preview(config: unknown): void {
+    this.#previewing = true;
+    this.#config = {
+      ...DEFAULT_CONFIG,
+      ...parsePublicConfig(config),
+      actions: { enabled: false, allowedOrigins: [] },
+    };
+    this.#applyConfig();
+    if (!this.#open) this.#openPanel(false);
+  }
+
   async #loadConfig(): Promise<void> {
     const assistant = this.#assistant();
-    if (!assistant) return;
+    if (!assistant || this.#previewing) return;
     try {
       const response = await fetch(
         `${this.#endpoint()}/v1/assistants/${encodeURIComponent(assistant)}`,
@@ -761,7 +780,7 @@ export class SolvChat extends HTMLElement {
   async #send(message: string, onAccepted?: () => void): Promise<void> {
     const assistant = this.#assistant();
     const trimmed = message.trim();
-    if (!assistant || this.#sending || !trimmed) return;
+    if (!assistant || this.#previewing || this.#sending || !trimmed) return;
 
     if (trimmed.length > MAX_CHAT_MESSAGE_LENGTH) {
       this.#showInputError(

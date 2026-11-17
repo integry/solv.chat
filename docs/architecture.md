@@ -56,7 +56,11 @@ from the auth seam and pass it down.
   published version, and inserts a fresh draft with the same config; rollback
   republishes an archived version.
 - `sources` — id, assistant_id, kind (`push` | `sitemap` | `entry`), label, settings.
-- `documents` — id, source_id, external_id, url, title, content_hash, updated_at.
+- `documents` — id, source_id, external_id, url, title, content_hash, updated_at,
+  indexed_hash (the content last made searchable), index_error and
+  index_error_hash (a short code saying why the content with that hash could
+  not be indexed: `too_long`, `missing_body` or `embedding_failed`; never a
+  provider message).
 - `chunks` — id, document_id, ordinal, text, heading_path. Vectors live in Vectorize
   keyed by chunk id, with `org_id` and `assistant_id` as metadata filters.
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
@@ -110,7 +114,12 @@ that fails one gets a plain error event and costs nothing.
   the draft config only (never publishes, rolls back, or reads history).
 
 Ingest writes the document row, enqueues it, and a Queue consumer chunks, embeds
-and upserts vectors. There is no crawler in v1: content is pushed (CLI, GitHub
+and upserts vectors. Until the consumer commits, the new content is not
+searchable: the admin's Sources list says "Indexing…" for those documents
+(content hash differs from the indexed hash), "Failed: reason" when the
+consumer recorded an error for the current hash (every failed attempt records
+one; a later success or a new push makes it stale), and "Ready" otherwise, and
+it re-checks every few seconds while anything is indexing. There is no crawler in v1: content is pushed (CLI, GitHub
 Action), imported once from a sitemap, or written by hand as an entry.
 
 Sitemap import validates every URL and redirect hop as `https:` and checks
@@ -195,7 +204,13 @@ custom base URL or endpoint field).
   key with one minimal provider request and reports success or the error
   category without echoing the provider's response body.
 - **Managed keys**: when `KeyProvider.managed` is true (in the cloud layer),
-  the admin hides the key-entry fields.
+  the admin says "Included with your plan: no key needed" and refuses key
+  entry. A host that sets `KeyProvider.ownKeysAllowed` as well lets the owner
+  store their own keys behind "Use my own key"; its `modelKey` must then
+  prefer a stored key.
+- **Wording**: the admin names where each value comes from as "Using the
+  default", "Set in this screen" (stored) or "Set on the server" (environment
+  variable or Worker secret).
 
 ### OpenRouter
 
@@ -364,6 +379,12 @@ so it ends with the tab), thumbs up and down, keyboard and
 screen-reader usable, respects `prefers-reduced-motion` and `prefers-color-scheme`.
 It sets no cookies and loads nothing from third parties.
 
+The element's `preview(config)` method (same shape as the public config
+response) shows a config with the panel open and from then on makes no
+requests. The admin's Widget screen uses it for a live preview: the real
+`/widget.js` runs in a sandboxed `srcdoc` frame (no same-origin, a policy with
+no `connect-src`) and receives the unsaved form values by `postMessage`.
+
 ## Admin
 
 React, served by the Worker. One screen per item:
@@ -381,6 +402,14 @@ Install
 - Gaps and Conversations offer one-click fixes: "Write the right answer" (creates
   an entry source), "Add to tests".
 - Plain words on every control. No model, temperature or chunking settings.
+- Leaving a screen (or switching assistant) with unsaved edits on Behaviour or
+  Widget asks first; closing the tab triggers the browser's own question.
+- Install shows three steps: the websites that may show the chat (the
+  Widget screen's list, read-only), the snippet with notes for plain HTML,
+  WordPress, Shopify and Next.js, and whether the widget has been seen, taken
+  from the page of the newest conversation (`lastSeen` on the install
+  response; a load with no message is not counted). The ingest key and CLI
+  sit in a collapsed "For developers" section.
 
 ### Extending the admin
 
@@ -476,7 +505,8 @@ The cloud layer replaces these and nothing else:
   exchanged for a signed, HttpOnly session cookie.
 - `KeyProvider` — returns the model and embedding keys for an org. The open build
   reads stored keys (sealed with `SOLV_SECRET_KEY`), then Worker secrets; when
-  `managed` is true, the admin hides key-entry fields.
+  `managed` is true, the admin hides key-entry fields unless `ownKeysAllowed`
+  is also true.
 - `UsageSink` — receives usage events. The open build writes `usage_daily`.
 - `Limits` — answers "may this org do this?". The open build enforces only the
   per-assistant spend cap and rate limits.

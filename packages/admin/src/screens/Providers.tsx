@@ -10,8 +10,13 @@ import type {
   SettingSource,
 } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { ConfirmDialog } from "../ui/Dialog.js";
+import { ErrorState } from "../ui/ErrorState.js";
 import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
+import { Skeleton } from "../ui/Skeleton.js";
+import { StatusBadge, type StatusTone } from "../ui/StatusBadge.js";
+import { Notice, useToast } from "../ui/Toast.js";
 
 const PROVIDER_LABELS: Record<LlmProviderName, string> = {
   anthropic: "Anthropic",
@@ -21,12 +26,16 @@ const PROVIDER_LABELS: Record<LlmProviderName, string> = {
 
 const PROVIDERS: readonly LlmProviderName[] = ["anthropic", "openai", "openrouter"];
 
-function SourceBadge({ source, label }: { source: SettingSource; label?: string }) {
-  return (
-    <span className="badge" title={label ? `${label} source: ${source}` : `source: ${source}`}>
-      {source}
-    </span>
-  );
+/** Where a value comes from, in the owner's words. */
+export const SOURCE_TEXT: Record<SettingSource, { label: string; tone: StatusTone }> = {
+  none: { label: "Using the default", tone: "neutral" },
+  stored: { label: "Set in this screen", tone: "info" },
+  environment: { label: "Set on the server", tone: "neutral" },
+};
+
+function SourceBadge({ source }: { source: SettingSource }) {
+  const text = SOURCE_TEXT[source];
+  return <StatusBadge tone={text.tone}>{text.label}</StatusBadge>;
 }
 
 function ProviderKeyCard({
@@ -42,8 +51,9 @@ function ProviderKeyCard({
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<KeyTestResult | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const toast = useToast();
 
   const label = PROVIDER_LABELS[provider];
   const inputId = `provider-key-${provider}`;
@@ -53,14 +63,13 @@ function ProviderKeyCard({
     if (busy) return;
     setBusy(true);
     setError(null);
-    setNotice(null);
     setTestResult(null);
     // Read once and clear state immediately so the secret does not linger in the DOM.
     const submitted = keyInput;
     setKeyInput("");
     try {
       await putJson(`/api/admin/providers/keys/${provider}`, { key: submitted });
-      setNotice(`${label} key saved.`);
+      toast.success(`${label} key saved.`);
       onChanged();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save key.");
@@ -73,11 +82,11 @@ function ProviderKeyCard({
     if (busy) return;
     setBusy(true);
     setError(null);
-    setNotice(null);
     setTestResult(null);
     try {
       await deleteJson(`/api/admin/providers/keys/${provider}`);
-      setNotice(`${label} key removed.`);
+      toast.success(`${label} key removed.`);
+      setConfirmRemove(false);
       onChanged();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not remove key.");
@@ -108,19 +117,21 @@ function ProviderKeyCard({
           <h3 className="section-heading">{label}</h3>
           <p className="muted">
             {status.source === "stored" && status.updatedAt !== null
-              ? `Set on ${formatDate(status.updatedAt)}`
+              ? `Saved here on ${formatDate(status.updatedAt)}.`
               : status.source === "environment"
-                ? "Using Worker secret (environment)."
-                : "Not set."}
+                ? "A key was set when the server was set up."
+                : "No key yet."}
           </p>
         </div>
-        <SourceBadge source={status.source} label={`${label} key`} />
+        <StatusBadge tone={status.source === "none" ? "warning" : SOURCE_TEXT[status.source].tone}>
+          {status.source === "none" ? "No key" : SOURCE_TEXT[status.source].label}
+        </StatusBadge>
       </div>
 
       {status.unreadable && (
         <p className="warning-banner" role="alert">
-          The stored {label} key could not be read (SOLV_SECRET_KEY may have changed). Re-enter it
-          below.
+          The {label} key saved here can no longer be read, so answers fail until you enter it again
+          below. This happens when the server's secret key changes.
         </p>
       )}
 
@@ -153,7 +164,10 @@ function ProviderKeyCard({
               type="button"
               className="btn btn-secondary btn-sm"
               disabled={busy}
-              onClick={() => void handleRemove()}
+              onClick={() => {
+                setError(null);
+                setConfirmRemove(true);
+              }}
             >
               Remove
             </button>
@@ -169,24 +183,31 @@ function ProviderKeyCard({
         </div>
       </form>
 
-      {error && (
-        <p className="error-text" role="alert">
-          {error}
-        </p>
-      )}
-      {notice && (
-        <p className="notice-text" role="status">
-          {notice}
-        </p>
-      )}
+      {error && !confirmRemove && <Notice tone="error">{error}</Notice>}
       {testResult && (
-        <p
-          className={testResult.ok ? "notice-text" : "error-text"}
-          role={testResult.ok ? "status" : "alert"}
-        >
-          {testResult.message}
-        </p>
+        <div className="key-test-result" role={testResult.ok ? "status" : "alert"}>
+          <StatusBadge tone={testResult.ok ? "success" : "danger"}>
+            {testResult.ok ? "Key works" : "Key test failed"}
+          </StatusBadge>
+          <span>{testResult.message}</span>
+        </div>
       )}
+      <ConfirmDialog
+        open={confirmRemove}
+        title={`Remove the ${label} key?`}
+        description={
+          status.source === "stored"
+            ? "Answers then use the key set on the server, if there is one. Without a key, this provider stops answering."
+            : ""
+        }
+        confirmLabel="Remove key"
+        busyLabel="Removing…"
+        tone="danger"
+        busy={busy}
+        error={error}
+        onCancel={() => setConfirmRemove(false)}
+        onConfirm={() => void handleRemove()}
+      />
     </section>
   );
 }
@@ -202,7 +223,9 @@ export function Providers() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [notice, setNotice] = useState<string | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [ownKeysOpen, setOwnKeysOpen] = useState(false);
+  const toast = useToast();
   const settingsDirtyRef = useRef(false);
 
   useEffect(() => {
@@ -219,7 +242,6 @@ export function Providers() {
     setBusy(true);
     setError(null);
     setFieldErrors({});
-    setNotice(null);
     try {
       const updated = await putJson<ProviderSettingsView>("/api/admin/providers", {
         llmProvider,
@@ -230,7 +252,7 @@ export function Providers() {
       });
       settingsDirtyRef.current = false;
       res.setValue(updated);
-      setNotice("Provider settings saved.");
+      toast.success("Provider settings saved.");
     } catch (err) {
       if (err instanceof ApiError) {
         setError(err.message);
@@ -248,7 +270,6 @@ export function Providers() {
     setBusy(true);
     setError(null);
     setFieldErrors({});
-    setNotice(null);
     try {
       const updated = await putJson<ProviderSettingsView>("/api/admin/providers", {
         llmProvider: null,
@@ -258,7 +279,8 @@ export function Providers() {
       });
       settingsDirtyRef.current = false;
       res.setValue(updated);
-      setNotice("Reset to environment defaults.");
+      setConfirmReset(false);
+      toast.success("Back to the defaults.");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not reset provider settings.");
     } finally {
@@ -281,11 +303,13 @@ export function Providers() {
       />
 
       {res.status === "loading" && !data ? (
-        <p className="muted">Loading provider settings…</p>
+        <Skeleton label="Loading provider settings…" lines={6} />
       ) : res.status === "error" ? (
-        <p className="error-text" role="alert">
-          {res.error}
-        </p>
+        <ErrorState
+          title="Could not load your provider settings."
+          detail={res.error}
+          onRetry={res.reload}
+        />
       ) : data ? (
         <div className="stack">
           {data.configError && (
@@ -300,7 +324,7 @@ export function Providers() {
             <div className="field">
               <div className="sitemap-toolbar">
                 <label htmlFor="llm-provider">Answering provider</label>
-                <SourceBadge source={data.settings.llmProvider.source} label="Answering provider" />
+                <SourceBadge source={data.settings.llmProvider.source} />
               </div>
               <select
                 id="llm-provider"
@@ -322,7 +346,7 @@ export function Providers() {
               <div className="field">
                 <div className="sitemap-toolbar">
                   <label htmlFor="llm-model">OpenRouter model ID</label>
-                  <SourceBadge source={data.settings.llmModel.source} label="OpenRouter model ID" />
+                  <SourceBadge source={data.settings.llmModel.source} />
                 </div>
                 <input
                   id="llm-model"
@@ -348,7 +372,7 @@ export function Providers() {
               <div className="field">
                 <div className="sitemap-toolbar">
                   <label htmlFor="llm-tier">Model tier</label>
-                  <SourceBadge source={data.settings.llmTier.source} label="Model tier" />
+                  <SourceBadge source={data.settings.llmTier.source} />
                 </div>
                 <select
                   id="llm-tier"
@@ -369,10 +393,7 @@ export function Providers() {
             <div className="field">
               <div className="sitemap-toolbar">
                 <label htmlFor="embeddings-provider">Embeddings provider</label>
-                <SourceBadge
-                  source={data.settings.embeddingsProvider.source}
-                  label="Embeddings provider"
-                />
+                <SourceBadge source={data.settings.embeddingsProvider.source} />
               </div>
               <select
                 id="embeddings-provider"
@@ -402,42 +423,89 @@ export function Providers() {
                   type="button"
                   className="btn btn-secondary"
                   disabled={busy}
-                  onClick={() => void handleResetSettings()}
+                  onClick={() => {
+                    setError(null);
+                    setConfirmReset(true);
+                  }}
                 >
                   Reset to defaults
                 </button>
               )}
             </div>
 
-            {error && (
-              <p className="error-text" role="alert">
-                {error}
-              </p>
-            )}
-            {notice && (
-              <p className="notice-text" role="status">
-                {notice}
-              </p>
-            )}
+            {error && !confirmReset && <Notice tone="error">{error}</Notice>}
           </form>
 
-          {!data.keysManaged && (
-            <div className="stack">
-              <h2 className="section-heading">API keys</h2>
-              <p className="muted">
-                Keys are encrypted at rest and never shown again after saving. Leave blank to keep
-                the current key or use a Worker secret.
-              </p>
-              {PROVIDERS.map((provider) => (
-                <ProviderKeyCard
-                  key={provider}
-                  provider={provider}
-                  status={data.keys[provider]}
-                  onChanged={res.reload}
-                />
-              ))}
-            </div>
-          )}
+          <section className="stack" aria-labelledby="provider-keys-heading">
+            <h2 id="provider-keys-heading" className="section-heading">
+              API keys
+            </h2>
+            {data.keysManaged ? (
+              <div className="source-card stack">
+                <p className="managed-keys">
+                  <StatusBadge tone="success">Included with your plan</StatusBadge>
+                  <span>No key needed: answers use keys your plan provides.</span>
+                </p>
+                {data.ownKeysAllowed === true && (
+                  <>
+                    <div>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        aria-expanded={ownKeysOpen}
+                        aria-controls="own-keys"
+                        onClick={() => setOwnKeysOpen((open) => !open)}
+                      >
+                        Use my own key
+                      </button>
+                    </div>
+                    <div id="own-keys" className="stack" hidden={!ownKeysOpen}>
+                      <p className="muted">
+                        A key you save here is used instead of your plan's key for that provider.
+                        Keys are encrypted and never shown again after saving.
+                      </p>
+                      {ownKeysOpen &&
+                        PROVIDERS.map((provider) => (
+                          <ProviderKeyCard
+                            key={provider}
+                            provider={provider}
+                            status={data.keys[provider]}
+                            onChanged={res.reload}
+                          />
+                        ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              <>
+                <p className="muted">
+                  Keys are encrypted and never shown again after saving. A key saved here is used
+                  instead of one set on the server.
+                </p>
+                {PROVIDERS.map((provider) => (
+                  <ProviderKeyCard
+                    key={provider}
+                    provider={provider}
+                    status={data.keys[provider]}
+                    onChanged={res.reload}
+                  />
+                ))}
+              </>
+            )}
+          </section>
+
+          <ConfirmDialog
+            open={confirmReset}
+            title="Go back to the defaults?"
+            description="The choices saved on this screen are removed. Answers then use the server's settings, or the built-in defaults. Saved keys are kept."
+            confirmLabel="Use the defaults"
+            busyLabel="Resetting…"
+            busy={busy}
+            error={error}
+            onCancel={() => setConfirmReset(false)}
+            onConfirm={() => void handleResetSettings()}
+          />
         </div>
       ) : null}
     </div>
