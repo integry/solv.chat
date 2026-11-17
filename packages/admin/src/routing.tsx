@@ -126,11 +126,11 @@ export function useRoute(
     return () => window.removeEventListener("popstate", onPopState);
   }, [navItems, defaultScreen]);
 
+  // The same move as a screen's: the query is compared and dropped too, and
+  // `popstate` tells screens that follow the address (an open conversation).
   const navigate = useCallback(
     (path: string) => {
-      if (window.location.pathname !== path) {
-        window.history.pushState(null, "", path);
-      }
+      navigateTo(path);
       setScreen(matchScreen(window.location.pathname, navItems, defaultScreen));
     },
     [navItems, defaultScreen],

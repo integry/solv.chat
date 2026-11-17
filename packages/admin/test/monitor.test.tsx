@@ -190,6 +190,8 @@ interface ServerOptions {
   twoAssistants?: boolean;
   /** Holds each dismiss request until the test resolves it. */
   holdDismiss?: (release: () => void) => void;
+  /** Holds each restore request until the test resolves it. */
+  holdRestore?: (release: () => void) => void;
 }
 
 function installServer(options: ServerOptions = {}) {
@@ -251,6 +253,8 @@ function installServer(options: ServerOptions = {}) {
     }
     if (url.pathname === `${base}/gaps/restore` && method === "POST") {
       const question = (body as { question: string }).question;
+      const hold = options.holdRestore;
+      if (hold) await new Promise<void>((release) => hold(release));
       dismissed.delete(question);
       return Response.json({ question, dismissed: false });
     }
@@ -584,6 +588,20 @@ describe("Monitor screens", () => {
       expect(window.location.search).toBe("");
     });
 
+    it("goes back to the list when Conversations is picked in the sidebar", async () => {
+      installServer();
+      await open("/admin/conversations");
+      fireEvent.click(await screen.findByRole("link", { name: /Do you ship to Spain\?/ }));
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+
+      const nav = screen.getByRole("navigation", { name: "Primary" });
+      fireEvent.click(within(nav).getByRole("link", { name: "Conversations" }));
+      expect(await screen.findByRole("link", { name: /Do you ship to Spain\?/ })).toBeTruthy();
+      expect(screen.queryByText("I could not find that.")).toBeNull();
+      expect(window.location.pathname).toBe("/admin/conversations");
+      expect(window.location.search).toBe("");
+    });
+
     it("filters by flag and date and searches by text", async () => {
       const { calls } = installServer();
       await open("/admin/conversations");
@@ -774,6 +792,37 @@ describe("Monitor screens", () => {
         question: "do you ship to spain?",
       });
       expect(screen.queryByText(/Dismissed “/)).toBeNull();
+    });
+
+    it("keeps a newer dismissal's Undo when an earlier Undo finishes", async () => {
+      let releaseRestore: (() => void) | undefined;
+      const { calls } = installServer({
+        gaps: [gap(), gap({ question: "sso?", displayQuestion: "SSO?", exampleMessageId: "m2" })],
+        holdRestore: (r) => {
+          releaseRestore = r;
+        },
+      });
+      await open("/admin/gaps");
+      await screen.findByText("SSO?");
+
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss “Do you ship to Spain?”" }));
+      expect(await screen.findByText(/Dismissed “Do you ship to Spain\?”/)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+      await waitFor(() => expect(releaseRestore).toBeDefined());
+
+      // While the first Undo waits, the second gap is dismissed and finishes first.
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss “SSO?”" }));
+      expect(await screen.findByText(/Dismissed “SSO\?”/)).toBeTruthy();
+
+      await act(async () => {
+        releaseRestore?.();
+      });
+      // The restored gap is listed again, so the first Undo has fully finished.
+      await screen.findByText("Do you ship to Spain?");
+      expect(calls.filter((c) => c.path.endsWith("/gaps/restore"))).toHaveLength(1);
+      expect(screen.getByText(/Dismissed “SSO\?”/)).toBeTruthy();
+      const undo = screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement;
+      expect(undo.disabled).toBe(false);
     });
 
     it("keeps another gap's editor open when an earlier dismissal finishes", async () => {

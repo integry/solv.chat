@@ -88,7 +88,7 @@ export function Gaps({ assistantId }: GapsProps) {
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not dismiss. Try again.");
     } finally {
-      setBusyKey(null);
+      setBusyKey((current) => (current === gap.question ? null : current));
     }
   }
 
@@ -98,12 +98,13 @@ export function Gaps({ assistantId }: GapsProps) {
       await postJson(`/api/admin/assistants/${assistantId}/gaps/restore`, {
         question: gap.question,
       });
-      setDismissed(null);
+      // Another gap may have been dismissed while this waited; keep its Undo.
+      setDismissed((current) => (current === gap ? null : current));
       gapsRes.reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not undo. Try again.");
     } finally {
-      setBusyKey(null);
+      setBusyKey((current) => (current === gap.question ? null : current));
     }
   }
 
