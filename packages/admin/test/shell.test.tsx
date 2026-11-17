@@ -197,6 +197,20 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * The items laid out in the header row. On wide screens the drawer element and its
+ * groups use `display: contents`, so their children sit directly in the row.
+ */
+function headerRow(): Element[] {
+  const flatten = (el: Element): Element[] =>
+    el.matches(
+      ".shell-header-controls, .shell-header-controls > .drawer-top, .shell-header-controls > .drawer-bottom",
+    )
+      ? Array.from(el.children).flatMap(flatten)
+      : [el];
+  return Array.from(header().children).flatMap(flatten);
+}
+
 function header(): HTMLElement {
   const el = document.querySelector("header.shell-header");
   if (!(el instanceof HTMLElement)) throw new Error("no header");
@@ -212,7 +226,7 @@ describe("header slots", () => {
       expect(selectedAssistantId()).toBe("ast_1");
     });
     expect(header().querySelector(".shell-header-slot")).toBeNull();
-    const children = Array.from(header().children);
+    const children = headerRow();
     expect(children[0]?.classList.contains("shell-brand")).toBe(true);
     expect(children[1]?.classList.contains("switcher")).toBe(true);
     expect(children[children.length - 1]?.textContent).toBe("Sign out");
@@ -225,7 +239,7 @@ describe("header slots", () => {
     await waitFor(() => {
       expect(screen.getByTestId("org-name").textContent).toBe("Acme");
     });
-    const children = Array.from(header().children);
+    const children = headerRow();
     const brandIndex = children.findIndex((el) => el.classList.contains("shell-brand"));
     const startIndex = children.findIndex((el) => el.contains(screen.getByTestId("org-name")));
     const switcherIndex = children.findIndex((el) => el.classList.contains("switcher"));

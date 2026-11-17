@@ -1,5 +1,6 @@
 import { defaultVersionConfig } from "@solvchat/core";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Assistant, VersionRow } from "../src/api/types.js";
 import { App, type HeaderSlotProps, type MountAdminOptions } from "../src/index.js";
@@ -158,6 +159,33 @@ function setNarrow(narrow: boolean) {
   );
 }
 
+/** A matchMedia stub whose narrow flag can change mid-test, like a resize or rotation. */
+function controllableNarrow(initial: boolean) {
+  let narrow = initial;
+  const listeners = new Set<() => void>();
+  vi.spyOn(window, "matchMedia").mockImplementation(
+    (query: string) =>
+      ({
+        get matches() {
+          return narrow && query.includes("max-width: 899px");
+        },
+        media: query,
+        onchange: null,
+        addEventListener: (_: string, fn: () => void) => listeners.add(fn),
+        removeEventListener: (_: string, fn: () => void) => listeners.delete(fn),
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      }) as unknown as MediaQueryList,
+  );
+  return (next: boolean) => {
+    narrow = next;
+    act(() => {
+      for (const fn of [...listeners]) fn();
+    });
+  };
+}
+
 function go(path: string) {
   window.history.replaceState(null, "", path);
 }
@@ -249,12 +277,15 @@ describe("narrow screens", () => {
 
     const menuButton = await screen.findByRole("button", { name: "Menu" });
     // Header: product name, host start slot, current screen, Try it, menu button.
-    expect(within(header()).getByText("solv.chat")).toBeTruthy();
+    expect(header().firstElementChild?.textContent).toBe("solv.chat");
     expect(within(header()).getByTestId("org")).toBeTruthy();
     expect(header().querySelector(".shell-current")?.textContent).toBe("Overview");
-    expect(header().querySelector(".switcher")).toBeNull();
+    // Switcher, host end slot and Sign out wait in the closed drawer.
+    const closedDrawer = document.getElementById("shell-drawer") as HTMLElement;
+    expect(closedDrawer.hidden).toBe(true);
+    expect(closedDrawer.querySelector(".switcher")).toBeTruthy();
+    expect(within(closedDrawer).getByTestId("org-switch")).toBeTruthy();
     expect(within(header()).queryByRole("button", { name: "Sign out" })).toBeNull();
-    expect(within(header()).queryByTestId("org-switch")).toBeNull();
     expect(menuButton.getAttribute("aria-expanded")).toBe("false");
 
     // Closed drawer is out of the accessibility tree.
@@ -575,6 +606,80 @@ describe("dialogs opened from the narrow-screen drawer", () => {
     fix.focus();
     expect(fireEvent.keyDown(fix, { key: "Tab" })).toBe(true);
     expect(document.activeElement).toBe(fix);
+  });
+});
+
+let hostMounts = 0;
+
+function CountingHost(_: HeaderSlotProps) {
+  const [clicks, setClicks] = useState(0);
+  useEffect(() => {
+    hostMounts += 1;
+  }, []);
+  return (
+    <button type="button" data-testid="host-counter" onClick={() => setClicks((n) => n + 1)}>
+      Clicked {clicks}
+    </button>
+  );
+}
+
+describe("crossing the narrow-screen breakpoint", () => {
+  it("keeps a half-filled New assistant form and host header slots mounted", async () => {
+    hostMounts = 0;
+    const setNarrowNow = controllableNarrow(false);
+    oneAssistant(LIVE);
+    render(<App options={{ headerEnd: CountingHost }} />);
+    await findAssistantButton();
+    openNewAssistantForm();
+    const name = screen.getByLabelText("Name") as HTMLInputElement;
+    fireEvent.change(name, { target: { value: "Half typed" } });
+    fireEvent.click(screen.getByTestId("host-counter"));
+    const host = screen.getByTestId("host-counter");
+    expect(host.textContent).toBe("Clicked 1");
+    expect(hostMounts).toBe(1);
+
+    // Wide to narrow: everything moves into the drawer without remounting.
+    setNarrowNow(true);
+    fireEvent.click(within(header()).getByRole("button", { name: "Menu" }));
+    const drawer = screen.getByRole("dialog", { name: "Menu" });
+    expect(within(drawer).getByLabelText("Name")).toBe(name);
+    expect(name.value).toBe("Half typed");
+    expect(within(drawer).getByTestId("host-counter")).toBe(host);
+    expect(host.textContent).toBe("Clicked 1");
+
+    // And back again, as when a phone is rotated twice.
+    setNarrowNow(false);
+    expect(screen.queryByRole("dialog", { name: "Menu" })).toBeNull();
+    expect(screen.getByLabelText("Name")).toBe(name);
+    expect(name.value).toBe("Half typed");
+    expect(within(header()).getByTestId("host-counter")).toBe(host);
+    expect(host.textContent).toBe("Clicked 1");
+    expect(hostMounts).toBe(1);
+  });
+});
+
+describe("narrow-screen Menu with Try it open", () => {
+  it("closes the Try it sheet so the drawer is not covered", async () => {
+    setNarrow(true);
+    oneAssistant(LIVE);
+    go("/admin/behaviour");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Try it" }));
+    expect(screen.getByRole("complementary", { name: "Try it" })).toBeTruthy();
+
+    const menu = within(header()).getByRole("button", { name: "Menu" });
+    menu.focus();
+    fireEvent.click(menu);
+    expect(screen.queryByRole("complementary", { name: "Try it" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Try it" }).getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+    const drawer = screen.getByRole("dialog", { name: "Menu" });
+    expect(drawer.contains(document.activeElement)).toBe(true);
+
+    // Escape returns focus to Menu, not to Try it.
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(document.activeElement).toBe(menu);
   });
 });
 

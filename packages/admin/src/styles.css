@@ -92,19 +92,6 @@ body {
   line-height: 1.5;
 }
 
-/* Reduced motion: drawers, toasts and placeholders appear without animating. */
-@media (prefers-reduced-motion: reduce) {
-  .shell-drawer,
-  .toast,
-  .skeleton-line {
-    animation: none;
-  }
-
-  .btn {
-    transition: none;
-  }
-}
-
 /* One focus ring for every interactive element. */
 :focus-visible {
   outline: 3px solid var(--focus);
@@ -282,6 +269,11 @@ a {
   display: none;
 }
 
+/* The drawer lives in the header, so lift the header above the page while it is open. */
+.shell-drawer-open .shell-header {
+  z-index: 41;
+}
+
 @keyframes drawer-in {
   from {
     transform: translateX(-100%);
@@ -393,6 +385,18 @@ a {
 .switcher[hidden],
 .drawer-top[hidden],
 .try-it[hidden] {
+  display: none;
+}
+
+/* Wide screens: the drawer element and its groups have no box of their own, so
+   the switcher, publish status, host slot and Sign out sit in the header row. */
+.shell-header-controls,
+.shell-header-controls > .drawer-top,
+.shell-header-controls > .drawer-bottom {
+  display: contents;
+}
+
+.shell-header-controls > .drawer-top[hidden] {
   display: none;
 }
 
@@ -1588,4 +1592,18 @@ a {
   flex-direction: column;
   gap: 0.35rem;
   font-size: 0.9375rem;
+}
+
+/* Reduced motion: drawers, toasts and placeholders appear without animating.
+   Kept last so it wins over the animation and transition rules above. */
+@media (prefers-reduced-motion: reduce) {
+  .shell-drawer,
+  .toast,
+  .skeleton-line {
+    animation: none;
+  }
+
+  .btn {
+    transition: none;
+  }
 }

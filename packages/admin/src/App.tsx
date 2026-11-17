@@ -307,8 +307,16 @@ function AdminShell({
     .filter(Boolean)
     .join(" ");
 
+  const shellClass = [
+    "shell",
+    narrow ? "shell-narrow" : null,
+    narrow && drawerOpen ? "shell-drawer-open" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <div className={narrow ? "shell shell-narrow" : "shell"}>
+    <div className={shellClass}>
       <header className="shell-header">
         <div className="shell-brand">solv.chat</div>
         {HeaderStart && (
@@ -316,33 +324,74 @@ function AdminShell({
             <HeaderStart api={ADMIN_API_HELPERS} />
           </div>
         )}
-        {narrow ? (
-          <>
-            <div className="shell-current" aria-hidden={currentItem === null ? true : undefined}>
-              {currentItem?.label ?? ""}
+        {narrow && (
+          <div className="shell-current" aria-hidden={currentItem === null ? true : undefined}>
+            {currentItem?.label ?? ""}
+          </div>
+        )}
+        {narrow && tryItToggle}
+        {narrow && (
+          <button
+            type="button"
+            className="btn-icon shell-menu-button"
+            aria-label="Menu"
+            aria-expanded={drawerOpen}
+            aria-controls={DRAWER_ID}
+            onClick={() => {
+              // The Try it sheet sits above the drawer; close it so the menu is usable.
+              if (tryIt.open) tryIt.setOpen(false);
+              setDrawerOpen(true);
+            }}
+          >
+            <Icon name="menu" size={20} />
+          </button>
+        )}
+        {narrow && drawerOpen && (
+          <div className="shell-backdrop" aria-hidden="true" onClick={() => setDrawerOpen(false)} />
+        )}
+        {/* One element at one place in the tree on every screen and at every width:
+            wide screens lay its contents out in the header row (display: contents),
+            narrow screens show it as the drawer. Moving the switcher or the host slot
+            between parents would remount them and lose a half-filled form. */}
+        <div
+          ref={drawerRef}
+          id={DRAWER_ID}
+          className={narrow ? "shell-sidebar shell-drawer" : "shell-header-controls"}
+          hidden={narrow && !drawerOpen}
+          {...(narrow
+            ? {
+                role: "dialog",
+                "aria-modal": true,
+                "aria-label": "Menu",
+                onKeyDown: drawerTrap.onKeyDown,
+              }
+            : {})}
+        >
+          {narrow && (
+            <div className="drawer-header">
+              <span className="shell-brand">solv.chat</span>
+              <button
+                type="button"
+                className="btn-icon"
+                aria-label="Close menu"
+                onClick={() => setDrawerOpen(false)}
+              >
+                <Icon name="close" size={20} />
+              </button>
             </div>
-            {tryItToggle}
-            <button
-              type="button"
-              className="btn-icon shell-menu-button"
-              aria-label="Menu"
-              aria-expanded={drawerOpen}
-              aria-controls={DRAWER_ID}
-              onClick={() => setDrawerOpen(true)}
-            >
-              <Icon name="menu" size={20} />
-            </button>
-          </>
-        ) : (
-          <>
+          )}
+          <div className="drawer-top" hidden={!assistantChrome}>
             {switcher}
             {publishControls}
-            <div className="shell-header-spacer" />
+          </div>
+          {narrow && navigation}
+          {!narrow && <div className="shell-header-spacer" />}
+          <div className="drawer-bottom">
             {headerEnd}
-            {tryItToggle}
+            {!narrow && tryItToggle}
             {signOut}
-          </>
-        )}
+          </div>
+        </div>
       </header>
       {signOutError && (
         <div className="shell-alert" role="alert">
@@ -351,52 +400,7 @@ function AdminShell({
       )}
 
       <div className={bodyClass}>
-        {narrow ? (
-          <>
-            {drawerOpen && (
-              <div
-                className="shell-backdrop"
-                aria-hidden="true"
-                onClick={() => setDrawerOpen(false)}
-              />
-            )}
-            <div
-              ref={drawerRef}
-              id={DRAWER_ID}
-              className="shell-sidebar shell-drawer"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Menu"
-              hidden={!drawerOpen}
-              onKeyDown={drawerTrap.onKeyDown}
-            >
-              <div className="drawer-header">
-                <span className="shell-brand">solv.chat</span>
-                <button
-                  type="button"
-                  className="btn-icon"
-                  aria-label="Close menu"
-                  onClick={() => setDrawerOpen(false)}
-                >
-                  <Icon name="close" size={20} />
-                </button>
-              </div>
-              {/* One stable parent on every screen: moving the switcher between
-                  parents would remount it and lose a half-filled New assistant form. */}
-              <div className="drawer-top" hidden={!assistantChrome}>
-                {switcher}
-                {publishControls}
-              </div>
-              {navigation}
-              <div className="drawer-bottom">
-                {headerEnd}
-                {signOut}
-              </div>
-            </div>
-          </>
-        ) : (
-          <div className="shell-sidebar">{navigation}</div>
-        )}
+        {!narrow && <div className="shell-sidebar">{navigation}</div>}
 
         <main className="shell-main">
           {narrow && keyNotice && assistantChrome && (
