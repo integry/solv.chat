@@ -29,6 +29,12 @@ const PAGE_SIZE = 25;
  * in the meantime is lost when the save's completion clears the draft.
  */
 interface AnswerSession {
+  /**
+   * New each time an editor is opened, and kept while the same editor moves
+   * between its row and the top of the list. A save started in an earlier
+   * session for the same gap must not touch a session opened after it.
+   */
+  sessionId: number;
   fromMessageId: string;
   /** Set when it belongs to a row in the list; null for a handed-over question. */
   gapKey: string | null;
@@ -48,6 +54,7 @@ function readHandedOverAnswer(): AnswerSession | null {
   const fromMessageId = readQueryParam("answer");
   if (!fromMessageId) return null;
   return {
+    sessionId: 0,
     fromMessageId,
     gapKey: null,
     draft: { question: readQueryParam("question") ?? "", answer: "" },
@@ -68,6 +75,8 @@ export function Gaps({ assistantId }: GapsProps) {
   const [answering, setAnswering] = useState<AnswerSession | null>(readHandedOverAnswer);
   const [addingTest, setAddingTest] = useState<TestSession | null>(null);
   const nextTestSessionId = useRef(1);
+  // 0 is the handed-over question's session.
+  const nextAnswerSessionId = useRef(1);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<GapSummary | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -102,6 +111,7 @@ export function Gaps({ assistantId }: GapsProps) {
       current?.gapKey === gap.question
         ? current
         : {
+            sessionId: nextAnswerSessionId.current++,
             fromMessageId: gap.exampleMessageId,
             gapKey: gap.question,
             draft: { question: gapTitle(gap), answer: "" },
@@ -158,27 +168,30 @@ export function Gaps({ assistantId }: GapsProps) {
   }
 
   function editorFor(session: AnswerSession) {
+    // An editor's callbacks act only on the session it was opened for. The
+    // same gap can be closed and opened again while an earlier save waits, and
+    // that save's completion must leave the newer draft alone.
+    const sessionId = session.sessionId;
     return (
       <EntryEditor
+        key={sessionId}
         assistantId={assistantId}
         fromMessageId={session.fromMessageId}
         draft={session.draft}
         onDraftChange={(draft) =>
           setAnswering((current) =>
-            current?.fromMessageId === session.fromMessageId ? { ...current, draft } : current,
+            current?.sessionId === sessionId ? { ...current, draft } : current,
           )
         }
         saveState={session.save}
         onSaveStateChange={(save) =>
           setAnswering((current) =>
-            current?.fromMessageId === session.fromMessageId ? { ...current, save } : current,
+            current?.sessionId === sessionId ? { ...current, save } : current,
           )
         }
         onSaved={(_result, saved) => {
           if (saved.assistantId !== assistantId) return;
-          setAnswering((current) =>
-            current?.fromMessageId === saved.fromMessageId ? null : current,
-          );
+          setAnswering((current) => (current?.sessionId === sessionId ? null : current));
           toast.success("Answer saved to your sources. The assistant can use it once indexed.");
           gapsRes.reload();
         }}

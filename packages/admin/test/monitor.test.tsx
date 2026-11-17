@@ -1336,6 +1336,64 @@ describe("Monitor screens", () => {
       });
     });
 
+    it.each([
+      ["succeeds", undefined],
+      [
+        "fails",
+        () =>
+          Response.json(
+            { error: "Check the answer.", fields: ["answer: The answer is too short."] },
+            { status: 400 },
+          ),
+      ],
+    ] as const)(
+      "keeps a reopened answer's draft when the earlier save for the same gap %s",
+      async (_outcome, reply) => {
+        const releases: Array<(reply?: Response) => void> = [];
+        const { calls } = installServer({
+          gaps: [gap(), gap({ question: "sso?", displayQuestion: "SSO?", exampleMessageId: "m2" })],
+          holdAnswer: (r) => {
+            releases.push(r);
+          },
+        });
+        await open("/admin/gaps");
+        await screen.findByText("SSO?");
+        const items = () => Array.from(document.querySelectorAll(".gap-item")) as HTMLElement[];
+        const [first, second] = items();
+        if (!first || !second) throw new Error("Expected two gaps");
+
+        fireEvent.click(within(first).getByRole("button", { name: "Write an answer" }));
+        fireEvent.change(within(first).getByLabelText("Answer"), {
+          target: { value: "Yes, to all of Spain." },
+        });
+        fireEvent.click(within(first).getByRole("button", { name: "Save answer" }));
+        await waitFor(() => expect(releases).toHaveLength(1));
+
+        // While that save waits, open another gap, then the first one again.
+        fireEvent.click(within(second).getByRole("button", { name: "Write an answer" }));
+        expect(within(first).queryByLabelText("Answer")).toBeNull();
+        fireEvent.click(within(first).getByRole("button", { name: "Write an answer" }));
+        const reopened = within(first).getByLabelText("Answer") as HTMLTextAreaElement;
+        expect(reopened.value).toBe("");
+        expect(reopened.disabled).toBe(false);
+        fireEvent.change(reopened, { target: { value: "Only to the mainland." } });
+
+        await act(async () => releases[0]?.(reply?.()));
+
+        // The earlier save's completion belongs to a closed editor: the newer
+        // draft stays open, unchanged, editable and free of its errors.
+        await waitFor(() => {
+          const answer = screen.getByLabelText("Answer") as HTMLTextAreaElement;
+          expect(answer.value).toBe("Only to the mainland.");
+          expect(answer.disabled).toBe(false);
+        });
+        expect(screen.getAllByLabelText("Answer")).toHaveLength(1);
+        expect(screen.queryByText("The answer is too short.")).toBeNull();
+        expect(screen.getByRole("button", { name: "Save answer" })).toBeTruthy();
+        expect(calls.filter((c) => c.path.endsWith("/answers"))).toHaveLength(1);
+      },
+    );
+
     it("keeps the typed answer when Write an answer is pressed again on the same gap", async () => {
       installServer();
       await open("/admin/gaps");
