@@ -84,19 +84,36 @@ export interface TopQuestionRow {
   count: number;
 }
 
+/**
+ * Turns each run of whitespace into one space. Same result as
+ * `replace(/\s+/g, " ")`, without rewriting every single space between words.
+ */
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s{2,}|[^\S ]/g, " ");
+}
+
 /** Normalises a visitor question for grouping (trimmed, lowercased, collapsed whitespace). */
 export function normalizeQuestionText(text: string): string {
-  return text.trim().toLowerCase().replace(/\s+/g, " ");
+  return collapseWhitespace(text.trim().toLowerCase());
 }
 
 /**
- * Folds message text for the Conversations search: Unicode lowercase in NFC.
- * The same function folds the stored text and the search, so both sides
- * agree (SQLite's `lower()` only folds ASCII).
+ * Folds message text for the Conversations search: Unicode lowercase in NFC,
+ * whitespace collapsed the way `normalizeQuestionText` collapses it, so a
+ * grouped question still finds the messages it was grouped from. The same
+ * function folds the stored text and the search, so both sides agree
+ * (SQLite's `lower()` only folds ASCII).
  */
 export function searchableText(text: string): string {
-  return text.normalize("NFC").toLowerCase().normalize("NFC");
+  return collapseWhitespace(text.normalize("NFC").toLowerCase().normalize("NFC"));
 }
+
+// Older rows `fillSearchText` folds per call: at most 2 D1 queries a round,
+// well inside the 50 a Workers Free invocation may make (a `db.batch()`
+// counts as one). Source (checked 2026-11-17):
+//   https://developers.cloudflare.com/d1/platform/limits/
+const SEARCH_FILL_BATCH = 200;
+const SEARCH_FILL_ROUNDS = 10;
 
 const COLUMNS =
   "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to";
@@ -380,6 +397,38 @@ export function messagesFor(db: D1Database, orgId: string) {
         )
         .run();
       return (res.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Folds `search_text` for rows written before it existed. Migration 0018
+     * folds plain ASCII text in SQL; the rest needs `searchableText`, which
+     * SQL cannot reproduce. A row a writer filled in the meantime is left
+     * alone: every write of `content` also writes `search_text`, so a
+     * non-NULL value is never older than the text. Each call folds a bounded
+     * number of rows: true means none are left, false that some may be.
+     */
+    async fillSearchText(options: { batch?: number; rounds?: number } = {}): Promise<boolean> {
+      const batch = options.batch ?? SEARCH_FILL_BATCH;
+      const rounds = options.rounds ?? SEARCH_FILL_ROUNDS;
+      const update = prepare(
+        db,
+        `UPDATE messages SET search_text = ?3
+          WHERE org_id = ?1 AND id = ?2 AND search_text IS NULL`,
+      );
+      for (let round = 0; round < rounds; round++) {
+        const pending = await prepare(
+          db,
+          "SELECT id, content FROM messages WHERE org_id = ?1 AND search_text IS NULL LIMIT ?2",
+        )
+          .bind(orgId, batch)
+          .all<{ id: string; content: string }>();
+        if (pending.results.length === 0) return true;
+        await db.batch(
+          pending.results.map((row) => update.bind(orgId, row.id, searchableText(row.content))),
+        );
+        if (pending.results.length < batch) return true;
+      }
+      return false;
     },
 
     async unanswered(assistantId: string, limit = 50): Promise<MessageRow[]> {

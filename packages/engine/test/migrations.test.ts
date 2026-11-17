@@ -1,5 +1,6 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import { searchableText } from "../src/db/messages.js";
 
 const EXPECTED_TABLES = [
   "orgs",
@@ -182,6 +183,70 @@ describe("migrations", () => {
       { id: "msg_y", reply_to: "msg_z", question_key: null },
       { id: "msg_x", reply_to: null, question_key: "hello world again?" },
       { id: "msg_w", reply_to: "msg_x", question_key: null },
+    ]);
+  });
+
+  it("folds ASCII rows written before 0018 exactly as the engine does, and only those", async () => {
+    const orgId = "org_00000000000000000000";
+    // Every ASCII whitespace character, other control characters and letters
+    // in both cases, in runs, from a fixed seed.
+    const alphabet = ["a", "B", "z", "Q", "?", "1", " ", "\t", "\n", "\v", "\f", "\r", "\x1c"];
+    let seed = 7;
+    const generated = Array.from({ length: 40 }, () => {
+      let text = "";
+      for (let i = 0; i < 30; i++) {
+        seed = (seed * 1103515245 + 12345) % 2 ** 31;
+        const char = alphabet[seed % alphabet.length] ?? "";
+        text += char.repeat(1 + (seed % 3));
+      }
+      return text;
+    });
+    const ascii = [
+      "  Do  YOU\tship?\r\n\nTo SPAIN?  ",
+      "\vVertical\fform feed",
+      "Unit\x1fseparator stays",
+      `x${" ".repeat(256)}y`,
+      ...generated,
+    ];
+    const forTheEngine = [
+      // More spaces in a row than eight passes collapse.
+      `x${" ".repeat(300)}y`,
+      "Où est l'École?",
+      "Curly ’quotes’ only",
+      "Do you\u00a0ship?",
+    ];
+    const contents = [...ascii, ...forTheEngine];
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'Site', 'pk_1', 1)",
+      ).bind(orgId),
+      env.DB.prepare(
+        "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES ('cnv_1', ?1, 'ast_1', 'vis', 1, '')",
+      ).bind(orgId),
+      ...contents.map((content, i) =>
+        env.DB.prepare(
+          "INSERT INTO messages (id, org_id, conversation_id, role, content, created_at) VALUES (?1, ?2, 'cnv_1', 'assistant', ?3, ?4)",
+        ).bind(`msg_${i}`, orgId, content, i),
+      ),
+    ]);
+
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0018_"));
+    const updates = (migration?.queries ?? []).filter((q) =>
+      /\bUPDATE\s+messages\s+SET\s+search_text\b/i.test(q),
+    );
+    expect(updates.length).toBe(10);
+    for (const sql of updates) {
+      await env.DB.prepare(sql).run();
+    }
+
+    const rows = await env.DB.prepare(
+      "SELECT content, search_text FROM messages WHERE org_id = ?1 ORDER BY created_at",
+    )
+      .bind(orgId)
+      .all<{ content: string; search_text: string | null }>();
+    expect(rows.results).toEqual([
+      ...ascii.map((content) => ({ content, search_text: searchableText(content) })),
+      ...forTheEngine.map((content) => ({ content, search_text: null })),
     ]);
   });
 

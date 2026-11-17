@@ -698,8 +698,10 @@ describe("admin Monitor screen APIs", () => {
       }
       // The text before the reply resumed is gone from the search.
       expect(await search("one moment")).toEqual([]);
-      // Older rows are still found by the exact text.
-      expect(await search("ZÜRICH")).toEqual([legacy.conversationId]);
+      // Older rows are folded before the search, so they match in any case too.
+      for (const q of ["ZÜRICH", "zürich", "Zürich"]) {
+        expect({ q, ids: await search(q) }).toEqual({ q, ids: [legacy.conversationId] });
+      }
     });
 
     it("refuses unknown filters and dates instead of showing everything", async () => {

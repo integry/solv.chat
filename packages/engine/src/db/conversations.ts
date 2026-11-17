@@ -1,4 +1,4 @@
-import { searchableText } from "./messages.js";
+import { messagesFor, searchableText } from "./messages.js";
 import { prepare, prepareInsert } from "./sql.js";
 
 interface Row {
@@ -111,12 +111,15 @@ export function conversationsFor(db: D1Database, orgId: string) {
     ): Promise<{ conversations: ConversationSummaryRow[]; total: number }> {
       const filter = options.filter ?? {};
       const search = (filter.search ?? "").trim();
+      // The search reads `search_text`, so rows written before it existed
+      // are folded first.
+      if (search !== "") await messagesFor(db, orgId).fillSearchText();
       // Each condition is switched on by its own parameter, so one statement
       // serves every combination and nothing is spliced into the SQL.
       // The search compares `search_text` with the search folded the same way
-      // in JavaScript (SQLite's `lower()` only folds ASCII). Rows written
-      // before `search_text` existed fall back to `lower(content)`, and the
-      // exact text (`?8`) always matches.
+      // in JavaScript (SQLite's `lower()` only folds ASCII). Should a backlog
+      // outlast one fill, its rows fall back to `lower(content)` until a later
+      // search folds them. The exact text (`?8`) always matches.
       const where = `
         FROM conversations c
        WHERE c.org_id = ?1 AND c.assistant_id = ?2

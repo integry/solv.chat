@@ -65,8 +65,10 @@ from the auth seam and pass it down.
   the widget's localStorage), started_at, page_url.
 - `messages` — id, conversation_id, role, content, citations JSON, tool_calls JSON,
   tokens_in, tokens_out, answered (boolean: did retrieval find support),
-  search_text (content in Unicode lowercase, NFC, for the Conversations search;
-  NULL on rows written before it existed).
+  search_text (content in Unicode lowercase, NFC, whitespace runs collapsed like
+  the question key, for the Conversations search. For rows written before it
+  existed, the migration fills it for ASCII text and the engine folds the rest
+  before it runs a search).
 - `feedback` — message_id, value (`up` | `down`), note.
 - `mcp_servers` — id, assistant_id, label, url, auth_kind (`none` | `static_header`),
   secret_ciphertext, enabled.
