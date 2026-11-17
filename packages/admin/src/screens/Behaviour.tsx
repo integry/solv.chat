@@ -21,13 +21,16 @@ function parseQuestions(text: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
 function behaviourEqual(a: BehaviourConfig, b: BehaviourConfig): boolean {
   return (
     a.greeting === b.greeting &&
     a.persona === b.persona &&
     a.fallbackText === b.fallbackText &&
-    a.suggestedQuestions.length === b.suggestedQuestions.length &&
-    a.suggestedQuestions.every((q, i) => q === b.suggestedQuestions[i])
+    sameStrings(a.suggestedQuestions, b.suggestedQuestions)
   );
 }
 
@@ -61,6 +64,8 @@ export function Behaviour({ assistantId }: BehaviourProps) {
 
   const latestRef = useRef({ greeting, persona, fallbackText, questionsText });
   latestRef.current = { greeting, persona, fallbackText, questionsText };
+  const savedBehaviourRef = useRef(savedBehaviour);
+  savedBehaviourRef.current = savedBehaviour;
   const lastTickRef = useRef(mutation.tick);
   const ignoreNextTickRef = useRef(false);
   const syncOnLoadRef = useRef(false);
@@ -86,6 +91,34 @@ export function Behaviour({ assistantId }: BehaviourProps) {
       ignoreNextTickRef.current = false;
       return;
     }
+    if (mutation.lastKind === "publishing") {
+      // Published from outside this screen (the header). Publishing replaces
+      // the draft and adds a version, so reload both. Publish waits for edits
+      // to be saved, so a field that now differs from the saved draft was
+      // changed while the publish was in flight and keeps its edit.
+      const saved = savedBehaviourRef.current;
+      if (saved) {
+        const latest = latestRef.current;
+        const questionsSame = sameStrings(
+          parseQuestions(latest.questionsText),
+          saved.suggestedQuestions,
+        );
+        publishSnapshotRef.current = {
+          assistantId,
+          fields: {
+            greeting: saved.greeting,
+            persona: saved.persona,
+            fallbackText: saved.fallbackText,
+            questionsText: questionsSame
+              ? latest.questionsText
+              : saved.suggestedQuestions.join("\n"),
+          },
+        };
+      }
+      draft.reload();
+      setHistoryTick((n) => n + 1);
+      return;
+    }
     if (mutation.lastKind !== "saving") {
       return;
     }
@@ -95,7 +128,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     }
     draft.reload();
     setHistoryTick((n) => n + 1);
-  }, [mutation.tick, mutation.lastKind, draft.reload]);
+  }, [mutation.tick, mutation.lastKind, draft.reload, assistantId]);
 
   useEffect(() => {
     if (!savedBehaviour) return;

@@ -116,6 +116,7 @@ export function AssistantSwitcher({
   const labelId = `${baseId}-label`;
   const buttonId = `${baseId}-button`;
   const listId = `${baseId}-list`;
+  const optionId = (index: number) => `${baseId}-option-${index}`;
   const states = usePublishStates(assistants, open);
 
   const optionIds = [...assistants.map((a) => a.id), NEW_ASSISTANT];
@@ -127,12 +128,30 @@ export function AssistantSwitcher({
     if (open) listRef.current?.focus();
   }, [open]);
 
+  // Focus stays on the listbox and aria-activedescendant does not scroll, so
+  // the active option is brought into view when the list opens and when the
+  // keyboard moves it. Hovering does not scroll: the hovered option is in view.
+  const scrollActiveRef = useRef(false);
+  useEffect(() => {
+    if (!open || !scrollActiveRef.current) return;
+    scrollActiveRef.current = false;
+    document.getElementById(optionId(activeIndex))?.scrollIntoView?.({ block: "nearest" });
+  });
+
+  function moveActive(next: (index: number) => number) {
+    const index = next(activeIndex);
+    if (index === activeIndex) return;
+    scrollActiveRef.current = true;
+    setActiveIndex(index);
+  }
+
   useEffect(() => {
     if (hidden) setOpen(false);
   }, [hidden]);
 
   function openList(index?: number) {
     const selectedIndex = assistants.findIndex((a) => a.id === selectedId);
+    scrollActiveRef.current = true;
     setActiveIndex(index ?? Math.max(selectedIndex, 0));
     setOpen(true);
   }
@@ -159,19 +178,19 @@ export function AssistantSwitcher({
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
-        setActiveIndex((i) => Math.min(i + 1, last));
+        moveActive((i) => Math.min(i + 1, last));
         break;
       case "ArrowUp":
         event.preventDefault();
-        setActiveIndex((i) => Math.max(i - 1, 0));
+        moveActive((i) => Math.max(i - 1, 0));
         break;
       case "Home":
         event.preventDefault();
-        setActiveIndex(0);
+        moveActive(() => 0);
         break;
       case "End":
         event.preventDefault();
-        setActiveIndex(last);
+        moveActive(() => last);
         break;
       case "Enter":
       case " ":
@@ -188,8 +207,6 @@ export function AssistantSwitcher({
         break;
     }
   }
-
-  const optionId = (index: number) => `${baseId}-option-${index}`;
 
   return (
     <div className="switcher" hidden={hidden}>

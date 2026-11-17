@@ -86,6 +86,8 @@ export function Widget({ assistantId }: WidgetProps) {
     builtins,
     actionOriginsText,
   };
+  const savedDraftRef = useRef({ widget: savedWidget, actions: savedActions });
+  savedDraftRef.current = { widget: savedWidget, actions: savedActions };
   const lastTickRef = useRef(mutation.tick);
   const ignoreNextTickRef = useRef(false);
   const syncWidgetOnLoadRef = useRef(false);
@@ -122,6 +124,35 @@ export function Widget({ assistantId }: WidgetProps) {
       ignoreNextTickRef.current = false;
       return;
     }
+    if (mutation.lastKind === "publishing") {
+      // Published from outside this screen (the header). Publishing replaces
+      // the draft and adds a version, so reload both. Publish waits for edits
+      // to be saved, so a field that now differs from the saved draft was
+      // changed while the publish was in flight and keeps its edit.
+      const { widget, actions } = savedDraftRef.current;
+      if (widget && actions) {
+        const latest = latestRef.current;
+        const actionOriginsSame = arraysEqual(
+          parseOrigins(latest.actionOriginsText),
+          actions.allowedOrigins,
+        );
+        publishSnapshotRef.current = {
+          assistantId,
+          fields: {
+            title: widget.title,
+            accentColor: widget.accentColor,
+            position: widget.position,
+            builtins: actions.builtins,
+            actionOriginsText: actionOriginsSame
+              ? latest.actionOriginsText
+              : actions.allowedOrigins.join("\n"),
+          },
+        };
+      }
+      draftRes.reload();
+      setHistoryTick((n) => n + 1);
+      return;
+    }
     if (mutation.lastKind !== "saving") {
       return;
     }
@@ -142,7 +173,7 @@ export function Widget({ assistantId }: WidgetProps) {
     assistantRes.reload();
     draftRes.reload();
     setHistoryTick((n) => n + 1);
-  }, [mutation.tick, mutation.lastKind, assistantRes.reload, draftRes.reload]);
+  }, [mutation.tick, mutation.lastKind, assistantRes.reload, draftRes.reload, assistantId]);
 
   useEffect(() => {
     if (!savedWidget || !savedActions) return;

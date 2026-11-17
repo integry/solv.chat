@@ -40,6 +40,8 @@ interface AssistantState {
 interface ServerOptions {
   /** Answers the first unforced publish with 409 and a failed test run. */
   failTests?: boolean;
+  /** Publish answers only after this settles, so a test can act mid-publish. */
+  holdPublish?: Promise<void>;
 }
 
 function installServer(
@@ -49,8 +51,11 @@ function installServer(
   const assistants = entries.map((e) => e.assistant);
   const states = new Map(entries.map((e) => [e.assistant.id, e.state]));
   const calls: Array<{ method: string; path: string; body: unknown }> = [];
+  // Publishing promotes the draft and inserts a fresh one, so the draft id changes.
+  const draftGeneration = new Map<string, number>();
   const row = (id: string, state: VersionRow["state"], config: Config): VersionRow => ({
-    id: `ver_${state}_${id}`,
+    id:
+      state === "draft" ? `ver_draft_${id}_${draftGeneration.get(id) ?? 0}` : `ver_${state}_${id}`,
     orgId: "org_00000000000000000000",
     assistantId: id,
     state,
@@ -111,7 +116,9 @@ function installServer(
             { status: 409 },
           );
         }
+        if (options.holdPublish) await options.holdPublish;
         state.published = state.draft;
+        draftGeneration.set(id, (draftGeneration.get(id) ?? 0) + 1);
         return Response.json({ version: row(id, "published", state.published) });
       }
     }
@@ -567,6 +574,59 @@ describe("header Publish with unsaved edits on the screen", () => {
   });
 });
 
+describe("header Publish with the screen's History open", () => {
+  it.each([
+    ["behaviour", "First thing it says", "How it should sound"],
+    ["widget", "Title", "Accent colour"],
+  ] as const)(
+    "refreshes %s History and the draft, keeping edits typed mid-publish",
+    async (screenId, editedLabel, untouchedLabel) => {
+      let release = () => {};
+      const holdPublish = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const server = installServer(
+        [{ assistant: makeAssistant("ast_1", "Docs Bot"), state: structuredClone(NEVER) }],
+        { holdPublish },
+      );
+      go(`/admin/${screenId}`);
+      render(<App />);
+      const edited = (await screen.findByLabelText(editedLabel)) as HTMLInputElement;
+      await waitFor(() => expect(edited.value).not.toBe(""));
+      const untouched = screen.getByLabelText(untouchedLabel) as HTMLInputElement;
+      const untouchedBefore = untouched.value;
+
+      fireEvent.click(screen.getByRole("button", { name: "History" }));
+      const history = await screen.findByRole("region", { name: "Version history" });
+      await within(history).findByText("Draft");
+      expect(within(history).queryByText("Published")).toBeNull();
+      const draftLoads = () =>
+        server.calls.filter((c) => c.method === "GET" && c.path.endsWith("/draft")).length;
+      const loadsBefore = draftLoads();
+
+      await within(header()).findByText("Not published yet");
+      fireEvent.click(within(header()).getByRole("button", { name: "Publish draft" }));
+      await waitFor(() =>
+        expect(within(header()).getByRole("button", { name: "Publishing…" })).toBeTruthy(),
+      );
+      fireEvent.change(edited, { target: { value: "Typed while publishing" } });
+      await act(async () => {
+        release();
+      });
+
+      await within(header()).findByText("Live");
+      expect(await within(history).findByText("Published")).toBeTruthy();
+      await waitFor(() => expect(draftLoads()).toBeGreaterThan(loadsBefore));
+      // The reloaded draft has a new id; the edit typed mid-publish is kept,
+      // still unsaved, and the field left alone shows the saved value.
+      await waitFor(() => expect(screen.getByText("Unsaved changes")).toBeTruthy());
+      expect(edited.value).toBe("Typed while publishing");
+      expect(untouched.value).toBe(untouchedBefore);
+      expect(server.states.get("ast_1")?.published).not.toBeNull();
+    },
+  );
+});
+
 describe("dialogs opened from the narrow-screen drawer", () => {
   it("keep Tab inside the dialog instead of the drawer behind it", async () => {
     setNarrow(true);
@@ -773,4 +833,69 @@ describe("assistant switcher", () => {
     expect(document.activeElement).toBe(within(form).getByLabelText("Name"));
     await expectNoSeriousA11yViolations();
   });
+
+  it("scrolls the keyboard-active option into view in a long list", async () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({
+      assistant: makeAssistant(`ast_${String(i).padStart(2, "0")}`, `Bot ${i}`),
+      state: structuredClone(LIVE),
+    }));
+    installServer(many);
+    // jsdom has no layout, so record which option each scroll targets.
+    const scrolled: string[] = [];
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value(this: Element, arg?: ScrollIntoViewOptions) {
+        expect(arg).toEqual({ block: "nearest" });
+        scrolled.push(this.textContent ?? "");
+      },
+    });
+    try {
+      render(<App />);
+      const button = await findAssistantButton();
+      pickByKeyboard(button, "ast_27");
+
+      // Opening with a selection near the bottom brings it into view.
+      scrolled.length = 0;
+      fireEvent.keyDown(assistantButton(), { key: "ArrowDown" });
+      const listbox = screen.getByRole("listbox");
+      const active = () =>
+        document.getElementById(listbox.getAttribute("aria-activedescendant") ?? "");
+      expect(active()?.getAttribute("data-value")).toBe("ast_27");
+      expect(scrolled.at(-1)).toMatch(/^Bot 27/);
+
+      // End, ArrowUp and Home each scroll the newly active option.
+      fireEvent.keyDown(listbox, { key: "End" });
+      expect(active()?.textContent).toBe("New assistant");
+      expect(scrolled.at(-1)).toBe("New assistant");
+      fireEvent.keyDown(listbox, { key: "ArrowUp" });
+      expect(scrolled.at(-1)).toMatch(/^Bot 29/);
+      fireEvent.keyDown(listbox, { key: "Home" });
+      expect(scrolled.at(-1)).toMatch(/^Bot 0/);
+
+      // Hovering does not scroll: the hovered option is already in view.
+      const count = scrolled.length;
+      const options = within(listbox).getAllByRole("option");
+      fireEvent.mouseEnter(options[5] as HTMLElement);
+      expect(active()).toBe(options[5]);
+      expect(scrolled).toHaveLength(count);
+    } finally {
+      if (original) Object.defineProperty(Element.prototype, "scrollIntoView", original);
+      else delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
 });
+
+/** Selects `id` through the open listbox with ArrowDown presses and Enter. */
+function pickByKeyboard(button: HTMLElement, id: string): void {
+  fireEvent.keyDown(button, { key: "ArrowDown" });
+  const listbox = screen.getByRole("listbox");
+  for (let i = 0; i < 40; i++) {
+    const active = document.getElementById(listbox.getAttribute("aria-activedescendant") ?? "");
+    if (active?.getAttribute("data-value") === id) break;
+    fireEvent.keyDown(listbox, { key: "ArrowDown" });
+  }
+  fireEvent.keyDown(listbox, { key: "Enter" });
+  expect(selectedAssistantId()).toBe(id);
+}
