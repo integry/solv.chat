@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { ApiError, postJson, putJson } from "../api/client.js";
 
 export interface EntrySaveSession {
@@ -41,6 +41,10 @@ export function EntryEditor({
   const [formError, setFormError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const sessionRef = useRef(0);
+  // Sources can show the edit form and the new-answer form at once: each needs its own ids.
+  const fieldId = useId();
+  const questionId = `${fieldId}-question`;
+  const answerId = `${fieldId}-answer`;
 
   useEffect(() => {
     void assistantId;
@@ -128,9 +132,9 @@ export function EntryEditor({
         <h2 className="section-heading">{isEditing ? "Edit answer" : "Write an answer"}</h2>
       )}
       <div className="field">
-        <label htmlFor="entry-question">Question</label>
+        <label htmlFor={questionId}>Question</label>
         <input
-          id="entry-question"
+          id={questionId}
           type="text"
           value={question}
           disabled={saving}
@@ -145,9 +149,9 @@ export function EntryEditor({
       </div>
 
       <div className="field">
-        <label htmlFor="entry-answer">Answer</label>
+        <label htmlFor={answerId}>Answer</label>
         <textarea
-          id="entry-answer"
+          id={answerId}
           rows={4}
           value={answer}
           disabled={saving}

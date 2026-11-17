@@ -1092,8 +1092,26 @@ describe("admin Sources screen", () => {
     await waitFor(() => expect(screen.queryByText("Answers you wrote")).toBeNull());
   });
 
-  it("re-imports a sitemap source from its saved address, in batches, into the same source", async () => {
+  function sitemapDocs(sourceId: string, urls: string[]) {
+    return urls.map((url, i) => ({
+      id: `doc_m_${i + 1}`,
+      sourceId,
+      externalId: url,
+      url,
+      title: `Page ${i + 1}`,
+      updatedAt: 1_700_000_200_000,
+      markdown: `# Page ${i + 1}`,
+    }));
+  }
+
+  it("re-imports only the pages the owner chose, in batches, into the same source", async () => {
+    // The sitemap lists 7 pages; the owner imported 3 of them, the last one late in the list.
     const previewUrls = Array.from({ length: 7 }, (_, i) => `https://blog.example.com/p${i}`);
+    const chosen = [
+      "https://blog.example.com/p1",
+      "https://blog.example.com/p3",
+      "https://blog.example.com/p6",
+    ];
     const server = installSourcesFakeServer({
       previewUrls,
       extraSources: [
@@ -1102,18 +1120,237 @@ describe("admin Sources screen", () => {
           kind: "sitemap",
           label: "blog.example.com",
           settings: { url: "https://blog.example.com/sitemap.xml" },
+          documentCount: chosen.length,
         }),
       ],
+      extraDocuments: [["src_map_1", sitemapDocs("src_map_1", chosen)]],
     });
     window.history.replaceState(null, "", "/admin/sources");
     render(<App />);
 
     await chooseRowAction("blog.example.com", "Re-import");
-    expect(await screen.findByText(/^blog\.example\.com: Imported 7 pages\./)).toBeTruthy();
-    expect(server.previewBodies).toEqual([{ url: "https://blog.example.com/sitemap.xml" }]);
-    expect(server.importedPayloads.map((p) => p.urls.length)).toEqual([5, 2]);
+    expect(await screen.findByText(/^blog\.example\.com: Imported 3 pages\./)).toBeTruthy();
+    expect(server.previewBodies).toEqual([]);
+    expect(server.importedPayloads.flatMap((p) => p.urls)).toEqual(chosen);
     expect(server.importedPayloads.every((p) => p.sourceId === "src_map_1")).toBe(true);
     expect(server.createdSitemapSourceCount).toBe(0);
+  });
+
+  it("re-imports every page in a source, past the first 100, in batches", async () => {
+    const pages = Array.from({ length: 103 }, (_, i) => `https://blog.example.com/p${i}`);
+    const server = installSourcesFakeServer({
+      extraSources: [
+        source({
+          id: "src_map_1",
+          kind: "sitemap",
+          label: "blog.example.com",
+          settings: { url: "https://blog.example.com/sitemap.xml" },
+          documentCount: pages.length,
+        }),
+      ],
+      extraDocuments: [["src_map_1", sitemapDocs("src_map_1", pages)]],
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+
+    await chooseRowAction("blog.example.com", "Re-import");
+    expect(await screen.findByText(/^blog\.example\.com: Imported 103 pages\./)).toBeTruthy();
+    expect(server.importedPayloads.flatMap((p) => p.urls)).toEqual(pages);
+    expect(server.importedPayloads.every((p) => p.urls.length <= 5)).toBe(true);
+  });
+
+  it("does not import anything when re-importing a source with no pages", async () => {
+    const server = installSourcesFakeServer({
+      extraSources: [
+        source({
+          id: "src_map_1",
+          kind: "sitemap",
+          label: "blog.example.com",
+          settings: { url: "https://blog.example.com/sitemap.xml" },
+          documentCount: 0,
+        }),
+      ],
+      extraDocuments: [["src_map_1", []]],
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+
+    await chooseRowAction("blog.example.com", "Re-import");
+    expect(
+      await screen.findByText(
+        "blog.example.com has no pages to re-import. Use Add content to import some.",
+      ),
+    ).toBeTruthy();
+    expect(server.importedPayloads).toEqual([]);
+    expect(server.previewBodies).toEqual([]);
+  });
+
+  it("keeps open forms and their contents when a background check fails", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let failChecks = true;
+    const server = installSourcesFakeServer({
+      extraSources: [source({ id: "src_entry_1", indexingCount: 1 })],
+      extraDocuments: [
+        [
+          "src_entry_1",
+          [
+            {
+              id: "doc_a",
+              sourceId: "src_entry_1",
+              externalId: "entry:a",
+              url: "https://example.com/admin/sources#entry:a",
+              title: "Question A",
+              updatedAt: 1_700_000_200_000,
+              markdown: "# Question A\n\nAnswer A",
+            },
+          ],
+        ],
+      ],
+      onSourcesGet(count) {
+        if (count > 1 && failChecks) {
+          return Response.json({ error: "The database is busy." }, { status: 503 });
+        }
+        return null;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+    expect(await screen.findByText("Indexing…")).toBeTruthy();
+
+    // An answer being edited, and a new one being written.
+    await chooseRowAction("Answers you wrote", "View documents");
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Question A" }));
+    const editForm = (await screen.findByRole("heading", { name: "Edit answer" })).closest("form");
+    if (!editForm) throw new Error("Expected the edit form");
+    fireEvent.change(within(editForm).getByLabelText("Answer"), {
+      target: { value: "Answer A, edited" },
+    });
+    await openAddContent();
+    const newForm = screen.getByRole("form", { name: "Write an answer" });
+    fireEvent.change(within(newForm).getByLabelText("Question"), {
+      target: { value: "Do you ship abroad?" },
+    });
+
+    const before = server.sourcesGets;
+    await vi.advanceTimersByTimeAsync(INDEXING_POLL_MS + 50);
+    await waitFor(() => expect(server.sourcesGets).toBe(before + 1));
+    expect(await screen.findByText("Could not refresh your sources.")).toBeTruthy();
+    expect(screen.getByText("The database is busy.")).toBeTruthy();
+
+    // The list and both forms stay, with what was typed.
+    expect(sourceRow("Answers you wrote")).toBeTruthy();
+    expect((within(editForm).getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+      "Answer A, edited",
+    );
+    expect(
+      (
+        within(screen.getByRole("form", { name: "Write an answer" })).getByLabelText(
+          "Question",
+        ) as HTMLInputElement
+      ).value,
+    ).toBe("Do you ship abroad?");
+
+    // Trying again, even if it fails once more, keeps them too.
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(server.sourcesGets).toBe(before + 2));
+    expect(await screen.findByText("Could not refresh your sources.")).toBeTruthy();
+    failChecks = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByText("Could not refresh your sources.")).toBeNull());
+    expect((within(editForm).getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+      "Answer A, edited",
+    );
+    expect(
+      (
+        within(screen.getByRole("form", { name: "Write an answer" })).getByLabelText(
+          "Question",
+        ) as HTMLInputElement
+      ).value,
+    ).toBe("Do you ship abroad?");
+  });
+
+  it("keeps a sitemap selection when a background check fails", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const server = installSourcesFakeServer({
+      extraSources: [source({ id: "src_entry_1", indexingCount: 1 })],
+      onSourcesGet(count) {
+        if (count > 1) return Response.json({ error: "The database is busy." }, { status: 503 });
+        return null;
+      },
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+    expect(await screen.findByText("Indexing…")).toBeTruthy();
+    await openAddContent("Import from a sitemap");
+    fireEvent.change(screen.getByLabelText("Sitemap URL"), {
+      target: { value: "https://docs.example.com/sitemap.xml" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch URLs" }));
+    const pricing = (await screen.findByLabelText(
+      "https://docs.example.com/pricing",
+    )) as HTMLInputElement;
+    fireEvent.click(pricing);
+    expect(pricing.checked).toBe(false);
+
+    const before = server.sourcesGets;
+    await vi.advanceTimersByTimeAsync(INDEXING_POLL_MS + 50);
+    await waitFor(() => expect(server.sourcesGets).toBe(before + 1));
+    expect(await screen.findByText("Could not refresh your sources.")).toBeTruthy();
+    expect(
+      (screen.getByLabelText("https://docs.example.com/pricing") as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(
+      (screen.getByLabelText("https://docs.example.com/changelog") as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(screen.getByText(/2 of 3 selected/)).toBeTruthy();
+  });
+
+  it("gives the edit form and the new-answer form their own fields when both are open", async () => {
+    installSourcesFakeServer({
+      extraSources: [source({ id: "src_entry_1", documentCount: 1 })],
+      extraDocuments: [
+        [
+          "src_entry_1",
+          [
+            {
+              id: "doc_a",
+              sourceId: "src_entry_1",
+              externalId: "entry:a",
+              url: "https://example.com/admin/sources#entry:a",
+              title: "Question A",
+              updatedAt: 1_700_000_200_000,
+              markdown: "# Question A\n\nAnswer A",
+            },
+          ],
+        ],
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    const { container } = render(<App />);
+    await openAddContent();
+    await chooseRowAction("Answers you wrote", "View documents");
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Question A" }));
+    const editForm = (await screen.findByRole("heading", { name: "Edit answer" })).closest("form");
+    const newForm = screen.getByRole("form", { name: "Write an answer" });
+    if (!editForm) throw new Error("Expected the edit form");
+
+    for (const form of [editForm, newForm]) {
+      for (const name of ["Question", "Answer"]) {
+        const label = within(form).getByText(name, {
+          selector: "label",
+        }) as HTMLLabelElement;
+        // Each label points at the field in its own form.
+        expect(label.control).not.toBeNull();
+        expect(form.contains(label.control)).toBe(true);
+      }
+    }
+    expect((within(editForm).getByLabelText("Question") as HTMLInputElement).value).toBe(
+      "Question A",
+    );
+    expect((within(newForm).getByLabelText("Question") as HTMLInputElement).value).toBe("");
+    const ids = Array.from(container.querySelectorAll("form [id]"), (el) => el.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    await expectNoSeriousA11yViolations(container);
   });
 
   it("shows import progress, then a summary with the unchanged pages", async () => {

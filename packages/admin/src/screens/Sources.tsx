@@ -138,6 +138,29 @@ async function importInBatches(
   return { written, unchanged, total };
 }
 
+/** The engine returns at most this many documents per page. */
+const SOURCE_PAGE_LIST_LIMIT = 100;
+
+/** Every page address already in a source, in the order the engine lists them. */
+async function listSourcePageUrls(sourceId: string): Promise<string[]> {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  let offset = 0;
+  for (;;) {
+    const page = await getJson<{ documents: DocumentSummary[]; total: number }>(
+      `/api/admin/sources/${sourceId}/documents?limit=${SOURCE_PAGE_LIST_LIMIT}&offset=${offset}`,
+    );
+    for (const doc of page.documents) {
+      if (doc.url && !seen.has(doc.url)) {
+        seen.add(doc.url);
+        urls.push(doc.url);
+      }
+    }
+    offset += page.documents.length;
+    if (page.documents.length === 0 || offset >= page.total) return urls;
+  }
+}
+
 function importSummary(result: { written: number; unchanged: number; total: number }): string {
   const head = `Imported ${formatPages(result.total)}.`;
   if (result.unchanged === 0) return head;
@@ -290,7 +313,8 @@ function SitemapImport({
     <div className="stack">
       <p className="field-hint">
         Lists the pages in a sitemap so you can choose which to copy in. This is a one-off import,
-        not a crawl: run it again from the source's menu when the pages change.
+        not a crawl: when those pages change, choose Re-import from the source's menu to copy them
+        in again.
       </p>
 
       <form className="stack" onSubmit={(e) => void handlePreview(e)}>
@@ -447,7 +471,16 @@ export function Sources({ assistantId }: SourcesProps) {
   const sourcesRes = useResource<{ sources: SourceSummary[] }>(
     `/api/admin/assistants/${assistantId}/sources`,
   );
-  const sources = sourcesRes.value?.sources ?? [];
+  // A failed background check must not unmount the editors below the list and
+  // lose what the owner is typing: keep showing the last list that loaded.
+  const lastSourcesRef = useRef<{ assistantId: string; sources: SourceSummary[] } | null>(null);
+  if (sourcesRes.status === "ready" && sourcesRes.value) {
+    lastSourcesRef.current = { assistantId, sources: sourcesRes.value.sources };
+  }
+  const lastSources =
+    lastSourcesRef.current?.assistantId === assistantId ? lastSourcesRef.current.sources : null;
+  const loadedSources = sourcesRes.value?.sources ?? lastSources;
+  const sources = loadedSources ?? [];
   // Also keep checking while a failure is retried: the Queue can still index it.
   const anyIndexing = sources.some((s) => (s.indexingCount ?? 0) > 0 || mayRecover(s));
 
@@ -665,13 +698,13 @@ export function Sources({ assistantId }: SourcesProps) {
     setActionError(null);
     setReimport({ sourceId: source.id, done: 0, total: 0 });
     try {
-      const preview = await postJson<{ urls: string[] }>(
-        `/api/admin/assistants/${assistantId}/sitemap-preview`,
-        { url },
-      );
-      const urls = preview.urls.slice(0, MAX_IMPORT_URLS);
+      // Refresh the pages the owner chose, not whatever the sitemap lists now:
+      // pages they left out stay out, and every chosen page is fetched again.
+      const urls = await listSourcePageUrls(source.id);
       if (urls.length === 0) {
-        setActionError(`No pages found in ${url}.`);
+        setActionError(
+          `${sourceName(source)} has no pages to re-import. Use Add content to import some.`,
+        );
         return;
       }
       setReimport({ sourceId: source.id, done: 0, total: urls.length });
@@ -693,7 +726,7 @@ export function Sources({ assistantId }: SourcesProps) {
     }
   }
 
-  if (sourcesRes.status === "loading" && !sourcesRes.value) {
+  if (sourcesRes.status === "loading" && loadedSources === null) {
     return (
       <div className="screen">
         <PageHeader title="Sources" description="Where your assistant's answers come from." />
@@ -701,7 +734,7 @@ export function Sources({ assistantId }: SourcesProps) {
       </div>
     );
   }
-  if (sourcesRes.status === "error") {
+  if (sourcesRes.status === "error" && loadedSources === null) {
     return (
       <div className="screen">
         <PageHeader title="Sources" description="Where your assistant's answers come from." />
@@ -742,7 +775,7 @@ export function Sources({ assistantId }: SourcesProps) {
       render: (source) => {
         if (reimport?.sourceId === source.id) {
           return reimport.total === 0 ? (
-            <StatusBadge tone="info">Reading sitemap…</StatusBadge>
+            <StatusBadge tone="info">Getting pages…</StatusBadge>
           ) : (
             <ImportProgress done={reimport.done} total={reimport.total} label="Re-importing" />
           );
@@ -819,6 +852,14 @@ export function Sources({ assistantId }: SourcesProps) {
           </button>
         }
       />
+
+      {sourcesRes.status === "error" && (
+        <ErrorState
+          title="Could not refresh your sources."
+          detail={sourcesRes.error}
+          onRetry={sourcesRes.reload}
+        />
+      )}
 
       {actionError && (
         <p className="error-text" role="alert">
