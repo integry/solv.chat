@@ -80,7 +80,9 @@ const map = (row: Row): ConversationRow => ({
   pageUrl: row.page_url,
 });
 
-// Per-conversation flags, each a correlated subquery on `c`.
+// Per-conversation flags, each a correlated subquery on `c`. SQLite does not
+// promise the order it evaluates `AND` terms in, so a guard that must run first
+// (json_valid before json_array_length) is a CASE.
 const UNANSWERED = `SELECT 1 FROM messages u
    WHERE u.org_id = c.org_id AND u.conversation_id = c.id
      AND u.role = 'assistant' AND u.answered = 0`;
@@ -89,8 +91,8 @@ const NOT_HELPFUL = `SELECT 1 FROM messages fm
    WHERE fm.org_id = c.org_id AND fm.conversation_id = c.id AND f.value = 'down'`;
 const USED_TOOL = `SELECT 1 FROM messages tm
    WHERE tm.org_id = c.org_id AND tm.conversation_id = c.id AND tm.role = 'assistant'
-     AND tm.tool_calls IS NOT NULL AND json_valid(tm.tool_calls)
-     AND json_array_length(tm.tool_calls) > 0`;
+     AND CASE WHEN tm.tool_calls IS NOT NULL AND json_valid(tm.tool_calls)
+              THEN json_array_length(tm.tool_calls) ELSE 0 END > 0`;
 
 /** Tenant-scoped data access for `conversations`. */
 export function conversationsFor(db: D1Database, orgId: string) {

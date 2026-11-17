@@ -109,7 +109,7 @@ function installServer(initial: Assistant[] = [], options: ServerOptions = {}) {
       return Response.json({ org: "Acme" });
     }
     if (path.endsWith("/overview")) {
-      return Response.json({ messages: 0, answeredShare: 1, todayCostMicros: 0, topQuestions: [] });
+      return Response.json({ todayCostMicros: 0, topQuestions: [] });
     }
     if (path.endsWith("/sources")) {
       return Response.json({ sources: [] });

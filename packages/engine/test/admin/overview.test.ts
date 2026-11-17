@@ -61,8 +61,6 @@ describe("admin overview API", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body).toMatchObject({
-      messages: 0,
-      answeredShare: 0,
       topQuestions: [],
       todayCostMicros: 0,
       todayCostUnknown: false,
@@ -83,7 +81,7 @@ describe("admin overview API", () => {
     ]);
   });
 
-  it("computes messages, answered share, top questions, and today's cost for the principal's org only", async () => {
+  it("computes top questions and today's cost for the principal's org only", async () => {
     const astA = await seedAssistant(ORG_A);
     const astB = await seedAssistant(ORG_B);
     const convA = newId("cnv");
@@ -136,14 +134,13 @@ describe("admin overview API", () => {
     const res = await call(app, `/api/admin/assistants/${astA}/overview`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      messages: number;
-      answeredShare: number;
       topQuestions: Array<{ question: string; count: number }>;
       todayCostMicros: number;
-    };
+    } & Record<string, unknown>;
 
-    expect(body.messages).toBe(6);
-    expect(body.answeredShare).toBeCloseTo(2 / 3);
+    // The all-time figures are not on the screen any more, so not computed.
+    expect(body).not.toHaveProperty("messages");
+    expect(body).not.toHaveProperty("answeredShare");
     expect(body.topQuestions).toEqual([
       { question: "pricing?", count: 2 },
       { question: "refunds?", count: 1 },

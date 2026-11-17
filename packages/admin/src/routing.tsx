@@ -182,6 +182,20 @@ export function dropQueryParams(names: readonly string[]): void {
   window.history.replaceState(window.history.state, "", address);
 }
 
+/**
+ * Sets one query parameter of the current address (or drops it, for null),
+ * without a new history entry. The rest of the query stays.
+ */
+export function replaceQueryParam(name: string, value: string | null): void {
+  const params = new URLSearchParams(window.location.search);
+  if (value === null ? !params.has(name) : params.get(name) === value) return;
+  if (value === null) params.delete(name);
+  else params.set(name, value);
+  const query = params.toString();
+  const address = query === "" ? window.location.pathname : `${window.location.pathname}?${query}`;
+  window.history.replaceState(window.history.state, "", address);
+}
+
 export function useRoute(
   navItems: readonly NavItem[] = NAV_ITEMS,
   defaultScreen?: string,
@@ -337,25 +351,44 @@ export function useAdminNavigation(): AdminNavigation {
 }
 
 /**
- * A link to another admin screen. Renders its children as plain text when
- * that screen is hidden, so a screen never points at something missing.
+ * The address of a screen's path with a query, e.g. `/admin/gaps?assistant=a`.
+ * No query (or an empty one) is the bare path.
+ */
+export function screenAddress(path: string, query?: Readonly<Record<string, string>>): string {
+  const search = new URLSearchParams(query ?? {}).toString();
+  return search === "" ? path : `${path}?${search}`;
+}
+
+/**
+ * A link to another admin screen, by its id, with an optional query (the
+ * assistant it is for, a search). Renders its children as plain text when
+ * that screen is hidden or unknown, so a screen never points at something
+ * missing. A plain click moves through the shell, so leaving unsaved edits
+ * asks first; a modified click (new tab, new window) is left to the browser.
  */
 export function ScreenLink({
   to,
+  query,
   children,
   className,
+  "aria-label": ariaLabel,
 }: {
+  /** A screen id, e.g. `gaps`. */
   to: string;
+  query?: Readonly<Record<string, string>> | undefined;
   children: ReactNode;
-  className?: string;
+  className?: string | undefined;
+  "aria-label"?: string | undefined;
 }) {
   const { navigate, pathFor } = useAdminNavigation();
   const path = pathFor(to);
   if (path === null) return <>{children}</>;
+  const address = screenAddress(path, query);
   return (
     <a
-      href={path}
+      href={address}
       className={className}
+      aria-label={ariaLabel}
       onClick={(event: MouseEvent<HTMLAnchorElement>) => {
         if (
           event.metaKey ||
@@ -367,7 +400,7 @@ export function ScreenLink({
           return;
         }
         event.preventDefault();
-        navigate(path);
+        navigate(address);
       }}
     >
       {children}

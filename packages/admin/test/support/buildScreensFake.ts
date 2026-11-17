@@ -96,8 +96,6 @@ export function installBuildScreensFake(options: BuildScreensFakeOptions = {}) {
       }
       if (sub === "overview") {
         return Response.json({
-          messages: 0,
-          answeredShare: 0,
           topQuestions: [],
           todayCostMicros: 0,
         });

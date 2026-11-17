@@ -1,4 +1,4 @@
-import { isPlainObject } from "@solvchat/core";
+import { isPlainObject, MAX_CHAT_MESSAGE_LENGTH } from "@solvchat/core";
 import { normalizeQuestionText } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
 import { BadRequest, NotFound } from "./errors.js";
@@ -58,8 +58,14 @@ export async function listGaps(
   };
 }
 
-/** Upper bound on a question key in a dismiss request: longer is not a key we stored. */
-const MAX_QUESTION_KEY = 2000;
+/**
+ * Upper bound on a question key in a dismiss request: longer is not a key we
+ * stored. A key is a visitor's message (at most MAX_CHAT_MESSAGE_LENGTH),
+ * lowercased, and lowercasing lengthens a few characters ("İ" becomes two
+ * code units), so the bound leaves room for that rather than refusing a gap
+ * the list shows.
+ */
+const MAX_QUESTION_KEY = MAX_CHAT_MESSAGE_LENGTH * 3;
 
 function readQuestionKey(body: unknown): string {
   if (!isPlainObject(body) || typeof body.question !== "string") {
@@ -67,8 +73,11 @@ function readQuestionKey(body: unknown): string {
   }
   // Normalised again so a display-text question finds the same group.
   const key = normalizeQuestionText(body.question);
-  if (key.length === 0 || key.length > MAX_QUESTION_KEY) {
+  if (key.length === 0) {
     throw new BadRequest(["question: must not be empty"]);
+  }
+  if (key.length > MAX_QUESTION_KEY) {
+    throw new BadRequest([`question: must be at most ${MAX_QUESTION_KEY} characters`]);
   }
   return key;
 }

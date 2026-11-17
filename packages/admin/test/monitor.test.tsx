@@ -1,7 +1,7 @@
 import { MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App } from "../src/App.js";
+import { App, type AppProps } from "../src/App.js";
 import type {
   Assistant,
   AssistantOverview,
@@ -34,8 +34,6 @@ const NOW = Date.UTC(2026, 10, 16, 12, 0, 0);
 
 function overview(overrides: Partial<AssistantOverview> = {}): AssistantOverview {
   return {
-    messages: 30,
-    answeredShare: 0.8,
     topQuestions: [{ question: "do you ship to spain?", count: 4 }],
     todayCostMicros: 1_000,
     dailyCostCapMicros: 2_000_000,
@@ -199,6 +197,8 @@ interface ServerOptions {
   holdAnswer?: (release: (reply?: Response) => void) => void;
   /** Holds each test save until the test resolves it. */
   holdTestSave?: (release: () => void) => void;
+  /** Called when the Try it pane asks a question. */
+  onChat?: () => void;
 }
 
 function installServer(options: ServerOptions = {}) {
@@ -305,6 +305,14 @@ function installServer(options: ServerOptions = {}) {
         { status: 201 },
       );
     }
+    if (url.pathname === "/api/admin/chat" && method === "POST") {
+      options.onChat?.();
+      return new Response(
+        `event: token\ndata: ${JSON.stringify({ text: "Draft reply." })}\n\n` +
+          `event: done\ndata: ${JSON.stringify({ messageId: "m1", conversationId: "c1" })}\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }
     if (url.pathname === `${base}/versions`) {
       return Response.json({ versions: [] });
     }
@@ -314,9 +322,9 @@ function installServer(options: ServerOptions = {}) {
   return { calls };
 }
 
-async function open(path: string) {
+async function open(path: string, options?: AppProps["options"]) {
   window.history.pushState(null, "", path);
-  render(<App />);
+  render(<App {...(options ? { options } : {})} />);
   await screen.findByRole("heading", { level: 1 });
 }
 
@@ -440,6 +448,93 @@ describe("Monitor screens", () => {
       expect(block.textContent).toContain("The OpenAI key must be entered again.");
     });
 
+    it("points at no screen the host has hidden", async () => {
+      installServer({
+        overview: overview({
+          configError: "The OpenAI key must be entered again.",
+          attention: {
+            openGaps: 3,
+            failingTests: 1,
+            notIndexed: [{ sourceId: "src_1", label: "Docs", documents: 2 }],
+          },
+        }),
+      });
+      await open("/admin/overview", {
+        hideScreens: ["providers", "gaps", "tests", "sources", "install", "reports"],
+      });
+
+      const block = await screen.findByRole("region", { name: "Needs attention" });
+      expect(within(block).queryAllByRole("link")).toEqual([]);
+      // Still said, without a link; the providers pointer is left out.
+      expect(block.textContent).toContain("3 unanswered questions are waiting for an answer");
+      expect(block.textContent).toContain("The OpenAI key must be entered again.");
+      expect(block.textContent).not.toContain("Check providers");
+
+      const checklist = screen.getByRole("region", { name: "Getting started" });
+      const linked = within(checklist)
+        .getAllByRole("link")
+        .map((a) => a.textContent);
+      expect(linked).toEqual(["Publish", "First visitor question"]);
+      expect(within(checklist).getByText("Add content")).toBeTruthy();
+      expect(screen.queryByRole("link", { name: "See Reports" })).toBeNull();
+      // Conversations is still shown, so its question links stay.
+      expect(screen.getByRole("link", { name: "do you ship to spain?" })).toBeTruthy();
+    });
+
+    it("ticks Try a question once the Try it pane gets an answer", async () => {
+      let tried = false;
+      let overviewLoads = 0;
+      installServer({
+        overview: () => {
+          overviewLoads++;
+          return Response.json(
+            overview({
+              setup: {
+                hasContent: true,
+                tried,
+                published: false,
+                installed: false,
+                visitorQuestion: false,
+              },
+            }),
+          );
+        },
+        // The engine records the try when the question is asked.
+        onChat: () => {
+          tried = true;
+        },
+      });
+      await open("/admin/overview");
+      const checklist = await screen.findByRole("region", { name: "Getting started" });
+      expect(within(checklist).getByText("1 of 5 done")).toBeTruthy();
+      const loadsBefore = overviewLoads;
+
+      fireEvent.click(within(checklist).getByRole("button", { name: "Open Try it" }));
+      const pane = await screen.findByRole("complementary", { name: "Try it" });
+      fireEvent.change(within(pane).getByLabelText("Ask a question"), {
+        target: { value: "Do you ship?" },
+      });
+      fireEvent.click(within(pane).getByRole("button", { name: "Send" }));
+      await within(pane).findByText("Draft reply.");
+
+      await waitFor(() =>
+        expect(
+          within(screen.getByRole("region", { name: "Getting started" })).getByText("2 of 5 done"),
+        ).toBeTruthy(),
+      );
+      expect(overviewLoads).toBe(loadsBefore + 1);
+      expect(screen.queryByRole("button", { name: "Open Try it" })).toBeNull();
+
+      // Once the step is done, later answers do not reload the overview.
+      fireEvent.change(within(pane).getByLabelText("Ask a question"), {
+        target: { value: "And returns?" },
+      });
+      fireEvent.click(within(pane).getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(within(pane).getAllByText("Draft reply.")).toHaveLength(2));
+      await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+      expect(overviewLoads).toBe(loadsBefore + 1);
+    });
+
     it("does not render Needs attention when there is nothing to show", async () => {
       installServer();
       await open("/admin/overview");
@@ -542,6 +637,18 @@ describe("Monitor screens", () => {
       const unanswered = await screen.findByRole("region", { name: "Most often unanswered" });
       expect(within(unanswered).getByRole("heading", { name: "None in this period" })).toBeTruthy();
       expect(unanswered.querySelector(".empty-state-compact")).toBeTruthy();
+    });
+
+    it("names questions without links when Conversations and Gaps are hidden", async () => {
+      installServer({
+        report: { ...REPORT, topGaps: [{ question: "do you ship to spain?", count: 2 }] },
+      });
+      await open("/admin/reports", { hideScreens: ["conversations", "gaps"] });
+      expect(await screen.findByText("how do i reset my password?")).toBeTruthy();
+      expect(screen.getByText("do you ship to spain?")).toBeTruthy();
+      expect(screen.queryByRole("link", { name: "how do i reset my password?" })).toBeNull();
+      expect(screen.queryByRole("link", { name: "do you ship to spain?" })).toBeNull();
+      expect(screen.queryByText(/on the Gaps screen/)).toBeNull();
     });
 
     it("offers the periods as presets that a keyboard can move between", async () => {
@@ -765,6 +872,76 @@ describe("Monitor screens", () => {
       expect(await screen.findByRole("link", { name: /Do you ship to Spain\?/ })).toBeTruthy();
     });
 
+    it("keeps the search in the address, and a cleared search stays cleared", async () => {
+      const { calls } = installServer({
+        twoAssistants: true,
+        conversations: (search) => (search.get("q") === "spain" ? [] : [conversation()]),
+      });
+      await open(`/admin/conversations?q=spain&assistant=${ASSISTANT.id}`);
+      expect(await screen.findByRole("heading", { name: "No conversations match" })).toBeTruthy();
+      expect(new URLSearchParams(window.location.search).get("q")).toBe("spain");
+
+      fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+      expect(await screen.findByRole("link", { name: /Do you ship to Spain\?/ })).toBeTruthy();
+      expect(window.location.search).toBe(`?assistant=${ASSISTANT.id}`);
+
+      // A reload does not bring the cleared search back.
+      cleanup();
+      await open(`${window.location.pathname}${window.location.search}`);
+      expect(await screen.findByRole("link", { name: /Do you ship to Spain\?/ })).toBeTruthy();
+      expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe("");
+
+      // A typed search is written to the address, so a switch keeps it.
+      fireEvent.change(screen.getByLabelText("Search conversations"), {
+        target: { value: "returns" },
+      });
+      await waitFor(
+        () => expect(new URLSearchParams(window.location.search).get("q")).toBe("returns"),
+        { timeout: 2000 },
+      );
+      pickAssistant(OTHER_ASSISTANT.id);
+      await waitFor(() =>
+        expect(
+          calls.some(
+            (c) =>
+              c.path === `/api/admin/assistants/${OTHER_ASSISTANT.id}/conversations` &&
+              c.search.get("q") === "returns",
+          ),
+        ).toBe(true),
+      );
+      expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe(
+        "returns",
+      );
+    });
+
+    it("writes the answer in place when the host hides Gaps", async () => {
+      const { calls } = installServer();
+      await open(`/admin/conversations?id=cnv_1&assistant=${ASSISTANT.id}`, {
+        hideScreens: ["gaps"],
+      });
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Write an answer for this" }));
+      // Still on the conversation: Gaps is not there to go to.
+      expect(window.location.pathname).toBe("/admin/conversations");
+      expect(screen.getByRole("heading", { name: "Conversation", level: 1 })).toBeTruthy();
+      expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe(
+        "Do you ship to Spain?",
+      );
+
+      fireEvent.change(screen.getByLabelText("Answer"), { target: { value: "Yes, in 3 days." } });
+      fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
+      await waitFor(() =>
+        expect(calls.find((c) => c.path.endsWith("/answers"))?.body).toEqual({
+          question: "Do you ship to Spain?",
+          answer: "Yes, in 3 days.",
+          fromMessageId: "msg_a1",
+        }),
+      );
+      expect(await screen.findByText(/Answer saved to your sources/)).toBeTruthy();
+      expect(screen.queryByLabelText("Answer")).toBeNull();
+    });
+
     it("retries after an error", async () => {
       let attempts = 0;
       installServer({
@@ -944,6 +1121,13 @@ describe("Monitor screens", () => {
       expect(
         screen.getByText(/Writing an answer adds it to your sources, so the next visitor/),
       ).toBeTruthy();
+    });
+
+    it("offers no Read conversations button when the host hides Conversations", async () => {
+      installServer({ gaps: [] });
+      await open("/admin/gaps", { hideScreens: ["conversations"] });
+      expect(await screen.findByRole("heading", { name: "No unanswered questions" })).toBeTruthy();
+      expect(screen.queryByText("Read conversations")).toBeNull();
     });
 
     it("asks only for open gaps, most asked first as the engine sends them", async () => {

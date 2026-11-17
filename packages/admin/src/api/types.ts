@@ -198,8 +198,6 @@ export interface OverviewAttention {
 }
 
 export interface AssistantOverview {
-  messages: number;
-  answeredShare: number;
   topQuestions: TopQuestion[];
   todayCostMicros: number;
   todayCostUnknown?: boolean;

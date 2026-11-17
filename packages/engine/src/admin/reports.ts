@@ -10,15 +10,8 @@ import { BadRequest, NotFound } from "./errors.js";
 export const REPORT_DAY_OPTIONS = [7, 30, 90] as const;
 export type ReportDays = (typeof REPORT_DAY_OPTIONS)[number];
 
-export interface AssistantReport {
+export interface AssistantReport extends PeriodFigures {
   days: ReportDays;
-  from: string;
-  to: string;
-  questions: number;
-  replies: number;
-  answeredShare: number;
-  thumbsDownShare: number;
-  costMicros: number;
   topQuestions: QuestionCount[];
   topGaps: QuestionCount[];
   topSources: SourceCitationCount[];
@@ -100,29 +93,19 @@ export async function reportFor(
   const range = rangeFor(days, at);
 
   // In parallel, as the Overview screen already does, so the figures are one
-  // consistent read rather than seven sequential ones.
-  const [questions, shares, costMicros, topQuestions, topGaps, topSources, uncited] =
-    await Promise.all([
-      tenant.reports.questionCount(assistantId, range),
-      tenant.reports.replyShares(assistantId, range),
-      tenant.reports.costMicros(assistantId, range),
-      tenant.reports.topQuestions(assistantId, range, { unansweredOnly: false }),
-      tenant.reports.topQuestions(assistantId, range, { unansweredOnly: true }),
-      tenant.reports.topSources(assistantId, range),
-      tenant.reports.uncitedSources(assistantId, range),
-    ]);
+  // consistent read rather than sequential ones. The headline figures come
+  // from the same function as Overview's, so the two screens cannot drift.
+  const [figures, topQuestions, topGaps, topSources, uncited] = await Promise.all([
+    periodFigures(tenant, assistantId, range),
+    tenant.reports.topQuestions(assistantId, range, { unansweredOnly: false }),
+    tenant.reports.topQuestions(assistantId, range, { unansweredOnly: true }),
+    tenant.reports.topSources(assistantId, range),
+    tenant.reports.uncitedSources(assistantId, range),
+  ]);
 
   return {
     days,
-    from: range.fromDay,
-    to: range.toDay,
-    questions,
-    replies: shares.replies,
-    // Zero rather than null on an empty range: the screen shows a number with
-    // a plain sentence, and a dash makes an owner wonder if it is broken.
-    answeredShare: shares.replies === 0 ? 0 : shares.answered / shares.replies,
-    thumbsDownShare: shares.replies === 0 ? 0 : shares.thumbsDown / shares.replies,
-    costMicros,
+    ...figures,
     topQuestions,
     topGaps,
     topSources,

@@ -499,7 +499,9 @@ Options accepted by `mountAdmin`:
 - `onSignOut` — optional sign-out handler replacing the default `/api/admin/logout`
   request.
 - `hideScreens` — built-in screen ids to omit from navigation and routing (for
-  example, when keys are fully managed).
+  example, when keys are fully managed). Screens never link to a hidden screen:
+  the link's text stays, without the link. With Gaps hidden, "Write an answer
+  for this" on a conversation opens the answer editor in place.
 - `headerStart` / `headerEnd` — optional components rendered in the top bar after
   the product name and before the Sign out button, with `{ api }`. Below 900px
   `headerEnd` moves with Sign out to the bottom of the navigation drawer.

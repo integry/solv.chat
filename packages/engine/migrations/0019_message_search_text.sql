@@ -30,3 +30,18 @@ UPDATE messages SET search_text = NULL WHERE instr(search_text, '  ') > 0;
 -- The engine folds every row still NULL (any non-ASCII text) before it runs a
 -- search, and finds them through this index, which empties as it goes.
 CREATE INDEX messages_search_text_pending ON messages(org_id) WHERE search_text IS NULL;
+
+-- An older Worker still serving while this deploys rewrites `content` (a
+-- paused reply completed, say) without `search_text`, which would keep the
+-- text folded from the old content for good. A rewrite that leaves
+-- `search_text` as it was drops it instead, so the engine folds the row again
+-- before the next search. The engine writes both together, so this does not
+-- fire for its own rewrites unless the folded text happens to be unchanged,
+-- and then the row is only folded once more.
+CREATE TRIGGER messages_search_text_stale AFTER UPDATE OF content ON messages
+WHEN NEW.content IS NOT OLD.content
+  AND NEW.search_text IS NOT NULL
+  AND NEW.search_text IS OLD.search_text
+BEGIN
+  UPDATE messages SET search_text = NULL WHERE org_id = NEW.org_id AND id = NEW.id;
+END;

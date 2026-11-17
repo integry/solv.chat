@@ -1,5 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { defaultVersionConfig, newId } from "@solvchat/core";
+import { defaultVersionConfig, MAX_CHAT_MESSAGE_LENGTH, newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { NOT_INDEXED_AFTER_MS } from "../../src/admin/overview.js";
 import { conversationsFor } from "../../src/db/conversations.js";
@@ -834,6 +834,43 @@ describe("admin Monitor screen APIs", () => {
         ["do you ship?", 1],
         ["other?", 1],
       ]);
+    });
+
+    it("dismisses the longest question a visitor can ask, even once lowercasing lengthens it", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      // "İ" lowercases to two code units, so the key is twice the message.
+      const question = "İ".repeat(MAX_CHAT_MESSAGE_LENGTH);
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question,
+        answered: false,
+        createdAt: Date.now(),
+      });
+      const listed = await getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps?status=open`);
+      const key = listed.gaps[0]?.question ?? "";
+      expect(key.length).toBe(MAX_CHAT_MESSAGE_LENGTH * 2);
+
+      const dismiss = await call(app, "POST", `/api/admin/assistants/${ast}/gaps/dismiss`, {
+        question: key,
+      });
+      expect(dismiss.status).toBe(200);
+      expect(
+        (await getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps?status=open`)).total,
+      ).toBe(0);
+    });
+
+    it("says a dismissal's question is too long rather than empty", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      const res = await call(app, "POST", `/api/admin/assistants/${ast}/gaps/dismiss`, {
+        question: "a".repeat(MAX_CHAT_MESSAGE_LENGTH * 3 + 1),
+      });
+      expect(res.status).toBe(400);
+      const body = JSON.stringify(await res.json());
+      expect(body).toContain(`question: must be at most ${MAX_CHAT_MESSAGE_LENGTH * 3} characters`);
+      expect(body).not.toContain("must not be empty");
     });
 
     it("refuses a dismissal without a question, and for another org's assistant", async () => {

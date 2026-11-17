@@ -1,13 +1,19 @@
 import { type ReactNode, useState } from "react";
 import type { AssistantOverview, OverviewSetup } from "../api/types.js";
-import { assistantPath } from "../routing.js";
+import { ScreenLink, useAdminNavigation } from "../routing.js";
 import { formatDate } from "../ui/format.js";
 import { Icon } from "../ui/Icon.js";
-import { ScreenLink } from "../ui/ScreenLink.js";
 import type { Change } from "./figures.js";
 
 /** Asks the shell to open the Try it pane (it owns the pane and its toggle). */
 export const OPEN_TRY_IT_EVENT = "solvchat:open-try-it";
+
+/**
+ * Sent by the Try it pane when a question it asked got its answer, with the
+ * assistant's id as `detail`. The engine has recorded the try by then, so
+ * Overview reloads and its checklist ticks "Try a question" at once.
+ */
+export const TRY_IT_ANSWERED_EVENT = "solvchat:try-it-answered";
 
 export function StatCard({
   label,
@@ -122,7 +128,8 @@ export function QuestionsChart({ daily }: { daily: Array<{ day: string; question
   );
 }
 
-// Each `to` is one of the assistant's own screens; links add the assistant.
+// Each `to` is the id of one of the assistant's own screens; links add the
+// assistant. A screen the host has hidden is named without a link.
 const STEPS: Array<{
   key: keyof OverviewSetup;
   label: string;
@@ -134,7 +141,7 @@ const STEPS: Array<{
     key: "hasContent",
     label: "Add content",
     hint: "Pages or answers your assistant replies from.",
-    to: "/admin/sources",
+    to: "sources",
   },
   {
     key: "tried",
@@ -146,19 +153,19 @@ const STEPS: Array<{
     key: "published",
     label: "Publish",
     hint: "Publish is at the top of the Build screens.",
-    to: "/admin/behaviour",
+    to: "behaviour",
   },
   {
     key: "installed",
     label: "Install on your site",
     hint: "Paste the snippet into your site.",
-    to: "/admin/install",
+    to: "install",
   },
   {
     key: "visitorQuestion",
     label: "First visitor question",
     hint: "Shows up in Conversations when it arrives.",
-    to: "/admin/conversations",
+    to: "conversations",
   },
 ];
 
@@ -231,7 +238,9 @@ export function GettingStarted({
               <div className="checklist-text">
                 <span className="checklist-label">
                   {step.to ? (
-                    <ScreenLink to={assistantPath(step.to, assistantId)}>{step.label}</ScreenLink>
+                    <ScreenLink to={step.to} query={{ assistant: assistantId }}>
+                      {step.label}
+                    </ScreenLink>
                   ) : (
                     step.label
                   )}
@@ -272,6 +281,8 @@ export function NeedsAttention({
   overview: AssistantOverview;
 }) {
   const attention = overview.attention;
+  // A host that hides Providers manages them itself: no pointer to a missing screen.
+  const providersShown = useAdminNavigation().pathFor("providers") !== null;
   const items: Array<{ key: string; tone: "warning" | "danger"; body: ReactNode }> = [];
   if (overview.configError) {
     items.push({
@@ -279,8 +290,13 @@ export function NeedsAttention({
       tone: "danger",
       body: (
         <>
-          <span>{overview.configError}</span>{" "}
-          <ScreenLink to="/admin/providers">Check providers</ScreenLink>
+          <span>{overview.configError}</span>
+          {providersShown && (
+            <>
+              {" "}
+              <ScreenLink to="providers">Check providers</ScreenLink>
+            </>
+          )}
         </>
       ),
     });
@@ -290,7 +306,7 @@ export function NeedsAttention({
       key: "gaps",
       tone: "warning",
       body: (
-        <ScreenLink to={assistantPath("/admin/gaps", assistantId)}>
+        <ScreenLink to="gaps" query={{ assistant: assistantId }}>
           {attention.openGaps}{" "}
           {plural(
             attention.openGaps,
@@ -306,7 +322,7 @@ export function NeedsAttention({
       key: "tests",
       tone: "danger",
       body: (
-        <ScreenLink to={assistantPath("/admin/tests", assistantId)}>
+        <ScreenLink to="tests" query={{ assistant: assistantId }}>
           {attention.failingTests} {plural(attention.failingTests, "test failed", "tests failed")}{" "}
           in the last run
         </ScreenLink>
@@ -318,7 +334,7 @@ export function NeedsAttention({
       key: `source-${source.sourceId}`,
       tone: "warning",
       body: (
-        <ScreenLink to={assistantPath("/admin/sources", assistantId)}>
+        <ScreenLink to="sources" query={{ assistant: assistantId }}>
           {source.label}: {source.documents}{" "}
           {plural(source.documents, "page was not indexed", "pages were not indexed")}
         </ScreenLink>

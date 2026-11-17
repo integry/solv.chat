@@ -2,12 +2,17 @@ import { toConversationSearch } from "@solvchat/core";
 import { useEffect, useId, useState } from "react";
 import type { ConversationSummary, ConversationsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { assistantPath, navigateTo, readQueryParam } from "../routing.js";
+import {
+  assistantPath,
+  navigateTo,
+  readQueryParam,
+  replaceQueryParam,
+  ScreenLink,
+} from "../routing.js";
 import { RelativeTime } from "../ui/DateText.js";
 import { EmptyState } from "../ui/EmptyState.js";
 import { ErrorState } from "../ui/ErrorState.js";
 import { PageHeader } from "../ui/PageHeader.js";
-import { ScreenLink } from "../ui/ScreenLink.js";
 import { Skeleton } from "../ui/Skeleton.js";
 import { StatusBadge } from "../ui/StatusBadge.js";
 import { Conversation } from "./Conversation.js";
@@ -42,9 +47,8 @@ const DATE_OPTIONS = [
  * A conversation's address names its assistant too, so a shared link opens
  * under the right assistant and switching assistants does not carry it over.
  */
-function conversationPath(conv: ConversationSummary): string {
-  const params = new URLSearchParams({ id: conv.id, assistant: conv.assistantId });
-  return `${LIST_PATH}?${params.toString()}`;
+function conversationQuery(conv: ConversationSummary): Record<string, string> {
+  return { id: conv.id, assistant: conv.assistantId };
 }
 
 interface OpenAddress {
@@ -85,7 +89,7 @@ function ConversationRow({ conv }: { conv: ConversationSummary }) {
   const messages = conv.turnCount === 1 ? "1 message" : `${conv.turnCount} messages`;
   return (
     <li className="conv-item">
-      <ScreenLink to={conversationPath(conv)} className="conv-row">
+      <ScreenLink to="conversations" query={conversationQuery(conv)} className="conv-row">
         <span className="conv-title">
           {conv.firstQuestion ?? "Conversation without a question"}
         </span>
@@ -138,6 +142,17 @@ export function Conversations({ assistantId }: ConversationsProps) {
     }, SEARCH_DELAY_MS);
     return () => clearTimeout(timer);
   }, [searchInput, search]);
+
+  // The search is kept in the address, so a reload, a copied link and an
+  // assistant switch (which keeps the query) show the search on screen, and a
+  // cleared search stays cleared. Only while the list is what the address
+  // shows: a Back waiting for an answer has moved it to another place.
+  useEffect(() => {
+    if (openId !== null || window.location.pathname !== LIST_PATH) return;
+    const named = readQueryParam("assistant");
+    if (named !== null && named !== assistantId) return;
+    replaceQueryParam("q", search === "" ? null : search);
+  }, [search, openId, assistantId]);
 
   const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
   if (flags.size > 0) params.set("filter", [...flags].join(","));

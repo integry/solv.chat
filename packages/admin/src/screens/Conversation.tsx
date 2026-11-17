@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import type { ConversationDetail, ConversationTurn } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { navigateTo } from "../routing.js";
+import { useAdminNavigation } from "../routing.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
 import { ErrorState } from "../ui/ErrorState.js";
 import { formatDateTime } from "../ui/format.js";
@@ -9,6 +9,7 @@ import { Icon } from "../ui/Icon.js";
 import { PageHeader } from "../ui/PageHeader.js";
 import { Skeleton } from "../ui/Skeleton.js";
 import { StatusBadge } from "../ui/StatusBadge.js";
+import { EntryEditor } from "./EntryEditor.js";
 import { TestEditor } from "./TestEditor.js";
 
 export interface ConversationProps {
@@ -18,17 +19,18 @@ export interface ConversationProps {
 }
 
 /**
- * Where "Write an answer for this" goes: Gaps, with the editor open and filled
- * in. It names the assistant, so once Gaps has taken the question out of the
- * address, a reload still shows this assistant.
+ * Where "Write an answer for this" goes when Gaps is shown: Gaps, with the
+ * editor open and filled in. It names the assistant, so once Gaps has taken
+ * the question out of the address, a reload still shows this assistant.
  */
-export function gapAnswerPath(
+function gapAnswerPath(
+  gapsPath: string,
   assistantId: string,
   fromMessageId: string,
   question: string,
 ): string {
   const params = new URLSearchParams({ answer: fromMessageId, question, assistant: assistantId });
-  return `/admin/gaps?${params.toString()}`;
+  return `${gapsPath}?${params.toString()}`;
 }
 
 function Timestamp({ value }: { value: number }) {
@@ -96,7 +98,16 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
     question: string;
   } | null>(null);
   const nextTestSessionId = useRef(1);
+  // Only used when the host hides Gaps: the answer is then written here.
+  const [answering, setAnswering] = useState<{
+    sessionId: number;
+    turnId: string;
+    question: string;
+  } | null>(null);
+  const nextAnswerSessionId = useRef(1);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const { navigate, pathFor } = useAdminNavigation();
+  const gapsPath = pathFor("gaps");
 
   // The detail is read by id alone. A link without its assistant (or naming
   // the wrong one) can load another assistant's conversation; it is not shown
@@ -198,13 +209,23 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                       <button
                         type="button"
                         className="btn btn-primary btn-sm"
-                        onClick={() =>
+                        onClick={() => {
                           // The reply's own id: the engine links the answer
                           // through the question the reply records.
-                          navigateTo(
-                            gapAnswerPath(assistantId, turn.id, questionTurn?.content ?? ""),
-                          )
-                        }
+                          const question = questionTurn?.content ?? "";
+                          if (gapsPath !== null) {
+                            navigate(gapAnswerPath(gapsPath, assistantId, turn.id, question));
+                            return;
+                          }
+                          // Gaps is hidden by the host: write the answer here.
+                          setAddingTest(null);
+                          setStatusMessage(null);
+                          setAnswering({
+                            sessionId: nextAnswerSessionId.current++,
+                            turnId: turn.id,
+                            question,
+                          });
+                        }}
                       >
                         Write an answer for this
                       </button>
@@ -213,6 +234,7 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                       type="button"
                       className="btn btn-secondary btn-sm"
                       onClick={() => {
+                        setAnswering(null);
                         setStatusMessage(null);
                         setAddingTest({
                           sessionId: nextTestSessionId.current++,
@@ -227,6 +249,36 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                     </button>
                   </div>
                 )}
+
+                {answering?.turnId === turn.id &&
+                  (() => {
+                    const sessionId = answering.sessionId;
+                    return (
+                      <EntryEditor
+                        key={sessionId}
+                        assistantId={assistantId}
+                        fromMessageId={turn.id}
+                        initialQuestion={answering.question}
+                        onSaved={(_result, saved) => {
+                          if (saved.assistantId !== assistantId) return;
+                          // A save that ends after the editor was closed or
+                          // reopened leaves the editor now open alone.
+                          setAnswering((current) =>
+                            current?.sessionId === sessionId ? null : current,
+                          );
+                          setStatusMessage(
+                            "Answer saved to your sources. The assistant can use it once indexed.",
+                          );
+                          detailRes.reload();
+                        }}
+                        onCancel={() =>
+                          setAnswering((current) =>
+                            current?.sessionId === sessionId ? null : current,
+                          )
+                        }
+                      />
+                    );
+                  })()}
 
                 {addingTest?.turnId === turn.id &&
                   (() => {

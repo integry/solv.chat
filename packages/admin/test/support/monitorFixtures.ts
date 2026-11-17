@@ -16,8 +16,6 @@ const HOUR = 3_600_000;
 export function monitorOverview(now: number): AssistantOverview {
   const day = (offset: number) => new Date(now - offset * 86_400_000).toISOString().slice(0, 10);
   return {
-    messages: 120,
-    answeredShare: 0.82,
     todayCostMicros: 41_000,
     dailyCostCapMicros: 2_000_000,
     configError: null,

@@ -77,7 +77,7 @@ async function ask(orgId: string, conversationId: string, content: string, at: n
   return id;
 }
 
-/** A row as it was stored before migration 0018: no `search_text`. */
+/** A row as it was stored before migration 0019: no `search_text`. */
 async function legacyMessage(
   orgId: string,
   conversationId: string,
@@ -172,7 +172,7 @@ describe("conversation search", () => {
         await ask(ORG_A, conversation, text, now - 10_000 + i * 100);
         expected.push(conversation);
       }
-      // One asked before migration 0018, with its runs of spaces.
+      // One asked before migration 0019, with its runs of spaces.
       const older = await seedConversation(ORG_A, ast, now - 9000);
       await legacyMessage(ORG_A, older, "user", "Do  you   ship?", now - 9000);
       expected.push(older);

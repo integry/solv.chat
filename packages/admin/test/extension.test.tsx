@@ -44,8 +44,6 @@ function installMockFetch(options: { signedIn?: boolean; assistants?: Assistant[
 
     if (path.endsWith("/overview")) {
       return Response.json({
-        messages: 0,
-        answeredShare: 1,
         todayCostMicros: 0,
         topQuestions: [],
       });

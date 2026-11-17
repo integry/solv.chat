@@ -131,7 +131,7 @@ function installServer(
       );
     }
     if (path.endsWith("/overview")) {
-      return Response.json({ messages: 0, answeredShare: 1, todayCostMicros: 0, topQuestions: [] });
+      return Response.json({ todayCostMicros: 0, topQuestions: [] });
     }
     if (path.endsWith("/sources")) return Response.json({ sources: [] });
     return Response.json({});

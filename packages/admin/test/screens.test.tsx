@@ -33,8 +33,6 @@ async function findConversationRow(): Promise<HTMLElement> {
 
 function makeOverview(overrides: Partial<AssistantOverview> = {}): AssistantOverview {
   return {
-    messages: 24,
-    answeredShare: 0.75,
     topQuestions: [{ question: "pricing?", count: 5 }],
     todayCostMicros: 15_000,
     dailyCostCapMicros: 2_000_000,

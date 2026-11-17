@@ -186,7 +186,7 @@ describe("migrations", () => {
     ]);
   });
 
-  it("folds ASCII rows written before 0018 exactly as the engine does, and only those", async () => {
+  it("folds ASCII rows written before 0019 exactly as the engine does, and only those", async () => {
     const orgId = "org_00000000000000000000";
     // Every ASCII whitespace character, other control characters and letters
     // in both cases, in runs, from a fixed seed.
@@ -231,8 +231,10 @@ describe("migrations", () => {
     ]);
 
     const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0019_"));
-    const updates = (migration?.queries ?? []).filter((q) =>
-      /\bUPDATE\s+messages\s+SET\s+search_text\b/i.test(q),
+    // The backfill's own updates, not the trigger's body.
+    const updates = (migration?.queries ?? []).filter(
+      (q) =>
+        /\bUPDATE\s+messages\s+SET\s+search_text\b/i.test(q) && !/\bCREATE\s+TRIGGER\b/i.test(q),
     );
     expect(updates.length).toBe(10);
     for (const sql of updates) {
@@ -247,6 +249,49 @@ describe("migrations", () => {
     expect(rows.results).toEqual([
       ...ascii.map((content) => ({ content, search_text: searchableText(content) })),
       ...forTheEngine.map((content) => ({ content, search_text: null })),
+    ]);
+  });
+
+  it("drops search_text when content is rewritten without it, as an older Worker does", async () => {
+    const orgId = "org_00000000000000000000";
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'Site', 'pk_1', 1)",
+      ).bind(orgId),
+      env.DB.prepare(
+        "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES ('cnv_1', ?1, 'ast_1', 'vis', 1, '')",
+      ).bind(orgId),
+      ...["msg_old", "msg_new", "msg_same"].map((id, i) =>
+        env.DB.prepare(
+          "INSERT INTO messages (id, org_id, conversation_id, role, content, search_text, created_at) VALUES (?1, ?2, 'cnv_1', 'assistant', 'Paused', 'paused', ?3)",
+        ).bind(id, orgId, i),
+      ),
+    ]);
+
+    await env.DB.batch([
+      // An older Worker completes a paused reply: content only.
+      env.DB.prepare(
+        "UPDATE messages SET content = 'Paused, then École' WHERE org_id = ?1 AND id = 'msg_old'",
+      ).bind(orgId),
+      // The engine writes both together.
+      env.DB.prepare(
+        "UPDATE messages SET content = ?2, search_text = ?3 WHERE org_id = ?1 AND id = 'msg_new'",
+      ).bind(orgId, "Paused, then École", searchableText("Paused, then École")),
+      // A write that leaves content as it was changes nothing.
+      env.DB.prepare(
+        "UPDATE messages SET content = 'Paused' WHERE org_id = ?1 AND id = 'msg_same'",
+      ).bind(orgId),
+    ]);
+
+    const rows = await env.DB.prepare(
+      "SELECT id, search_text FROM messages WHERE org_id = ?1 ORDER BY created_at",
+    )
+      .bind(orgId)
+      .all<{ id: string; search_text: string | null }>();
+    expect(rows.results).toEqual([
+      { id: "msg_old", search_text: null },
+      { id: "msg_new", search_text: "paused, then école" },
+      { id: "msg_same", search_text: "paused" },
     ]);
   });
 

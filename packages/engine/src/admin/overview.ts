@@ -37,8 +37,6 @@ export interface OverviewAttention {
 }
 
 export interface AssistantOverview {
-  messages: number;
-  answeredShare: number;
   topQuestions: TopQuestionRow[];
   todayCostMicros: number;
   todayCostUnknown: boolean;
@@ -92,8 +90,6 @@ export async function overviewFor(
   const previousRange = rangeFor(OVERVIEW_DAYS, at - OVERVIEW_DAYS * DAY_MS);
 
   const [
-    messages,
-    answeredShare,
     topQuestions,
     todayUsage,
     published,
@@ -108,8 +104,6 @@ export async function overviewFor(
     gaps,
     notIndexed,
   ] = await Promise.all([
-    tenant.messages.countFor(assistantId),
-    tenant.messages.answeredShareFor(assistantId),
     tenant.messages.topQuestionsFor(assistantId, 5),
     tenant.usage.summaryFor(assistantId, today),
     tenant.versions.published(assistantId),
@@ -145,8 +139,6 @@ export async function overviewFor(
   // number with a plain sentence, and "—" would make an owner wonder if it is
   // broken.
   return {
-    messages,
-    answeredShare,
     topQuestions,
     todayCostMicros: todayUsage?.costMicros ?? 0,
     todayCostUnknown: todayUsage?.costUnknown ?? false,

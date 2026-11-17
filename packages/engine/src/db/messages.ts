@@ -400,12 +400,14 @@ export function messagesFor(db: D1Database, orgId: string) {
     },
 
     /**
-     * Folds `search_text` for rows written before it existed. Migration 0018
+     * Folds `search_text` for rows written before it existed. Migration 0019
      * folds plain ASCII text in SQL; the rest needs `searchableText`, which
      * SQL cannot reproduce. A row a writer filled in the meantime is left
      * alone: every write of `content` also writes `search_text`, so a
-     * non-NULL value is never older than the text. Each call folds a bounded
-     * number of rows: true means none are left, false that some may be.
+     * non-NULL value is never older than the text (an older Worker's rewrite
+     * of `content` alone is set back to NULL by migration 0019's trigger).
+     * Each call folds a bounded number of rows: true means none are left,
+     * false that some may be.
      */
     async fillSearchText(options: { batch?: number; rounds?: number } = {}): Promise<boolean> {
       const batch = options.batch ?? SEARCH_FILL_BATCH;
@@ -631,19 +633,6 @@ export function messagesFor(db: D1Database, orgId: string) {
       return mapByMsg;
     },
 
-    async countFor(assistantId: string): Promise<number> {
-      const row = await prepare(
-        db,
-        `SELECT COUNT(*) AS total
-           FROM messages m
-           JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
-          WHERE m.org_id = ?1 AND c.assistant_id = ?2`,
-      )
-        .bind(orgId, assistantId)
-        .first<{ total: number }>();
-      return row?.total ?? 0;
-    },
-
     /**
      * Tool calls already stored in this conversation. `json_array_length` reads the
      * column the loop writes, so the cap counts exactly what was spent and needs
@@ -661,21 +650,6 @@ export function messagesFor(db: D1Database, orgId: string) {
         .bind(orgId, conversationId)
         .first<{ total: number }>();
       return row?.total ?? 0;
-    },
-
-    async answeredShareFor(assistantId: string): Promise<number> {
-      const row = await prepare(
-        db,
-        `SELECT COUNT(*) AS total,
-                COALESCE(SUM(CASE WHEN m.answered = 1 THEN 1 ELSE 0 END), 0) AS answered_count
-           FROM messages m
-           JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
-          WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'assistant'`,
-      )
-        .bind(orgId, assistantId)
-        .first<{ total: number; answered_count: number }>();
-      if (!row || row.total === 0) return 0;
-      return row.answered_count / row.total;
     },
 
     async topQuestionsFor(assistantId: string, limit = 5): Promise<TopQuestionRow[]> {

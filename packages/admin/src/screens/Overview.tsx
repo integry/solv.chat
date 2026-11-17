@@ -1,12 +1,12 @@
+import { useEffect } from "react";
 import type { AssistantOverview, PeriodFigures } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { assistantPath } from "../routing.js";
+import { ScreenLink, useAdminNavigation } from "../routing.js";
 import { ErrorState } from "../ui/ErrorState.js";
 import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
-import { ScreenLink } from "../ui/ScreenLink.js";
 import { Skeleton } from "../ui/Skeleton.js";
-import { questionConversationsPath } from "./conversationLinks.js";
+import { questionConversationsQuery } from "./conversationLinks.js";
 import {
   costChange,
   countChange,
@@ -15,7 +15,13 @@ import {
   formatTimes,
   shareChange,
 } from "./figures.js";
-import { GettingStarted, NeedsAttention, QuestionsChart, StatCard } from "./OverviewParts.js";
+import {
+  GettingStarted,
+  NeedsAttention,
+  QuestionsChart,
+  StatCard,
+  TRY_IT_ANSWERED_EVENT,
+} from "./OverviewParts.js";
 
 export interface OverviewProps {
   assistantId: string;
@@ -56,6 +62,20 @@ export function Overview({ assistantId }: OverviewProps) {
     `/api/admin/assistants/${assistantId}/overview`,
   );
   const overview = overviewRes.value;
+  const reportsShown = useAdminNavigation().pathFor("reports") !== null;
+
+  // A question answered in the Try it pane is a checklist step done. Reload
+  // while that step is still open, so it ticks without leaving the screen.
+  const triedPending = overview?.setup !== undefined && !overview.setup.tried;
+  const reloadOverview = overviewRes.reload;
+  useEffect(() => {
+    if (!triedPending) return;
+    const onAnswered = (event: Event) => {
+      if (event instanceof CustomEvent && event.detail === assistantId) reloadOverview();
+    };
+    window.addEventListener(TRY_IT_ANSWERED_EVENT, onAnswered);
+    return () => window.removeEventListener(TRY_IT_ANSWERED_EVENT, onAnswered);
+  }, [triedPending, assistantId, reloadOverview]);
   const period = overview?.period;
   const days = period?.days ?? 7;
   const current = period ?? EMPTY_FIGURES;
@@ -152,7 +172,10 @@ export function Overview({ assistantId }: OverviewProps) {
                 <ul className="history-list">
                   {overview.topQuestions.map((item) => (
                     <li key={item.question} className="history-item">
-                      <ScreenLink to={questionConversationsPath(assistantId, item.question)}>
+                      <ScreenLink
+                        to="conversations"
+                        query={questionConversationsQuery(assistantId, item.question)}
+                      >
                         {item.question}
                       </ScreenLink>
                       <span className="badge">{formatTimes(item.count)}</span>
@@ -160,9 +183,11 @@ export function Overview({ assistantId }: OverviewProps) {
                   ))}
                 </ul>
               )}
-              <ScreenLink to={assistantPath("/admin/reports", assistantId)} className="more-link">
-                See Reports
-              </ScreenLink>
+              {reportsShown && (
+                <ScreenLink to="reports" query={{ assistant: assistantId }} className="more-link">
+                  See Reports
+                </ScreenLink>
+              )}
             </section>
           </div>
         </div>

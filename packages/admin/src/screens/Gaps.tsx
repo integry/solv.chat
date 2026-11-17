@@ -2,12 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, postJson } from "../api/client.js";
 import type { GapSummary, GapsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { assistantPath, dropQueryParams, readQueryParam } from "../routing.js";
+import { dropQueryParams, readQueryParam, ScreenLink, useAdminNavigation } from "../routing.js";
 import { RelativeTime } from "../ui/DateText.js";
 import { EmptyState } from "../ui/EmptyState.js";
 import { ErrorState } from "../ui/ErrorState.js";
 import { PageHeader } from "../ui/PageHeader.js";
-import { ScreenLink } from "../ui/ScreenLink.js";
 import { Skeleton } from "../ui/Skeleton.js";
 import { useToast } from "../ui/Toast.js";
 import { type EntryDraft, EntryEditor } from "./EntryEditor.js";
@@ -68,6 +67,7 @@ function gapTitle(gap: GapSummary): string {
 
 export function Gaps({ assistantId }: GapsProps) {
   const toast = useToast();
+  const conversationsShown = useAdminNavigation().pathFor("conversations") !== null;
   const [offset, setOffset] = useState(0);
   const gapsRes = useResource<GapsPage>(
     `/api/admin/assistants/${assistantId}/gaps?status=open&limit=${PAGE_SIZE}&offset=${offset}`,
@@ -269,12 +269,16 @@ export function Gaps({ assistantId }: GapsProps) {
           title="No unanswered questions"
           description="When a visitor asks something your content does not cover, the question shows up here, grouped with others asked the same way. Writing an answer adds it to your sources, so the next visitor gets a real reply."
           action={
-            <ScreenLink
-              to={assistantPath("/admin/conversations", assistantId)}
-              className="btn btn-secondary"
-            >
-              Read conversations
-            </ScreenLink>
+            // A button that goes nowhere is left out when the host hides Conversations.
+            conversationsShown ? (
+              <ScreenLink
+                to="conversations"
+                query={{ assistant: assistantId }}
+                className="btn btn-secondary"
+              >
+                Read conversations
+              </ScreenLink>
+            ) : undefined
           }
         />
       ) : (

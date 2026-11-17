@@ -2,16 +2,15 @@ import { type ReactNode, useState } from "react";
 import type { AssistantReport, TopQuestion } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { buildCsv } from "../csv.js";
-import { assistantPath } from "../routing.js";
+import { ScreenLink, useAdminNavigation } from "../routing.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
 import { EmptyState } from "../ui/EmptyState.js";
 import { ErrorState } from "../ui/ErrorState.js";
 import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
-import { ScreenLink } from "../ui/ScreenLink.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { Skeleton } from "../ui/Skeleton.js";
-import { questionConversationsPath } from "./conversationLinks.js";
+import { questionConversationsQuery } from "./conversationLinks.js";
 import { formatCost, formatPercent, formatTimes } from "./figures.js";
 
 export interface ReportsProps {
@@ -97,13 +96,13 @@ function QuestionTable({
   heading: string;
   explanation: string;
   rows: readonly TopQuestion[];
-  linkTo: (question: string) => string;
+  linkTo: (question: string) => { to: string; query: Record<string, string> };
 }) {
   return (
     <ReportList heading={heading} explanation={explanation} empty={rows.length === 0}>
       {rows.map((item) => (
         <li key={item.question} className="history-item">
-          <ScreenLink to={linkTo(item.question)}>{item.question}</ScreenLink>
+          <ScreenLink {...linkTo(item.question)}>{item.question}</ScreenLink>
           <span className="badge">{formatTimes(item.count)}</span>
         </li>
       ))}
@@ -149,6 +148,7 @@ const RANGE_OPTIONS = RANGES.map((value) => ({ value, label: `${value} days` }))
 
 export function Reports({ assistantId }: ReportsProps) {
   const [days, setDays] = useState<(typeof RANGES)[number]>(30);
+  const gapsShown = useAdminNavigation().pathFor("gaps") !== null;
   const reportRes = useResource<AssistantReport>(
     `/api/admin/assistants/${assistantId}/report?days=${days}`,
   );
@@ -259,13 +259,20 @@ export function Reports({ assistantId }: ReportsProps) {
               heading="Most asked questions"
               explanation="What visitors want to know. Open one to read those conversations."
               rows={report.topQuestions}
-              linkTo={(question) => questionConversationsPath(assistantId, question)}
+              linkTo={(question) => ({
+                to: "conversations",
+                query: questionConversationsQuery(assistantId, question),
+              })}
             />
             <QuestionTable
               heading="Most often unanswered"
-              explanation="Write an answer for these on the Gaps screen."
+              explanation={
+                gapsShown
+                  ? "Write an answer for these on the Gaps screen."
+                  : "Questions your assistant could not answer from your content."
+              }
               rows={report.topGaps}
-              linkTo={() => assistantPath("/admin/gaps", assistantId)}
+              linkTo={() => ({ to: "gaps", query: { assistant: assistantId } })}
             />
 
             <ReportList
