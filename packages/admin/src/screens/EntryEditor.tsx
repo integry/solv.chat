@@ -8,6 +8,12 @@ export interface EntrySaveSession {
   fromMessageId?: string;
 }
 
+/** The text in the editor's two boxes. */
+export interface EntryDraft {
+  question: string;
+  answer: string;
+}
+
 export interface EntryEditorProps {
   assistantId: string;
   sourceId?: string | undefined;
@@ -15,6 +21,14 @@ export interface EntryEditorProps {
   fromMessageId?: string | undefined;
   initialQuestion?: string | undefined;
   initialAnswer?: string | undefined;
+  /**
+   * Text held by the owner instead of the editor. When given, the editor shows
+   * and edits it through `onDraftChange`, so a draft outlives the editor being
+   * unmounted and mounted again (for example when the list it sits in is
+   * replaced by an error and comes back).
+   */
+  draft?: EntryDraft | undefined;
+  onDraftChange?: ((draft: EntryDraft) => void) | undefined;
   onSaved?:
     | ((result: { documentId: string; sourceId: string }, session: EntrySaveSession) => void)
     | undefined;
@@ -28,11 +42,16 @@ export function EntryEditor({
   fromMessageId,
   initialQuestion = "",
   initialAnswer = "",
+  draft,
+  onDraftChange,
   onSaved,
   onCancel,
 }: EntryEditorProps) {
-  const [question, setQuestion] = useState(initialQuestion);
-  const [answer, setAnswer] = useState(initialAnswer);
+  const [ownDraft, setOwnDraft] = useState<EntryDraft>({
+    question: initialQuestion,
+    answer: initialAnswer,
+  });
+  const { question, answer } = draft ?? ownDraft;
   const [saving, setSaving] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -45,8 +64,7 @@ export function EntryEditor({
     void documentId;
     void fromMessageId;
     sessionRef.current++;
-    setQuestion(initialQuestion);
-    setAnswer(initialAnswer);
+    setOwnDraft({ question: initialQuestion, answer: initialAnswer });
     setSaving(false);
     setFieldErrors({});
     setFormError(null);
@@ -54,6 +72,14 @@ export function EntryEditor({
   }, [assistantId, sourceId, documentId, fromMessageId, initialQuestion, initialAnswer]);
 
   const isEditing = Boolean(sourceId && documentId);
+
+  function updateDraft(next: EntryDraft) {
+    if (draft !== undefined) {
+      onDraftChange?.(next);
+    } else {
+      setOwnDraft(next);
+    }
+  }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -94,8 +120,7 @@ export function EntryEditor({
       if (sessionRef.current === submitSession) {
         setStatusMessage("Answer saved.");
         if (!isEditing) {
-          setQuestion("");
-          setAnswer("");
+          updateDraft({ question: "", answer: "" });
         }
       }
       onSaved?.(result, session);
@@ -125,7 +150,7 @@ export function EntryEditor({
           type="text"
           value={question}
           disabled={saving}
-          onChange={(e) => setQuestion(e.target.value)}
+          onChange={(e) => updateDraft({ question: e.target.value, answer })}
           placeholder="What do visitors ask?"
         />
         {fieldErrors.question && (
@@ -142,7 +167,7 @@ export function EntryEditor({
           rows={4}
           value={answer}
           disabled={saving}
-          onChange={(e) => setAnswer(e.target.value)}
+          onChange={(e) => updateDraft({ question, answer: e.target.value })}
           placeholder="Write the answer in plain words or Markdown."
         />
         {fieldErrors.answer && (

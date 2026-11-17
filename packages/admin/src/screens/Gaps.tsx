@@ -10,8 +10,8 @@ import { PageHeader } from "../ui/PageHeader.js";
 import { ScreenLink } from "../ui/ScreenLink.js";
 import { Skeleton } from "../ui/Skeleton.js";
 import { useToast } from "../ui/Toast.js";
-import { EntryEditor } from "./EntryEditor.js";
-import { TestEditor } from "./TestEditor.js";
+import { type EntryDraft, EntryEditor } from "./EntryEditor.js";
+import { type TestDraft, TestEditor } from "./TestEditor.js";
 
 export interface GapsProps {
   assistantId: string;
@@ -19,19 +19,34 @@ export interface GapsProps {
 
 const PAGE_SIZE = 25;
 
-/** The editor is open for one gap row, or for a question handed over from a conversation. */
+/**
+ * The editor is open for one gap row, or for a question handed over from a
+ * conversation. The screen holds the typed text, not the editor: the list a
+ * row sits in can be replaced by an error, or the row can move to another
+ * page, and the draft must outlive both.
+ */
 interface AnswerSession {
   fromMessageId: string;
-  question: string;
   /** Set when it belongs to a row in the list; null for a handed-over question. */
   gapKey: string | null;
+  draft: EntryDraft;
+}
+
+interface TestSession {
+  sessionId: number;
+  gapKey: string;
+  draft: TestDraft;
 }
 
 /** "Write an answer for this" in a conversation lands here with `?answer=…&question=…`. */
 function readHandedOverAnswer(): AnswerSession | null {
   const fromMessageId = readQueryParam("answer");
   if (!fromMessageId) return null;
-  return { fromMessageId, question: readQueryParam("question") ?? "", gapKey: null };
+  return {
+    fromMessageId,
+    gapKey: null,
+    draft: { question: readQueryParam("question") ?? "", answer: "" },
+  };
 }
 
 function gapTitle(gap: GapSummary): string {
@@ -45,7 +60,7 @@ export function Gaps({ assistantId }: GapsProps) {
     `/api/admin/assistants/${assistantId}/gaps?status=open&limit=${PAGE_SIZE}&offset=${offset}`,
   );
   const [answering, setAnswering] = useState<AnswerSession | null>(readHandedOverAnswer);
-  const [addingTest, setAddingTest] = useState<{ sessionId: number; gapKey: string } | null>(null);
+  const [addingTest, setAddingTest] = useState<TestSession | null>(null);
   const nextTestSessionId = useRef(1);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<GapSummary | null>(null);
@@ -63,13 +78,38 @@ export function Gaps({ assistantId }: GapsProps) {
   const hasPrevious = offset > 0;
   const hasNext = page ? offset + page.limit < page.total : false;
 
+  // Rows on screen right now. An open editor sits under its row when the row
+  // is here, and above the list when it is not (the list failed to load, or
+  // the gap moved to another page), so its draft stays in view either way.
+  const listedKeys = new Set(
+    gapsRes.status === "error" || !page ? [] : gaps.map((g) => g.question),
+  );
+  const answeringInList = answering?.gapKey != null && listedKeys.has(answering.gapKey);
+  const addingTestInList = addingTest !== null && listedKeys.has(addingTest.gapKey);
+
   function startAnswer(gap: GapSummary) {
     setAddingTest(null);
     setStatusMessage(null);
-    setAnswering({
-      fromMessageId: gap.exampleMessageId,
-      question: gapTitle(gap),
+    // Pressing the button again on the gap already being answered keeps what
+    // has been typed; only a different gap starts a fresh draft.
+    setAnswering((current) =>
+      current?.gapKey === gap.question
+        ? current
+        : {
+            fromMessageId: gap.exampleMessageId,
+            gapKey: gap.question,
+            draft: { question: gapTitle(gap), answer: "" },
+          },
+    );
+  }
+
+  function startTest(gap: GapSummary) {
+    setAnswering(null);
+    setStatusMessage(null);
+    setAddingTest({
+      sessionId: nextTestSessionId.current++,
       gapKey: gap.question,
+      draft: { question: gapTitle(gap), kind: "contains", detail: "" },
     });
   }
 
@@ -114,7 +154,12 @@ export function Gaps({ assistantId }: GapsProps) {
       <EntryEditor
         assistantId={assistantId}
         fromMessageId={session.fromMessageId}
-        initialQuestion={session.question}
+        draft={session.draft}
+        onDraftChange={(draft) =>
+          setAnswering((current) =>
+            current?.fromMessageId === session.fromMessageId ? { ...current, draft } : current,
+          )
+        }
         onSaved={(_result, saved) => {
           if (saved.assistantId !== assistantId) return;
           setAnswering((current) =>
@@ -124,6 +169,27 @@ export function Gaps({ assistantId }: GapsProps) {
           gapsRes.reload();
         }}
         onCancel={() => setAnswering(null)}
+      />
+    );
+  }
+
+  function testEditorFor(session: TestSession) {
+    const sessionId = session.sessionId;
+    return (
+      <TestEditor
+        key={sessionId}
+        assistantId={assistantId}
+        draft={session.draft}
+        onDraftChange={(draft) =>
+          setAddingTest((current) =>
+            current?.sessionId === sessionId ? { ...current, draft } : current,
+          )
+        }
+        onSaved={() => {
+          setAddingTest((current) => (current?.sessionId === sessionId ? null : current));
+          setStatusMessage("Added to tests.");
+        }}
+        onCancel={() => setAddingTest(null)}
       />
     );
   }
@@ -155,7 +221,8 @@ export function Gaps({ assistantId }: GapsProps) {
         </p>
       )}
 
-      {answering && answering.gapKey === null && editorFor(answering)}
+      {answering && !answeringInList && editorFor(answering)}
+      {addingTest && !addingTestInList && testEditorFor(addingTest)}
 
       {gapsRes.status === "error" ? (
         <ErrorState title="Could not load gaps." message={gapsRes.error} onRetry={gapsRes.reload} />
@@ -211,14 +278,7 @@ export function Gaps({ assistantId }: GapsProps) {
                         <button
                           type="button"
                           className="btn btn-secondary btn-sm"
-                          onClick={() => {
-                            setAnswering(null);
-                            setStatusMessage(null);
-                            setAddingTest({
-                              sessionId: nextTestSessionId.current++,
-                              gapKey: gap.question,
-                            });
-                          }}
+                          onClick={() => startTest(gap)}
                         >
                           Add to tests
                         </button>
@@ -236,24 +296,7 @@ export function Gaps({ assistantId }: GapsProps) {
 
                     {answering?.gapKey === gap.question && editorFor(answering)}
 
-                    {addingTest?.gapKey === gap.question &&
-                      (() => {
-                        const sessionId = addingTest.sessionId;
-                        return (
-                          <TestEditor
-                            key={sessionId}
-                            assistantId={assistantId}
-                            initialQuestion={title}
-                            onSaved={() => {
-                              setAddingTest((current) =>
-                                current?.sessionId === sessionId ? null : current,
-                              );
-                              setStatusMessage("Added to tests.");
-                            }}
-                            onCancel={() => setAddingTest(null)}
-                          />
-                        );
-                      })()}
+                    {addingTest?.gapKey === gap.question && testEditorFor(addingTest)}
                   </li>
                 );
               })}

@@ -58,37 +58,49 @@ export function describeExpectation(expectation: TestExpectation): string {
   }
 }
 
+/** What the owner has typed and picked so far. */
+export interface TestDraft {
+  question: string;
+  kind: TestExpectation["kind"];
+  detail: string;
+}
+
 export interface TestEditorProps {
   assistantId: string;
   testId?: string | undefined;
   initialQuestion?: string | undefined;
   initialExpectation?: TestExpectation | undefined;
+  /**
+   * A draft held by the owner instead of the editor. When given, the editor
+   * shows and edits it through `onDraftChange`, so the draft outlives the
+   * editor being unmounted and mounted again.
+   */
+  draft?: TestDraft | undefined;
+  onDraftChange?: ((draft: TestDraft) => void) | undefined;
   onSaved: (test: AnswerTest) => void;
   onCancel?: (() => void) | undefined;
 }
 
+function initialDraftOf(props: TestEditorProps): TestDraft {
+  return {
+    question: props.initialQuestion ?? "",
+    kind: props.initialExpectation?.kind ?? "contains",
+    detail: detailOf(props.initialExpectation),
+  };
+}
+
 /** Shared form for adding or editing an answer test. */
 export function TestEditor(props: TestEditorProps) {
-  const [question, setQuestion] = useState(props.initialQuestion ?? "");
-  const [kind, setKind] = useState<TestExpectation["kind"]>(
-    props.initialExpectation?.kind ?? "contains",
-  );
-  const [detail, setDetail] = useState(detailOf(props.initialExpectation));
+  const [ownDraft, setOwnDraft] = useState<TestDraft>(() => initialDraftOf(props));
+  const current = props.draft ?? ownDraft;
+  const { question, kind, detail } = current;
   const [busy, setBusy] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const sessionRef = useRef(0);
 
-  const latestInitialRef = useRef({
-    question: props.initialQuestion ?? "",
-    kind: props.initialExpectation?.kind ?? ("contains" as const),
-    detail: detailOf(props.initialExpectation),
-  });
-  latestInitialRef.current = {
-    question: props.initialQuestion ?? "",
-    kind: props.initialExpectation?.kind ?? ("contains" as const),
-    detail: detailOf(props.initialExpectation),
-  };
+  const latestInitialRef = useRef(initialDraftOf(props));
+  latestInitialRef.current = initialDraftOf(props);
   const identityRef = useRef({ assistantId: props.assistantId, testId: props.testId });
 
   // Reset only when the edited target (assistant/test) changes, not when
@@ -103,15 +115,22 @@ export function TestEditor(props: TestEditorProps) {
     }
     identityRef.current = { assistantId: props.assistantId, testId: props.testId };
     sessionRef.current++;
-    setQuestion(latestInitialRef.current.question);
-    setKind(latestInitialRef.current.kind);
-    setDetail(latestInitialRef.current.detail);
+    setOwnDraft(latestInitialRef.current);
     setBusy(false);
     setFieldErrors({});
     setFormError(null);
   }, [props.assistantId, props.testId]);
 
   const chosen = EXPECTATIONS.find((option) => option.kind === kind) ?? EXPECTATIONS[0];
+
+  function updateDraft(patch: Partial<TestDraft>) {
+    const next = { ...current, ...patch };
+    if (props.draft !== undefined) {
+      props.onDraftChange?.(next);
+    } else {
+      setOwnDraft(next);
+    }
+  }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -170,7 +189,7 @@ export function TestEditor(props: TestEditorProps) {
           type="text"
           value={question}
           disabled={busy}
-          onChange={(e) => setQuestion(e.target.value)}
+          onChange={(e) => updateDraft({ question: e.target.value })}
           placeholder="What should the assistant answer?"
         />
         {fieldErrors.question && (
@@ -188,7 +207,7 @@ export function TestEditor(props: TestEditorProps) {
           value={kind}
           disabled={busy}
           onChange={(e) => {
-            setKind(e.target.value as TestExpectation["kind"]);
+            updateDraft({ kind: e.target.value as TestExpectation["kind"] });
             setFieldErrors({});
           }}
         >
@@ -212,7 +231,7 @@ export function TestEditor(props: TestEditorProps) {
             type={chosen.field === "url" ? "url" : "text"}
             value={detail}
             disabled={busy}
-            onChange={(e) => setDetail(e.target.value)}
+            onChange={(e) => updateDraft({ detail: e.target.value })}
             placeholder={
               chosen.field === "url"
                 ? "https://example.com/page"

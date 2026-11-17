@@ -193,6 +193,8 @@ interface ServerOptions {
   holdDismiss?: (release: () => void) => void;
   /** Holds each restore request until the test resolves it. */
   holdRestore?: (release: () => void) => void;
+  /** Asked before each gaps list request; true makes that request fail. */
+  failGapsList?: () => boolean;
 }
 
 function installServer(options: ServerOptions = {}) {
@@ -245,8 +247,18 @@ function installServer(options: ServerOptions = {}) {
       });
     }
     if (url.pathname === `${base}/gaps` && method === "GET") {
+      if (options.failGapsList?.()) {
+        return Response.json({ error: "Database busy." }, { status: 503 });
+      }
       const listed = gaps.filter((g) => !dismissed.has(g.question) && !g.handled);
-      return Response.json({ gaps: listed, total: listed.length, limit: 25, offset: 0 });
+      const limit = Number(url.searchParams.get("limit") ?? 25);
+      const offset = Number(url.searchParams.get("offset") ?? 0);
+      return Response.json({
+        gaps: listed.slice(offset, offset + limit),
+        total: listed.length,
+        limit,
+        offset,
+      });
     }
     if (url.pathname === `${base}/gaps/dismiss` && method === "POST") {
       const question = (body as { question: string }).question;
@@ -1043,6 +1055,127 @@ describe("Monitor screens", () => {
       expect(await screen.findByText(/Dismissed “Do you ship to Spain\?”/)).toBeTruthy();
       await waitFor(() => expect(items()).toHaveLength(1));
       expect((items()[0] as HTMLElement).querySelector("form")).toBeTruthy();
+    });
+
+    it("keeps an answer draft when an unrelated dismissal's reload fails and is tried again", async () => {
+      let fail = false;
+      installServer({
+        gaps: [gap(), gap({ question: "sso?", displayQuestion: "SSO?", exampleMessageId: "m2" })],
+        failGapsList: () => fail,
+      });
+      await open("/admin/gaps");
+      await screen.findByText("SSO?");
+      const items = () => Array.from(document.querySelectorAll(".gap-item")) as HTMLElement[];
+      const second = items()[1];
+      if (!second) throw new Error("Expected two gaps");
+
+      fireEvent.click(within(second).getByRole("button", { name: "Write an answer" }));
+      fireEvent.change(within(second).getByLabelText("Answer"), {
+        target: { value: "Yes, with SAML." },
+      });
+
+      // Dismissing the first gap refreshes the list, and that refresh fails.
+      fail = true;
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss “Do you ship to Spain?”" }));
+      expect(await screen.findByText("Could not load gaps.")).toBeTruthy();
+      expect(items()).toHaveLength(0);
+      // The draft is still on screen, above where the list was.
+      expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+        "Yes, with SAML.",
+      );
+      expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("SSO?");
+
+      fail = false;
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(items()).toHaveLength(1));
+      const remaining = items()[0] as HTMLElement;
+      expect((within(remaining).getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+        "Yes, with SAML.",
+      );
+      expect(screen.getAllByLabelText("Answer")).toHaveLength(1);
+    });
+
+    it("keeps a test draft when an unrelated dismissal's reload fails and is tried again", async () => {
+      let fail = false;
+      installServer({
+        gaps: [gap(), gap({ question: "sso?", displayQuestion: "SSO?", exampleMessageId: "m2" })],
+        failGapsList: () => fail,
+      });
+      await open("/admin/gaps");
+      await screen.findByText("SSO?");
+      const items = () => Array.from(document.querySelectorAll(".gap-item")) as HTMLElement[];
+      const second = items()[1];
+      if (!second) throw new Error("Expected two gaps");
+
+      fireEvent.click(within(second).getByRole("button", { name: "Add to tests" }));
+      fireEvent.change(within(second).getByLabelText("Words"), { target: { value: "SAML" } });
+
+      fail = true;
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss “Do you ship to Spain?”" }));
+      expect(await screen.findByText("Could not load gaps.")).toBeTruthy();
+      expect(items()).toHaveLength(0);
+      expect((screen.getByLabelText("Words") as HTMLInputElement).value).toBe("SAML");
+      expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("SSO?");
+
+      fail = false;
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(items()).toHaveLength(1));
+      const remaining = items()[0] as HTMLElement;
+      expect((within(remaining).getByLabelText("Words") as HTMLInputElement).value).toBe("SAML");
+      expect(screen.getAllByLabelText("Words")).toHaveLength(1);
+    });
+
+    it("keeps an answer draft when Undo pushes its gap onto the next page", async () => {
+      const many = Array.from({ length: 26 }, (_, i) =>
+        gap({
+          question: `question ${i + 1}?`,
+          displayQuestion: `Question ${i + 1}?`,
+          exampleMessageId: `m${i + 1}`,
+          times: 30 - i,
+        }),
+      );
+      installServer({ gaps: many });
+      await open("/admin/gaps");
+      await screen.findByText("Question 1?");
+      const items = () => Array.from(document.querySelectorAll(".gap-item")) as HTMLElement[];
+      expect(items()).toHaveLength(25);
+
+      // Dismissing the first gap pulls the 26th onto this page.
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss “Question 1?”" }));
+      await screen.findByText("Question 26?");
+      const last = items()[24];
+      if (!last) throw new Error("Expected the 26th gap on the first page");
+      fireEvent.click(within(last).getByRole("button", { name: "Write an answer" }));
+      fireEvent.change(within(last).getByLabelText("Answer"), {
+        target: { value: "Draft for the last row." },
+      });
+
+      // Undo restores the first gap, which pushes the edited one onto page 2.
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+      await screen.findByText("Question 1?");
+      await waitFor(() => expect(screen.queryByText("Question 26?")).toBeNull());
+      const editor = screen.getByLabelText("Answer") as HTMLTextAreaElement;
+      expect(editor.value).toBe("Draft for the last row.");
+      expect(editor.closest(".gap-item")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      await screen.findByText("Question 26?");
+      await waitFor(() => expect(items()).toHaveLength(1));
+      const moved = items()[0] as HTMLElement;
+      expect((within(moved).getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+        "Draft for the last row.",
+      );
+      expect(screen.getAllByLabelText("Answer")).toHaveLength(1);
+    });
+
+    it("keeps the typed answer when Write an answer is pressed again on the same gap", async () => {
+      installServer();
+      await open("/admin/gaps");
+      await screen.findByText("Do you ship to Spain?");
+      fireEvent.click(screen.getByRole("button", { name: "Write an answer" }));
+      fireEvent.change(screen.getByLabelText("Answer"), { target: { value: "Yes, we do." } });
+      fireEvent.click(screen.getByRole("button", { name: "Write an answer" }));
+      expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).value).toBe("Yes, we do.");
     });
 
     it("opens the answer editor inline under its gap", async () => {
