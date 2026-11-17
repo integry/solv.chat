@@ -1,3 +1,4 @@
+import { searchableText } from "./messages.js";
 import { prepare, prepareInsert } from "./sql.js";
 
 interface Row {
@@ -109,8 +110,13 @@ export function conversationsFor(db: D1Database, orgId: string) {
       options: { limit: number; offset: number; filter?: ConversationFilter },
     ): Promise<{ conversations: ConversationSummaryRow[]; total: number }> {
       const filter = options.filter ?? {};
+      const search = (filter.search ?? "").trim();
       // Each condition is switched on by its own parameter, so one statement
       // serves every combination and nothing is spliced into the SQL.
+      // The search compares `search_text` with the search folded the same way
+      // in JavaScript (SQLite's `lower()` only folds ASCII). Rows written
+      // before `search_text` existed fall back to `lower(content)`, and the
+      // exact text (`?8`) always matches.
       const where = `
         FROM conversations c
        WHERE c.org_id = ?1 AND c.assistant_id = ?2
@@ -121,7 +127,8 @@ export function conversationsFor(db: D1Database, orgId: string) {
          AND (?7 = '' OR EXISTS (
            SELECT 1 FROM messages s
             WHERE s.org_id = c.org_id AND s.conversation_id = c.id
-              AND instr(lower(s.content), ?7) > 0
+              AND (instr(COALESCE(s.search_text, lower(s.content)), ?7) > 0
+                   OR instr(s.content, ?8) > 0)
          ))`;
       const params = [
         orgId,
@@ -130,7 +137,8 @@ export function conversationsFor(db: D1Database, orgId: string) {
         filter.notHelpful ? 1 : 0,
         filter.usedTool ? 1 : 0,
         filter.since ?? 0,
-        (filter.search ?? "").trim().toLowerCase(),
+        searchableText(search),
+        search,
       ];
       const [rowsRes, countRow] = await Promise.all([
         prepare(
@@ -152,7 +160,7 @@ export function conversationsFor(db: D1Database, orgId: string) {
                   EXISTS(${USED_TOOL}) AS used_tool
              ${where}
             ORDER BY c.started_at DESC, c.id DESC
-            LIMIT ?8 OFFSET ?9`,
+            LIMIT ?9 OFFSET ?10`,
         )
           .bind(...params, options.limit, options.offset)
           .all<SummaryRow>(),

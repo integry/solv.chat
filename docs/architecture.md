@@ -64,7 +64,9 @@ from the auth seam and pass it down.
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
   the widget's localStorage), started_at, page_url.
 - `messages` — id, conversation_id, role, content, citations JSON, tool_calls JSON,
-  tokens_in, tokens_out, answered (boolean: did retrieval find support).
+  tokens_in, tokens_out, answered (boolean: did retrieval find support),
+  search_text (content in Unicode lowercase, NFC, for the Conversations search;
+  NULL on rows written before it existed).
 - `feedback` — message_id, value (`up` | `down`), note.
 - `mcp_servers` — id, assistant_id, label, url, auth_kind (`none` | `static_header`),
   secret_ciphertext, enabled.

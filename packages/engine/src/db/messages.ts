@@ -89,6 +89,15 @@ export function normalizeQuestionText(text: string): string {
   return text.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+/**
+ * Folds message text for the Conversations search: Unicode lowercase in NFC.
+ * The same function folds the stored text and the search, so both sides
+ * agree (SQLite's `lower()` only folds ASCII).
+ */
+export function searchableText(text: string): string {
+  return text.normalize("NFC").toLowerCase().normalize("NFC");
+}
+
 const COLUMNS =
   "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to";
 
@@ -340,6 +349,7 @@ export function messagesFor(db: D1Database, orgId: string) {
                 citations = ?4,
                 tool_calls = ?5,
                 resume_context = ?6,
+                search_text = ?12,
                 tokens_in = tokens_in + ?7,
                 tokens_out = tokens_out + ?8,
                 cost_micros = cost_micros + ?11,
@@ -366,6 +376,7 @@ export function messagesFor(db: D1Database, orgId: string) {
           params.claimToken,
           params.revision,
           params.costMicros === undefined ? 0 : params.costMicros,
+          searchableText(params.content),
         )
         .run();
       return (res.meta.changes ?? 0) > 0;
@@ -391,8 +402,8 @@ export function messagesFor(db: D1Database, orgId: string) {
       const questionKey = input.role === "user" ? normalizeQuestionText(input.content) : null;
       await prepareInsert(
         db,
-        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, question_key, resume_context)
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, question_key, resume_context, search_text)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
       )
         .bind(
           orgId,
@@ -410,6 +421,7 @@ export function messagesFor(db: D1Database, orgId: string) {
           replyTo,
           questionKey,
           input.resumeContext == null ? null : JSON.stringify(input.resumeContext),
+          searchableText(input.content),
         )
         .run();
 

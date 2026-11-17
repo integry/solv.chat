@@ -2,7 +2,8 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import { defaultVersionConfig, newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { NOT_INDEXED_AFTER_MS } from "../../src/admin/overview.js";
-import { normalizeQuestionText } from "../../src/db/messages.js";
+import { conversationsFor } from "../../src/db/conversations.js";
+import { messagesFor, normalizeQuestionText } from "../../src/db/messages.js";
 import { utcDay } from "../../src/util/time.js";
 import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
@@ -580,6 +581,125 @@ describe("admin Monitor screen APIs", () => {
         `/api/admin/assistants/${ast}/conversations?q=refund&days=30`,
       );
       expect(combined.conversations.map((c) => c.id)).toEqual([ids.notHelpful]);
+    });
+
+    it("finds non-ASCII text exactly and in any case", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      const now = Date.now();
+      const conversations = conversationsFor(env.DB, ORG_A);
+      const messages = messagesFor(env.DB, ORG_A);
+
+      // A visitor question, written the way the chat route writes it.
+      const asked = newId("cnv");
+      await conversations.create({
+        id: asked,
+        assistantId: ast,
+        visitorId: "vis_1",
+        startedAt: now - 3000,
+        pageUrl: "",
+      });
+      await messages.create({
+        id: newId("msg"),
+        conversationId: asked,
+        role: "user",
+        content: "Is the École course in Ålesund?",
+        citations: [],
+        toolCalls: null,
+        tokensIn: 0,
+        tokensOut: 0,
+        answered: true,
+        createdAt: now - 3000,
+      });
+
+      // A reply rewritten when a paused page action resumes.
+      const resumed = newId("cnv");
+      await conversations.create({
+        id: resumed,
+        assistantId: ast,
+        visitorId: "vis_2",
+        startedAt: now - 2000,
+        pageUrl: "",
+      });
+      const question = newId("msg");
+      await messages.create({
+        id: question,
+        conversationId: resumed,
+        role: "user",
+        content: "Opening hours?",
+        citations: [],
+        toolCalls: null,
+        tokensIn: 0,
+        tokensOut: 0,
+        answered: true,
+        createdAt: now - 2000,
+      });
+      const reply = newId("msg");
+      await messages.create({
+        id: reply,
+        conversationId: resumed,
+        role: "assistant",
+        content: "One moment.",
+        citations: [],
+        toolCalls: [],
+        tokensIn: 0,
+        tokensOut: 0,
+        answered: true,
+        createdAt: now - 1999,
+        replyTo: question,
+        resumeContext: { step: 1 },
+      });
+      const claimed = await messages.claimPendingReply({
+        conversationId: resumed,
+        id: reply,
+        claimToken: "claim_1",
+        revision: 0,
+        now,
+        ttlMs: 60_000,
+      });
+      expect(claimed).toBe(true);
+      const completed = await messages.completeReply({
+        id: reply,
+        claimToken: "claim_1",
+        revision: 0,
+        content: "ΩΜΈΓΑ opens at nine.",
+        citations: [],
+        toolCalls: [],
+        resumeContext: null,
+        tokensIn: 0,
+        tokensOut: 0,
+      });
+      expect(completed).toBe(true);
+
+      // A row written before `search_text` existed.
+      const legacy = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Où est ZÜRICH?",
+        answered: true,
+        createdAt: now - 1000,
+      });
+
+      const search = async (q: string) =>
+        (
+          await getJson<ConversationsBody>(
+            app,
+            `/api/admin/assistants/${ast}/conversations?q=${encodeURIComponent(q)}`,
+          )
+        ).conversations.map((c) => c.id);
+
+      for (const q of ["École", "école", "ÉCOLE", "ålesund", "ÅLESUND"]) {
+        expect({ q, ids: await search(q) }).toEqual({ q, ids: [asked] });
+      }
+      // The same letter typed as e + combining accent.
+      expect(await search("e\u0301cole")).toEqual([asked]);
+      for (const q of ["ΩΜΈΓΑ", "ωμέγα", "Ωμέγα"]) {
+        expect({ q, ids: await search(q) }).toEqual({ q, ids: [resumed] });
+      }
+      // The text before the reply resumed is gone from the search.
+      expect(await search("one moment")).toEqual([]);
+      // Older rows are still found by the exact text.
+      expect(await search("ZÜRICH")).toEqual([legacy.conversationId]);
     });
 
     it("refuses unknown filters and dates instead of showing everything", async () => {
