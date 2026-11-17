@@ -35,26 +35,52 @@ const DATE_OPTIONS = [
   { value: "90", label: "Last 90 days" },
 ] as const;
 
-function conversationPath(id: string): string {
-  return `${LIST_PATH}?id=${encodeURIComponent(id)}`;
+/**
+ * A conversation's address names its assistant too, so a shared link opens
+ * under the right assistant and switching assistants does not carry it over.
+ */
+function conversationPath(conv: ConversationSummary): string {
+  const params = new URLSearchParams({ id: conv.id, assistant: conv.assistantId });
+  return `${LIST_PATH}?${params.toString()}`;
 }
 
-/** The open conversation follows the address, so Back and a shared link both work. */
-function useOpenConversationId(): string | null {
-  const [id, setId] = useState(() => readQueryParam("id"));
+interface OpenAddress {
+  id: string | null;
+  assistant: string | null;
+}
+
+function readOpenAddress(): OpenAddress {
+  return { id: readQueryParam("id"), assistant: readQueryParam("assistant") };
+}
+
+/**
+ * The open conversation follows the address, so Back and a shared link both
+ * work. An address naming another assistant (left over from before a switch,
+ * or reached with Back) opens nothing and is cleared, so its actions cannot
+ * land on the assistant now selected.
+ */
+function useOpenConversationId(assistantId: string): string | null {
+  const [address, setAddress] = useState(readOpenAddress);
   useEffect(() => {
-    const onPopState = () => setId(readQueryParam("id"));
+    const onPopState = () => setAddress(readOpenAddress());
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
-  return id;
+  const otherAssistant = address.assistant !== null && address.assistant !== assistantId;
+  useEffect(() => {
+    if (otherAssistant && address.id !== null) {
+      window.history.replaceState(window.history.state, "", LIST_PATH);
+      setAddress({ id: null, assistant: null });
+    }
+  }, [otherAssistant, address.id]);
+  return otherAssistant ? null : address.id;
 }
 
 function ConversationRow({ conv }: { conv: ConversationSummary }) {
   const messages = conv.turnCount === 1 ? "1 message" : `${conv.turnCount} messages`;
   return (
     <li className="conv-item">
-      <ScreenLink to={conversationPath(conv.id)} className="conv-row">
+      <ScreenLink to={conversationPath(conv)} className="conv-row">
         <span className="conv-title">
           {conv.firstQuestion ?? "Conversation without a question"}
         </span>
@@ -84,7 +110,7 @@ function ListSkeleton() {
 }
 
 export function Conversations({ assistantId }: ConversationsProps) {
-  const openId = useOpenConversationId();
+  const openId = useOpenConversationId(assistantId);
   const [offset, setOffset] = useState(0);
   const [searchInput, setSearchInput] = useState(() => readQueryParam("q") ?? "");
   const [search, setSearch] = useState(searchInput.trim());

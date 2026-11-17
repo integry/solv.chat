@@ -80,8 +80,10 @@ export function Gaps({ assistantId }: GapsProps) {
       });
       setDismissed(gap);
       setStatusMessage(null);
-      if (answering?.gapKey === gap.question) setAnswering(null);
-      if (addingTest?.gapKey === gap.question) setAddingTest(null);
+      // Read the editors as they are now, not as they were when Dismiss was
+      // pressed: another gap's editor may have opened while this waited.
+      setAnswering((current) => (current?.gapKey === gap.question ? null : current));
+      setAddingTest((current) => (current?.gapKey === gap.question ? null : current));
       gapsRes.reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not dismiss. Try again.");

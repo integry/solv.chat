@@ -8,7 +8,13 @@ import {
   type ResolvedAdminConfig,
   resolveAdminConfig,
 } from "./extension.js";
-import { BUILD_SCREENS, type BuiltinScreenId, MONITOR_SCREENS, useRoute } from "./routing.js";
+import {
+  BUILD_SCREENS,
+  type BuiltinScreenId,
+  MONITOR_SCREENS,
+  readQueryParam,
+  useRoute,
+} from "./routing.js";
 import { Behaviour } from "./screens/Behaviour.js";
 import { Conversations } from "./screens/Conversations.js";
 import { Gaps } from "./screens/Gaps.js";
@@ -144,7 +150,9 @@ function AdminShell({
   const { screen, navigate } = useRoute(config.navItems, config.defaultScreen);
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // A shared conversation link names its assistant; start on that one. An id
+  // that is not in the list falls back to the first assistant below.
+  const [selectedId, setSelectedId] = useState<string | null>(() => readQueryParam("assistant"));
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
   // A queue, not one slot: two create forms can finish close together, and each key is

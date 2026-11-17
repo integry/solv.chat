@@ -90,7 +90,12 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
   const nextTestSessionId = useRef(1);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  const detail = detailRes.value;
+  // The detail is read by id alone. A link without its assistant (or naming
+  // the wrong one) can load another assistant's conversation; it is not shown
+  // here, so its actions cannot write to the assistant now selected.
+  const loaded = detailRes.value;
+  const otherAssistant = loaded !== undefined && loaded.conversation.assistantId !== assistantId;
+  const detail = otherAssistant ? undefined : loaded;
 
   /**
    * The question a reply answered. The engine records it on the reply, and
@@ -144,6 +149,10 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
           message={detailRes.error}
           onRetry={detailRes.reload}
         />
+      ) : otherAssistant ? (
+        <p className="notice notice-info" role="status">
+          This conversation belongs to another assistant. Switch to that assistant to read it.
+        </p>
       ) : !detail ? (
         <div className="source-card">
           <Skeleton label="Loading conversation…" lines={5} />

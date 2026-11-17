@@ -10,6 +10,7 @@ import type {
   GapSummary,
 } from "../src/api/types.js";
 import { expectNoSeriousA11yViolations } from "./support/axe.js";
+import { findAssistantButton, pickAssistant, selectedAssistantId } from "./support/switcher.js";
 
 const ASSISTANT: Assistant = {
   id: "ast_1",
@@ -19,6 +20,13 @@ const ASSISTANT: Assistant = {
   allowedOrigins: ["https://docs.example.com"],
   hasIngestKey: true,
   createdAt: 1_700_000_000_000,
+};
+
+const OTHER_ASSISTANT: Assistant = {
+  ...ASSISTANT,
+  id: "ast_2",
+  name: "Sales Bot",
+  publicKey: "pk_ast_2",
 };
 
 const NOW = Date.UTC(2026, 10, 16, 12, 0, 0);
@@ -178,6 +186,10 @@ interface ServerOptions {
   report?: AssistantReport | (() => Response);
   conversations?: (search: URLSearchParams) => ConversationSummary[] | Response;
   gaps?: GapSummary[];
+  /** Also list the second assistant (it has no conversations of its own). */
+  twoAssistants?: boolean;
+  /** Holds each dismiss request until the test resolves it. */
+  holdDismiss?: (release: () => void) => void;
 }
 
 function installServer(options: ServerOptions = {}) {
@@ -195,7 +207,12 @@ function installServer(options: ServerOptions = {}) {
     const base = `/api/admin/assistants/${ASSISTANT.id}`;
 
     if (url.pathname === "/api/admin/assistants") {
-      return Response.json({ assistants: [ASSISTANT] });
+      return Response.json({
+        assistants: options.twoAssistants ? [ASSISTANT, OTHER_ASSISTANT] : [ASSISTANT],
+      });
+    }
+    if (url.pathname === `/api/admin/assistants/${OTHER_ASSISTANT.id}/conversations`) {
+      return Response.json({ conversations: [], total: 0, limit: 25, offset: 0 });
     }
     if (url.pathname === `${base}/overview`) {
       if (typeof options.overview === "function") return options.overview();
@@ -215,12 +232,20 @@ function installServer(options: ServerOptions = {}) {
     if (url.pathname === "/api/admin/conversations/cnv_1") {
       return Response.json(DETAIL);
     }
+    if (url.pathname === "/api/admin/conversations/cnv_2") {
+      return Response.json({
+        ...DETAIL,
+        conversation: { ...DETAIL.conversation, id: "cnv_2", assistantId: OTHER_ASSISTANT.id },
+      });
+    }
     if (url.pathname === `${base}/gaps` && method === "GET") {
       const listed = gaps.filter((g) => !dismissed.has(g.question) && !g.handled);
       return Response.json({ gaps: listed, total: listed.length, limit: 25, offset: 0 });
     }
     if (url.pathname === `${base}/gaps/dismiss` && method === "POST") {
       const question = (body as { question: string }).question;
+      const hold = options.holdDismiss;
+      if (hold) await new Promise<void>((release) => hold(release));
       dismissed.add(question);
       return Response.json({ question, dismissed: true });
     }
@@ -552,7 +577,7 @@ describe("Monitor screens", () => {
 
       fireEvent.click(row);
       expect(await screen.findByText("I could not find that.")).toBeTruthy();
-      expect(window.location.search).toBe("?id=cnv_1");
+      expect(window.location.search).toBe("?id=cnv_1&assistant=ast_1");
 
       fireEvent.click(screen.getByRole("button", { name: "Back to conversations" }));
       expect(await screen.findByRole("link", { name: /Do you ship to Spain\?/ })).toBeTruthy();
@@ -655,6 +680,46 @@ describe("Monitor screens", () => {
       );
     });
 
+    it("drops an open conversation when another assistant is picked", async () => {
+      installServer({ twoAssistants: true });
+      await open("/admin/conversations");
+      fireEvent.click(await screen.findByRole("link", { name: /Do you ship to Spain\?/ }));
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+
+      pickAssistant(OTHER_ASSISTANT.id);
+      expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
+      expect(screen.queryByText("I could not find that.")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Add to tests" })).toBeNull();
+      expect(window.location.search).toBe("");
+    });
+
+    it("opens a shared link under the assistant it names", async () => {
+      installServer({ twoAssistants: true });
+      // Not the first assistant, which the shell would pick on its own.
+      await open(`/admin/conversations?id=cnv_2&assistant=${OTHER_ASSISTANT.id}`);
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+      await findAssistantButton();
+      expect(selectedAssistantId()).toBe(OTHER_ASSISTANT.id);
+      expect(screen.getAllByRole("button", { name: "Add to tests" }).length).toBeGreaterThan(0);
+    });
+
+    it("does not show or act on a conversation that belongs to another assistant", async () => {
+      installServer({ twoAssistants: true });
+      // A link without its assistant, opened while the other assistant is selected.
+      await open(`/admin/conversations?assistant=${OTHER_ASSISTANT.id}`);
+      await screen.findByRole("heading", { name: "No conversations yet" });
+      act(() => {
+        window.history.pushState(null, "", "/admin/conversations?id=cnv_1");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      expect(
+        await screen.findByText(/This conversation belongs to another assistant/),
+      ).toBeTruthy();
+      expect(screen.queryByText("I could not find that.")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Add to tests" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Write an answer for this" })).toBeNull();
+    });
+
     it("has no serious accessibility violations on the list and the conversation", async () => {
       installServer();
       await open("/admin/conversations");
@@ -709,6 +774,70 @@ describe("Monitor screens", () => {
         question: "do you ship to spain?",
       });
       expect(screen.queryByText(/Dismissed “/)).toBeNull();
+    });
+
+    it("keeps another gap's editor open when an earlier dismissal finishes", async () => {
+      let release: (() => void) | undefined;
+      installServer({
+        gaps: [gap(), gap({ question: "sso?", displayQuestion: "SSO?", exampleMessageId: "m2" })],
+        holdDismiss: (r) => {
+          release = r;
+        },
+      });
+      await open("/admin/gaps");
+      await screen.findByText("SSO?");
+      const items = () => Array.from(document.querySelectorAll(".gap-item"));
+      const [first, second] = items() as HTMLElement[];
+      if (!first || !second) throw new Error("Expected two gaps");
+
+      // The first gap's editor is open when its Dismiss is pressed.
+      fireEvent.click(within(first).getByRole("button", { name: "Write an answer" }));
+      fireEvent.click(
+        within(first).getByRole("button", { name: "Dismiss “Do you ship to Spain?”" }),
+      );
+      await waitFor(() => expect(release).toBeDefined());
+
+      // While it waits, the owner starts an answer for the second gap.
+      fireEvent.click(within(second).getByRole("button", { name: "Write an answer" }));
+      fireEvent.change(within(second).getByLabelText("Answer"), {
+        target: { value: "Yes, with SAML." },
+      });
+
+      await act(async () => release?.());
+      expect(await screen.findByText(/Dismissed “Do you ship to Spain\?”/)).toBeTruthy();
+      await waitFor(() => expect(items()).toHaveLength(1));
+      const remaining = items()[0] as HTMLElement;
+      expect((within(remaining).getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+        "Yes, with SAML.",
+      );
+    });
+
+    it("keeps another gap's test editor open when an earlier dismissal finishes", async () => {
+      let release: (() => void) | undefined;
+      installServer({
+        gaps: [gap(), gap({ question: "sso?", displayQuestion: "SSO?", exampleMessageId: "m2" })],
+        holdDismiss: (r) => {
+          release = r;
+        },
+      });
+      await open("/admin/gaps");
+      await screen.findByText("SSO?");
+      const items = () => Array.from(document.querySelectorAll(".gap-item"));
+      const [first, second] = items() as HTMLElement[];
+      if (!first || !second) throw new Error("Expected two gaps");
+
+      fireEvent.click(within(first).getByRole("button", { name: "Add to tests" }));
+      fireEvent.click(
+        within(first).getByRole("button", { name: "Dismiss “Do you ship to Spain?”" }),
+      );
+      await waitFor(() => expect(release).toBeDefined());
+      fireEvent.click(within(second).getByRole("button", { name: "Add to tests" }));
+      expect(second.querySelector("form")).toBeTruthy();
+
+      await act(async () => release?.());
+      expect(await screen.findByText(/Dismissed “Do you ship to Spain\?”/)).toBeTruthy();
+      await waitFor(() => expect(items()).toHaveLength(1));
+      expect((items()[0] as HTMLElement).querySelector("form")).toBeTruthy();
     });
 
     it("opens the answer editor inline under its gap", async () => {
