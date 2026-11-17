@@ -406,7 +406,9 @@ Install
 - Plain words on every control. No model, temperature or chunking settings.
 - Leaving a screen (a link, the browser's Back or Forward, or switching
   assistant) with unsaved edits on Behaviour or Widget asks first; "Stay here"
-  keeps the screen and puts the address back. Closing the tab triggers the
+  keeps the screen and puts the address back. A move made while a save is
+  running waits for that save: it goes ahead once the edits are saved, and asks
+  first if the save failed, so the edits and the error stay. Closing the tab triggers the
   browser's own question while edits are unsaved or a save is still running.
 - Install shows three steps: the websites that may show the chat (the
   Widget screen's list, read-only), the snippet with notes for plain HTML,

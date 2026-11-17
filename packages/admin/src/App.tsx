@@ -160,19 +160,32 @@ function AdminShell({
   // Set while the owner decides whether to leave a screen with unsaved edits.
   const [pendingLeave, setPendingLeave] = useState<PendingLeave | null>(null);
   const unsavedRef = useRef(false);
+  const savingRef = useRef(false);
+  // A move asked for while a save runs. It waits for the save: the save can
+  // still fail, and leaving then would lose both the edits and the error.
+  const deferredLeaveRef = useRef<PendingLeave | null>(null);
 
   /**
    * Runs `leave` now, or after the owner agrees to drop unsaved edits.
    * `stay` runs if they choose to stay (Back/Forward use it to undo the move).
+   * While a save runs, the move waits until the save finishes and is decided then.
    */
   const guardLeave = useCallback((leave: () => void, stay?: () => void) => {
-    if (unsavedRef.current) {
+    if (savingRef.current) {
+      // The newest move replaces an older one still waiting, as below.
+      deferredLeaveRef.current = { leave, stay };
+    } else if (unsavedRef.current) {
       // A newer request replaces one still on screen. Back/Forward's `stay`
       // reads the live address, so the newest one still returns to this screen.
       setPendingLeave({ leave, stay });
     } else {
       leave();
     }
+  }, []);
+
+  /** Asking for the place already on show drops a move still waiting for a save. */
+  const stayPut = useCallback(() => {
+    deferredLeaveRef.current = null;
   }, []);
 
   const { screen, navigate } = useRoute(config.navItems, config.defaultScreen, guardLeave);
@@ -201,7 +214,10 @@ function AdminShell({
 
   function handleNavigate(path: string) {
     setDrawerOpen(false);
-    if (path === window.location.pathname) return;
+    if (path === window.location.pathname) {
+      stayPut();
+      return;
+    }
     guardLeave(() => navigate(path));
   }
 
@@ -253,10 +269,22 @@ function AdminShell({
       : (assistants[0]?.id ?? null);
   const selectedAssistant = assistants.find((a) => a.id === effectiveSelectedId) ?? null;
   const selectedMutation = useAssistantMutation(effectiveSelectedId ?? "");
-  // While a save runs the edits still count as unsaved, but moving to another
-  // screen does not lose them: the save finishes either way, so there is nothing to ask.
-  const unsavedEdits = selectedMutation.unsaved && !selectedMutation.saving;
-  unsavedRef.current = unsavedEdits;
+  const saving = selectedMutation.saving;
+  unsavedRef.current = selectedMutation.unsaved;
+  savingRef.current = saving;
+  const isUnsavedNow = selectedMutation.isUnsavedNow;
+  // Once the save finishes, a move that waited for it goes ahead if the edits
+  // are saved, and asks first if the save failed and they are still unsaved.
+  // The editor reports its new state in an effect of this same commit, before
+  // this one runs, so `isUnsavedNow` already reflects the save's outcome.
+  useEffect(() => {
+    if (saving) return;
+    const deferred = deferredLeaveRef.current;
+    if (!deferred) return;
+    deferredLeaveRef.current = null;
+    if (isUnsavedNow()) setPendingLeave(deferred);
+    else deferred.leave();
+  }, [saving, isUnsavedNow]);
   // Closing the tab is different: it can cancel a save that has not reached the
   // server, so the browser asks until every save has finished.
   const anySaveRunning = useAnySaveRunning();
@@ -276,12 +304,15 @@ function AdminShell({
   const navigation: AdminNavigation = useMemo(
     () => ({
       navigate: (path: string) => {
-        if (path === window.location.pathname) return;
+        if (path === window.location.pathname) {
+          stayPut();
+          return;
+        }
         guardLeave(() => navigate(path));
       },
       pathFor: (id: string) => config.navItems.find((item) => item.id === id)?.path ?? null,
     }),
-    [config.navItems, guardLeave, navigate],
+    [config.navItems, guardLeave, navigate, stayPut],
   );
   const ExtraScreen =
     screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
@@ -307,7 +338,10 @@ function AdminShell({
       selectedId={effectiveSelectedId}
       onSelect={(id) => {
         setDrawerOpen(false);
-        if (id === effectiveSelectedId) return;
+        if (id === effectiveSelectedId) {
+          stayPut();
+          return;
+        }
         guardLeave(() => setSelectedId(id));
       }}
       onCreated={handleCreated}

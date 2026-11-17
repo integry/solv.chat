@@ -63,20 +63,31 @@ describe("leaving a screen with unsaved edits", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("does not ask while the save covering the edits is still running", async () => {
-    installBuildScreensFake();
+  /**
+   * Holds every save (PUT/PATCH) until `release` is called. `release(true)`
+   * answers it with a 400, as the API does for a value it will not accept.
+   */
+  function holdSaves() {
     const inner = globalThis.fetch;
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
+    let settle!: (reject: boolean) => void;
+    const held = new Promise<boolean>((resolve) => {
+      settle = resolve;
     });
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
-      if ((init?.method ?? "GET").toUpperCase() === "PUT") await held;
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "PUT" || method === "PATCH") {
+        if (await held) {
+          return Response.json({ error: "That greeting is too long." }, { status: 400 });
+        }
+      }
       return inner(input, init);
     });
-    render(<App />);
+    return { release: (reject = false) => settle(reject) };
+  }
+
+  async function startBehaviourSave(text: string) {
     fireEvent.change(await screen.findByLabelText("First thing it says"), {
-      target: { value: "Saving now" },
+      target: { value: text },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
@@ -84,11 +95,108 @@ describe("leaving a screen with unsaved edits", () => {
         true,
       ),
     );
+  }
+
+  it("waits for a running save, then moves on without asking once it is saved", async () => {
+    const api = installBuildScreensFake();
+    const saves = holdSaves();
+    render(<App />);
+    await startBehaviourSave("Saving now");
 
     fireEvent.click(navLink("Widget"));
+    // The save could still fail, so the screen and its edits stay for now.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(window.location.pathname).toBe("/admin/behaviour");
+    expect(screen.getByLabelText("First thing it says")).toBeTruthy();
+
+    saves.release();
     expect(await screen.findByLabelText("Title")).toBeTruthy();
+    expect(window.location.pathname).toBe("/admin/widget");
     expect(screen.queryByRole("dialog", { name: "Leave without saving?" })).toBeNull();
-    release();
+    expect(api.drafts.get("ast_1")?.config.behaviour.greeting).toBe("Saving now");
+  });
+
+  it("asking for the screen already on show drops a move waiting for a save", async () => {
+    installBuildScreensFake();
+    const saves = holdSaves();
+    render(<App />);
+    await startBehaviourSave("Staying here");
+
+    fireEvent.click(navLink("Widget"));
+    fireEvent.click(navLink("Behaviour"));
+    saves.release();
+    await waitFor(() =>
+      expect((screen.getByLabelText("First thing it says") as HTMLInputElement).disabled).toBe(
+        false,
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(window.location.pathname).toBe("/admin/behaviour");
+    expect(screen.queryByLabelText("Title")).toBeNull();
+  });
+
+  it("a failed save keeps the edits and the error, and asks before leaving", async () => {
+    installBuildScreensFake();
+    const saves = holdSaves();
+    render(<App />);
+    await startBehaviourSave("Far too long a greeting");
+
+    fireEvent.click(navLink("Widget"));
+    saves.release(true);
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    expect(window.location.pathname).toBe("/admin/behaviour");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stay here" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(window.location.pathname).toBe("/admin/behaviour");
+    const greeting = screen.getByLabelText("First thing it says") as HTMLInputElement;
+    expect(greeting.value).toBe("Far too long a greeting");
+    expect(greeting.disabled).toBe(false);
+    expect(screen.getByText("That greeting is too long.")).toBeTruthy();
+  });
+
+  it("a failed Widget save keeps the edits and asks before leaving", async () => {
+    window.history.replaceState(null, "", "/admin/widget");
+    installBuildScreensFake();
+    const saves = holdSaves();
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("Title"), {
+      target: { value: "Edited title" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect((screen.getByLabelText("Title") as HTMLInputElement).disabled).toBe(true),
+    );
+
+    fireEvent.click(navLink("Behaviour"));
+    saves.release(true);
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    expect(window.location.pathname).toBe("/admin/widget");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stay here" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe("Edited title");
+    expect(screen.getByText("That greeting is too long.")).toBeTruthy();
+  });
+
+  it("switching assistant waits for a running save and asks if it fails", async () => {
+    installBuildScreensFake({
+      assistants: [makeAssistant("ast_1", "First Bot"), makeAssistant("ast_2", "Second Bot")],
+    });
+    const saves = holdSaves();
+    render(<App />);
+    await startBehaviourSave("First bot edit");
+
+    pickAssistant("ast_2");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(selectedAssistantId()).toBe("ast_1");
+
+    saves.release(true);
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stay here" }));
+    expect(selectedAssistantId()).toBe("ast_1");
+    expect((screen.getByLabelText("First thing it says") as HTMLInputElement).value).toBe(
+      "First bot edit",
+    );
   });
 
   it("guards switching assistant the same way", async () => {
@@ -202,6 +310,29 @@ describe("leaving a screen with unsaved edits", () => {
     expect(history.position()).toBe(0);
   });
 
+  it("Back during a save that fails asks, and Stay here puts the address back", async () => {
+    window.history.replaceState(null, "", "/admin/widget");
+    const history = browserHistory();
+    installBuildScreensFake();
+    const saves = holdSaves();
+    render(<App />);
+    await screen.findByLabelText("Title");
+    fireEvent.click(navLink("Behaviour"));
+    await startBehaviourSave("Rejected on save");
+
+    await popTo(() => window.history.back());
+    // Still on Behaviour while the save runs.
+    expect(screen.getByLabelText("First thing it says")).toBeTruthy();
+    saves.release(true);
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stay here" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/behaviour"));
+    expect(history.position()).toBe(1);
+    expect((screen.getByLabelText("First thing it says") as HTMLInputElement).value).toBe(
+      "Rejected on save",
+    );
+  });
+
   it("asks before Forward leaves, and Stay here returns to the same entry", async () => {
     const history = browserHistory();
     installBuildScreensFake();
@@ -258,11 +389,6 @@ describe("leaving a screen with unsaved edits", () => {
         true,
       ),
     );
-    expect(closing()).toBe(true);
-
-    // Moving on inside the admin does not lose the save, but closing still could.
-    fireEvent.click(navLink("Widget"));
-    expect(await screen.findByLabelText("Title")).toBeTruthy();
     expect(closing()).toBe(true);
 
     release();

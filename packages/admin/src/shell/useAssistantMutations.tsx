@@ -34,6 +34,8 @@ export type MutationRunResult<T> = { ran: true; value: T } | { ran: false };
 
 export interface AssistantMutationHandle extends AssistantMutationState {
   run: <T>(kind: AssistantMutationKind, fn: () => Promise<T>) => Promise<MutationRunResult<T>>;
+  /** The latest unsaved report, current even before the next render. */
+  isUnsavedNow: () => boolean;
 }
 
 interface Coordinator {
@@ -44,6 +46,12 @@ interface Coordinator {
     fn: () => Promise<T>,
   ) => Promise<MutationRunResult<T>>;
   setUnsaved: (assistantId: string, reporter: string, unsaved: boolean) => void;
+  /**
+   * Whether an editor reports unsaved edits for `assistantId` right now. Reads
+   * the latest report, including one made earlier in the same commit, so an
+   * effect can decide straight after a save settles.
+   */
+  isUnsaved: (assistantId: string) => boolean;
   /** True while a save runs for any assistant. */
   anySaving: boolean;
 }
@@ -60,6 +68,8 @@ function useLocalCoordinator(): Coordinator {
   >({});
   // Ids of the editors reporting unsaved edits, per assistant.
   const [unsavedByAssistant, setUnsavedByAssistant] = useState<Record<string, string[]>>({});
+  // The same reports, kept current outside render.
+  const unsavedNowRef = useRef<Map<string, Set<string>>>(new Map());
 
   const getState = useCallback(
     (assistantId: string): AssistantMutationState => {
@@ -80,6 +90,11 @@ function useLocalCoordinator(): Coordinator {
   );
 
   const setUnsaved = useCallback((assistantId: string, reporter: string, unsaved: boolean) => {
+    const reporters = unsavedNowRef.current.get(assistantId) ?? new Set<string>();
+    if (unsaved) reporters.add(reporter);
+    else reporters.delete(reporter);
+    if (reporters.size > 0) unsavedNowRef.current.set(assistantId, reporters);
+    else unsavedNowRef.current.delete(assistantId);
     setUnsavedByAssistant((prev) => {
       const current = prev[assistantId] ?? [];
       const has = current.includes(reporter);
@@ -91,6 +106,11 @@ function useLocalCoordinator(): Coordinator {
       return next;
     });
   }, []);
+
+  const isUnsaved = useCallback(
+    (assistantId: string) => (unsavedNowRef.current.get(assistantId)?.size ?? 0) > 0,
+    [],
+  );
 
   const run = useCallback(
     async <T,>(
@@ -129,8 +149,8 @@ function useLocalCoordinator(): Coordinator {
   const anySaving = Object.values(activeByAssistant).includes("saving");
 
   return useMemo(
-    () => ({ getState, run, setUnsaved, anySaving }),
-    [getState, run, setUnsaved, anySaving],
+    () => ({ getState, run, setUnsaved, isUnsaved, anySaving }),
+    [getState, run, setUnsaved, isUnsaved, anySaving],
   );
 }
 
@@ -159,8 +179,12 @@ export function useAssistantMutation(assistantId: string): AssistantMutationHand
       coordinator.run(assistantId, kind, fn),
     [coordinator, assistantId],
   );
+  const isUnsavedNow = useCallback(
+    () => coordinator.isUnsaved(assistantId),
+    [coordinator, assistantId],
+  );
 
-  return { ...state, run };
+  return { ...state, run, isUnsavedNow };
 }
 
 /**
