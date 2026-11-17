@@ -29,7 +29,7 @@ const MAX_IMPORT_URLS = 100;
 // The engine imports at most this many pages per request so one request
 // stays inside the Workers subrequest limit; a selection goes in batches.
 export const IMPORT_BATCH_URLS = 5;
-/** How often the list is checked while something is being indexed. */
+/** How often the list is checked while something is being indexed or retried. */
 export const INDEXING_POLL_MS = 5000;
 
 const KIND_TEXT: Record<SourceKind, { icon: IconName; type: string }> = {
@@ -72,6 +72,14 @@ export interface IndexStatus {
   tone: StatusTone;
   label: string;
   hint: string | null;
+}
+
+/** Whether a failed source can still turn Ready without the owner doing anything. */
+function mayRecover(source: SourceSummary): boolean {
+  if ((source.failedCount ?? 0) === 0) return false;
+  // Engines older than `retryingCount` only give one error code for the source.
+  if (source.retryingCount === undefined) return source.indexError !== "too_long";
+  return source.retryingCount > 0;
 }
 
 /** "Indexing…", "Ready" or "Failed: reason", from a source's counts. */
@@ -440,7 +448,8 @@ export function Sources({ assistantId }: SourcesProps) {
     `/api/admin/assistants/${assistantId}/sources`,
   );
   const sources = sourcesRes.value?.sources ?? [];
-  const anyIndexing = sources.some((s) => (s.indexingCount ?? 0) > 0);
+  // Also keep checking while a failure is retried: the Queue can still index it.
+  const anyIndexing = sources.some((s) => (s.indexingCount ?? 0) > 0 || mayRecover(s));
 
   const [addChoice, setAddChoice] = useState<AddChoice | null>(null);
   const [expandedSourceId, setExpandedSourceId] = useState<string | null>(null);
@@ -522,11 +531,14 @@ export function Sources({ assistantId }: SourcesProps) {
   // New content is not searchable for a short while: check again until it is.
   const reloadSources = sourcesRes.reload;
   const sourcesReady = sourcesRes.status === "ready";
+  // Each answer is a new value, so every check schedules the next one even when
+  // the status never visibly left "ready" (a fast answer batches both updates).
+  const sourcesValue = sourcesRes.value;
   useEffect(() => {
-    if (!anyIndexing || !sourcesReady) return;
+    if (!anyIndexing || !sourcesReady || sourcesValue === undefined) return;
     const timer = setTimeout(reloadSources, INDEXING_POLL_MS);
     return () => clearTimeout(timer);
-  }, [anyIndexing, sourcesReady, reloadSources]);
+  }, [anyIndexing, sourcesReady, sourcesValue, reloadSources]);
 
   async function loadDocuments(sourceId: string, offset = 0) {
     docsRequestRef.current?.controller.abort();

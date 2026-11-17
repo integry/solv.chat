@@ -167,10 +167,11 @@ describe("ingest consumer", () => {
       return {
         indexing: source?.indexingCount,
         failed: source?.failedCount,
+        retrying: source?.retryingCount,
         error: source?.indexError,
       };
     };
-    expect(await status()).toEqual({ indexing: 1, failed: 0, error: null });
+    expect(await status()).toEqual({ indexing: 1, failed: 0, retrying: 0, error: null });
 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const failing = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash });
@@ -191,7 +192,13 @@ describe("ingest consumer", () => {
     );
     warn.mockRestore();
     expect(failing.retried).toBe(true);
-    expect(await status()).toEqual({ indexing: 0, failed: 1, error: "embedding_failed" });
+    // The Queue retries this one, so the admin keeps checking.
+    expect(await status()).toEqual({
+      indexing: 0,
+      failed: 1,
+      retrying: 1,
+      error: "embedding_failed",
+    });
     const stored = await env.DB.prepare("SELECT index_error FROM documents WHERE id = ?1")
       .bind(documentId)
       .first<{ index_error: string }>();
@@ -208,7 +215,7 @@ describe("ingest consumer", () => {
         retriever: memoryRetriever(),
       },
     );
-    expect(await status()).toEqual({ indexing: 0, failed: 0, error: null });
+    expect(await status()).toEqual({ indexing: 0, failed: 0, retrying: 0, error: null });
   });
 
   it("records too_long for a body with too many sections, and a new push clears it", async () => {
@@ -228,6 +235,8 @@ describe("ingest consumer", () => {
     errors.mockRestore();
     const failed = (await tenant.sources.listWithStats(assistantId)).find((s) => s.id === sourceId);
     expect(failed?.failedCount).toBe(1);
+    // Not retried: only a new push can fix it.
+    expect(failed?.retryingCount).toBe(0);
     expect(failed?.indexError).toBe("too_long");
 
     const hash2 = await contentHash("Huge", "# Short\n\nNow fine.");

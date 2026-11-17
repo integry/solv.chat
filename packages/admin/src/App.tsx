@@ -38,7 +38,11 @@ import { Navigation } from "./shell/Navigation.js";
 import type { CreatedAssistant } from "./shell/NewAssistantForm.js";
 import { PublishControls } from "./shell/PublishStatus.js";
 import { TryItPane } from "./shell/TryItPane.js";
-import { AssistantMutationsProvider, useAssistantMutation } from "./shell/useAssistantMutations.js";
+import {
+  AssistantMutationsProvider,
+  useAnySaveRunning,
+  useAssistantMutation,
+} from "./shell/useAssistantMutations.js";
 import { useSession } from "./shell/useSession.js";
 import { ConfirmDialog } from "./ui/Dialog.js";
 import { useFocusTrap, useMediaQuery } from "./ui/focus.js";
@@ -141,6 +145,11 @@ function useTryItOpen(screen: string | null, narrow: boolean) {
   return { open, setOpen };
 }
 
+interface PendingLeave {
+  leave: () => void;
+  stay?: (() => void) | undefined;
+}
+
 function AdminShell({
   config,
   onSignOut,
@@ -148,7 +157,25 @@ function AdminShell({
   config: ResolvedAdminConfig;
   onSignOut: () => Promise<void>;
 }) {
-  const { screen, navigate } = useRoute(config.navItems, config.defaultScreen);
+  // Set while the owner decides whether to leave a screen with unsaved edits.
+  const [pendingLeave, setPendingLeave] = useState<PendingLeave | null>(null);
+  const unsavedRef = useRef(false);
+
+  /**
+   * Runs `leave` now, or after the owner agrees to drop unsaved edits.
+   * `stay` runs if they choose to stay (Back/Forward use it to undo the move).
+   */
+  const guardLeave = useCallback((leave: () => void, stay?: () => void) => {
+    if (unsavedRef.current) {
+      // A newer request replaces one still on screen. Back/Forward's `stay`
+      // reads the live address, so the newest one still returns to this screen.
+      setPendingLeave({ leave, stay });
+    } else {
+      leave();
+    }
+  }, []);
+
+  const { screen, navigate } = useRoute(config.navItems, config.defaultScreen, guardLeave);
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -171,19 +198,6 @@ function AdminShell({
   useEffect(() => {
     if (!narrow) setDrawerOpen(false);
   }, [narrow]);
-
-  // Set while the owner decides whether to leave a screen with unsaved edits.
-  const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
-  const unsavedRef = useRef(false);
-
-  /** Runs `leave` now, or after the owner agrees to drop unsaved edits. */
-  const guardLeave = useCallback((leave: () => void) => {
-    if (unsavedRef.current) {
-      setPendingLeave(() => leave);
-    } else {
-      leave();
-    }
-  }, []);
 
   function handleNavigate(path: string) {
     setDrawerOpen(false);
@@ -239,21 +253,25 @@ function AdminShell({
       : (assistants[0]?.id ?? null);
   const selectedAssistant = assistants.find((a) => a.id === effectiveSelectedId) ?? null;
   const selectedMutation = useAssistantMutation(effectiveSelectedId ?? "");
-  // While a save runs the edits still count as unsaved, but they are not lost
-  // by leaving: the save finishes either way, so there is nothing to ask.
+  // While a save runs the edits still count as unsaved, but moving to another
+  // screen does not lose them: the save finishes either way, so there is nothing to ask.
   const unsavedEdits = selectedMutation.unsaved && !selectedMutation.saving;
   unsavedRef.current = unsavedEdits;
+  // Closing the tab is different: it can cancel a save that has not reached the
+  // server, so the browser asks until every save has finished.
+  const anySaveRunning = useAnySaveRunning();
+  const protectUnload = selectedMutation.unsaved || anySaveRunning;
 
   // Closing or reloading the tab asks the browser's own question.
   useEffect(() => {
-    if (!unsavedEdits) return;
+    if (!protectUnload) return;
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [unsavedEdits]);
+  }, [protectUnload]);
 
   const navigation: AdminNavigation = useMemo(
     () => ({
@@ -516,11 +534,15 @@ function AdminShell({
           confirmLabel="Leave without saving"
           cancelLabel="Stay here"
           tone="danger"
-          onCancel={() => setPendingLeave(null)}
-          onConfirm={() => {
-            const leave = pendingLeave;
+          onCancel={() => {
+            const pending = pendingLeave;
             setPendingLeave(null);
-            leave?.();
+            pending?.stay?.();
+          }}
+          onConfirm={() => {
+            const pending = pendingLeave;
+            setPendingLeave(null);
+            pending?.leave();
           }}
         />
       </div>

@@ -1016,6 +1016,59 @@ describe("admin Sources screen", () => {
     expect(server.sourcesGets).toBe(before + 1);
   });
 
+  it("keeps checking a failure the Queue retries, and shows Ready once a retry succeeds", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const server = installSourcesFakeServer({
+      extraSources: [
+        source({
+          id: "src_entry_1",
+          failedCount: 1,
+          retryingCount: 1,
+          indexError: "embedding_failed",
+        }),
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+    await screen.findByText("Answers you wrote");
+    expect(within(sourceRow("Answers you wrote")).getByText("Failed")).toBeTruthy();
+    const before = server.sourcesGets;
+
+    // Nothing changes yet: still failed, still checking.
+    await vi.advanceTimersByTimeAsync(INDEXING_POLL_MS + 50);
+    await waitFor(() => expect(server.sourcesGets).toBe(before + 1));
+    expect(within(sourceRow("Answers you wrote")).getByText("Failed")).toBeTruthy();
+
+    // The Queue's retry succeeds on the server; the next check shows it.
+    const entry = server.sources.find((s) => s.id === "src_entry_1");
+    if (entry) Object.assign(entry, { failedCount: 0, retryingCount: 0, indexError: null });
+    // The next check is scheduled once the last one has answered, so step the clock.
+    for (let step = 0; step < 20 && server.sourcesGets < before + 2; step++) {
+      await vi.advanceTimersByTimeAsync(INDEXING_POLL_MS / 5);
+    }
+    expect(server.sourcesGets).toBe(before + 2);
+    expect(await within(sourceRow("Answers you wrote")).findByText("Ready")).toBeTruthy();
+
+    await vi.advanceTimersByTimeAsync(INDEXING_POLL_MS * 3);
+    expect(server.sourcesGets).toBe(before + 2);
+  });
+
+  it("does not keep checking a failure that only the owner can fix", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const server = installSourcesFakeServer({
+      extraSources: [
+        source({ id: "src_entry_1", failedCount: 1, retryingCount: 0, indexError: "too_long" }),
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+    await screen.findByText("Answers you wrote");
+    expect(within(sourceRow("Answers you wrote")).getByText("Failed")).toBeTruthy();
+    const before = server.sourcesGets;
+    await vi.advanceTimersByTimeAsync(INDEXING_POLL_MS * 3);
+    expect(server.sourcesGets).toBe(before);
+  });
+
   it("asks before deleting a source, and Cancel deletes nothing", async () => {
     const server = installSourcesFakeServer({ extraSources: [source({ id: "src_entry_1" })] });
     window.history.replaceState(null, "", "/admin/sources");

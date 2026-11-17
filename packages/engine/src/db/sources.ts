@@ -29,6 +29,11 @@ export interface SourceWithStatsRow extends SourceRow {
   indexingCount: number;
   /** Documents whose current content could not be indexed. */
   failedCount: number;
+  /**
+   * Failed documents the Queue tries again (every code but `too_long`), so
+   * their status can still change on its own.
+   */
+  retryingCount: number;
   /** One of the failed documents' error codes, or null when none failed. */
   indexError: IndexErrorCode | null;
 }
@@ -38,6 +43,7 @@ interface StatsRow extends Row {
   last_updated_at: number | null;
   indexing_count: number | null;
   failed_count: number | null;
+  retrying_count: number | null;
   index_error: string | null;
 }
 
@@ -137,6 +143,10 @@ export function sourcesFor(db: D1Database, orgId: string) {
                 SUM(CASE WHEN d.index_error_hash = d.content_hash
                           AND (d.indexed_hash IS NULL OR d.indexed_hash != d.content_hash)
                          THEN 1 ELSE 0 END) AS failed_count,
+                SUM(CASE WHEN d.index_error_hash = d.content_hash
+                          AND (d.indexed_hash IS NULL OR d.indexed_hash != d.content_hash)
+                          AND d.index_error != 'too_long'
+                         THEN 1 ELSE 0 END) AS retrying_count,
                 MAX(CASE WHEN d.index_error_hash = d.content_hash
                           AND (d.indexed_hash IS NULL OR d.indexed_hash != d.content_hash)
                          THEN d.index_error END) AS index_error
@@ -154,6 +164,7 @@ export function sourcesFor(db: D1Database, orgId: string) {
         lastUpdatedAt: row.last_updated_at ?? null,
         indexingCount: Number(row.indexing_count ?? 0),
         failedCount: Number(row.failed_count ?? 0),
+        retryingCount: Number(row.retrying_count ?? 0),
         indexError:
           row.index_error !== null && INDEX_ERROR_CODES.has(row.index_error)
             ? (row.index_error as IndexErrorCode)

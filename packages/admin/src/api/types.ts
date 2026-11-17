@@ -36,6 +36,8 @@ export interface SourceSummary {
   indexingCount?: number;
   /** Documents that could not be indexed. */
   failedCount?: number;
+  /** Failed documents that are tried again automatically, so may still recover. */
+  retryingCount?: number;
   /** Why (one of the failed documents), as a code the admin words. */
   indexError?: IndexErrorCode | null;
 }

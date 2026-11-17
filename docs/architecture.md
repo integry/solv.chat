@@ -119,7 +119,9 @@ searchable: the admin's Sources list says "Indexing…" for those documents
 (content hash differs from the indexed hash), "Failed: reason" when the
 consumer recorded an error for the current hash (every failed attempt records
 one; a later success or a new push makes it stale), and "Ready" otherwise, and
-it re-checks every few seconds while anything is indexing. There is no crawler in v1: content is pushed (CLI, GitHub
+it re-checks every few seconds while anything is indexing or has a failure
+the Queue retries (every code but `too_long`), so a retry that succeeds turns
+the row Ready. There is no crawler in v1: content is pushed (CLI, GitHub
 Action), imported once from a sitemap, or written by hand as an entry.
 
 Sitemap import validates every URL and redirect hop as `https:` and checks
@@ -402,8 +404,10 @@ Install
 - Gaps and Conversations offer one-click fixes: "Write the right answer" (creates
   an entry source), "Add to tests".
 - Plain words on every control. No model, temperature or chunking settings.
-- Leaving a screen (or switching assistant) with unsaved edits on Behaviour or
-  Widget asks first; closing the tab triggers the browser's own question.
+- Leaving a screen (a link, the browser's Back or Forward, or switching
+  assistant) with unsaved edits on Behaviour or Widget asks first; "Stay here"
+  keeps the screen and puts the address back. Closing the tab triggers the
+  browser's own question while edits are unsaved or a save is still running.
 - Install shows three steps: the websites that may show the chat (the
   Widget screen's list, read-only), the snippet with notes for plain HTML,
   WordPress, Shopify and Next.js, and whether the widget has been seen, taken

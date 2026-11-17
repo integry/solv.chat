@@ -19,6 +19,7 @@ describe("leaving a screen with unsaved edits", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("asks first; Stay here keeps the edits and the screen", async () => {
@@ -125,5 +126,146 @@ describe("leaving a screen with unsaved edits", () => {
     const dirty = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(dirty);
     expect(dirty.defaultPrevented).toBe(true);
+  });
+
+  /**
+   * Same-document session history, as a browser keeps it. happy-dom's own
+   * back/forward reload the frame instead of firing popstate.
+   */
+  function browserHistory() {
+    const real = History.prototype.replaceState;
+    const setAddress = (state: unknown, url: string) => real.call(window.history, state, "", url);
+    const entries = [{ state: window.history.state as unknown, url: window.location.pathname }];
+    let index = 0;
+    vi.spyOn(window.history, "pushState").mockImplementation((state, _title, url) => {
+      const next = { state, url: String(url ?? window.location.pathname) };
+      entries.splice(index + 1, entries.length, next);
+      index += 1;
+      setAddress(next.state, next.url);
+    });
+    vi.spyOn(window.history, "replaceState").mockImplementation((state, _title, url) => {
+      const entry = { state, url: String(url ?? window.location.pathname) };
+      entries[index] = entry;
+      setAddress(entry.state, entry.url);
+    });
+    const go = (delta = 0) => {
+      const target = index + delta;
+      const entry = entries[target];
+      if (delta === 0 || !entry) return;
+      setTimeout(() => {
+        index = target;
+        setAddress(entry.state, entry.url);
+        window.dispatchEvent(new PopStateEvent("popstate", { state: entry.state }));
+      }, 0);
+    };
+    vi.spyOn(window.history, "go").mockImplementation(go);
+    vi.spyOn(window.history, "back").mockImplementation(() => go(-1));
+    vi.spyOn(window.history, "forward").mockImplementation(() => go(1));
+    return { position: () => index };
+  }
+
+  async function popTo(move: () => void) {
+    const popped = new Promise<void>((resolve) =>
+      window.addEventListener("popstate", () => resolve(), { once: true }),
+    );
+    move();
+    await popped;
+  }
+
+  it("asks before Back leaves; Stay here keeps the screen, the edits and the address", async () => {
+    window.history.replaceState(null, "", "/admin/widget");
+    const history = browserHistory();
+    installBuildScreensFake();
+    render(<App />);
+    await screen.findByLabelText("Title");
+    fireEvent.click(navLink("Behaviour"));
+    fireEvent.change(await screen.findByLabelText("First thing it says"), {
+      target: { value: "Not saved yet" },
+    });
+
+    await popTo(() => window.history.back());
+    let dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stay here" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/behaviour"));
+    expect(history.position()).toBe(1);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect((screen.getByLabelText("First thing it says") as HTMLInputElement).value).toBe(
+      "Not saved yet",
+    );
+
+    // Still one entry ahead of the Widget screen, so Back asks again.
+    await popTo(() => window.history.back());
+    dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Leave without saving" }));
+    expect(await screen.findByLabelText("Title")).toBeTruthy();
+    expect(window.location.pathname).toBe("/admin/widget");
+    expect(history.position()).toBe(0);
+  });
+
+  it("asks before Forward leaves, and Stay here returns to the same entry", async () => {
+    const history = browserHistory();
+    installBuildScreensFake();
+    render(<App />);
+    await screen.findByLabelText("First thing it says");
+    fireEvent.click(navLink("Widget"));
+    await screen.findByLabelText("Title");
+    // Nothing unsaved: Back goes straight there.
+    await popTo(() => window.history.back());
+    const greeting = await screen.findByLabelText("First thing it says");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.change(greeting, { target: { value: "Edited after Back" } });
+
+    await popTo(() => window.history.forward());
+    let dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    expect(screen.getByLabelText("First thing it says")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stay here" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/behaviour"));
+    expect(history.position()).toBe(0);
+    expect((screen.getByLabelText("First thing it says") as HTMLInputElement).value).toBe(
+      "Edited after Back",
+    );
+
+    await popTo(() => window.history.forward());
+    dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Leave without saving" }));
+    expect(await screen.findByLabelText("Title")).toBeTruthy();
+    expect(window.location.pathname).toBe("/admin/widget");
+  });
+
+  it("keeps asking the browser before the tab closes until a running save finishes", async () => {
+    installBuildScreensFake();
+    const inner = globalThis.fetch;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "PUT") await held;
+      return inner(input, init);
+    });
+    const closing = () => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("First thing it says"), {
+      target: { value: "Saving now" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect((screen.getByLabelText("First thing it says") as HTMLInputElement).disabled).toBe(
+        true,
+      ),
+    );
+    expect(closing()).toBe(true);
+
+    // Moving on inside the admin does not lose the save, but closing still could.
+    fireEvent.click(navLink("Widget"));
+    expect(await screen.findByLabelText("Title")).toBeTruthy();
+    expect(closing()).toBe(true);
+
+    release();
+    await waitFor(() => expect(closing()).toBe(false));
   });
 });

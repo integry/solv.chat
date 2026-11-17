@@ -5,6 +5,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
 
@@ -91,9 +92,27 @@ export function matchScreen(
   return found ? found.id : fallback;
 }
 
+/** Asks whether to leave the current screen; calls exactly one of the two. */
+export type ConfirmLeave = (leave: () => void, stay: () => void) => void;
+
+const HISTORY_INDEX_KEY = "solvAdminIndex";
+
+function historyIndex(state: unknown): number | null {
+  if (state === null || typeof state !== "object") return null;
+  const value = (state as Record<string, unknown>)[HISTORY_INDEX_KEY];
+  return typeof value === "number" ? value : null;
+}
+
+function withHistoryIndex(state: unknown, index: number): Record<string, unknown> {
+  const base =
+    state !== null && typeof state === "object" ? (state as Record<string, unknown>) : {};
+  return { ...base, [HISTORY_INDEX_KEY]: index };
+}
+
 export function useRoute(
   navItems: readonly NavItem[] = NAV_ITEMS,
   defaultScreen?: string,
+  confirmLeave?: ConfirmLeave,
 ): {
   screen: string | null;
   navigate: (path: string) => void;
@@ -101,24 +120,71 @@ export function useRoute(
   const [screen, setScreen] = useState<string | null>(() =>
     matchScreen(window.location.pathname, navItems, defaultScreen),
   );
+  // The screen on show and the history entry it belongs to. Back and Forward
+  // change the address before we hear about them, so these are what "Stay
+  // here" returns to.
+  const screenRef = useRef(screen);
+  const indexRef = useRef(0);
+  const confirmRef = useRef(confirmLeave);
+  confirmRef.current = confirmLeave;
+
+  const show = useCallback((next: string | null) => {
+    screenRef.current = next;
+    setScreen(next);
+  }, []);
 
   useEffect(() => {
-    setScreen(matchScreen(window.location.pathname, navItems, defaultScreen));
-    const onPopState = () => {
-      setScreen(matchScreen(window.location.pathname, navItems, defaultScreen));
+    const current = historyIndex(window.history.state);
+    if (current === null) {
+      window.history.replaceState(withHistoryIndex(window.history.state, indexRef.current), "");
+    } else {
+      indexRef.current = current;
+    }
+    show(matchScreen(window.location.pathname, navItems, defaultScreen));
+
+    const onPopState = (event: PopStateEvent) => {
+      const next = matchScreen(window.location.pathname, navItems, defaultScreen);
+      const arrived = historyIndex(event.state);
+      const commit = () => {
+        // Read the address again: it may have moved on while the owner decided.
+        const index = historyIndex(window.history.state);
+        if (index !== null) indexRef.current = index;
+        show(matchScreen(window.location.pathname, navItems, defaultScreen));
+      };
+      if (next === screenRef.current || !confirmRef.current) {
+        if (arrived !== null) indexRef.current = arrived;
+        show(next);
+        return;
+      }
+      confirmRef.current(commit, () => {
+        const index = historyIndex(window.history.state);
+        const committed = indexRef.current;
+        if (index !== null && index !== committed) {
+          // Step back to the entry the owner is still on.
+          window.history.go(committed - index);
+        } else if (index === null) {
+          // An entry we did not create: put the current screen's address back.
+          const path = navItems.find((item) => item.id === screenRef.current)?.path;
+          if (path) {
+            window.history.pushState(withHistoryIndex(null, committed + 1), "", path);
+            indexRef.current = committed + 1;
+          }
+        }
+      });
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [navItems, defaultScreen]);
+  }, [navItems, defaultScreen, show]);
 
   const navigate = useCallback(
     (path: string) => {
       if (window.location.pathname !== path) {
-        window.history.pushState(null, "", path);
+        indexRef.current += 1;
+        window.history.pushState(withHistoryIndex(null, indexRef.current), "", path);
       }
-      setScreen(matchScreen(window.location.pathname, navItems, defaultScreen));
+      show(matchScreen(window.location.pathname, navItems, defaultScreen));
     },
-    [navItems, defaultScreen],
+    [navItems, defaultScreen, show],
   );
 
   return { screen, navigate };

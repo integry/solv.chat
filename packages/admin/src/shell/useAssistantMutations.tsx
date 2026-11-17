@@ -44,6 +44,8 @@ interface Coordinator {
     fn: () => Promise<T>,
   ) => Promise<MutationRunResult<T>>;
   setUnsaved: (assistantId: string, reporter: string, unsaved: boolean) => void;
+  /** True while a save runs for any assistant. */
+  anySaving: boolean;
 }
 
 const AssistantMutationsContext = createContext<Coordinator | null>(null);
@@ -124,7 +126,12 @@ function useLocalCoordinator(): Coordinator {
     [],
   );
 
-  return useMemo(() => ({ getState, run, setUnsaved }), [getState, run, setUnsaved]);
+  const anySaving = Object.values(activeByAssistant).includes("saving");
+
+  return useMemo(
+    () => ({ getState, run, setUnsaved, anySaving }),
+    [getState, run, setUnsaved, anySaving],
+  );
 }
 
 /**
@@ -154,6 +161,14 @@ export function useAssistantMutation(assistantId: string): AssistantMutationHand
   );
 
   return { ...state, run };
+}
+
+/**
+ * True while a save runs for any assistant, including one the owner has
+ * switched away from. Closing the tab then could cancel the request.
+ */
+export function useAnySaveRunning(): boolean {
+  return useContext(AssistantMutationsContext)?.anySaving ?? false;
 }
 
 /**
