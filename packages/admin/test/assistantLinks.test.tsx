@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
 import type { Assistant, AssistantOverview, AssistantReport } from "../src/api/types.js";
@@ -73,6 +73,17 @@ function installServer() {
     }),
   );
   return { paths };
+}
+
+/**
+ * The browser's Back: the previous address comes back and `popstate` says so.
+ * happy-dom restores the address but fires no event, so it is sent here.
+ */
+function goBack() {
+  act(() => {
+    window.history.back();
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
 }
 
 /** Opens `screenPath`, switches to the second assistant, and finds the link. */
@@ -253,6 +264,87 @@ describe("links to an assistant's own screens", () => {
     expect(selectedAssistantId()).toBe(SECOND.id);
     // The editor does not reopen on a reload.
     expect(screen.queryByLabelText("Question")).toBeNull();
+  });
+
+  it("names the newly picked assistant in the Gaps address, so a reload shows it", async () => {
+    const { paths } = installServer();
+    window.history.pushState(null, "", `/admin/gaps?assistant=${FIRST.id}`);
+    render(<App />);
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${FIRST.id}/gaps`));
+    pickAssistant(SECOND.id);
+    await waitFor(() => expect(selectedAssistantId()).toBe(SECOND.id));
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${SECOND.id}/gaps`));
+    // The address follows the switch: it no longer names the assistant it came from.
+    expect(window.location.pathname).toBe("/admin/gaps");
+    expect(window.location.search).toBe(`?assistant=${SECOND.id}`);
+
+    // A reload, or the copied address opened elsewhere: a fresh shell from it alone.
+    cleanup();
+    paths.length = 0;
+    render(<App />);
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${SECOND.id}/gaps`));
+    expect(selectedAssistantId()).toBe(SECOND.id);
+    expect(paths.filter((p) => p.startsWith(`/api/admin/assistants/${FIRST.id}/`))).toEqual([]);
+  });
+
+  it("shows the assistant the restored address names after Back across a switch", async () => {
+    const { paths } = installServer();
+    // Overview of the second assistant, then its Reports through the Overview link.
+    const link = await linkOnSecondAssistant(
+      "/admin/overview",
+      "Most asked questions",
+      "See Reports",
+    );
+    expect(window.location.search).toBe(`?assistant=${SECOND.id}`);
+    fireEvent.click(link);
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${SECOND.id}/report`));
+    expect(window.location.pathname).toBe("/admin/reports");
+    expect(window.location.search).toBe(`?assistant=${SECOND.id}`);
+
+    // Switch to the first assistant on Reports: the address follows.
+    pickAssistant(FIRST.id);
+    await waitFor(() => expect(selectedAssistantId()).toBe(FIRST.id));
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${FIRST.id}/report`));
+    expect(window.location.search).toBe(`?assistant=${FIRST.id}`);
+
+    // Back restores the second assistant's Reports address, and the shell shows it:
+    // its content and its name in the switcher, not the first assistant's.
+    paths.length = 0;
+    goBack();
+    await waitFor(() => expect(window.location.search).toBe(`?assistant=${SECOND.id}`));
+    expect(window.location.pathname).toBe("/admin/reports");
+    await waitFor(() => expect(selectedAssistantId()).toBe(SECOND.id));
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${SECOND.id}/report`));
+    expect(paths.filter((p) => p.startsWith(`/api/admin/assistants/${FIRST.id}/`))).toEqual([]);
+
+    // Back once more: the second assistant's Overview, where this started.
+    paths.length = 0;
+    goBack();
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/overview"));
+    expect(window.location.search).toBe(`?assistant=${SECOND.id}`);
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${SECOND.id}/overview`));
+    expect(selectedAssistantId()).toBe(SECOND.id);
+  });
+
+  it("keeps the selection when Back reaches an address that names no assistant", async () => {
+    const { paths } = installServer();
+    window.history.pushState(null, "", "/admin/overview");
+    render(<App />);
+    await findAssistantButton();
+    pickAssistant(SECOND.id);
+    await waitFor(() => expect(selectedAssistantId()).toBe(SECOND.id));
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${SECOND.id}/overview`));
+    expect(window.location.search).toBe(`?assistant=${SECOND.id}`);
+
+    // The bare Overview address from before the switch names nobody, so the
+    // assistant on show stays, and nothing of the first one is loaded.
+    paths.length = 0;
+    goBack();
+    await waitFor(() => expect(window.location.search).toBe(""));
+    expect(window.location.pathname).toBe("/admin/overview");
+    expect(selectedAssistantId()).toBe(SECOND.id);
+    expect(await screen.findByRole("region", { name: "Most asked questions" })).toBeTruthy();
+    expect(paths.filter((p) => p.startsWith(`/api/admin/assistants/${FIRST.id}/`))).toEqual([]);
   });
 
   it("leaves Providers, which is for the whole organisation, without an assistant", async () => {

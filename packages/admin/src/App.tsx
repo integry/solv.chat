@@ -9,11 +9,14 @@ import {
   resolveAdminConfig,
 } from "./extension.js";
 import {
+  assistantPath,
   BUILD_SCREENS,
   type BuiltinScreenId,
   MONITOR_SCREENS,
+  navigateTo,
   readQueryParam,
   useRoute,
+  withAssistant,
 } from "./routing.js";
 import { Behaviour } from "./screens/Behaviour.js";
 import { Conversations } from "./screens/Conversations.js";
@@ -150,9 +153,26 @@ function AdminShell({
   const { screen, navigate } = useRoute(config.navItems, config.defaultScreen);
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
-  // Conversation and question links name their assistant; start on that one. An id
-  // that is not in the list falls back to the first assistant below.
+  // The address names the assistant on show, so a link, a reload and Back all
+  // show the one they were made under. Start from it; an id that is not in the
+  // list falls back to the first assistant below.
   const [selectedId, setSelectedId] = useState<string | null>(() => readQueryParam("assistant"));
+  // Back and Forward restore an address, and with it the assistant it names. An
+  // address without one (the bare screen path) keeps the current selection.
+  useEffect(() => {
+    const onPopState = () => {
+      setSelectedId((prev) => readQueryParam("assistant") ?? prev);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+  // Choosing an assistant writes it into the address too (a new history entry,
+  // so Back undoes the switch), and `popstate` tells screens that follow the
+  // address: an open conversation of the previous assistant is left behind.
+  const selectAssistant = useCallback((id: string) => {
+    setSelectedId(id);
+    navigateTo(withAssistant(id));
+  }, []);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
   // A queue, not one slot: two create forms can finish close together, and each key is
@@ -185,7 +205,7 @@ function AdminShell({
       if (current.some((a) => a.id === assistant.id)) return prev ?? { assistants: current };
       return { assistants: [...current, assistant] };
     });
-    setSelectedId(assistant.id);
+    selectAssistant(assistant.id);
     setDrawerOpen(false);
     if (ingestKey) {
       setCreatedKeys((prev) =>
@@ -199,7 +219,7 @@ function AdminShell({
   function handleFirstRunCreated(created: CreatedAssistant) {
     handleCreated(created);
     const sources = config.navItems.find((item) => item.id === "sources");
-    if (sources) navigate(sources.path);
+    if (sources) navigate(assistantPath(sources.path, created.assistant.id));
   }
 
   async function handleSignOut() {
@@ -261,7 +281,7 @@ function AdminShell({
       assistants={assistants}
       selectedId={effectiveSelectedId}
       onSelect={(id) => {
-        setSelectedId(id);
+        selectAssistant(id);
         setDrawerOpen(false);
       }}
       onCreated={handleCreated}

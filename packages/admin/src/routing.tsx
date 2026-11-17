@@ -104,6 +104,18 @@ export function assistantPath(path: string, assistantId: string): string {
   return `${path}?${new URLSearchParams({ assistant: assistantId }).toString()}`;
 }
 
+/**
+ * The current address with `assistantId` as its assistant. An open
+ * conversation (`id`) belongs to the assistant it was opened under, so it is
+ * dropped; the rest of the query (a search, say) stays.
+ */
+export function withAssistant(assistantId: string): string {
+  const params = new URLSearchParams(window.location.search);
+  params.set("assistant", assistantId);
+  params.delete("id");
+  return `${window.location.pathname}?${params.toString()}`;
+}
+
 /** Reads one query parameter of the current address. */
 export function readQueryParam(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name);

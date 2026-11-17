@@ -809,6 +809,33 @@ describe("Monitor screens", () => {
       expect(window.location.search).toBe(`?assistant=${OTHER_ASSISTANT.id}`);
     });
 
+    it("Back after a switch reopens the conversation under the assistant it belongs to", async () => {
+      installServer({ twoAssistants: true });
+      await open("/admin/conversations");
+      fireEvent.click(await screen.findByRole("link", { name: /Do you ship to Spain\?/ }));
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+      expect(window.location.search).toBe(`?id=cnv_1&assistant=${ASSISTANT.id}`);
+
+      pickAssistant(OTHER_ASSISTANT.id);
+      expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
+      expect(window.location.search).toBe(`?assistant=${OTHER_ASSISTANT.id}`);
+
+      // Back restores the first assistant's open conversation, and the shell
+      // switches back to that assistant, so it is shown and its actions work.
+      // happy-dom restores the address on Back but fires no popstate; the browser does.
+      act(() => {
+        window.history.back();
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      await waitFor(() =>
+        expect(window.location.search).toBe(`?id=cnv_1&assistant=${ASSISTANT.id}`),
+      );
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+      expect(selectedAssistantId()).toBe(ASSISTANT.id);
+      expect(screen.queryByText(/This conversation belongs to another assistant/)).toBeNull();
+      expect(screen.getAllByRole("button", { name: "Add to tests" }).length).toBeGreaterThan(0);
+    });
+
     it("keeps the second assistant in the address when Back and Write an answer leave a conversation", async () => {
       const { calls } = installServer({ twoAssistants: true });
       await open(`/admin/conversations?id=cnv_2&assistant=${OTHER_ASSISTANT.id}`);

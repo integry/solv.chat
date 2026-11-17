@@ -58,9 +58,11 @@ function readOpenAddress(): OpenAddress {
 
 /**
  * The open conversation follows the address, so Back and a shared link both
- * work. An address naming another assistant (left over from before a switch,
- * or reached with Back) opens nothing and is cleared, so its actions cannot
- * land on the assistant now selected.
+ * work. The shell keeps the address's assistant and the selection together:
+ * a switch drops the open conversation from the address, and Back restores
+ * the assistant the address names. What is left is an address naming an
+ * assistant that is not in the list: it opens nothing and is cleared, so its
+ * actions cannot land on the assistant shown instead.
  */
 function useOpenConversationId(assistantId: string): string | null {
   const [address, setAddress] = useState(readOpenAddress);
