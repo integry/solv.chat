@@ -9,6 +9,7 @@ import type {
   GapSummary,
   InstallInfo,
 } from "../src/api/types.js";
+import { findAssistantButton, openNewAssistantForm } from "./support/switcher.js";
 
 function makeAssistant(allowedOrigins: string[] = []): Assistant {
   return {
@@ -798,8 +799,8 @@ describe("admin phase 1 screens", () => {
       "Conversations",
       "Gaps",
       "Sources",
-      "Tools",
       "Behaviour",
+      "Tools",
       "Widget",
       "Tests",
       "Install",
@@ -849,7 +850,8 @@ describe("admin phase 1 screens", () => {
     installFakeServer();
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "New assistant" }));
+    await findAssistantButton();
+    openNewAssistantForm();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Docs" } });
     fireEvent.click(screen.getByRole("button", { name: "Create assistant" }));
 

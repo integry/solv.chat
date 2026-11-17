@@ -3,6 +3,9 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, deleteJson, getJson, postJson } from "../api/client.js";
 import type { DocumentSummary, SourceSummary } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { EmptyState } from "../ui/EmptyState.js";
+import { formatDateTime } from "../ui/format.js";
+import { PageHeader } from "../ui/PageHeader.js";
 import { EntryEditor } from "./EntryEditor.js";
 
 export interface SourcesProps {
@@ -27,7 +30,7 @@ function formatCount(count: number): string {
 
 function formatDate(timestamp: number | null): string {
   if (timestamp === null) return "Never";
-  return new Date(timestamp).toLocaleString();
+  return formatDateTime(timestamp);
 }
 
 function stripLeadingHeading(markdown: string, title: string): string {
@@ -473,12 +476,7 @@ export function Sources({ assistantId }: SourcesProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Sources</h1>
-          <p className="muted">Where your assistant&apos;s answers come from.</p>
-        </div>
-      </div>
+      <PageHeader title="Sources" description="Where your assistant's answers come from." />
 
       {actionError && (
         <p className="error-text" role="alert">
@@ -487,10 +485,16 @@ export function Sources({ assistantId }: SourcesProps) {
       )}
 
       {sources.length === 0 ? (
-        <p className="muted">
-          No sources yet. Push your site with <code>solv push</code>, write an answer below, or
-          import once from a sitemap.
-        </p>
+        <EmptyState
+          icon="sources"
+          title="No sources yet"
+          description={
+            <>
+              Push your site with <code>solv push</code>, write an answer below, or import once from
+              a sitemap.
+            </>
+          }
+        />
       ) : (
         <ul className="source-list">
           {sources.map((source) => {

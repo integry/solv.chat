@@ -165,7 +165,10 @@ describe("admin extension point", () => {
     const links = Array.from(nav.querySelectorAll("a"));
     expect(links.map((a) => a.textContent)).toEqual(NAV_ITEMS.map((item) => item.label));
     expect(links.map((a) => a.getAttribute("href"))).toEqual(NAV_ITEMS.map((item) => item.path));
-    expect(nav.querySelector(".nav-section-label")?.textContent).toBe("Settings");
+    const sectionLabels = Array.from(nav.querySelectorAll("h2.nav-section-label")).map(
+      (el) => el.textContent,
+    );
+    expect(sectionLabels).toEqual(["Monitor", "Build", "Go live", "Settings"]);
   });
 
   it("adds an extra nav item in the given section, routes to it, and passes props", async () => {
@@ -188,7 +191,7 @@ describe("admin extension point", () => {
     const sectionLabels = Array.from(nav.querySelectorAll(".nav-section-label")).map(
       (el) => el.textContent,
     );
-    expect(sectionLabels).toEqual(["Settings", "Account"]);
+    expect(sectionLabels).toEqual(["Monitor", "Build", "Go live", "Settings", "Account"]);
 
     const accountLink = screen.getByRole("link", { name: "Account" });
     expect(accountLink.getAttribute("href")).toBe("/admin/account");
@@ -196,7 +199,7 @@ describe("admin extension point", () => {
     fireEvent.click(accountLink);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Account" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Account", level: 1 })).toBeTruthy();
       expect(screen.getByTestId("plan").textContent).toBe("Pro");
     });
 
@@ -223,7 +226,7 @@ describe("admin extension point", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Account" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Account", level: 1 })).toBeTruthy();
     });
     expect(screen.getByTestId("assistant-id").textContent).toBe("none");
   });

@@ -152,9 +152,8 @@ describe("Tests screen", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Tests" })).toBeTruthy();
-    expect(
-      await screen.findByText("No tests yet. Add a question your assistant should get right."),
-    ).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "No tests yet" })).toBeTruthy();
+    expect(screen.getByText("Add a question your assistant should get right.")).toBeTruthy();
     const runBtn = screen.getByRole("button", { name: "Run now" }) as HTMLButtonElement;
     expect(runBtn.disabled).toBe(true);
   });
@@ -314,9 +313,7 @@ describe("Tests screen", () => {
     await waitFor(() => {
       expect(screen.queryByText("Updated question?")).toBeNull();
     });
-    expect(
-      screen.getByText("No tests yet. Add a question your assistant should get right."),
-    ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "No tests yet" })).toBeTruthy();
   });
 
   it("runs all tests with progress state, mixed outcomes, and stopped-early notice", async () => {

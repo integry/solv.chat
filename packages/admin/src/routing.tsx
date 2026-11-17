@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 
 export type BuiltinScreenId =
   | "overview"
@@ -19,22 +19,50 @@ export interface NavItem {
   id: string;
   label: string;
   path: string;
+  /** Sidebar group heading. Built-in screens use the groups below. */
   section?: string;
+  /** Small decorative icon shown before the label (a host item's own SVG). */
+  icon?: ReactNode;
 }
 
+/** Built-in sidebar groups, in order. Host sections are listed after them. */
+export const NAV_GROUPS = ["Monitor", "Build", "Go live", "Settings"] as const;
+
 export const NAV_ITEMS: readonly NavItem[] = [
-  { id: "overview", label: "Overview", path: "/admin/overview" },
-  { id: "reports", label: "Reports", path: "/admin/reports" },
-  { id: "conversations", label: "Conversations", path: "/admin/conversations" },
-  { id: "gaps", label: "Gaps", path: "/admin/gaps" },
-  { id: "sources", label: "Sources", path: "/admin/sources" },
-  { id: "tools", label: "Tools", path: "/admin/tools" },
-  { id: "behaviour", label: "Behaviour", path: "/admin/behaviour" },
-  { id: "widget", label: "Widget", path: "/admin/widget" },
-  { id: "tests", label: "Tests", path: "/admin/tests" },
-  { id: "install", label: "Install", path: "/admin/install" },
+  { id: "overview", label: "Overview", path: "/admin/overview", section: "Monitor" },
+  { id: "reports", label: "Reports", path: "/admin/reports", section: "Monitor" },
+  {
+    id: "conversations",
+    label: "Conversations",
+    path: "/admin/conversations",
+    section: "Monitor",
+  },
+  { id: "gaps", label: "Gaps", path: "/admin/gaps", section: "Monitor" },
+  { id: "sources", label: "Sources", path: "/admin/sources", section: "Build" },
+  { id: "behaviour", label: "Behaviour", path: "/admin/behaviour", section: "Build" },
+  { id: "tools", label: "Tools", path: "/admin/tools", section: "Build" },
+  { id: "widget", label: "Widget", path: "/admin/widget", section: "Build" },
+  { id: "tests", label: "Tests", path: "/admin/tests", section: "Build" },
+  { id: "install", label: "Install", path: "/admin/install", section: "Go live" },
   { id: "providers", label: "Providers", path: "/admin/providers", section: "Settings" },
 ];
+
+/** "How is it doing" screens: the Try it pane starts closed here. */
+export const MONITOR_SCREENS: ReadonlySet<string> = new Set([
+  "overview",
+  "reports",
+  "conversations",
+  "gaps",
+]);
+
+/** "Set it up" screens: the header offers Publish here. */
+export const BUILD_SCREENS: ReadonlySet<string> = new Set([
+  "sources",
+  "behaviour",
+  "tools",
+  "widget",
+  "tests",
+]);
 
 export function matchScreen(
   pathname: string,

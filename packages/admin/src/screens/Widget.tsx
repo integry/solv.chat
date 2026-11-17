@@ -4,7 +4,9 @@ import { ApiError, patchJson, putJson } from "../api/client.js";
 import { FailedTestsError, publishAssistant } from "../api/publish.js";
 import type { Assistant, TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { useAssistantMutation } from "../shell/useAssistantMutations.js";
+import { useAssistantMutation, useReportUnsavedEdits } from "../shell/useAssistantMutations.js";
+import { formatDateTime } from "../ui/format.js";
+import { PageHeader } from "../ui/PageHeader.js";
 import { FailedTestsPanel } from "./FailedTestsPanel.js";
 import { History } from "./History.js";
 
@@ -84,6 +86,8 @@ export function Widget({ assistantId }: WidgetProps) {
     builtins,
     actionOriginsText,
   };
+  const savedDraftRef = useRef({ widget: savedWidget, actions: savedActions });
+  savedDraftRef.current = { widget: savedWidget, actions: savedActions };
   const lastTickRef = useRef(mutation.tick);
   const ignoreNextTickRef = useRef(false);
   const syncWidgetOnLoadRef = useRef(false);
@@ -120,6 +124,35 @@ export function Widget({ assistantId }: WidgetProps) {
       ignoreNextTickRef.current = false;
       return;
     }
+    if (mutation.lastKind === "publishing") {
+      // Published from outside this screen (the header). Publishing replaces
+      // the draft and adds a version, so reload both. Publish waits for edits
+      // to be saved, so a field that now differs from the saved draft was
+      // changed while the publish was in flight and keeps its edit.
+      const { widget, actions } = savedDraftRef.current;
+      if (widget && actions) {
+        const latest = latestRef.current;
+        const actionOriginsSame = arraysEqual(
+          parseOrigins(latest.actionOriginsText),
+          actions.allowedOrigins,
+        );
+        publishSnapshotRef.current = {
+          assistantId,
+          fields: {
+            title: widget.title,
+            accentColor: widget.accentColor,
+            position: widget.position,
+            builtins: actions.builtins,
+            actionOriginsText: actionOriginsSame
+              ? latest.actionOriginsText
+              : actions.allowedOrigins.join("\n"),
+          },
+        };
+      }
+      draftRes.reload();
+      setHistoryTick((n) => n + 1);
+      return;
+    }
     if (mutation.lastKind !== "saving") {
       return;
     }
@@ -140,7 +173,7 @@ export function Widget({ assistantId }: WidgetProps) {
     assistantRes.reload();
     draftRes.reload();
     setHistoryTick((n) => n + 1);
-  }, [mutation.tick, mutation.lastKind, assistantRes.reload, draftRes.reload]);
+  }, [mutation.tick, mutation.lastKind, assistantRes.reload, draftRes.reload, assistantId]);
 
   useEffect(() => {
     if (!savedWidget || !savedActions) return;
@@ -226,6 +259,26 @@ export function Widget({ assistantId }: WidgetProps) {
     }
   }, [assistantId, initOriginsKey, savedAssistant]);
 
+  const currentWidget: WidgetConfig = { title, accentColor, position };
+  const currentOrigins = parseOrigins(originsText);
+  const currentActions: ActionsConfig = {
+    builtins,
+    allowedOrigins: parseOrigins(actionOriginsText),
+  };
+  const widgetChanged =
+    savedWidget !== undefined && initWidgetKey !== null && !widgetEqual(currentWidget, savedWidget);
+  const actionsChanged =
+    savedActions !== undefined &&
+    initWidgetKey !== null &&
+    !actionsEqual(currentActions, savedActions);
+  const originsChanged =
+    savedAssistant !== undefined &&
+    initOriginsKey !== null &&
+    !arraysEqual(currentOrigins, savedAssistant.allowedOrigins);
+  const unsaved = widgetChanged || originsChanged || actionsChanged;
+  // The header's Publish sends the saved draft too, so it waits for a save.
+  useReportUnsavedEdits(assistantId, unsaved);
+
   if (
     (draftRes.status === "loading" && !savedWidget) ||
     (assistantRes.status === "loading" && !savedAssistant)
@@ -249,18 +302,6 @@ export function Widget({ assistantId }: WidgetProps) {
   if (!savedWidget || !savedActions || !savedAssistant) {
     return null;
   }
-
-  const currentWidget: WidgetConfig = { title, accentColor, position };
-  const currentOrigins = parseOrigins(originsText);
-  const currentActions: ActionsConfig = {
-    builtins,
-    allowedOrigins: parseOrigins(actionOriginsText),
-  };
-  const widgetChanged = initWidgetKey !== null && !widgetEqual(currentWidget, savedWidget);
-  const actionsChanged = initWidgetKey !== null && !actionsEqual(currentActions, savedActions);
-  const originsChanged =
-    initOriginsKey !== null && !arraysEqual(currentOrigins, savedAssistant.allowedOrigins);
-  const unsaved = widgetChanged || originsChanged || actionsChanged;
 
   async function handleSave(event: FormEvent) {
     event.preventDefault();
@@ -366,9 +407,7 @@ export function Widget({ assistantId }: WidgetProps) {
         const res = await publishAssistant(assistantId, force, runId);
         publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
-        setStatusMessage(
-          `Published (${new Date(res.version.publishedAt ?? Date.now()).toLocaleString()}).`,
-        );
+        setStatusMessage(`Published (${formatDateTime(res.version.publishedAt ?? Date.now())}).`);
         setHistoryTick((n) => n + 1);
         draftRes.reload();
       });
@@ -386,31 +425,31 @@ export function Widget({ assistantId }: WidgetProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Widget</h1>
-          <p className="muted">Choose how the chat button and window look on your site.</p>
-        </div>
-        <div className="screen-actions">
-          {unsaved && <span className="unsaved-badge">Unsaved changes</span>}
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => setShowHistory((prev) => !prev)}
-          >
-            History
-          </button>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={busy || unsaved}
-            aria-describedby={unsaved ? "widget-publish-hint" : undefined}
-            onClick={() => void handlePublish(false)}
-          >
-            {publishing ? "Publishing…" : "Publish"}
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title="Widget"
+        description="Choose how the chat button and window look on your site."
+        actions={
+          <>
+            {unsaved && <span className="unsaved-badge">Unsaved changes</span>}
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setShowHistory((prev) => !prev)}
+            >
+              History
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={busy || unsaved}
+              aria-describedby={unsaved ? "widget-publish-hint" : undefined}
+              onClick={() => void handlePublish(false)}
+            >
+              {publishing ? "Publishing…" : "Publish"}
+            </button>
+          </>
+        }
+      />
       {unsaved && !busy && (
         <p id="widget-publish-hint" className="field-hint">
           Save your changes before publishing.
@@ -431,6 +470,7 @@ export function Widget({ assistantId }: WidgetProps) {
         <FailedTestsPanel
           run={failedRun}
           busy={busy}
+          publishBlocked={unsaved}
           onFix={() => setFailedRun(null)}
           onPublishAnyway={() => void handlePublish(true, failedRun.id)}
         />

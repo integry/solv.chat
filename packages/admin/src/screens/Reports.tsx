@@ -3,6 +3,9 @@ import type { AssistantReport, TopQuestion } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { buildCsv } from "../csv.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
+import { EmptyState } from "../ui/EmptyState.js";
+import { formatDate } from "../ui/format.js";
+import { PageHeader } from "../ui/PageHeader.js";
 
 export interface ReportsProps {
   assistantId: string;
@@ -121,40 +124,40 @@ export function Reports({ assistantId }: ReportsProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Reports</h1>
-          <p className="muted">
-            {report
-              ? `How your assistant did from ${report.from} to ${report.to}.`
-              : "How your assistant did over time."}
-          </p>
-        </div>
-        <div className="screen-actions">
-          <label htmlFor="report-range" className="sr-only">
-            Period
-          </label>
-          <select
-            id="report-range"
-            className="select"
-            value={days}
-            onChange={(e) => setDays(Number(e.target.value) as (typeof RANGES)[number])}
-          >
-            {RANGES.map((option) => (
-              <option key={option} value={option}>
-                Last {option} days
-              </option>
-            ))}
-          </select>
-          {/* Offered only with something to download: an empty CSV is a
-              support question, not a feature. */}
-          {report && !empty && (
-            <button type="button" className="btn btn-secondary" onClick={download}>
-              Download CSV
-            </button>
-          )}
-        </div>
-      </div>
+      <PageHeader
+        title="Reports"
+        description={
+          report
+            ? `How your assistant did from ${formatDate(report.from)} to ${formatDate(report.to)}.`
+            : "How your assistant did over time."
+        }
+        actions={
+          <>
+            <label htmlFor="report-range" className="sr-only">
+              Period
+            </label>
+            <select
+              id="report-range"
+              className="select"
+              value={days}
+              onChange={(e) => setDays(Number(e.target.value) as (typeof RANGES)[number])}
+            >
+              {RANGES.map((option) => (
+                <option key={option} value={option}>
+                  Last {option} days
+                </option>
+              ))}
+            </select>
+            {/* Offered only with something to download: an empty CSV is a
+                support question, not a feature. */}
+            {report && !empty && (
+              <button type="button" className="btn btn-secondary" onClick={download}>
+                Download CSV
+              </button>
+            )}
+          </>
+        }
+      />
 
       {reportRes.status === "error" ? (
         <p className="error-text" role="alert">
@@ -163,9 +166,11 @@ export function Reports({ assistantId }: ReportsProps) {
       ) : !report ? (
         <p className="muted">Loading report…</p>
       ) : empty ? (
-        <p className="muted">
-          Nothing yet for this period. Once visitors ask questions, their answers show up here.
-        </p>
+        <EmptyState
+          icon="reports"
+          title="Nothing yet for this period"
+          description="Once visitors ask questions, their answers show up here."
+        />
       ) : report ? (
         <div className="stack">
           <div className="overview-grid">

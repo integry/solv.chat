@@ -11,6 +11,13 @@ import {
   mountAdmin,
 } from "../src/index.js";
 import { NAV_ITEMS } from "../src/routing.js";
+import {
+  assistantButton,
+  findAssistantButton,
+  listedAssistantNames,
+  openNewAssistantForm,
+  selectedAssistantId,
+} from "./support/switcher.js";
 
 function makeAssistant(id: string, name: string, allowedOrigins: string[] = []): Assistant {
   return {
@@ -190,6 +197,20 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * The items laid out in the header row. On wide screens the drawer element and its
+ * groups use `display: contents`, so their children sit directly in the row.
+ */
+function headerRow(): Element[] {
+  const flatten = (el: Element): Element[] =>
+    el.matches(
+      ".shell-header-controls, .shell-header-controls > .drawer-top, .shell-header-controls > .drawer-bottom",
+    )
+      ? Array.from(el.children).flatMap(flatten)
+      : [el];
+  return Array.from(header().children).flatMap(flatten);
+}
+
 function header(): HTMLElement {
   const el = document.querySelector("header.shell-header");
   if (!(el instanceof HTMLElement)) throw new Error("no header");
@@ -197,22 +218,18 @@ function header(): HTMLElement {
 }
 
 describe("header slots", () => {
-  it("leaves the header markup unchanged when no slots are given", async () => {
+  it("renders no slot wrappers when no slots are given", async () => {
     installServer([makeAssistant("ast_1", "Docs Bot")]);
     mountIntoDom();
-    await screen.findByRole("heading", { name: "Overview" });
+    await screen.findByRole("heading", { name: "Overview", level: 1 });
     await waitFor(() => {
-      expect((screen.getByLabelText("Assistant") as HTMLSelectElement).value).toBe("ast_1");
+      expect(selectedAssistantId()).toBe("ast_1");
     });
-    // Markup of the header before header slots existed.
-    expect(header().outerHTML).toBe(
-      '<header class="shell-header"><div class="shell-brand">solv.chat</div>' +
-        '<div class="switcher"><div class="switcher-bar">' +
-        '<label for="assistant-select" class="switcher-label">Assistant</label>' +
-        '<select id="assistant-select" class="select"><option value="ast_1">Docs Bot</option></select>' +
-        '<button type="button" class="btn btn-secondary">New assistant</button></div></div>' +
-        '<button type="button" class="btn btn-secondary btn-sm">Sign out</button></header>',
-    );
+    expect(header().querySelector(".shell-header-slot")).toBeNull();
+    const children = headerRow();
+    expect(children[0]?.classList.contains("shell-brand")).toBe(true);
+    expect(children[1]?.classList.contains("switcher")).toBe(true);
+    expect(children[children.length - 1]?.textContent).toBe("Sign out");
   });
 
   it("renders headerStart after the product name and headerEnd before Sign out, with api", async () => {
@@ -222,7 +239,7 @@ describe("header slots", () => {
     await waitFor(() => {
       expect(screen.getByTestId("org-name").textContent).toBe("Acme");
     });
-    const children = Array.from(header().children);
+    const children = headerRow();
     const brandIndex = children.findIndex((el) => el.classList.contains("shell-brand"));
     const startIndex = children.findIndex((el) => el.contains(screen.getByTestId("org-name")));
     const switcherIndex = children.findIndex((el) => el.classList.contains("switcher"));
@@ -230,8 +247,12 @@ describe("header slots", () => {
     const signOutIndex = children.findIndex((el) => el.textContent === "Sign out");
     expect(startIndex).toBe(brandIndex + 1);
     expect(switcherIndex).toBe(startIndex + 1);
-    expect(endIndex).toBe(switcherIndex + 1);
-    expect(signOutIndex).toBe(endIndex + 1);
+    // Publish status and the Try it toggle sit between the switcher and headerEnd.
+    expect(endIndex).toBeGreaterThan(switcherIndex);
+    expect(signOutIndex).toBeGreaterThan(endIndex);
+    expect(children.slice(endIndex + 1, signOutIndex).every((el) => el.tagName === "BUTTON")).toBe(
+      true,
+    );
 
     expect(headerProps.length).toBeGreaterThan(0);
     for (const props of headerProps) {
@@ -249,21 +270,22 @@ describe("assistantScoped", () => {
     window.history.replaceState(null, "", "/admin/account");
     mountIntoDom(accountOptions);
 
-    await screen.findByRole("heading", { name: "Account" });
+    await screen.findByRole("heading", { name: "Account", level: 1 });
     await waitFor(() => {
       expect(screen.getByTestId("account-assistant").textContent).toBe("ast_1");
     });
-    expect(screen.queryByRole("combobox", { name: "Assistant" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "New assistant" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Assistant / })).toBeNull();
+    expect(screen.queryByRole("option", { name: "New assistant" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try it" })).toBeNull();
     expect(screen.queryByRole("complementary", { name: "Try it" })).toBeNull();
     expect((document.querySelector(".switcher") as HTMLElement).hidden).toBe(true);
     expect((document.querySelector(".try-it") as HTMLElement).hidden).toBe(true);
     expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
 
     // Back on a built-in screen the chrome returns.
-    fireEvent.click(screen.getByRole("link", { name: "Overview" }));
-    await screen.findByRole("heading", { name: "Overview" });
-    expect(screen.getByLabelText("Assistant")).toBeTruthy();
+    fireEvent.click(screen.getByRole("link", { name: "Sources" }));
+    await screen.findByRole("heading", { name: "Sources", level: 1 });
+    expect(assistantButton()).toBeTruthy();
     expect(screen.getByRole("complementary", { name: "Try it" })).toBeTruthy();
   });
 
@@ -309,6 +331,7 @@ describe("assistantScoped", () => {
     });
     mountIntoDom(accountOptions);
 
+    fireEvent.click(await screen.findByRole("button", { name: "Try it" }));
     const pane = await screen.findByRole("complementary", { name: "Try it" });
     const input = within(pane).getByLabelText("Ask a question") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "First question" } });
@@ -322,7 +345,7 @@ describe("assistantScoped", () => {
     expect(input.disabled).toBe(true);
 
     fireEvent.click(screen.getByRole("link", { name: "Account" }));
-    await screen.findByRole("heading", { name: "Account" });
+    await screen.findByRole("heading", { name: "Account", level: 1 });
     // Hidden: out of layout, the tab order and the accessibility tree, but still mounted.
     expect(screen.queryByRole("complementary", { name: "Try it" })).toBeNull();
     expect(pane.isConnected).toBe(true);
@@ -345,7 +368,7 @@ describe("assistantScoped", () => {
     // An unsent question survives a round trip too.
     fireEvent.change(input, { target: { value: "Third question" } });
     fireEvent.click(screen.getByRole("link", { name: "Account" }));
-    await screen.findByRole("heading", { name: "Account" });
+    await screen.findByRole("heading", { name: "Account", level: 1 });
     fireEvent.click(screen.getByRole("link", { name: "Overview" }));
     await screen.findByRole("heading", { name: "Overview" });
     expect(input.isConnected).toBe(true);
@@ -364,11 +387,12 @@ describe("assistantScoped", () => {
     installServer([makeAssistant("ast_1", "Docs Bot")]);
     mountIntoDom(accountOptions);
 
-    fireEvent.click(await screen.findByRole("button", { name: "New assistant" }));
+    await findAssistantButton();
+    openNewAssistantForm();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Half typed" } });
 
     fireEvent.click(screen.getByRole("link", { name: "Account" }));
-    await screen.findByRole("heading", { name: "Account" });
+    await screen.findByRole("heading", { name: "Account", level: 1 });
     expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
 
@@ -382,9 +406,10 @@ describe("assistantScoped", () => {
     window.history.replaceState(null, "", "/admin/usage");
     mountIntoDom(accountOptions);
 
-    await screen.findByRole("heading", { name: "Account" });
-    expect(screen.getByLabelText("Assistant")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "New assistant" })).toBeTruthy();
+    await screen.findByRole("heading", { name: "Account", level: 1 });
+    expect(assistantButton()).toBeTruthy();
+    openNewAssistantForm();
+    expect(screen.getByRole("textbox", { name: "Name" })).toBeTruthy();
     await screen.findByRole("complementary", { name: "Try it" });
   });
 
@@ -393,11 +418,11 @@ describe("assistantScoped", () => {
     window.history.replaceState(null, "", "/admin/account");
     mountIntoDom(accountOptions);
 
-    await screen.findByRole("heading", { name: "Account" });
+    await screen.findByRole("heading", { name: "Account", level: 1 });
     expect(screen.getByTestId("account-assistant").textContent).toBe("none");
-    expect(screen.queryByRole("combobox", { name: "Assistant" })).toBeNull();
-    expect(screen.queryByRole("option", { name: "No assistants yet" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "New assistant" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Assistant / })).toBeNull();
+    expect((document.querySelector(".switcher") as HTMLElement).hidden).toBe(true);
+    expect(screen.queryByRole("option", { name: "New assistant" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Create your first assistant" })).toBeNull();
   });
 });
@@ -408,7 +433,7 @@ describe("defaultScreen", () => {
     window.history.replaceState(null, "", "/admin/");
     mountIntoDom({ ...accountOptions, defaultScreen: "account" });
 
-    await screen.findByRole("heading", { name: "Account" });
+    await screen.findByRole("heading", { name: "Account", level: 1 });
     expect(screen.getByRole("link", { name: "Account" }).getAttribute("aria-current")).toBe("page");
   });
 
@@ -477,7 +502,7 @@ describe("first-run state", () => {
 
     await screen.findByRole("heading", { name: "Sources" });
     expect(window.location.pathname).toBe("/admin/sources");
-    expect((screen.getByLabelText("Assistant") as HTMLSelectElement).value).toBe("ast_1");
+    expect(selectedAssistantId()).toBe("ast_1");
     expect(screen.getByRole("link", { name: "Sources" }).getAttribute("aria-current")).toBe("page");
     expect((screen.getByLabelText("Ingest key") as HTMLInputElement).value).toBe("ik_test_once");
     expect(server.calls).toContainEqual({
@@ -532,7 +557,7 @@ describe("first-run state", () => {
 
     const firstRun = await screen.findByRole("form", { name: "Create your first assistant" });
     fireEvent.change(within(firstRun).getByLabelText("Name"), { target: { value: "First" } });
-    fireEvent.click(screen.getByRole("button", { name: "New assistant" }));
+    openNewAssistantForm();
     const headerForm = document.querySelector("header form");
     if (!(headerForm instanceof HTMLElement)) throw new Error("no header form");
     fireEvent.change(within(headerForm).getByLabelText("Name"), { target: { value: "Second" } });
@@ -545,11 +570,10 @@ describe("first-run state", () => {
     await screen.findByRole("heading", { name: "Sources" });
     await act(async () => server.releaseCreate());
 
-    const select = screen.getByLabelText("Assistant") as HTMLSelectElement;
     await waitFor(() => {
-      expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["First", "Second"]);
+      expect(listedAssistantNames()).toEqual(["First", "Second"]);
     });
-    expect(select.value).toBe("ast_2");
+    expect(selectedAssistantId()).toBe("ast_2");
     expect(server.assistants.map((a) => a.name)).toEqual(["First", "Second"]);
   });
 
@@ -560,7 +584,7 @@ describe("first-run state", () => {
 
     const firstRun = await screen.findByRole("form", { name: "Create your first assistant" });
     fireEvent.change(within(firstRun).getByLabelText("Name"), { target: { value: "First" } });
-    fireEvent.click(screen.getByRole("button", { name: "New assistant" }));
+    openNewAssistantForm();
     const headerForm = document.querySelector("header form");
     if (!(headerForm instanceof HTMLElement)) throw new Error("no header form");
     fireEvent.change(within(headerForm).getByLabelText("Name"), { target: { value: "Second" } });

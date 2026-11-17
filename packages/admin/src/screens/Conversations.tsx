@@ -1,6 +1,9 @@
 import { useState } from "react";
 import type { ConversationsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { EmptyState } from "../ui/EmptyState.js";
+import { formatDateTime } from "../ui/format.js";
+import { PageHeader } from "../ui/PageHeader.js";
 import { Conversation } from "./Conversation.js";
 
 export interface ConversationsProps {
@@ -10,7 +13,7 @@ export interface ConversationsProps {
 const PAGE_SIZE = 25;
 
 function formatDate(timestamp: number): string {
-  return new Date(timestamp).toLocaleString();
+  return formatDateTime(timestamp);
 }
 
 export function Conversations({ assistantId }: ConversationsProps) {
@@ -40,12 +43,10 @@ export function Conversations({ assistantId }: ConversationsProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Conversations</h1>
-          <p className="muted">Read what visitors asked and how your assistant replied.</p>
-        </div>
-      </div>
+      <PageHeader
+        title="Conversations"
+        description="Read what visitors asked and how your assistant replied."
+      />
 
       {listRes.status === "loading" && !page ? (
         <p className="muted">Loading conversations…</p>
@@ -54,7 +55,11 @@ export function Conversations({ assistantId }: ConversationsProps) {
           {listRes.error}
         </p>
       ) : page && page.conversations.length === 0 ? (
-        <p className="muted">No conversations yet.</p>
+        <EmptyState
+          icon="conversations"
+          title="No conversations yet"
+          description="When visitors chat on your site, their conversations show up here."
+        />
       ) : page ? (
         <div className="stack">
           <ul className="history-list">

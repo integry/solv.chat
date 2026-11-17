@@ -410,7 +410,11 @@ if (root) {
 Options accepted by `mountAdmin`:
 
 - `extraNavItems` — items appended to the sidebar (`id`, `label`, `path` under
-  `/admin/…`, and an optional `section` heading such as `"Settings"` or `"Account"`).
+  `/admin/…`, an optional `section` heading and an optional decorative `icon`).
+  Built-in screens are grouped as _Monitor_ (Overview, Reports, Conversations,
+  Gaps), _Build_ (Sources, Behaviour, Tools, Widget, Tests), _Go live_ (Install)
+  and _Settings_ (Providers); an item naming one of those joins it, other
+  sections follow the built-in ones.
 - `extraScreens` — map from those ids to React components rendered in the main
   area with `{ assistant, assistantId, api }` (the same-origin API helpers used
   by built-in screens).
@@ -421,14 +425,26 @@ Options accepted by `mountAdmin`:
 - `hideScreens` — built-in screen ids to omit from navigation and routing (for
   example, when keys are fully managed).
 - `headerStart` / `headerEnd` — optional components rendered in the top bar after
-  the product name and before the Sign out button, with `{ api }`. Absent, the
-  header is unchanged.
+  the product name and before the Sign out button, with `{ api }`. Below 900px
+  `headerEnd` moves with Sign out to the bottom of the navigation drawer.
 - `assistantScoped` (on an extra nav item, default `true`) — `false` hides the
   assistant switcher, "New assistant" and the Try it pane on that screen, and
   renders it even when no assistant exists.
 - `defaultScreen` — the screen `/admin/` and unknown admin paths land on (a
   visible built-in id or an extra nav item id; default Overview). Unknown or
   hidden ids throw at mount time.
+
+The shell shows the selected assistant's publish state next to the switcher:
+"Live" (the saved draft is what visitors get), "Unpublished changes" or "Not
+published yet", worked out by comparing the draft and published configs from
+the versions list. On Build screens it offers Publish (the same flow as the
+screens: tests run first, failures can be overridden) and "Discard changes",
+which saves the published config as the draft. The Try it pane is a toggle:
+closed by default on Monitor screens and open elsewhere, remembered per browser
+in `localStorage`; on narrow screens it is a sheet. Its transcript survives
+closing it. The package entry also exports the shared components the screens
+use (page header, empty state, status badge, dialogs, toasts, table, row menu,
+copy button, skeleton) and the date formatters.
 
 With no assistant, every built-in screen except Providers shows one first-run
 state: what an assistant is, the "New assistant" form inline, and the next steps

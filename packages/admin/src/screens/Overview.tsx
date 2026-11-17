@@ -1,5 +1,6 @@
 import type { AssistantOverview } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { PageHeader } from "../ui/PageHeader.js";
 
 export interface OverviewProps {
   assistantId: string;
@@ -30,12 +31,7 @@ export function Overview({ assistantId }: OverviewProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Overview</h1>
-          <p className="muted">How your assistant is doing.</p>
-        </div>
-      </div>
+      <PageHeader title="Overview" description="How your assistant is doing." />
 
       {overviewRes.status === "loading" && !overviewRes.value ? (
         <p className="muted">Loading overview…</p>

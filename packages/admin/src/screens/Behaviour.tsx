@@ -4,7 +4,9 @@ import { ApiError, putJson } from "../api/client.js";
 import { FailedTestsError, publishAssistant } from "../api/publish.js";
 import type { TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { useAssistantMutation } from "../shell/useAssistantMutations.js";
+import { useAssistantMutation, useReportUnsavedEdits } from "../shell/useAssistantMutations.js";
+import { formatDateTime } from "../ui/format.js";
+import { PageHeader } from "../ui/PageHeader.js";
 import { FailedTestsPanel } from "./FailedTestsPanel.js";
 import { History } from "./History.js";
 
@@ -19,13 +21,16 @@ function parseQuestions(text: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
 function behaviourEqual(a: BehaviourConfig, b: BehaviourConfig): boolean {
   return (
     a.greeting === b.greeting &&
     a.persona === b.persona &&
     a.fallbackText === b.fallbackText &&
-    a.suggestedQuestions.length === b.suggestedQuestions.length &&
-    a.suggestedQuestions.every((q, i) => q === b.suggestedQuestions[i])
+    sameStrings(a.suggestedQuestions, b.suggestedQuestions)
   );
 }
 
@@ -59,6 +64,8 @@ export function Behaviour({ assistantId }: BehaviourProps) {
 
   const latestRef = useRef({ greeting, persona, fallbackText, questionsText });
   latestRef.current = { greeting, persona, fallbackText, questionsText };
+  const savedBehaviourRef = useRef(savedBehaviour);
+  savedBehaviourRef.current = savedBehaviour;
   const lastTickRef = useRef(mutation.tick);
   const ignoreNextTickRef = useRef(false);
   const syncOnLoadRef = useRef(false);
@@ -84,6 +91,34 @@ export function Behaviour({ assistantId }: BehaviourProps) {
       ignoreNextTickRef.current = false;
       return;
     }
+    if (mutation.lastKind === "publishing") {
+      // Published from outside this screen (the header). Publishing replaces
+      // the draft and adds a version, so reload both. Publish waits for edits
+      // to be saved, so a field that now differs from the saved draft was
+      // changed while the publish was in flight and keeps its edit.
+      const saved = savedBehaviourRef.current;
+      if (saved) {
+        const latest = latestRef.current;
+        const questionsSame = sameStrings(
+          parseQuestions(latest.questionsText),
+          saved.suggestedQuestions,
+        );
+        publishSnapshotRef.current = {
+          assistantId,
+          fields: {
+            greeting: saved.greeting,
+            persona: saved.persona,
+            fallbackText: saved.fallbackText,
+            questionsText: questionsSame
+              ? latest.questionsText
+              : saved.suggestedQuestions.join("\n"),
+          },
+        };
+      }
+      draft.reload();
+      setHistoryTick((n) => n + 1);
+      return;
+    }
     if (mutation.lastKind !== "saving") {
       return;
     }
@@ -93,7 +128,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     }
     draft.reload();
     setHistoryTick((n) => n + 1);
-  }, [mutation.tick, mutation.lastKind, draft.reload]);
+  }, [mutation.tick, mutation.lastKind, draft.reload, assistantId]);
 
   useEffect(() => {
     if (!savedBehaviour) return;
@@ -147,6 +182,19 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     }
   }, [assistantId, draft.value?.draft.id, initializedFor, savedBehaviour]);
 
+  const current: BehaviourConfig = {
+    greeting,
+    persona,
+    fallbackText,
+    suggestedQuestions: parseQuestions(questionsText),
+  };
+  const unsaved =
+    savedBehaviour !== undefined &&
+    initializedFor !== null &&
+    !behaviourEqual(current, savedBehaviour);
+  // The header's Publish sends the saved draft too, so it waits for a save.
+  useReportUnsavedEdits(assistantId, unsaved);
+
   if (draft.status === "loading" && !savedBehaviour) {
     return <p className="muted">Loading behaviour…</p>;
   }
@@ -160,14 +208,6 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   if (!savedBehaviour) {
     return null;
   }
-
-  const current: BehaviourConfig = {
-    greeting,
-    persona,
-    fallbackText,
-    suggestedQuestions: parseQuestions(questionsText),
-  };
-  const unsaved = initializedFor !== null && !behaviourEqual(current, savedBehaviour);
 
   async function handleSave(event: FormEvent) {
     event.preventDefault();
@@ -226,9 +266,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         const res = await publishAssistant(assistantId, force, runId);
         publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
-        setStatusMessage(
-          `Published (${new Date(res.version.publishedAt ?? Date.now()).toLocaleString()}).`,
-        );
+        setStatusMessage(`Published (${formatDateTime(res.version.publishedAt ?? Date.now())}).`);
         setHistoryTick((n) => n + 1);
         draft.reload();
       });
@@ -245,31 +283,31 @@ export function Behaviour({ assistantId }: BehaviourProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Behaviour</h1>
-          <p className="muted">Control how your assistant greets visitors and responds.</p>
-        </div>
-        <div className="screen-actions">
-          {unsaved && <span className="unsaved-badge">Unsaved changes</span>}
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => setShowHistory((prev) => !prev)}
-          >
-            History
-          </button>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={busy || unsaved}
-            aria-describedby={unsaved ? "behaviour-publish-hint" : undefined}
-            onClick={() => void handlePublish(false)}
-          >
-            {publishing ? "Publishing…" : "Publish"}
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title="Behaviour"
+        description="Control how your assistant greets visitors and responds."
+        actions={
+          <>
+            {unsaved && <span className="unsaved-badge">Unsaved changes</span>}
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setShowHistory((prev) => !prev)}
+            >
+              History
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={busy || unsaved}
+              aria-describedby={unsaved ? "behaviour-publish-hint" : undefined}
+              onClick={() => void handlePublish(false)}
+            >
+              {publishing ? "Publishing…" : "Publish"}
+            </button>
+          </>
+        }
+      />
       {unsaved && !busy && (
         <p id="behaviour-publish-hint" className="field-hint">
           Save your changes before publishing.
@@ -290,6 +328,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         <FailedTestsPanel
           run={failedRun}
           busy={busy}
+          publishBlocked={unsaved}
           onFix={() => setFailedRun(null)}
           onPublishAnyway={() => void handlePublish(true, failedRun.id)}
         />

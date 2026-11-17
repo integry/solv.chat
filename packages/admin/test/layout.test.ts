@@ -5,9 +5,17 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { defaultVersionConfig } from "@solvchat/core";
+import axe from "axe-core";
 import { createServer, type ViteDevServer } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AnswerTest, Assistant, AssistantReport, McpServerSummary } from "../src/api/types.js";
+import type {
+  AnswerTest,
+  Assistant,
+  AssistantReport,
+  McpServerSummary,
+  VersionRow,
+} from "../src/api/types.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const ADMIN_ROOT = resolve(TEST_DIR, "..");
@@ -127,6 +135,22 @@ const TESTS: AnswerTest[] = [
     },
   },
 ];
+
+const PUBLISHED_CONFIG = defaultVersionConfig();
+const DRAFT_CONFIG = defaultVersionConfig();
+DRAFT_CONFIG.behaviour = { ...DRAFT_CONFIG.behaviour, greeting: "Hello! Ask me about the docs." };
+
+function versionRow(state: VersionRow["state"], config: VersionRow["config"]): VersionRow {
+  return {
+    id: `ver_${state}`,
+    orgId: ASSISTANT.orgId,
+    assistantId: ASSISTANT.id,
+    state,
+    config,
+    createdAt: 1_700_000_000_000,
+    publishedAt: state === "draft" ? null : 1_700_000_100_000,
+  };
+}
 
 function findChromeBinary(): string {
   const candidates = [
@@ -373,6 +397,32 @@ describe("Admin layout regressions (Chromium)", () => {
                 res.end(JSON.stringify({ tests: TESTS }));
                 return;
               }
+              if (pathname === `/assistants/${ASSISTANT.id}/versions`) {
+                res.end(
+                  JSON.stringify({
+                    versions: [
+                      versionRow("draft", DRAFT_CONFIG),
+                      versionRow("published", PUBLISHED_CONFIG),
+                    ],
+                  }),
+                );
+                return;
+              }
+              if (pathname === `/assistants/${ASSISTANT.id}/draft`) {
+                res.end(JSON.stringify({ draft: versionRow("draft", DRAFT_CONFIG) }));
+                return;
+              }
+              if (pathname === `/assistants/${ASSISTANT.id}/overview`) {
+                res.end(
+                  JSON.stringify({
+                    messages: 120,
+                    answeredShare: 0.82,
+                    todayCostMicros: 41_000,
+                    topQuestions: [{ question: "How do I install the widget?", count: 14 }],
+                  }),
+                );
+                return;
+              }
               res.end(JSON.stringify({}));
             });
           },
@@ -600,4 +650,255 @@ describe("Admin layout regressions (Chromium)", () => {
       }
     }
   }, 15_000);
+  async function waitFor(expression: string, what: string) {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (await cdp.evaluate<boolean>(`Boolean(${expression})`)) {
+        await cdp.evaluate<void>(
+          "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))",
+        );
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    throw new Error(`Timed out waiting for ${what}`);
+  }
+
+  const horizontalOverflow = () =>
+    cdp.evaluate<number>(
+      "document.documentElement.scrollWidth - document.documentElement.clientWidth",
+    );
+
+  it("has no horizontal scroll at 320px on any shell screen, drawer open or closed", async () => {
+    for (const path of [
+      "/admin/overview",
+      "/admin/reports",
+      "/admin/behaviour",
+      "/admin/tools",
+      "/admin/tests",
+    ]) {
+      await openScreen(path, 320, ".shell-main h1");
+      expect({ path, overflow: await horizontalOverflow() }).toEqual({ path, overflow: 0 });
+    }
+
+    await openScreen("/admin/behaviour", 320, ".shell-main h1");
+    await cdp.evaluate<void>(`document.querySelector("button[aria-label='Menu']").click()`);
+    await waitFor(`document.querySelector("#shell-drawer:not([hidden]) .status-badge")`, "drawer");
+    expect(await horizontalOverflow()).toBe(0);
+    const drawer = await cdp.evaluate<{ right: number; width: number }>(`(() => {
+      const r = document.querySelector("#shell-drawer").getBoundingClientRect();
+      return { right: r.right, width: r.width };
+    })()`);
+    expect(drawer.right).toBeLessThanOrEqual(320);
+  }, 30_000);
+
+  it("keeps the phone header to one short row so content starts near the top at 380px", async () => {
+    await openScreen("/admin/overview", 380, ".shell-main h1");
+    const metrics = await cdp.evaluate<{
+      headerHeight: number;
+      h1Top: number;
+      navVisible: boolean;
+      current: string;
+    }>(`(() => {
+      const header = document.querySelector("header.shell-header").getBoundingClientRect();
+      const h1 = document.querySelector(".shell-main h1").getBoundingClientRect();
+      const nav = document.querySelector("nav[aria-label='Primary']");
+      return {
+        headerHeight: header.height,
+        h1Top: h1.top,
+        navVisible: Boolean(nav && nav.getClientRects().length > 0),
+        current: document.querySelector(".shell-current")?.textContent ?? "",
+      };
+    })()`);
+    expect(metrics.headerHeight).toBeLessThanOrEqual(56);
+    expect(metrics.h1Top).toBeLessThan(110);
+    expect(metrics.navVisible).toBe(false);
+    expect(metrics.current).toBe("Overview");
+  }, 15_000);
+
+  it("lays out sidebar, content and Try it at 1280px", async () => {
+    const columns = () =>
+      cdp.evaluate<{ nav: number; main: number; tryIt: number }>(`(() => {
+        const width = (sel) => {
+          const el = document.querySelector(sel);
+          return el && el.getClientRects().length ? el.getBoundingClientRect().width : 0;
+        };
+        return { nav: width(".shell-sidebar"), main: width(".shell-main"), tryIt: width(".try-it") };
+      })()`);
+
+    await openScreen("/admin/overview", 1280, ".shell-main h1");
+    const overview = await columns();
+    expect(overview.tryIt).toBe(0);
+    expect(overview.nav).toBe(220);
+    expect(overview.main).toBe(1280 - 220);
+
+    await openScreen("/admin/behaviour", 1280, ".try-it:not([hidden])");
+    const behaviour = await columns();
+    expect(behaviour.tryIt).toBe(360);
+    expect(behaviour.main).toBe(1280 - 220 - 360);
+    expect(await horizontalOverflow()).toBe(0);
+  }, 15_000);
+
+  it("passes axe, colour contrast included, on the shell at 1280px and 380px", async () => {
+    const runAxe = async () => {
+      await cdp.evaluate<void>(axe.source);
+      return cdp.evaluate<string[]>(`axe
+        .run(document, { resultTypes: ["violations"] })
+        .then((r) =>
+          r.violations
+            .filter((v) => v.impact === "serious" || v.impact === "critical")
+            .map((v) => v.id + ": " + v.nodes.map((n) => n.target.join(" ")).join(", ")),
+        )`);
+    };
+
+    for (const width of [1280, 380]) {
+      await openScreen("/admin/behaviour", width, ".shell-main h1");
+      await waitFor(`document.querySelector(".status-badge") || ${width < 900}`, "status");
+      expect({ width, violations: await runAxe() }).toEqual({ width, violations: [] });
+    }
+
+    await openScreen("/admin/behaviour", 380, ".shell-main h1");
+    await cdp.evaluate<void>(`document.querySelector("button[aria-label='Menu']").click()`);
+    await waitFor(`document.querySelector("#shell-drawer:not([hidden]) .status-badge")`, "drawer");
+    expect({ drawer: await runAxe() }).toEqual({ drawer: [] });
+  }, 30_000);
+
+  it("turns off drawer, toast, skeleton and button motion when reduced motion is on", async () => {
+    const motion = () =>
+      cdp.evaluate<Record<string, string>>(`(() => {
+        const probe = document.createElement("div");
+        probe.innerHTML =
+          '<div class="toast"></div><div class="skeleton"><span class="skeleton-line"></span></div>' +
+          '<button class="btn btn-primary">x</button>';
+        document.body.append(probe);
+        const style = (sel) => getComputedStyle(probe.querySelector(sel));
+        const result = {
+          drawer: getComputedStyle(document.querySelector("#shell-drawer")).animationName,
+          toast: style(".toast").animationName,
+          skeleton: style(".skeleton-line").animationName,
+          button: style(".btn").transitionProperty,
+        };
+        probe.remove();
+        return result;
+      })()`);
+    const openDrawer = async () => {
+      await openScreen("/admin/behaviour", 380, ".shell-main h1");
+      await cdp.evaluate<void>(`document.querySelector("button[aria-label='Menu']").click()`);
+      await waitFor(`document.querySelector("#shell-drawer:not([hidden])")`, "drawer");
+    };
+
+    try {
+      // Without the preference the animations run, so the check below is meaningful.
+      await cdp.send("Emulation.setEmulatedMedia", {
+        features: [{ name: "prefers-reduced-motion", value: "no-preference" }],
+      });
+      await openDrawer();
+      const normal = await motion();
+      expect(normal.drawer).toBe("drawer-in");
+      expect(normal.toast).toBe("toast-in");
+      expect(normal.skeleton).toBe("skeleton-pulse");
+      expect(normal.button).not.toBe("none");
+
+      await cdp.send("Emulation.setEmulatedMedia", {
+        features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+      });
+      await openDrawer();
+      expect(await motion()).toEqual({
+        drawer: "none",
+        toast: "none",
+        skeleton: "none",
+        button: "none",
+      });
+    } finally {
+      await cdp.send("Emulation.setEmulatedMedia", { features: [] });
+    }
+  }, 30_000);
+
+  it("closes the Try it sheet when Menu opens so the drawer links can be pressed", async () => {
+    await openScreen("/admin/behaviour", 380, ".shell-main h1");
+    await cdp.evaluate<void>(`document.querySelector(".try-it-toggle").click()`);
+    await waitFor(`document.querySelector(".try-it-overlay:not([hidden])")`, "Try it sheet");
+    await cdp.evaluate<void>(`document.querySelector("button[aria-label='Menu']").click()`);
+    await waitFor(`document.querySelector("#shell-drawer:not([hidden])")`, "drawer");
+    // Hit-test once the drawer has finished sliding in.
+    await cdp.evaluate<void>(
+      `Promise.all(document.getAnimations().map((a) => a.finished)).then(() => undefined)`,
+    );
+    const hits = await cdp.evaluate<{ label: string; hit: boolean }[]>(`(() =>
+      Array.from(document.querySelectorAll("#shell-drawer a.nav-link")).map((link) => {
+        const r = link.getBoundingClientRect();
+        const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return { label: link.textContent.trim(), hit: Boolean(top && link.contains(top)) };
+      }))()`);
+    expect(hits.length).toBeGreaterThan(5);
+    // Links scrolled below the drawer's fold are not hit-testable; the visible ones must be.
+    const visible = hits.slice(0, 5);
+    expect(visible).toEqual(visible.map(({ label }) => ({ label, hit: true })));
+  }, 15_000);
+
+  it("keeps the New assistant form and its text when the screen crosses 900px", async () => {
+    const setWidth = async (width: number) => {
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width,
+        height: 900,
+        deviceScaleFactor: 1,
+        mobile: width < 600,
+      });
+      await cdp.evaluate<void>(
+        "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))",
+      );
+    };
+    await openScreen("/admin/behaviour", 1280, ".shell-main h1");
+    await waitFor(`document.querySelector(".switcher-button[data-value]")`, "switcher");
+    // Wide: switcher sits in the header row, to the right of the brand.
+    const wide = await cdp.evaluate<{ inRow: boolean; signOutInRow: boolean }>(`(() => {
+      const header = document.querySelector("header.shell-header").getBoundingClientRect();
+      const within = (el) => {
+        const r = el.getBoundingClientRect();
+        return r.height > 0 && r.top >= header.top && r.bottom <= header.bottom;
+      };
+      const signOut = Array.from(document.querySelectorAll("header button")).find(
+        (b) => b.textContent.trim() === "Sign out",
+      );
+      return {
+        inRow: within(document.querySelector(".switcher-button")),
+        signOutInRow: within(signOut),
+      };
+    })()`);
+    expect(wide).toEqual({ inRow: true, signOutInRow: true });
+
+    await cdp.evaluate<void>(`document.querySelector(".switcher-button").click()`);
+    await waitFor(`document.querySelector(".switcher-new")`, "New assistant option");
+    await cdp.evaluate<void>(`document.querySelector(".switcher-new").click()`);
+    await waitFor(`document.querySelector(".switcher-form input")`, "New assistant form");
+    await cdp.evaluate<void>(`(() => {
+      const input = document.querySelector(".switcher-form input");
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+      set.call(input, "Half typed");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      window.__nameInput = input;
+    })()`);
+
+    await setWidth(380);
+    await waitFor(`document.querySelector(".shell-narrow")`, "narrow layout");
+    await cdp.evaluate<void>(`document.querySelector("button[aria-label='Menu']").click()`);
+    await waitFor(`document.querySelector("#shell-drawer:not([hidden])")`, "drawer");
+    const narrow = await cdp.evaluate<{ same: boolean; value: string; inDrawer: boolean }>(`(() => {
+      const input = document.querySelector(".switcher-form input");
+      return {
+        same: input === window.__nameInput,
+        value: input?.value ?? "",
+        inDrawer: Boolean(input?.closest("#shell-drawer[role='dialog']")),
+      };
+    })()`);
+    expect(narrow).toEqual({ same: true, value: "Half typed", inDrawer: true });
+
+    await setWidth(1280);
+    await waitFor(`!document.querySelector(".shell-narrow")`, "wide layout");
+    const back = await cdp.evaluate<{ same: boolean; value: string }>(`(() => {
+      const input = document.querySelector(".switcher-form input");
+      return { same: input === window.__nameInput, value: input?.value ?? "" };
+    })()`);
+    expect(back).toEqual({ same: true, value: "Half typed" });
+  }, 20_000);
 });

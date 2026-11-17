@@ -125,6 +125,67 @@ mountAdmin(document.getElementById("root")!, {
   built-in screen id or an extra nav item id. Defaults to Overview. An unknown or
   hidden id throws at mount time.
 
+- `icon` on an extra nav item — optional small decorative icon (for example a 16×16
+  inline `<svg aria-hidden="true">` drawn with `currentColor`) shown before the label.
+- `section` on an extra nav item — the built-in groups are _Monitor_, _Build_,
+  _Go live_ and _Settings_; naming one adds the item to it, any other name adds a
+  section after them.
+
+Below 900px the navigation becomes a drawer opened from a menu button. The top bar
+then keeps only the product name, `headerStart`, the current screen, Try it and the
+menu button; the assistant switcher and publish status move to the top of the
+drawer, and `headerEnd` and Sign out to its bottom. Keep `headerStart` compact.
+
+### Shared components
+
+The package entry also exports the pieces the built-in screens use, so host screens
+look and behave the same:
+
+```tsx
+import {
+  ConfirmDialog,
+  CopyButton,
+  DataTable,
+  EmptyState,
+  PageHeader,
+  RowMenu,
+  Skeleton,
+  StatusBadge,
+  formatDate,
+  formatDateTime,
+  formatRelative,
+  useToast,
+} from "@solvchat/admin";
+
+function BillingScreen() {
+  const toast = useToast(); // feedback messages; the admin shell provides them
+  return (
+    <div className="screen">
+      <PageHeader title="Billing" description="Your plan and invoices." />
+      <EmptyState
+        icon="inbox"
+        title="No invoices yet"
+        description="Your first invoice appears here."
+      />
+    </div>
+  );
+}
+```
+
+- `PageHeader` — screen title, one-sentence description and actions.
+- `EmptyState` — icon, title, one sentence and a primary action.
+- `StatusBadge` — a status word in a coloured pill (`success`, `warning`, `danger`,
+  `info`, `neutral`).
+- `ConfirmDialog` (and `Dialog`) — focus-trapped; `tone="danger"` for destructive
+  actions and `confirmText` to require typing a word first.
+- `ToastProvider` / `useToast` and `Notice` — feedback with `role="status"`, or
+  `role="alert"` for errors.
+- `Skeleton`, `DataTable` (stacks into labelled rows under 600px), `RowMenu`,
+  `CopyButton`, `Icon`, `RelativeTime`.
+- `formatDate` / `formatDateTime` / `formatRelative` — one date format everywhere:
+  `16 Nov 2026`, `16 Nov 2026, 23:10`, "3 hours ago". Month names follow the
+  browser's locale; dates are never US-style numeric.
+
 With no assistant yet, every built-in screen shows a first-run state with the
 "New assistant" form; after creating one the admin opens its Sources screen.
 The full option list is in [docs/architecture.md](docs/architecture.md#extending-the-admin).

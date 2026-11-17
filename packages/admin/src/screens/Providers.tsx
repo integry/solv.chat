@@ -10,6 +10,8 @@ import type {
   SettingSource,
 } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { formatDate } from "../ui/format.js";
+import { PageHeader } from "../ui/PageHeader.js";
 
 const PROVIDER_LABELS: Record<LlmProviderName, string> = {
   anthropic: "Anthropic",
@@ -25,14 +27,6 @@ function SourceBadge({ source, label }: { source: SettingSource; label?: string 
       {source}
     </span>
   );
-}
-
-function formatDate(timestamp: number): string {
-  return new Date(timestamp).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
 }
 
 function ProviderKeyCard({
@@ -281,14 +275,10 @@ export function Providers() {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Providers</h1>
-          <p className="muted">
-            Choose the answering and embeddings providers for this organisation.
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="Providers"
+        description="Choose the answering and embeddings providers for this organisation."
+      />
 
       {res.status === "loading" && !data ? (
         <p className="muted">Loading provider settings…</p>

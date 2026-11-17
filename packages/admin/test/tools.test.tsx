@@ -221,7 +221,7 @@ afterEach(() => {
 });
 
 describe("Tools screen", () => {
-  it("renders navigation with Tools in position four and no model/temperature/chunking settings", async () => {
+  it("renders navigation with Tools in the Build group and no model/temperature/chunking settings", async () => {
     installFakeServer();
     render(<App />);
 
@@ -233,8 +233,8 @@ describe("Tools screen", () => {
       "Conversations",
       "Gaps",
       "Sources",
-      "Tools",
       "Behaviour",
+      "Tools",
       "Widget",
       "Tests",
       "Install",

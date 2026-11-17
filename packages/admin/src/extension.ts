@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { apiFetch, deleteJson, getJson, patchJson, postJson, putJson } from "./api/client.js";
 import type { Assistant } from "./api/types.js";
 import { useResource } from "./api/useResource.js";
@@ -46,7 +46,17 @@ export interface ExtraNavItem {
   id: string;
   label: string;
   path: string;
+  /**
+   * Sidebar section heading. A built-in group name ("Monitor", "Build",
+   * "Go live", "Settings") adds the item to that group; any other name adds a
+   * section after the built-in ones.
+   */
   section?: string;
+  /**
+   * Optional small decorative icon shown before the label, typically a 16×16
+   * inline `<svg aria-hidden="true">` drawn with `currentColor`.
+   */
+  icon?: ReactNode;
   /**
    * Whether the screen is about the selected assistant. Default `true`. When
    * `false`, the assistant switcher, "New assistant" and the Try it pane are
@@ -67,9 +77,15 @@ export interface MountAdminOptions {
   signIn?: ComponentType<SignInProps>;
   onSignOut?: () => void | Promise<void>;
   hideScreens?: readonly BuiltinScreenId[];
-  /** Rendered in the top bar right after the product name. */
+  /**
+   * Rendered in the top bar right after the product name. It stays in the top
+   * bar on narrow screens, so keep it compact.
+   */
   headerStart?: ComponentType<HeaderSlotProps>;
-  /** Rendered in the top bar right before the Sign out button. */
+  /**
+   * Rendered in the top bar right before the Sign out button. Below 900px it
+   * moves, with Sign out, to the bottom of the navigation drawer.
+   */
   headerEnd?: ComponentType<HeaderSlotProps>;
   /**
    * Screen `/admin/` (and any unknown admin path) lands on: a built-in screen
@@ -184,6 +200,7 @@ export function resolveAdminConfig(options?: MountAdminOptions): ResolvedAdminCo
       label: item.label,
       path: normalizedPath,
       ...(section ? { section } : {}),
+      ...(item.icon !== undefined && item.icon !== null ? { icon: item.icon } : {}),
     });
   }
 

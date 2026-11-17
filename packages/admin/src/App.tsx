@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "./api/client.js";
 import type { Assistant } from "./api/types.js";
 import { useResource } from "./api/useResource.js";
@@ -8,7 +8,7 @@ import {
   type ResolvedAdminConfig,
   resolveAdminConfig,
 } from "./extension.js";
-import { type BuiltinScreenId, useRoute } from "./routing.js";
+import { BUILD_SCREENS, type BuiltinScreenId, MONITOR_SCREENS, useRoute } from "./routing.js";
 import { Behaviour } from "./screens/Behaviour.js";
 import { Conversations } from "./screens/Conversations.js";
 import { Gaps } from "./screens/Gaps.js";
@@ -21,13 +21,22 @@ import { Sources } from "./screens/Sources.js";
 import { Tests } from "./screens/Tests.js";
 import { Tools } from "./screens/Tools.js";
 import { Widget } from "./screens/Widget.js";
-import { AssistantSwitcher, type CreatedIngestKey } from "./shell/AssistantSwitcher.js";
+import {
+  AssistantSwitcher,
+  type CreatedIngestKey,
+  IngestKeyNotice,
+} from "./shell/AssistantSwitcher.js";
 import { FirstRun } from "./shell/FirstRun.js";
 import { Navigation } from "./shell/Navigation.js";
 import type { CreatedAssistant } from "./shell/NewAssistantForm.js";
+import { PublishControls } from "./shell/PublishStatus.js";
 import { TryItPane } from "./shell/TryItPane.js";
 import { AssistantMutationsProvider } from "./shell/useAssistantMutations.js";
 import { useSession } from "./shell/useSession.js";
+import { useFocusTrap, useMediaQuery } from "./ui/focus.js";
+import { Icon } from "./ui/Icon.js";
+import { Skeleton } from "./ui/Skeleton.js";
+import { ToastProvider } from "./ui/Toast.js";
 
 function renderBuiltinScreen(screen: BuiltinScreenId, assistantId: string) {
   switch (screen) {
@@ -56,6 +65,74 @@ function renderBuiltinScreen(screen: BuiltinScreenId, assistantId: string) {
   }
 }
 
+const NARROW_QUERY = "(max-width: 899px)";
+const TRY_IT_STORAGE_KEY = "solvchat.admin.tryIt";
+const TRY_IT_ID = "try-it-pane";
+const DRAWER_ID = "shell-drawer";
+
+type TryItGroup = "monitor" | "build";
+type TryItPrefs = Partial<Record<TryItGroup, boolean>>;
+
+function readTryItPrefs(): TryItPrefs {
+  try {
+    const raw = window.localStorage.getItem(TRY_IT_STORAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    const prefs: TryItPrefs = {};
+    if (parsed && typeof parsed === "object") {
+      for (const group of ["monitor", "build"] as const) {
+        const value = (parsed as Record<string, unknown>)[group];
+        if (typeof value === "boolean") prefs[group] = value;
+      }
+    }
+    return prefs;
+  } catch {
+    return {};
+  }
+}
+
+function writeTryItPrefs(prefs: TryItPrefs) {
+  try {
+    window.localStorage.setItem(TRY_IT_STORAGE_KEY, JSON.stringify(prefs));
+  } catch {
+    // Storage can be unavailable (private mode, blocked); the choice then lasts this visit.
+  }
+}
+
+/**
+ * Whether the Try it pane is open. Wide screens remember the choice per
+ * browser, separately for Monitor screens (closed by default) and the rest
+ * (open by default). On narrow screens it is a sheet, opened on demand and
+ * closed again on every screen change.
+ */
+function useTryItOpen(screen: string | null, narrow: boolean) {
+  const group: TryItGroup = screen !== null && MONITOR_SCREENS.has(screen) ? "monitor" : "build";
+  const [prefs, setPrefs] = useState<TryItPrefs>(readTryItPrefs);
+  const [sheetOpen, setSheetOpen] = useState(false);
+
+  useEffect(() => {
+    void screen;
+    void narrow;
+    setSheetOpen(false);
+  }, [screen, narrow]);
+
+  const open = narrow ? sheetOpen : (prefs[group] ?? group !== "monitor");
+  const setOpen = useCallback(
+    (next: boolean) => {
+      if (narrow) {
+        setSheetOpen(next);
+        return;
+      }
+      setPrefs((prev) => {
+        const updated = { ...prev, [group]: next };
+        writeTryItPrefs(updated);
+        return updated;
+      });
+    },
+    [narrow, group],
+  );
+  return { open, setOpen };
+}
+
 function AdminShell({
   config,
   onSignOut,
@@ -72,6 +149,25 @@ function AdminShell({
   // A queue, not one slot: two create forms can finish close together, and each key is
   // shown once by the API, so every key stays until the user dismisses it.
   const [createdKeys, setCreatedKeys] = useState<CreatedIngestKey[]>([]);
+  const narrow = useMediaQuery(NARROW_QUERY);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  const tryItToggleRef = useRef<HTMLButtonElement>(null);
+  // Set when the owner presses "Try it", so only that (not navigation) moves focus.
+  const focusTryItRef = useRef(false);
+  const tryIt = useTryItOpen(screen, narrow);
+  const drawerTrap = useFocusTrap(drawerRef, narrow && drawerOpen, {
+    onEscape: () => setDrawerOpen(false),
+  });
+
+  useEffect(() => {
+    if (!narrow) setDrawerOpen(false);
+  }, [narrow]);
+
+  function handleNavigate(path: string) {
+    setDrawerOpen(false);
+    navigate(path);
+  }
 
   function handleCreated({ assistant, ingestKey }: CreatedAssistant) {
     // Merge into the latest list: two create forms can have requests in flight at once.
@@ -81,6 +177,7 @@ function AdminShell({
       return { assistants: [...current, assistant] };
     });
     setSelectedId(assistant.id);
+    setDrawerOpen(false);
     if (ingestKey) {
       setCreatedKeys((prev) =>
         prev.some((k) => k.assistantId === assistant.id)
@@ -109,6 +206,11 @@ function AdminShell({
     }
   }
 
+  function closeTryIt() {
+    tryIt.setOpen(false);
+    tryItToggleRef.current?.focus();
+  }
+
   const effectiveSelectedId =
     selectedId !== null && assistants.some((a) => a.id === selectedId)
       ? selectedId
@@ -120,9 +222,101 @@ function AdminShell({
   const assistantChrome = !(ExtraScreen && screen !== null && config.unscopedScreenIds.has(screen));
   const HeaderStart = config.headerStart;
   const HeaderEnd = config.headerEnd;
+  const currentItem = config.navItems.find((item) => item.id === screen) ?? null;
+  const hasTryIt = selectedAssistant !== null && assistantChrome;
+  const tryItVisible = hasTryIt && tryIt.open;
+  const keyNotice = createdKeys[0] ?? null;
+
+  useEffect(() => {
+    if (!tryItVisible || !focusTryItRef.current) return;
+    focusTryItRef.current = false;
+    document.getElementById("try-it-input")?.focus();
+  }, [tryItVisible]);
+
+  // Hidden, not unmounted, on unscoped screens so a half-filled form survives.
+  const switcher = (
+    <AssistantSwitcher
+      assistants={assistants}
+      selectedId={effectiveSelectedId}
+      onSelect={(id) => {
+        setSelectedId(id);
+        setDrawerOpen(false);
+      }}
+      onCreated={handleCreated}
+      createdKey={narrow ? null : keyNotice}
+      pendingKeyCount={Math.max(createdKeys.length - 1, 0)}
+      onDismissKey={(assistantId) =>
+        setCreatedKeys((prev) => prev.filter((k) => k.assistantId !== assistantId))
+      }
+      hidden={!assistantChrome}
+    />
+  );
+  const publishControls =
+    assistantChrome && selectedAssistant !== null ? (
+      <PublishControls
+        key={selectedAssistant.id}
+        assistantId={selectedAssistant.id}
+        showActions={screen !== null && BUILD_SCREENS.has(screen)}
+        refreshKey={screen ?? ""}
+      />
+    ) : null;
+  const headerEnd = HeaderEnd && (
+    <div className="shell-header-slot">
+      <HeaderEnd api={ADMIN_API_HELPERS} />
+    </div>
+  );
+  const signOut = (
+    <button
+      type="button"
+      className="btn btn-secondary btn-sm"
+      disabled={signingOut}
+      onClick={() => void handleSignOut()}
+    >
+      {signingOut ? "Signing out…" : "Sign out"}
+    </button>
+  );
+  const tryItToggle = hasTryIt && (
+    <button
+      ref={tryItToggleRef}
+      type="button"
+      className={
+        tryIt.open
+          ? "btn btn-secondary btn-sm try-it-toggle is-on"
+          : "btn btn-secondary btn-sm try-it-toggle"
+      }
+      aria-expanded={tryIt.open}
+      aria-controls={TRY_IT_ID}
+      onClick={() => {
+        focusTryItRef.current = !tryIt.open;
+        tryIt.setOpen(!tryIt.open);
+      }}
+    >
+      <Icon name="chat" />
+      Try it
+    </button>
+  );
+  const navigation = (
+    <Navigation current={screen} onNavigate={handleNavigate} items={config.navItems} />
+  );
+
+  const bodyClass = [
+    "shell-body",
+    assistantChrome ? null : "shell-body-unscoped",
+    tryItVisible && !narrow ? "shell-body-try-open" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const shellClass = [
+    "shell",
+    narrow ? "shell-narrow" : null,
+    narrow && drawerOpen ? "shell-drawer-open" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
-    <div className="shell">
+    <div className={shellClass}>
       <header className="shell-header">
         <div className="shell-brand">solv.chat</div>
         {HeaderStart && (
@@ -130,33 +324,74 @@ function AdminShell({
             <HeaderStart api={ADMIN_API_HELPERS} />
           </div>
         )}
-        {/* Hidden, not unmounted, on unscoped screens so a half-filled form survives. */}
-        <AssistantSwitcher
-          assistants={assistants}
-          selectedId={effectiveSelectedId}
-          onSelect={setSelectedId}
-          onCreated={handleCreated}
-          createdKey={createdKeys[0] ?? null}
-          pendingKeyCount={Math.max(createdKeys.length - 1, 0)}
-          onDismissKey={(assistantId) =>
-            setCreatedKeys((prev) => prev.filter((k) => k.assistantId !== assistantId))
-          }
-          hidden={!assistantChrome}
-        />
-        {!assistantChrome && <div className="shell-header-spacer" />}
-        {HeaderEnd && (
-          <div className="shell-header-slot">
-            <HeaderEnd api={ADMIN_API_HELPERS} />
+        {narrow && (
+          <div className="shell-current" aria-hidden={currentItem === null ? true : undefined}>
+            {currentItem?.label ?? ""}
           </div>
         )}
-        <button
-          type="button"
-          className="btn btn-secondary btn-sm"
-          disabled={signingOut}
-          onClick={() => void handleSignOut()}
+        {narrow && tryItToggle}
+        {narrow && (
+          <button
+            type="button"
+            className="btn-icon shell-menu-button"
+            aria-label="Menu"
+            aria-expanded={drawerOpen}
+            aria-controls={DRAWER_ID}
+            onClick={() => {
+              // The Try it sheet sits above the drawer; close it so the menu is usable.
+              if (tryIt.open) tryIt.setOpen(false);
+              setDrawerOpen(true);
+            }}
+          >
+            <Icon name="menu" size={20} />
+          </button>
+        )}
+        {narrow && drawerOpen && (
+          <div className="shell-backdrop" aria-hidden="true" onClick={() => setDrawerOpen(false)} />
+        )}
+        {/* One element at one place in the tree on every screen and at every width:
+            wide screens lay its contents out in the header row (display: contents),
+            narrow screens show it as the drawer. Moving the switcher or the host slot
+            between parents would remount them and lose a half-filled form. */}
+        <div
+          ref={drawerRef}
+          id={DRAWER_ID}
+          className={narrow ? "shell-sidebar shell-drawer" : "shell-header-controls"}
+          hidden={narrow && !drawerOpen}
+          {...(narrow
+            ? {
+                role: "dialog",
+                "aria-modal": true,
+                "aria-label": "Menu",
+                onKeyDown: drawerTrap.onKeyDown,
+              }
+            : {})}
         >
-          {signingOut ? "Signing out…" : "Sign out"}
-        </button>
+          {narrow && (
+            <div className="drawer-header">
+              <span className="shell-brand">solv.chat</span>
+              <button
+                type="button"
+                className="btn-icon"
+                aria-label="Close menu"
+                onClick={() => setDrawerOpen(false)}
+              >
+                <Icon name="close" size={20} />
+              </button>
+            </div>
+          )}
+          <div className="drawer-top" hidden={!assistantChrome}>
+            {switcher}
+            {publishControls}
+          </div>
+          {narrow && navigation}
+          {!narrow && <div className="shell-header-spacer" />}
+          <div className="drawer-bottom">
+            {headerEnd}
+            {!narrow && tryItToggle}
+            {signOut}
+          </div>
+        </div>
       </header>
       {signOutError && (
         <div className="shell-alert" role="alert">
@@ -164,44 +399,76 @@ function AdminShell({
         </div>
       )}
 
-      <div className={assistantChrome ? "shell-body" : "shell-body shell-body-unscoped"}>
-        <Navigation current={screen} onNavigate={navigate} items={config.navItems} />
+      <div className={bodyClass}>
+        {!narrow && <div className="shell-sidebar">{navigation}</div>}
 
-        <AssistantMutationsProvider>
-          <main className="shell-main">
-            {ExtraScreen ? (
-              <ExtraScreen
-                assistant={selectedAssistant}
-                assistantId={selectedAssistant?.id ?? null}
-                api={ADMIN_API_HELPERS}
+        <main className="shell-main">
+          {narrow && keyNotice && assistantChrome && (
+            <div className="shell-key-notice">
+              <IngestKeyNotice
+                key={keyNotice.assistantId}
+                createdKey={keyNotice}
+                pendingCount={Math.max(createdKeys.length - 1, 0)}
+                onDismiss={() =>
+                  setCreatedKeys((prev) =>
+                    prev.filter((k) => k.assistantId !== keyNotice.assistantId),
+                  )
+                }
               />
-            ) : screen === null ? (
-              <div className="screen">
-                <p className="muted">No screens available.</p>
-              </div>
-            ) : screen === "providers" ? (
-              <Providers />
-            ) : assistantsRes.status === "loading" && assistants.length === 0 ? (
-              <p className="muted">Loading assistants…</p>
-            ) : assistantsRes.status === "error" ? (
-              <p className="error-text" role="alert">
-                {assistantsRes.error}
-              </p>
-            ) : selectedAssistant === null ? (
-              <FirstRun onCreated={handleFirstRunCreated} />
-            ) : (
-              renderBuiltinScreen(screen as BuiltinScreenId, selectedAssistant.id)
-            )}
-          </main>
-        </AssistantMutationsProvider>
+            </div>
+          )}
+          {ExtraScreen ? (
+            <ExtraScreen
+              assistant={selectedAssistant}
+              assistantId={selectedAssistant?.id ?? null}
+              api={ADMIN_API_HELPERS}
+            />
+          ) : screen === null ? (
+            <div className="screen">
+              <p className="muted">No screens available.</p>
+            </div>
+          ) : screen === "providers" ? (
+            <Providers />
+          ) : assistantsRes.status === "loading" && assistants.length === 0 ? (
+            <Skeleton label="Loading assistants…" lines={4} />
+          ) : assistantsRes.status === "error" ? (
+            <p className="error-text" role="alert">
+              {assistantsRes.error}
+            </p>
+          ) : selectedAssistant === null ? (
+            <FirstRun onCreated={handleFirstRunCreated} />
+          ) : (
+            renderBuiltinScreen(screen as BuiltinScreenId, selectedAssistant.id)
+          )}
+        </main>
 
-        {/* Mounted once outside <main> so moving between screens keeps the transcript.
-            Unscoped screens hide it rather than unmount it, for the same reason. */}
+        {/* Mounted once outside <main> so moving between screens, closing the pane
+            or visiting an unscoped screen keeps the transcript. */}
         {selectedAssistant !== null && (
-          <TryItPane assistant={selectedAssistant} hidden={!assistantChrome} />
+          <TryItPane
+            id={TRY_IT_ID}
+            assistant={selectedAssistant}
+            hidden={!tryItVisible}
+            overlay={narrow}
+            onClose={closeTryIt}
+          />
         )}
       </div>
     </div>
+  );
+}
+
+/** The shell with the providers every screen shares. */
+function AdminShellWithProviders(props: {
+  config: ResolvedAdminConfig;
+  onSignOut: () => Promise<void>;
+}) {
+  return (
+    <ToastProvider>
+      <AssistantMutationsProvider>
+        <AdminShell {...props} />
+      </AssistantMutationsProvider>
+    </ToastProvider>
   );
 }
 
@@ -238,5 +505,5 @@ export function App({ options, config: preResolved }: AppProps = {}) {
     );
   }
 
-  return <AdminShell config={resolved} onSignOut={session.signOut} />;
+  return <AdminShellWithProviders config={resolved} onSignOut={session.signOut} />;
 }
