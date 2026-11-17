@@ -693,8 +693,15 @@ describe("Monitor screens", () => {
       });
       await open(`/admin/conversations?q=${encodeURIComponent("école")}`);
 
-      const status = await screen.findByRole("status");
-      expect(within(status).getByRole("heading", { name: "Getting search ready" })).toBeTruthy();
+      // The loading skeleton is a status too, so wait for the heading itself
+      // rather than the first status on the page.
+      const heading = await screen.findByRole("heading", { name: "Getting search ready" });
+      const status = heading.closest('[role="status"]');
+      expect(status).not.toBeNull();
+      expect(
+        within(status as HTMLElement).getByRole("heading", { name: "Getting search ready" }),
+      ).toBe(heading);
+      expect(screen.queryByText("Loading conversations…")).toBeNull();
       expect(screen.queryByRole("heading", { name: "No conversations match" })).toBeNull();
       expect(screen.queryByText(/^Showing /)).toBeNull();
 
