@@ -2,6 +2,7 @@ import { type ReactNode, useState } from "react";
 import type { AssistantReport, TopQuestion } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { buildCsv } from "../csv.js";
+import { assistantPath } from "../routing.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
 import { EmptyState } from "../ui/EmptyState.js";
 import { ErrorState } from "../ui/ErrorState.js";
@@ -264,7 +265,7 @@ export function Reports({ assistantId }: ReportsProps) {
               heading="Most often unanswered"
               explanation="Write an answer for these on the Gaps screen."
               rows={report.topGaps}
-              linkTo={() => "/admin/gaps"}
+              linkTo={() => assistantPath("/admin/gaps", assistantId)}
             />
 
             <ReportList

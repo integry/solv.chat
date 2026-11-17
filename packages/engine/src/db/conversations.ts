@@ -105,21 +105,34 @@ export function conversationsFor(db: D1Database, orgId: string) {
       return res.results.map(map);
     },
 
+    /**
+     * One page of an assistant's conversations, newest first. A search reads
+     * `search_text`, so rows written before it existed are folded first, a
+     * bounded share per call. While some are left the search is not run (a
+     * row still to fold could match, so any answer could leave it out):
+     * the result is empty with `searchPending`, and asking again folds more.
+     */
     async listPaged(
       assistantId: string,
       options: { limit: number; offset: number; filter?: ConversationFilter },
-    ): Promise<{ conversations: ConversationSummaryRow[]; total: number }> {
+    ): Promise<{
+      conversations: ConversationSummaryRow[];
+      total: number;
+      searchPending: boolean;
+    }> {
       const filter = options.filter ?? {};
       const search = (filter.search ?? "").trim();
-      // The search reads `search_text`, so rows written before it existed
-      // are folded first.
-      if (search !== "") await messagesFor(db, orgId).fillSearchText();
+      if (search !== "" && !(await messagesFor(db, orgId).fillSearchText())) {
+        return { conversations: [], total: 0, searchPending: true };
+      }
       // Each condition is switched on by its own parameter, so one statement
       // serves every combination and nothing is spliced into the SQL.
       // The search compares `search_text` with the search folded the same way
-      // in JavaScript (SQLite's `lower()` only folds ASCII). Should a backlog
-      // outlast one fill, its rows fall back to `lower(content)` until a later
-      // search folds them. The exact text (`?8`) always matches.
+      // in JavaScript (SQLite's `lower()` only folds ASCII). Every write of
+      // `content` here also writes `search_text`; a row still NULL now came
+      // from a writer that does not (an older Worker still running during a
+      // deploy), so `lower(content)` covers its ASCII text until the next
+      // search folds it. The exact text (`?8`) always matches.
       const where = `
         FROM conversations c
        WHERE c.org_id = ?1 AND c.assistant_id = ?2
@@ -187,6 +200,7 @@ export function conversationsFor(db: D1Database, orgId: string) {
           lastMessageAt: r.last_message_at ?? r.started_at,
         })),
         total: countRow?.total ?? 0,
+        searchPending: false,
       };
     },
 

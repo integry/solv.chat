@@ -1,5 +1,6 @@
 import { type ReactNode, useState } from "react";
 import type { AssistantOverview, OverviewSetup } from "../api/types.js";
+import { assistantPath } from "../routing.js";
 import { formatDate } from "../ui/format.js";
 import { Icon } from "../ui/Icon.js";
 import { ScreenLink } from "../ui/ScreenLink.js";
@@ -121,6 +122,7 @@ export function QuestionsChart({ daily }: { daily: Array<{ day: string; question
   );
 }
 
+// Each `to` is one of the assistant's own screens; links add the assistant.
 const STEPS: Array<{
   key: keyof OverviewSetup;
   label: string;
@@ -228,7 +230,11 @@ export function GettingStarted({
               </span>
               <div className="checklist-text">
                 <span className="checklist-label">
-                  {step.to ? <ScreenLink to={step.to}>{step.label}</ScreenLink> : step.label}
+                  {step.to ? (
+                    <ScreenLink to={assistantPath(step.to, assistantId)}>{step.label}</ScreenLink>
+                  ) : (
+                    step.label
+                  )}
                   <span className="sr-only">{complete ? " (done)" : " (to do)"}</span>
                 </span>
                 <span className="muted">{step.hint}</span>
@@ -254,8 +260,17 @@ function plural(count: number, one: string, many: string): string {
   return count === 1 ? one : many;
 }
 
-/** What needs the owner now. Not rendered when there is nothing. */
-export function NeedsAttention({ overview }: { overview: AssistantOverview }) {
+/**
+ * What needs the owner now. Not rendered when there is nothing. Links to the
+ * assistant's own screens name it; Providers is for the whole organisation.
+ */
+export function NeedsAttention({
+  assistantId,
+  overview,
+}: {
+  assistantId: string;
+  overview: AssistantOverview;
+}) {
   const attention = overview.attention;
   const items: Array<{ key: string; tone: "warning" | "danger"; body: ReactNode }> = [];
   if (overview.configError) {
@@ -275,7 +290,7 @@ export function NeedsAttention({ overview }: { overview: AssistantOverview }) {
       key: "gaps",
       tone: "warning",
       body: (
-        <ScreenLink to="/admin/gaps">
+        <ScreenLink to={assistantPath("/admin/gaps", assistantId)}>
           {attention.openGaps}{" "}
           {plural(
             attention.openGaps,
@@ -291,7 +306,7 @@ export function NeedsAttention({ overview }: { overview: AssistantOverview }) {
       key: "tests",
       tone: "danger",
       body: (
-        <ScreenLink to="/admin/tests">
+        <ScreenLink to={assistantPath("/admin/tests", assistantId)}>
           {attention.failingTests} {plural(attention.failingTests, "test failed", "tests failed")}{" "}
           in the last run
         </ScreenLink>
@@ -303,7 +318,7 @@ export function NeedsAttention({ overview }: { overview: AssistantOverview }) {
       key: `source-${source.sourceId}`,
       tone: "warning",
       body: (
-        <ScreenLink to="/admin/sources">
+        <ScreenLink to={assistantPath("/admin/sources", assistantId)}>
           {source.label}: {source.documents}{" "}
           {plural(source.documents, "page was not indexed", "pages were not indexed")}
         </ScreenLink>

@@ -62,6 +62,11 @@ export interface ConversationsPage {
   total: number;
   limit: number;
   offset: number;
+  /**
+   * The engine is still preparing older messages for search, so it did not
+   * search: the list is empty and the same request should be sent again.
+   */
+  searchPending?: boolean;
 }
 
 export interface ConversationFeedback {

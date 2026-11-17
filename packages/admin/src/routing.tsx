@@ -94,6 +94,16 @@ export function navigateTo(path: string): void {
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
+/**
+ * The address of one assistant's screen, e.g. its Gaps. It names the
+ * assistant, so a link opened in a new tab (where the shell starts from the
+ * address) shows that assistant rather than the first one. Organisation-wide
+ * screens such as Providers need no assistant.
+ */
+export function assistantPath(path: string, assistantId: string): string {
+  return `${path}?${new URLSearchParams({ assistant: assistantId }).toString()}`;
+}
+
 /** Reads one query parameter of the current address. */
 export function readQueryParam(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name);

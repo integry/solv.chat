@@ -269,6 +269,67 @@ describe("conversation search", () => {
       expect(await messages.fillSearchText({ batch: 2, rounds: 2 })).toBe(true);
     });
 
+    it("are never left out of a search answer while more remain than one request folds", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const now = Date.now();
+      // More older non-ASCII rows than one search request may fold (10 rounds
+      // of 200), so the first request ends with some still unfolded.
+      const filler = await seedConversation(ORG_A, ast, now - 5000);
+      await env.DB.prepare(
+        `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2100)
+         INSERT INTO messages (id, org_id, conversation_id, role, content, citations, answered, created_at)
+         SELECT 'msg_fill_' || i, ?1, ?2, 'assistant', 'Réponse numéro ' || i, '[]', 1, ?3 + i FROM n`,
+      )
+        .bind(ORG_A, filler, now - 5000)
+        .run();
+      // Written last, so the first request most likely leaves it unfolded,
+      // where SQLite's lower() would not turn "ÉCOLE" into "école".
+      const school = await seedConversation(ORG_A, ast, now - 1000);
+      await legacyMessage(ORG_A, school, "user", "Où est l'ÉCOLE?", now - 1000);
+      expect(await pendingCount(ORG_A)).toBe(2101);
+
+      const answers: Array<ConversationsBody & { searchPending: boolean }> = [];
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const body = await getJson<ConversationsBody & { searchPending: boolean }>(
+          ORG_A,
+          `/api/admin/assistants/${ast}/conversations?q=${encodeURIComponent("école")}`,
+        );
+        answers.push(body);
+        if (!body.searchPending) break;
+      }
+
+      // The first answer says the search is not ready instead of "no match".
+      expect(answers[0]).toMatchObject({ searchPending: true, conversations: [], total: 0 });
+      // Asking again finishes the folding, and the only complete answer finds it.
+      const last = answers.at(-1);
+      expect(answers.length).toBe(2);
+      expect(last?.searchPending).toBe(false);
+      expect(last?.conversations.map((c) => c.id)).toEqual([school]);
+      expect(last?.total).toBe(1);
+      expect(await pendingCount(ORG_A)).toBe(0);
+
+      // A list without a search folds nothing and is never pending.
+      const unsearched = await getJson<ConversationsBody & { searchPending: boolean }>(
+        ORG_A,
+        `/api/admin/assistants/${ast}/conversations`,
+      );
+      expect(unsearched).toMatchObject({ searchPending: false, total: 2 });
+    });
+
+    it("are left alone by a list that does not search", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const now = Date.now();
+      const conversation = await seedConversation(ORG_A, ast, now - 1000);
+      await legacyMessage(ORG_A, conversation, "user", "Où est l'ÉCOLE?", now - 1000);
+
+      const body = await getJson<ConversationsBody & { searchPending: boolean }>(
+        ORG_A,
+        `/api/admin/assistants/${ast}/conversations?filter=unanswered`,
+      );
+      expect(body).toMatchObject({ searchPending: false, conversations: [], total: 0 });
+      expect(await pendingCount(ORG_A)).toBe(1);
+    });
+
     it("keep the newer text of a reply that resumed while they were being folded", async () => {
       const ast = await seedAssistant(ORG_A);
       const now = Date.now();

@@ -18,6 +18,8 @@ export interface ConversationsProps {
 
 const PAGE_SIZE = 25;
 const SEARCH_DELAY_MS = 300;
+/** How long to wait before asking again while search is getting ready. */
+const SEARCH_PENDING_RETRY_MS = 1000;
 const LIST_PATH = "/admin/conversations";
 
 type FlagKey = "unanswered" | "not_helpful" | "used_tool";
@@ -116,7 +118,9 @@ export function Conversations({ assistantId }: ConversationsProps) {
   const [searchInput, setSearchInput] = useState(() =>
     toConversationSearch(readQueryParam("q") ?? ""),
   );
-  const [search, setSearch] = useState(searchInput.trim());
+  // What is sent: the box, cut to the length the list accepts. A pasted
+  // question longer than that still finds its conversations by its start.
+  const [search, setSearch] = useState(() => toConversationSearch(searchInput));
   const [flags, setFlags] = useState<ReadonlySet<FlagKey>>(new Set());
   const [days, setDays] = useState("");
   const searchId = useId();
@@ -124,7 +128,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
 
   // Typing waits a moment before searching, so each key press is not a request.
   useEffect(() => {
-    const next = searchInput.trim();
+    const next = toConversationSearch(searchInput);
     if (next === search) return;
     const timer = setTimeout(() => {
       setSearch(next);
@@ -140,6 +144,20 @@ export function Conversations({ assistantId }: ConversationsProps) {
   const listRes = useResource<ConversationsPage>(
     `/api/admin/assistants/${assistantId}/conversations?${params.toString()}`,
   );
+
+  // The engine does not search until older messages are prepared for it; it
+  // says so and prepares a share each time it is asked. Ask again after a
+  // moment until it answers, rather than showing "No conversations match".
+  const pendingPage =
+    openId === null && listRes.status === "ready" && listRes.value?.searchPending === true
+      ? listRes.value
+      : undefined;
+  const reloadList = listRes.reload;
+  useEffect(() => {
+    if (pendingPage === undefined) return;
+    const timer = setTimeout(reloadList, SEARCH_PENDING_RETRY_MS);
+    return () => clearTimeout(timer);
+  }, [pendingPage, reloadList]);
 
   if (openId !== null) {
     return (
@@ -190,7 +208,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
         aria-label="Find conversations"
         onSubmit={(event) => {
           event.preventDefault();
-          setSearch(searchInput.trim());
+          setSearch(toConversationSearch(searchInput));
           setOffset(0);
         }}
       >
@@ -250,6 +268,14 @@ export function Conversations({ assistantId }: ConversationsProps) {
         />
       ) : !page ? (
         <ListSkeleton />
+      ) : page.searchPending === true ? (
+        <div role="status">
+          <EmptyState
+            icon="conversations"
+            title="Getting search ready"
+            description="Older messages are being prepared for search. This happens once, and the results show here when it is done."
+          />
+        </div>
       ) : page.conversations.length === 0 && !hasPrevious ? (
         filtered ? (
           <EmptyState

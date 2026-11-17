@@ -1,5 +1,6 @@
 import type { AssistantOverview, PeriodFigures } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { assistantPath } from "../routing.js";
 import { ErrorState } from "../ui/ErrorState.js";
 import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
@@ -82,7 +83,7 @@ export function Overview({ assistantId }: OverviewProps) {
         <OverviewSkeleton />
       ) : (
         <div className="stack">
-          <NeedsAttention overview={overview} />
+          <NeedsAttention assistantId={assistantId} overview={overview} />
           {overview.setup && <GettingStarted assistantId={assistantId} setup={overview.setup} />}
 
           <div className="overview-grid overview-grid-4">
@@ -159,7 +160,7 @@ export function Overview({ assistantId }: OverviewProps) {
                   ))}
                 </ul>
               )}
-              <ScreenLink to="/admin/reports" className="more-link">
+              <ScreenLink to={assistantPath("/admin/reports", assistantId)} className="more-link">
                 See Reports
               </ScreenLink>
             </section>

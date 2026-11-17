@@ -61,6 +61,12 @@ export interface ConversationsPage {
   total: number;
   limit: number;
   offset: number;
+  /**
+   * True when a search was asked for but messages written before the search
+   * existed are still being prepared for it: nothing was searched, the list
+   * is empty, and the same request should be sent again.
+   */
+  searchPending: boolean;
 }
 
 export interface ConversationDetail {
@@ -130,13 +136,12 @@ export async function listConversations(
 
   const limit = Math.min(Math.max(1, Math.trunc(options.limit ?? 25)), 100);
   const offset = Math.max(0, Math.trunc(options.offset ?? 0));
-  const { conversations, total } = await tenant.conversations.listPaged(assistantId, {
-    limit,
-    offset,
-    ...(options.filter ? { filter: options.filter } : {}),
-  });
+  const { conversations, total, searchPending } = await tenant.conversations.listPaged(
+    assistantId,
+    { limit, offset, ...(options.filter ? { filter: options.filter } : {}) },
+  );
 
-  return { conversations, total, limit, offset };
+  return { conversations, total, limit, offset, searchPending };
 }
 
 /** Returns a single conversation with its turns, citations, feedback, and linked answers. */

@@ -1,3 +1,4 @@
+import { MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
@@ -316,10 +317,10 @@ describe("Monitor screens", () => {
       ]);
       expect(
         within(checklist).getByRole("link", { name: "Add content" }).getAttribute("href"),
-      ).toBe("/admin/sources");
+      ).toBe(`/admin/sources?assistant=${ASSISTANT.id}`);
       expect(
         within(checklist).getByRole("link", { name: "Install on your site" }).getAttribute("href"),
-      ).toBe("/admin/install");
+      ).toBe(`/admin/install?assistant=${ASSISTANT.id}`);
 
       fireEvent.click(within(checklist).getByRole("link", { name: "First visitor question" }));
       expect(await screen.findByRole("heading", { name: "Conversations", level: 1 })).toBeTruthy();
@@ -393,11 +394,15 @@ describe("Monitor screens", () => {
       const links = within(block)
         .getAllByRole("link")
         .map((a) => [a.textContent, a.getAttribute("href")]);
+      // Providers is for the whole organisation; the rest name the assistant.
       expect(links).toEqual([
         ["Check providers", "/admin/providers"],
-        ["3 unanswered questions are waiting for an answer", "/admin/gaps"],
-        ["1 test failed in the last run", "/admin/tests"],
-        ["Docs: 2 pages were not indexed", "/admin/sources"],
+        [
+          "3 unanswered questions are waiting for an answer",
+          `/admin/gaps?assistant=${ASSISTANT.id}`,
+        ],
+        ["1 test failed in the last run", `/admin/tests?assistant=${ASSISTANT.id}`],
+        ["Docs: 2 pages were not indexed", `/admin/sources?assistant=${ASSISTANT.id}`],
       ]);
       expect(block.textContent).toContain("The OpenAI key must be entered again.");
     });
@@ -624,6 +629,86 @@ describe("Monitor screens", () => {
       });
       await waitFor(() => expect(lastList()?.search.get("q")).toBe("spain"), { timeout: 2000 });
       expect(lastList()?.search.get("offset")).toBe("0");
+    });
+
+    it.each([
+      { how: "typed", send: () => {} },
+      {
+        how: "submitted",
+        send: () => {
+          fireEvent.submit(screen.getByRole("form", { name: "Find conversations" }));
+        },
+      },
+    ])("cuts a $how search longer than the list accepts", async ({ send }) => {
+      // The list refuses an over-long search the way the engine does.
+      const { calls } = installServer({
+        conversations: (search) =>
+          (search.get("q") ?? "").length > MAX_CONVERSATION_SEARCH_LENGTH
+            ? Response.json(
+                { error: `q: must be at most ${MAX_CONVERSATION_SEARCH_LENGTH} characters` },
+                { status: 400 },
+              )
+            : [conversation()],
+      });
+      await open("/admin/conversations");
+      await screen.findByRole("link", { name: /Do you ship to Spain\?/ });
+
+      // A pasted question, with a character of two code units on the cut.
+      const pasted = `  ${"b".repeat(MAX_CONVERSATION_SEARCH_LENGTH - 1)}😀 and a few more words  `;
+      const box = screen.getByLabelText("Search conversations") as HTMLInputElement;
+      fireEvent.change(box, { target: { value: pasted } });
+      send();
+
+      const searched = () =>
+        calls.filter((c) => c.path.endsWith("/conversations") && c.search.get("q") !== null);
+      await waitFor(() => expect(searched().length).toBeGreaterThan(0), { timeout: 2000 });
+      expect(await screen.findByRole("link", { name: /Do you ship to Spain\?/ })).toBeTruthy();
+      expect(screen.queryByText("Could not load conversations.")).toBeNull();
+      for (const call of searched()) {
+        const q = call.search.get("q") ?? "";
+        expect(q.length).toBeGreaterThan(0);
+        expect(q.length).toBeLessThanOrEqual(MAX_CONVERSATION_SEARCH_LENGTH);
+        expect(pasted.trim().startsWith(q)).toBe(true);
+      }
+      // The box keeps what was pasted.
+      expect(box.value).toBe(pasted);
+    });
+
+    it("says search is getting ready, and asks again until the engine answers", async () => {
+      let pending = 2;
+      const { calls } = installServer({
+        conversations: (search) => {
+          if (search.get("q") !== null && pending > 0) {
+            pending--;
+            return Response.json({
+              conversations: [],
+              total: 0,
+              limit: 25,
+              offset: 0,
+              searchPending: true,
+            });
+          }
+          return [conversation()];
+        },
+      });
+      await open(`/admin/conversations?q=${encodeURIComponent("école")}`);
+
+      const status = await screen.findByRole("status");
+      expect(within(status).getByRole("heading", { name: "Getting search ready" })).toBeTruthy();
+      expect(screen.queryByRole("heading", { name: "No conversations match" })).toBeNull();
+      expect(screen.queryByText(/^Showing /)).toBeNull();
+
+      expect(
+        await screen.findByRole("link", { name: /Do you ship to Spain\?/ }, { timeout: 4000 }),
+      ).toBeTruthy();
+      expect(screen.queryByRole("heading", { name: "Getting search ready" })).toBeNull();
+      const searches = () =>
+        calls.filter((c) => c.path.endsWith("/conversations") && c.search.get("q") === "école");
+      expect(searches()).toHaveLength(3);
+
+      // Once it has answered, it stops asking.
+      await act(() => new Promise((resolve) => setTimeout(resolve, 1500)));
+      expect(searches()).toHaveLength(3);
     });
 
     it("offers Clear filters when nothing matches", async () => {

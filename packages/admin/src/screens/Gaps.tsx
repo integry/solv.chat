@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, postJson } from "../api/client.js";
 import type { GapSummary, GapsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { clearQueryParams, readQueryParam } from "../routing.js";
+import { assistantPath, clearQueryParams, readQueryParam } from "../routing.js";
 import { RelativeTime } from "../ui/DateText.js";
 import { EmptyState } from "../ui/EmptyState.js";
 import { ErrorState } from "../ui/ErrorState.js";
@@ -168,7 +168,10 @@ export function Gaps({ assistantId }: GapsProps) {
           title="No unanswered questions"
           description="When a visitor asks something your content does not cover, the question shows up here, grouped with others asked the same way. Writing an answer adds it to your sources, so the next visitor gets a real reply."
           action={
-            <ScreenLink to="/admin/conversations" className="btn btn-secondary">
+            <ScreenLink
+              to={assistantPath("/admin/conversations", assistantId)}
+              className="btn btn-secondary"
+            >
               Read conversations
             </ScreenLink>
           }
