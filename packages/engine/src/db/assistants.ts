@@ -145,6 +145,42 @@ export function assistantsFor(db: D1Database, orgId: string) {
       return (res.meta.changes ?? 0) > 0;
     },
 
+    /**
+     * When the owner first tried a question in "Try it", and when the widget
+     * first loaded on an allowed origin. Null until it happens.
+     */
+    async milestones(
+      id: string,
+    ): Promise<{ triedAt: number | null; widgetSeenAt: number | null } | null> {
+      const row = await prepare(
+        db,
+        "SELECT tried_at, widget_seen_at FROM assistants WHERE org_id = ?1 AND id = ?2",
+      )
+        .bind(orgId, id)
+        .first<{ tried_at: number | null; widget_seen_at: number | null }>();
+      return row ? { triedAt: row.tried_at, widgetSeenAt: row.widget_seen_at } : null;
+    },
+
+    /** Records the first "Try it" question. Later calls change nothing. */
+    async markTried(id: string, at: number): Promise<void> {
+      await prepare(
+        db,
+        "UPDATE assistants SET tried_at = ?3 WHERE org_id = ?1 AND id = ?2 AND tried_at IS NULL",
+      )
+        .bind(orgId, id, at)
+        .run();
+    },
+
+    /** Records the first widget load on the owner's site. Later calls change nothing. */
+    async markWidgetSeen(id: string, at: number): Promise<void> {
+      await prepare(
+        db,
+        "UPDATE assistants SET widget_seen_at = ?3 WHERE org_id = ?1 AND id = ?2 AND widget_seen_at IS NULL",
+      )
+        .bind(orgId, id, at)
+        .run();
+    },
+
     async remove(id: string): Promise<boolean> {
       const res = await prepare(db, "DELETE FROM assistants WHERE org_id = ?1 AND id = ?2")
         .bind(orgId, id)

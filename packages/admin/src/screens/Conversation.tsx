@@ -1,8 +1,14 @@
 import { useRef, useState } from "react";
-import type { ConversationDetail } from "../api/types.js";
+import type { ConversationDetail, ConversationTurn } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { navigateTo } from "../routing.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
-import { EntryEditor } from "./EntryEditor.js";
+import { ErrorState } from "../ui/ErrorState.js";
+import { formatDateTime } from "../ui/format.js";
+import { Icon } from "../ui/Icon.js";
+import { PageHeader } from "../ui/PageHeader.js";
+import { Skeleton } from "../ui/Skeleton.js";
+import { StatusBadge } from "../ui/StatusBadge.js";
 import { TestEditor } from "./TestEditor.js";
 
 export interface ConversationProps {
@@ -11,13 +17,71 @@ export interface ConversationProps {
   onBack: () => void;
 }
 
+/** Where "Write an answer for this" goes: Gaps, with the editor open and filled in. */
+export function gapAnswerPath(fromMessageId: string, question: string): string {
+  const params = new URLSearchParams({ answer: fromMessageId, question });
+  return `/admin/gaps?${params.toString()}`;
+}
+
+function Timestamp({ value }: { value: number }) {
+  return (
+    <time className="turn-time" dateTime={new Date(value).toISOString()}>
+      {formatDateTime(value)}
+    </time>
+  );
+}
+
+function TurnBody({ turn }: { turn: ConversationTurn }) {
+  const safeCitations = turn.citations.filter((c) => isSafeHttpUrl(c.url));
+  return (
+    <>
+      <div className="turn-content">{turn.content}</div>
+
+      {safeCitations.length > 0 && (
+        <div className="turn-sources">
+          <span className="turn-sources-label">Sources</span>
+          <ul className="turn-citations" aria-label="Sources">
+            {safeCitations.map((c) => (
+              <li key={c.url}>
+                <a href={c.url} target="_blank" rel="noreferrer">
+                  {c.title || c.url}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {turn.toolCalls && turn.toolCalls.length > 0 && (
+        <ul className="turn-citations" aria-label="What the assistant did">
+          {turn.toolCalls.map((call) => (
+            <li key={call.callId}>
+              {/* Name and outcome only: the stored row holds no result body, by
+                  design — a third party's payload is not the owner's to keep. */}
+              {call.kind === "action" ? "On the page: " : "Tool: "}
+              {call.name}
+              {call.pending ? " — waiting" : call.ok ? "" : " — did not work"}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {turn.feedback.length > 0 && (
+        <div className="source-meta">
+          {turn.feedback.map((fb) => (
+            <StatusBadge key={fb.id} tone={fb.value === "up" ? "success" : "danger"}>
+              {fb.value === "up" ? "Helpful" : "Not helpful"}
+              {fb.note ? `: ${fb.note}` : ""}
+            </StatusBadge>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 export function Conversation({ assistantId, conversationId, onBack }: ConversationProps) {
   const detailRes = useResource<ConversationDetail>(`/api/admin/conversations/${conversationId}`);
-  const [answering, setAnswering] = useState<{
-    turnId: string;
-    fromMessageId: string;
-    question: string;
-  } | null>(null);
   const [addingTest, setAddingTest] = useState<{
     sessionId: number;
     turnId: string;
@@ -51,21 +115,22 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
     return null;
   }
 
+  const pageUrl = detail?.conversation.pageUrl;
   return (
-    <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Conversation</h1>
-          {detail?.conversation.pageUrl && (
-            <p className="muted">Page: {detail.conversation.pageUrl}</p>
-          )}
-        </div>
-        <div className="screen-actions">
+    <div className="screen screen-medium">
+      <PageHeader
+        title="Conversation"
+        description={
+          detail
+            ? `Started ${formatDateTime(detail.conversation.startedAt)}${pageUrl ? ` on ${pageUrl}` : ""}.`
+            : undefined
+        }
+        actions={
           <button type="button" className="btn btn-secondary btn-sm" onClick={onBack}>
             Back to conversations
           </button>
-        </div>
-      </div>
+        }
+      />
 
       {statusMessage && (
         <p className="notice-text" role="status">
@@ -73,91 +138,62 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
         </p>
       )}
 
-      {detailRes.status === "loading" && !detail ? (
-        <p className="muted">Loading conversation…</p>
-      ) : detailRes.status === "error" ? (
-        <p className="error-text" role="alert">
-          {detailRes.error}
-        </p>
-      ) : detail ? (
-        <div className="stack">
+      {detailRes.status === "error" ? (
+        <ErrorState
+          title="Could not load this conversation."
+          message={detailRes.error}
+          onRetry={detailRes.reload}
+        />
+      ) : !detail ? (
+        <div className="source-card">
+          <Skeleton label="Loading conversation…" lines={5} />
+        </div>
+      ) : (
+        <ol className="transcript" aria-label="Messages">
           {detail.turns.map((turn, index) => {
             const isUser = turn.role === "user";
-            const safeCitations = turn.citations.filter((c) => isSafeHttpUrl(c.url));
             const questionTurn = findQuestionForTurn(index);
             const isUnanswered = !isUser && !turn.answered;
 
             return (
-              <div key={turn.id} className={isUser ? "turn turn-user" : "turn"}>
-                <div className="turn-role">{isUser ? "Visitor" : "Assistant"}</div>
-                <div className="turn-content">{turn.content}</div>
-
-                {safeCitations.length > 0 && (
-                  <ul className="turn-citations">
-                    {safeCitations.map((c) => (
-                      <li key={c.url}>
-                        <a href={c.url} target="_blank" rel="noreferrer">
-                          {c.title || c.url}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-
-                {turn.toolCalls && turn.toolCalls.length > 0 && (
-                  <ul className="turn-citations" aria-label="What the assistant did">
-                    {turn.toolCalls.map((call) => (
-                      <li key={call.callId}>
-                        {/* Name and outcome only: the stored row holds no result body, by
-                            design — a third party's payload is not the owner's to keep. */}
-                        {call.kind === "action" ? "On the page: " : "Tool: "}
-                        {call.name}
-                        {call.pending ? " — waiting" : call.ok ? "" : " — did not work"}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-
-                {turn.feedback.length > 0 && (
-                  <div className="source-meta">
-                    {turn.feedback.map((fb) => (
-                      <span key={fb.id} className="badge">
-                        {fb.value === "up" ? "Helpful" : "Not helpful"}
-                        {fb.note ? `: ${fb.note}` : ""}
-                      </span>
-                    ))}
-                  </div>
-                )}
+              <li
+                key={turn.id}
+                className={isUser ? "turn turn-user" : isUnanswered ? "turn turn-gap" : "turn"}
+              >
+                <div className="turn-header">
+                  <span className="turn-role">
+                    <Icon name={isUser ? "chat" : "conversations"} size={14} />
+                    {isUser ? "Visitor" : "Assistant"}
+                  </span>
+                  {isUnanswered && !turn.answerDocumentId && (
+                    <StatusBadge tone="warning">Unanswered</StatusBadge>
+                  )}
+                  {isUnanswered && turn.answerDocumentId && (
+                    <StatusBadge tone="success">Answer written</StatusBadge>
+                  )}
+                  <Timestamp value={turn.createdAt} />
+                </div>
+                <TurnBody turn={turn} />
 
                 {!isUser && (
                   <div className="actions">
-                    {isUnanswered &&
-                      (turn.answerDocumentId ? (
-                        <span className="badge badge-published">Handled</span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-sm"
-                          onClick={() => {
-                            setAddingTest(null);
-                            setStatusMessage(null);
-                            setAnswering({
-                              turnId: turn.id,
-                              // The reply's own id: the engine links the
-                              // answer through the question the reply records.
-                              fromMessageId: turn.id,
-                              question: questionTurn?.content ?? "",
-                            });
-                          }}
-                        >
-                          Write the right answer
-                        </button>
-                      ))}
+                    {isUnanswered && !turn.answerDocumentId && (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        onClick={() =>
+                          // The reply's own id: the engine links the answer
+                          // through the question the reply records.
+                          navigateTo(gapAnswerPath(turn.id, questionTurn?.content ?? ""))
+                        }
+                      >
+                        Write an answer for this
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
                       onClick={() => {
-                        setAnswering(null);
                         setStatusMessage(null);
                         setAddingTest({
                           sessionId: nextTestSessionId.current++,
@@ -171,22 +207,6 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                       Add to tests
                     </button>
                   </div>
-                )}
-
-                {answering?.turnId === turn.id && (
-                  <EntryEditor
-                    assistantId={assistantId}
-                    fromMessageId={answering.fromMessageId}
-                    initialQuestion={answering.question}
-                    onSaved={(_result, session) => {
-                      if (session.assistantId !== assistantId) return;
-                      setAnswering((current) =>
-                        current?.fromMessageId === session.fromMessageId ? null : current,
-                      );
-                      detailRes.reload();
-                    }}
-                    onCancel={() => setAnswering(null)}
-                  />
                 )}
 
                 {addingTest?.turnId === turn.id &&
@@ -207,11 +227,11 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                       />
                     );
                   })()}
-              </div>
+              </li>
             );
           })}
-        </div>
-      ) : null}
+        </ol>
+      )}
     </div>
   );
 }

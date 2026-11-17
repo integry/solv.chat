@@ -1,8 +1,12 @@
-import type { ConversationRow, ConversationSummaryRow } from "../db/conversations.js";
+import type {
+  ConversationFilter,
+  ConversationRow,
+  ConversationSummaryRow,
+} from "../db/conversations.js";
 import type { FeedbackValue } from "../db/feedback.js";
 import type { Citation, MessageRole } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
-import { NotFound } from "./errors.js";
+import { BadRequest, NotFound } from "./errors.js";
 
 export interface ConversationFeedback {
   id: string;
@@ -63,11 +67,61 @@ export interface ConversationDetail {
   turns: ConversationTurn[];
 }
 
+const FILTER_FLAGS = {
+  unanswered: "unanswered",
+  not_helpful: "notHelpful",
+  used_tool: "usedTool",
+} as const;
+
+/** Date presets the Conversations screen offers. */
+export const CONVERSATION_DAY_OPTIONS = [1, 7, 30, 90] as const;
+
+const DAY_MS = 86_400_000;
+const MAX_SEARCH = 200;
+
+/**
+ * Reads `?filter=unanswered,not_helpful,used_tool`, `?days=1|7|30|90` and
+ * `?q=text` from a list request. Unknown values are refused rather than
+ * ignored, so a typo does not silently show every conversation.
+ */
+export function readConversationFilter(url: URL, now: number = Date.now()): ConversationFilter {
+  const filter: ConversationFilter = {};
+  const errors: string[] = [];
+  const rawFilter = url.searchParams.get("filter");
+  if (rawFilter !== null && rawFilter.trim() !== "") {
+    for (const part of rawFilter.split(",")) {
+      const key = FILTER_FLAGS[part.trim() as keyof typeof FILTER_FLAGS];
+      if (key === undefined) {
+        errors.push(`filter: must be ${Object.keys(FILTER_FLAGS).join(", ")}`);
+        break;
+      }
+      filter[key] = true;
+    }
+  }
+  const rawDays = url.searchParams.get("days");
+  if (rawDays !== null && rawDays !== "") {
+    const days = Number(rawDays);
+    if (!(CONVERSATION_DAY_OPTIONS as readonly number[]).includes(days)) {
+      errors.push(`days: must be ${CONVERSATION_DAY_OPTIONS.join(", ")}`);
+    } else {
+      filter.since = now - days * DAY_MS;
+    }
+  }
+  const search = (url.searchParams.get("q") ?? "").trim();
+  if (search.length > MAX_SEARCH) {
+    errors.push(`q: must be at most ${MAX_SEARCH} characters`);
+  } else if (search !== "") {
+    filter.search = search;
+  }
+  if (errors.length > 0) throw new BadRequest(errors);
+  return filter;
+}
+
 /** Lists conversations for an assistant, newest first and paged. */
 export async function listConversations(
   tenant: Tenant,
   assistantId: string,
-  options: { limit?: number; offset?: number } = {},
+  options: { limit?: number; offset?: number; filter?: ConversationFilter } = {},
 ): Promise<ConversationsPage> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
@@ -77,6 +131,7 @@ export async function listConversations(
   const { conversations, total } = await tenant.conversations.listPaged(assistantId, {
     limit,
     offset,
+    ...(options.filter ? { filter: options.filter } : {}),
   });
 
   return { conversations, total, limit, offset };

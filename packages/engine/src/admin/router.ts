@@ -22,10 +22,10 @@ import {
   rotateIngestKey,
   updateAssistant,
 } from "./assistants.js";
-import { getConversation, listConversations } from "./conversations.js";
+import { getConversation, listConversations, readConversationFilter } from "./conversations.js";
 import { saveEntry } from "./entries.js";
 import { BadRequest, Conflict, NotFound, readJsonBody } from "./errors.js";
-import { listGaps } from "./gaps.js";
+import { dismissGap, listGaps, restoreGap } from "./gaps.js";
 import { getInstallInfo } from "./install.js";
 import {
   createMcpServer,
@@ -302,10 +302,20 @@ async function assistantRoutes(
       return Response.json(result, { status: 201 });
     }
     if (action === "conversations" && method === "GET") {
-      return Response.json(await listConversations(tenant, assistantId, readPagingParams(url)));
+      return Response.json(
+        await listConversations(tenant, assistantId, {
+          ...readPagingParams(url),
+          filter: readConversationFilter(url),
+        }),
+      );
     }
     if (action === "gaps" && method === "GET") {
-      return Response.json(await listGaps(tenant, assistantId, readPagingParams(url)));
+      return Response.json(
+        await listGaps(tenant, assistantId, {
+          ...readPagingParams(url),
+          openOnly: url.searchParams.get("status") === "open",
+        }),
+      );
     }
     if (action === "answers" && method === "POST") {
       const fields = readAnswerFields(await readJsonBody(request));
@@ -359,6 +369,17 @@ async function assistantRoutes(
         assistantId,
       );
       return Response.json(run, { status: 201 });
+    }
+    throw new NotFound();
+  }
+
+  if (segments.length === 4 && segments[2] === "gaps" && method === "POST") {
+    // "Dismiss" and its "Undo"; both name the gap group by its question.
+    if (segments[3] === "dismiss") {
+      return Response.json(await dismissGap(tenant, assistantId, await readJsonBody(request)));
+    }
+    if (segments[3] === "restore") {
+      return Response.json(await restoreGap(tenant, assistantId, await readJsonBody(request)));
     }
     throw new NotFound();
   }

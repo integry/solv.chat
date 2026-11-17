@@ -59,7 +59,8 @@ describe("admin overview API", () => {
 
     const res = await call(app, `/api/admin/assistants/${astA}/overview`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({
       messages: 0,
       answeredShare: 0,
       topQuestions: [],
@@ -67,7 +68,19 @@ describe("admin overview API", () => {
       todayCostUnknown: false,
       dailyCostCapMicros: 2_000_000,
       configError: null,
+      period: { days: 7, questions: 0, answeredShare: 0, thumbsDownShare: 0, costMicros: 0 },
+      setup: {
+        hasContent: false,
+        tried: false,
+        published: false,
+        installed: false,
+        visitorQuestion: false,
+      },
+      attention: { openGaps: 0, failingTests: 0, notIndexed: [] },
     });
+    expect((body.daily as Array<{ questions: number }>).map((d) => d.questions)).toEqual([
+      0, 0, 0, 0, 0, 0, 0,
+    ]);
   });
 
   it("computes messages, answered share, top questions, and today's cost for the principal's org only", async () => {

@@ -129,6 +129,35 @@ export function sourcesFor(db: D1Database, orgId: string) {
       }));
     },
 
+    /**
+     * Sources with documents that are still not indexed `olderThanMs` after
+     * they were last written: the Queue consumer gave up on them or keeps
+     * failing. A document written moments ago is just waiting its turn.
+     */
+    async notIndexed(
+      assistantId: string,
+      writtenBefore: number,
+    ): Promise<Array<{ sourceId: string; label: string; documents: number }>> {
+      const res = await prepare(
+        db,
+        `SELECT s.id AS source_id, s.label AS label, COUNT(d.id) AS documents
+           FROM sources s
+           JOIN documents d ON d.org_id = s.org_id AND d.source_id = s.id
+          WHERE s.org_id = ?1 AND s.assistant_id = ?2
+            AND d.updated_at < ?3
+            AND (d.indexed_hash IS NULL OR d.indexed_hash <> d.content_hash)
+          GROUP BY s.id
+          ORDER BY s.created_at ASC`,
+      )
+        .bind(orgId, assistantId, writtenBefore)
+        .all<{ source_id: string; label: string; documents: number }>();
+      return res.results.map((row) => ({
+        sourceId: row.source_id,
+        label: row.label,
+        documents: row.documents,
+      }));
+    },
+
     async getFirstByKind(assistantId: string, kind: SourceKind): Promise<SourceRow | null> {
       const row = await prepare(
         db,

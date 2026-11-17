@@ -159,7 +159,7 @@ describe("Reports screen", () => {
     fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
     await screen.findByText("How your assistant did from 17 Aug 2026 to 15 Nov 2026.");
 
-    fireEvent.change(await screen.findByLabelText("Period"), { target: { value: "7" } });
+    fireEvent.click(await screen.findByRole("radio", { name: "7 days" }));
     await waitFor(() =>
       expect(
         server.calls.some(
@@ -335,7 +335,7 @@ describe("Reports screen", () => {
       ).toBeTruthy();
       expect(screen.getByRole("button", { name: "Download CSV" })).toBeTruthy();
 
-      fireEvent.change(screen.getByLabelText("Period"), { target: { value: "7" } });
+      fireEvent.click(screen.getByRole("radio", { name: "7 days" }));
 
       expect(await screen.findByText("Loading report…")).toBeTruthy();
       expect(screen.getByText("How your assistant did over time.")).toBeTruthy();

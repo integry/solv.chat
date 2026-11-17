@@ -26,6 +26,7 @@ export { DataTable, type DataTableColumn, type DataTableProps } from "./ui/DataT
 export { RelativeTime, type RelativeTimeProps } from "./ui/DateText.js";
 export { ConfirmDialog, type ConfirmDialogProps, Dialog, type DialogProps } from "./ui/Dialog.js";
 export { EmptyState, type EmptyStateProps } from "./ui/EmptyState.js";
+export { ErrorState, type ErrorStateProps } from "./ui/ErrorState.js";
 export {
   type DateFormatOptions,
   type DateInput,
@@ -37,6 +38,11 @@ export {
 export { Icon, type IconName, type IconProps } from "./ui/Icon.js";
 export { PageHeader, type PageHeaderProps } from "./ui/PageHeader.js";
 export { RowMenu, type RowMenuItem, type RowMenuProps } from "./ui/RowMenu.js";
+export {
+  SegmentedControl,
+  type SegmentedControlProps,
+  type SegmentedOption,
+} from "./ui/SegmentedControl.js";
 export { Skeleton, type SkeletonProps } from "./ui/Skeleton.js";
 export { StatusBadge, type StatusBadgeProps, type StatusTone } from "./ui/StatusBadge.js";
 export {

@@ -16,6 +16,12 @@ import type {
   McpServerSummary,
   VersionRow,
 } from "../src/api/types.js";
+import {
+  monitorConversationDetail,
+  monitorConversations,
+  monitorGaps,
+  monitorOverview,
+} from "./support/monitorFixtures.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const ADMIN_ROOT = resolve(TEST_DIR, "..");
@@ -245,6 +251,15 @@ class CdpClient {
   }
 }
 
+/** Stops Chromium and every child it started (it runs in its own process group). */
+function killChromium(proc: ChildProcess) {
+  try {
+    if (proc.pid !== undefined) process.kill(-proc.pid, "SIGKILL");
+  } catch {
+    proc.kill("SIGKILL");
+  }
+}
+
 async function launchChromium(): Promise<{
   process: ChildProcess;
   cdp: CdpClient;
@@ -274,6 +289,9 @@ async function launchChromium(): Promise<{
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
+      // Its own process group, so teardown can stop the renderer and GPU
+      // children too; they otherwise keep writing to the profile directory.
+      detached: true,
       env: {
         ...process.env,
         DBUS_SESSION_BUS_ADDRESS: "/dev/null",
@@ -355,7 +373,7 @@ async function launchChromium(): Promise<{
     return { process: proc, cdp, userDataDir };
   } catch (err) {
     if (proc.exitCode === null) {
-      proc.kill("SIGKILL");
+      killChromium(proc);
     }
     rmSync(userDataDir, { recursive: true, force: true });
     throw err;
@@ -413,14 +431,21 @@ describe("Admin layout regressions (Chromium)", () => {
                 return;
               }
               if (pathname === `/assistants/${ASSISTANT.id}/overview`) {
-                res.end(
-                  JSON.stringify({
-                    messages: 120,
-                    answeredShare: 0.82,
-                    todayCostMicros: 41_000,
-                    topQuestions: [{ question: "How do I install the widget?", count: 14 }],
-                  }),
-                );
+                res.end(JSON.stringify(monitorOverview(Date.now())));
+                return;
+              }
+              if (pathname === `/assistants/${ASSISTANT.id}/conversations`) {
+                const conversations = monitorConversations(Date.now());
+                res.end(JSON.stringify({ conversations, total: 60, limit: 25, offset: 0 }));
+                return;
+              }
+              if (pathname === "/conversations/cnv_1") {
+                res.end(JSON.stringify(monitorConversationDetail(Date.now())));
+                return;
+              }
+              if (pathname === `/assistants/${ASSISTANT.id}/gaps`) {
+                const gaps = monitorGaps(Date.now());
+                res.end(JSON.stringify({ gaps, total: gaps.length, limit: 25, offset: 0 }));
                 return;
               }
               res.end(JSON.stringify({}));
@@ -448,11 +473,11 @@ describe("Admin layout regressions (Chromium)", () => {
       const exited = new Promise<void>((resolveExit) => {
         chromeProc.once("exit", () => resolveExit());
       });
-      chromeProc.kill("SIGKILL");
+      killChromium(chromeProc);
       await Promise.race([exited, new Promise((r) => setTimeout(r, 2000))]);
     }
     if (userDataDir) {
-      rmSync(userDataDir, { recursive: true, force: true });
+      rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
     await viteServer?.close();
   });
@@ -692,6 +717,79 @@ describe("Admin layout regressions (Chromium)", () => {
     expect(drawer.right).toBeLessThanOrEqual(320);
   }, 30_000);
 
+  describe("Monitor screens", () => {
+    const MONITOR = [
+      { path: "/admin/overview", ready: ".chart-bar" },
+      { path: "/admin/reports", ready: ".stat-card" },
+      { path: "/admin/conversations", ready: ".conv-row" },
+      { path: "/admin/conversations?id=cnv_1", ready: ".transcript .turn" },
+      { path: "/admin/gaps", ready: ".gap-item" },
+    ];
+
+    it("has no horizontal scroll at 380px and 320px", async () => {
+      for (const { path, ready } of MONITOR) {
+        for (const width of [380, 320]) {
+          await openScreen(path, width, ready);
+          expect({ path, width, overflow: await horizontalOverflow() }).toEqual({
+            path,
+            width,
+            overflow: 0,
+          });
+        }
+      }
+    }, 60_000);
+
+    it("passes axe, colour contrast included, at 1280px and 380px", async () => {
+      for (const { path, ready } of MONITOR) {
+        for (const width of [1280, 380]) {
+          await openScreen(path, width, ready);
+          await cdp.evaluate<void>(axe.source);
+          const violations = await cdp.evaluate<string[]>(`axe
+            .run(document, { resultTypes: ["violations"] })
+            .then((r) =>
+              r.violations
+                .filter((v) => v.impact === "serious" || v.impact === "critical")
+                .map((v) => v.id + ": " + v.nodes.map((n) => n.target.join(" ")).join(", ")),
+            )`);
+          expect({ path, width, violations }).toEqual({ path, width, violations: [] });
+        }
+      }
+    }, 60_000);
+
+    it("puts the four figures in one row at 1280px and stacks them at 380px", async () => {
+      const tops = () =>
+        cdp.evaluate<number[]>(
+          `Array.from(document.querySelectorAll(".overview-grid-4 > .stat-card")).map((c) => Math.round(c.getBoundingClientRect().top))`,
+        );
+      for (const path of ["/admin/overview", "/admin/reports"]) {
+        await openScreen(path, 1280, ".stat-card");
+        const wide = await tops();
+        expect(wide).toHaveLength(4);
+        expect(new Set(wide).size).toBe(1);
+
+        await openScreen(path, 380, ".stat-card");
+        expect(new Set(await tops()).size).toBe(4);
+      }
+    }, 30_000);
+
+    it("keeps every conversation row and gap action a tap-sized target at 380px", async () => {
+      await openScreen("/admin/conversations", 380, ".conv-row");
+      const rowHeights = await cdp.evaluate<number[]>(
+        `Array.from(document.querySelectorAll(".conv-row")).map((r) => r.getBoundingClientRect().height)`,
+      );
+      expect(rowHeights.length).toBe(3);
+      for (const height of rowHeights) expect(height).toBeGreaterThanOrEqual(44);
+
+      await openScreen("/admin/gaps", 380, ".gap-item");
+      const overflowing =
+        await cdp.evaluate<number>(`Array.from(document.querySelectorAll(".gap-item")).filter((item) => {
+        const box = item.getBoundingClientRect();
+        return Array.from(item.querySelectorAll("button")).some((b) => b.getBoundingClientRect().right > box.right + 0.5);
+      }).length`);
+      expect(overflowing).toBe(0);
+    }, 30_000);
+  });
+
   it("keeps the phone header to one short row so content starts near the top at 380px", async () => {
     await openScreen("/admin/overview", 380, ".shell-main h1");
     const metrics = await cdp.evaluate<{
@@ -718,19 +816,25 @@ describe("Admin layout regressions (Chromium)", () => {
 
   it("lays out sidebar, content and Try it at 1280px", async () => {
     const columns = () =>
-      cdp.evaluate<{ nav: number; main: number; tryIt: number }>(`(() => {
+      cdp.evaluate<{ nav: number; main: number; tryIt: number; viewport: number }>(`(() => {
         const width = (sel) => {
           const el = document.querySelector(sel);
           return el && el.getClientRects().length ? el.getBoundingClientRect().width : 0;
         };
-        return { nav: width(".shell-sidebar"), main: width(".shell-main"), tryIt: width(".try-it") };
+        return {
+          nav: width(".shell-sidebar"),
+          main: width(".shell-main"),
+          tryIt: width(".try-it"),
+          // Less than 1280 when the page is tall enough for a vertical scrollbar.
+          viewport: document.documentElement.clientWidth,
+        };
       })()`);
 
     await openScreen("/admin/overview", 1280, ".shell-main h1");
     const overview = await columns();
     expect(overview.tryIt).toBe(0);
     expect(overview.nav).toBe(220);
-    expect(overview.main).toBe(1280 - 220);
+    expect(overview.main).toBe(overview.viewport - 220);
 
     await openScreen("/admin/behaviour", 1280, ".try-it:not([hidden])");
     const behaviour = await columns();

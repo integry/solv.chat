@@ -47,7 +47,9 @@ on first run. No query may omit the `org_id` filter; route handlers receive it
 from the auth seam and pass it down.
 
 - `orgs` — id, name.
-- `assistants` — id, org_id, name, public_key (used by the widget), allowed_origins.
+- `assistants` — id, org_id, name, public_key (used by the widget), allowed_origins,
+  tried_at and widget_seen_at (first "Try it" question and first widget load on an
+  allowed origin; set once, for the Overview checklist).
 - `assistant_versions` — id, assistant_id, state (`draft` | `published` | `archived`),
   config JSON (behaviour, widget, tool allowlist), created_at, published_at.
   Exactly one draft and at most one published version per assistant. Publishing
@@ -71,6 +73,8 @@ from the auth seam and pass it down.
   must-not-contain, or must-decline).
 - `test_runs` — id, version_id, started_at, results JSON, passed.
 - `usage_daily` — org_id, assistant_id, day, messages, tokens_in, tokens_out, cost_micros.
+- `gap_dismissals` — org_id, assistant_id, question_key, dismissed_at. A dismissed gap
+  group is hidden until the question is asked again after `dismissed_at`.
 
 Migrations are plain SQL files under `packages/engine/migrations`, applied with
 `wrangler d1 migrations`.
@@ -135,6 +139,20 @@ identical message. Resources mirror the admin
 navigation: assistants, versions (draft, publish, history, rollback), sources and
 documents, MCP servers and tools, tests and runs, conversations, gaps, overview
 numbers, install snippet.
+
+The Monitor screens read:
+
+- Overview: the four Reports figures for the last 7 UTC days and the 7 before,
+  questions per day, the getting-started checklist (content added, a question
+  tried in "Try it" or a test run, published, widget loaded on an allowed
+  origin or a visitor question received, first visitor question) and what needs
+  attention (open gaps, failed tests in the latest run, the configuration
+  error, sources with documents still not indexed 15 minutes after they were
+  written).
+- Conversations: `filter=unanswered,not_helpful,used_tool`, `days=1|7|30|90`
+  and `q=` (case-insensitive text in any message); unknown values are refused.
+- Gaps: `status=open` leaves out groups with a written answer;
+  `POST …/gaps/dismiss` and `POST …/gaps/restore` take `{ question }`.
 
 ## Answering a message
 
@@ -378,8 +396,9 @@ Install
 - A "Try it" pane is always available and talks to the draft.
 - Draft and Publish: edits change the draft; Publish runs the tests and promotes
   it; History lists versions with rollback.
-- Gaps and Conversations offer one-click fixes: "Write the right answer" (creates
-  an entry source), "Add to tests".
+- Gaps and Conversations offer one-click fixes: "Write an answer" on Gaps (creates
+  an entry source and removes the gap; Conversations' "Write an answer for this"
+  opens it on Gaps, filled in), "Dismiss" with undo on Gaps, "Add to tests" on both.
 - Plain words on every control. No model, temperature or chunking settings.
 
 ### Extending the admin

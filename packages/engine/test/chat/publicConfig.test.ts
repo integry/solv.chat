@@ -28,6 +28,40 @@ describe("chat/publicConfig", () => {
     });
   });
 
+  it("records the widget's first load on an allowed origin, once, for the Overview checklist", async () => {
+    const draft = await tenant.versions.createDraft({
+      id: "ver_seen",
+      assistantId: "ast_1",
+      config: defaultVersionConfig(),
+      createdAt: 1000,
+    });
+    await tenant.versions.publishDraft("ast_1", draft.id, "ver_seen_2", 2000);
+    const app = createTestApp();
+    const load = async (headers: Record<string, string>) => {
+      const ctx = createExecutionContext();
+      const res = await app.fetch(
+        new Request("https://engine.example/v1/assistants/pk_pub_1", { headers }),
+        env,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      return res;
+    };
+
+    // A load the origin check refuses is not the snippet on the owner's site.
+    expect((await load({ origin: "https://elsewhere.example" })).status).toBe(403);
+    expect((await load({})).status).toBe(403);
+    expect((await tenant.assistants.milestones("ast_1"))?.widgetSeenAt).toBeNull();
+
+    expect((await load({ origin: "https://site.example" })).status).toBe(200);
+    const first = (await tenant.assistants.milestones("ast_1"))?.widgetSeenAt;
+    expect(first).toEqual(expect.any(Number));
+
+    await new Promise((r) => setTimeout(r, 5));
+    expect((await load({ origin: "https://site.example" })).status).toBe(200);
+    expect((await tenant.assistants.milestones("ast_1"))?.widgetSeenAt).toBe(first);
+  });
+
   it("returns 404 for an unknown key or a never-published assistant", async () => {
     await tenant.versions.createDraft({
       id: "ver_draft_only",

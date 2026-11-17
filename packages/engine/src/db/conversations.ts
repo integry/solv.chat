@@ -27,6 +27,23 @@ export interface ConversationSummaryRow {
   firstQuestion: string | null;
   turnCount: number;
   hasUnanswered: boolean;
+  /** A visitor gave at least one reply a thumbs down. */
+  hasNotHelpful: boolean;
+  /** At least one reply called an MCP tool or a page action. */
+  usedTool: boolean;
+  /** When the newest message was written; `startedAt` for an empty conversation. */
+  lastMessageAt: number;
+}
+
+/** Which conversations a list shows. Every set field narrows it further. */
+export interface ConversationFilter {
+  unanswered?: boolean;
+  notHelpful?: boolean;
+  usedTool?: boolean;
+  /** Started at or after this millisecond. */
+  since?: number;
+  /** Text a visitor question or a reply contains, case-insensitive. */
+  search?: string;
 }
 
 interface SummaryRow {
@@ -38,6 +55,9 @@ interface SummaryRow {
   first_question: string | null;
   turn_count: number;
   has_unanswered: number;
+  has_not_helpful: number;
+  used_tool: number;
+  last_message_at: number | null;
 }
 
 export interface CreateConversationInput {
@@ -59,6 +79,18 @@ const map = (row: Row): ConversationRow => ({
   pageUrl: row.page_url,
 });
 
+// Per-conversation flags, each a correlated subquery on `c`.
+const UNANSWERED = `SELECT 1 FROM messages u
+   WHERE u.org_id = c.org_id AND u.conversation_id = c.id
+     AND u.role = 'assistant' AND u.answered = 0`;
+const NOT_HELPFUL = `SELECT 1 FROM messages fm
+    JOIN feedback f ON f.org_id = fm.org_id AND f.message_id = fm.id
+   WHERE fm.org_id = c.org_id AND fm.conversation_id = c.id AND f.value = 'down'`;
+const USED_TOOL = `SELECT 1 FROM messages tm
+   WHERE tm.org_id = c.org_id AND tm.conversation_id = c.id AND tm.role = 'assistant'
+     AND tm.tool_calls IS NOT NULL AND json_valid(tm.tool_calls)
+     AND json_array_length(tm.tool_calls) > 0`;
+
 /** Tenant-scoped data access for `conversations`. */
 export function conversationsFor(db: D1Database, orgId: string) {
   return {
@@ -74,8 +106,32 @@ export function conversationsFor(db: D1Database, orgId: string) {
 
     async listPaged(
       assistantId: string,
-      options: { limit: number; offset: number },
+      options: { limit: number; offset: number; filter?: ConversationFilter },
     ): Promise<{ conversations: ConversationSummaryRow[]; total: number }> {
+      const filter = options.filter ?? {};
+      // Each condition is switched on by its own parameter, so one statement
+      // serves every combination and nothing is spliced into the SQL.
+      const where = `
+        FROM conversations c
+       WHERE c.org_id = ?1 AND c.assistant_id = ?2
+         AND (?3 = 0 OR EXISTS (${UNANSWERED}))
+         AND (?4 = 0 OR EXISTS (${NOT_HELPFUL}))
+         AND (?5 = 0 OR EXISTS (${USED_TOOL}))
+         AND c.started_at >= ?6
+         AND (?7 = '' OR EXISTS (
+           SELECT 1 FROM messages s
+            WHERE s.org_id = c.org_id AND s.conversation_id = c.id
+              AND instr(lower(s.content), ?7) > 0
+         ))`;
+      const params = [
+        orgId,
+        assistantId,
+        filter.unanswered ? 1 : 0,
+        filter.notHelpful ? 1 : 0,
+        filter.usedTool ? 1 : 0,
+        filter.since ?? 0,
+        (filter.search ?? "").trim().toLowerCase(),
+      ];
       const [rowsRes, countRow] = await Promise.all([
         prepare(
           db,
@@ -88,22 +144,20 @@ export function conversationsFor(db: D1Database, orgId: string) {
                   (SELECT COUNT(*)
                      FROM messages m
                     WHERE m.org_id = ?1 AND m.conversation_id = c.id) AS turn_count,
-                  EXISTS(SELECT 1
-                           FROM messages u
-                          WHERE u.org_id = ?1 AND u.conversation_id = c.id
-                            AND u.role = 'assistant' AND u.answered = 0) AS has_unanswered
-             FROM conversations c
-            WHERE c.org_id = ?1 AND c.assistant_id = ?2
+                  (SELECT MAX(l.created_at)
+                     FROM messages l
+                    WHERE l.org_id = ?1 AND l.conversation_id = c.id) AS last_message_at,
+                  EXISTS(${UNANSWERED}) AS has_unanswered,
+                  EXISTS(${NOT_HELPFUL}) AS has_not_helpful,
+                  EXISTS(${USED_TOOL}) AS used_tool
+             ${where}
             ORDER BY c.started_at DESC, c.id DESC
-            LIMIT ?3 OFFSET ?4`,
+            LIMIT ?8 OFFSET ?9`,
         )
-          .bind(orgId, assistantId, options.limit, options.offset)
+          .bind(...params, options.limit, options.offset)
           .all<SummaryRow>(),
-        prepare(
-          db,
-          "SELECT COUNT(*) AS total FROM conversations WHERE org_id = ?1 AND assistant_id = ?2",
-        )
-          .bind(orgId, assistantId)
+        prepare(db, `SELECT COUNT(*) AS total ${where}`)
+          .bind(...params)
           .first<{ total: number }>(),
       ]);
 
@@ -117,9 +171,27 @@ export function conversationsFor(db: D1Database, orgId: string) {
           firstQuestion: r.first_question,
           turnCount: r.turn_count,
           hasUnanswered: r.has_unanswered === 1,
+          hasNotHelpful: r.has_not_helpful === 1,
+          usedTool: r.used_tool === 1,
+          lastMessageAt: r.last_message_at ?? r.started_at,
         })),
         total: countRow?.total ?? 0,
       };
+    },
+
+    /** Whether any visitor has asked this assistant a question (the checklist's last step). */
+    async hasVisitorQuestion(assistantId: string): Promise<boolean> {
+      const row = await prepare(
+        db,
+        `SELECT EXISTS(
+           SELECT 1 FROM messages m
+             JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+            WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'user'
+         ) AS found`,
+      )
+        .bind(orgId, assistantId)
+        .first<{ found: number }>();
+      return row?.found === 1;
     },
 
     async get(id: string): Promise<ConversationRow | null> {

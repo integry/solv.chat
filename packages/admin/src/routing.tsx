@@ -83,6 +83,29 @@ export function matchScreen(
   return found ? found.id : fallback;
 }
 
+/**
+ * Moves to another admin path from inside a screen (screens are not handed
+ * the shell's `navigate`). The shell listens for `popstate`, so it follows.
+ */
+export function navigateTo(path: string): void {
+  if (`${window.location.pathname}${window.location.search}` !== path) {
+    window.history.pushState(null, "", path);
+  }
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+/** Reads one query parameter of the current address. */
+export function readQueryParam(name: string): string | null {
+  return new URLSearchParams(window.location.search).get(name);
+}
+
+/** Drops query parameters a screen has consumed, without a new history entry. */
+export function clearQueryParams(): void {
+  if (window.location.search !== "") {
+    window.history.replaceState(window.history.state, "", window.location.pathname);
+  }
+}
+
 export function useRoute(
   navItems: readonly NavItem[] = NAV_ITEMS,
   defaultScreen?: string,

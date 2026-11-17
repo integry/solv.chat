@@ -52,6 +52,9 @@ export interface ConversationSummary {
   firstQuestion: string | null;
   turnCount: number;
   hasUnanswered: boolean;
+  hasNotHelpful?: boolean;
+  usedTool?: boolean;
+  lastMessageAt?: number;
 }
 
 export interface ConversationsPage {
@@ -150,6 +153,35 @@ export interface AssistantReport {
   uncitedTotal: number;
 }
 
+export interface PeriodFigures {
+  from: string;
+  to: string;
+  questions: number;
+  replies: number;
+  answeredShare: number;
+  thumbsDownShare: number;
+  costMicros: number;
+}
+
+export interface OverviewPeriod extends PeriodFigures {
+  days: number;
+  previous: PeriodFigures;
+}
+
+export interface OverviewSetup {
+  hasContent: boolean;
+  tried: boolean;
+  published: boolean;
+  installed: boolean;
+  visitorQuestion: boolean;
+}
+
+export interface OverviewAttention {
+  openGaps: number;
+  failingTests: number;
+  notIndexed: Array<{ sourceId: string; label: string; documents: number }>;
+}
+
 export interface AssistantOverview {
   messages: number;
   answeredShare: number;
@@ -159,6 +191,10 @@ export interface AssistantOverview {
   dailyCostCapMicros?: number;
   costUnit?: "usd" | "credits";
   configError?: string | null;
+  period?: OverviewPeriod;
+  daily?: Array<{ day: string; questions: number }>;
+  setup?: OverviewSetup;
+  attention?: OverviewAttention;
 }
 
 export interface InstallInfo {

@@ -26,6 +26,8 @@ export interface PublicAssistant {
   name: string;
   publicKey: string;
   allowedOrigins: string[];
+  /** When the widget first loaded on an allowed origin; null until then. */
+  widgetSeenAt?: number | null;
 }
 
 interface AssistantLookupRow {
@@ -34,6 +36,7 @@ interface AssistantLookupRow {
   name: string;
   public_key: string;
   allowed_origins: string;
+  widget_seen_at?: number | null;
 }
 
 const mapAssistant = (row: AssistantLookupRow): PublicAssistant => ({
@@ -42,6 +45,7 @@ const mapAssistant = (row: AssistantLookupRow): PublicAssistant => ({
   name: row.name,
   publicKey: row.public_key,
   allowedOrigins: safeJsonArray<string>(row.allowed_origins),
+  ...(row.widget_seen_at !== undefined ? { widgetSeenAt: row.widget_seen_at } : {}),
 });
 
 /** The org's assistant with this public key, or null. */
@@ -52,7 +56,7 @@ export async function assistantByPublicKey(
 ): Promise<PublicAssistant | null> {
   const row = await prepare(
     db,
-    "SELECT id, org_id, name, public_key, allowed_origins FROM assistants WHERE org_id = ?1 AND public_key = ?2",
+    "SELECT id, org_id, name, public_key, allowed_origins, widget_seen_at FROM assistants WHERE org_id = ?1 AND public_key = ?2",
   )
     .bind(orgId, publicKey)
     .first<AssistantLookupRow>();

@@ -1,9 +1,14 @@
-import { useState } from "react";
-import type { ConversationsPage } from "../api/types.js";
+import { useEffect, useId, useState } from "react";
+import type { ConversationSummary, ConversationsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { navigateTo, readQueryParam } from "../routing.js";
+import { RelativeTime } from "../ui/DateText.js";
 import { EmptyState } from "../ui/EmptyState.js";
-import { formatDateTime } from "../ui/format.js";
+import { ErrorState } from "../ui/ErrorState.js";
 import { PageHeader } from "../ui/PageHeader.js";
+import { ScreenLink } from "../ui/ScreenLink.js";
+import { Skeleton } from "../ui/Skeleton.js";
+import { StatusBadge } from "../ui/StatusBadge.js";
 import { Conversation } from "./Conversation.js";
 
 export interface ConversationsProps {
@@ -11,26 +16,109 @@ export interface ConversationsProps {
 }
 
 const PAGE_SIZE = 25;
+const SEARCH_DELAY_MS = 300;
+const LIST_PATH = "/admin/conversations";
 
-function formatDate(timestamp: number): string {
-  return formatDateTime(timestamp);
+type FlagKey = "unanswered" | "not_helpful" | "used_tool";
+
+const FLAGS: Array<{ key: FlagKey; label: string }> = [
+  { key: "unanswered", label: "Unanswered" },
+  { key: "not_helpful", label: "Marked not helpful" },
+  { key: "used_tool", label: "Used a tool" },
+];
+
+const DATE_OPTIONS = [
+  { value: "", label: "Any time" },
+  { value: "1", label: "Last 24 hours" },
+  { value: "7", label: "Last 7 days" },
+  { value: "30", label: "Last 30 days" },
+  { value: "90", label: "Last 90 days" },
+] as const;
+
+function conversationPath(id: string): string {
+  return `${LIST_PATH}?id=${encodeURIComponent(id)}`;
+}
+
+/** The open conversation follows the address, so Back and a shared link both work. */
+function useOpenConversationId(): string | null {
+  const [id, setId] = useState(() => readQueryParam("id"));
+  useEffect(() => {
+    const onPopState = () => setId(readQueryParam("id"));
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+  return id;
+}
+
+function ConversationRow({ conv }: { conv: ConversationSummary }) {
+  const messages = conv.turnCount === 1 ? "1 message" : `${conv.turnCount} messages`;
+  return (
+    <li className="conv-item">
+      <ScreenLink to={conversationPath(conv.id)} className="conv-row">
+        <span className="conv-title">
+          {conv.firstQuestion ?? "Conversation without a question"}
+        </span>
+        <span className="conv-meta">
+          <RelativeTime value={conv.lastMessageAt ?? conv.startedAt} />
+          <span aria-hidden="true">·</span>
+          <span>{messages}</span>
+          {(conv.hasUnanswered || conv.hasNotHelpful || conv.usedTool) && (
+            <span className="conv-badges">
+              {conv.hasUnanswered && <StatusBadge tone="warning">Unanswered</StatusBadge>}
+              {conv.hasNotHelpful && <StatusBadge tone="danger">Marked not helpful</StatusBadge>}
+              {conv.usedTool && <StatusBadge tone="info">Used a tool</StatusBadge>}
+            </span>
+          )}
+        </span>
+      </ScreenLink>
+    </li>
+  );
+}
+
+function ListSkeleton() {
+  return (
+    <div className="source-card">
+      <Skeleton label="Loading conversations…" lines={6} />
+    </div>
+  );
 }
 
 export function Conversations({ assistantId }: ConversationsProps) {
+  const openId = useOpenConversationId();
   const [offset, setOffset] = useState(0);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [searchInput, setSearchInput] = useState(() => readQueryParam("q") ?? "");
+  const [search, setSearch] = useState(searchInput.trim());
+  const [flags, setFlags] = useState<ReadonlySet<FlagKey>>(new Set());
+  const [days, setDays] = useState("");
+  const searchId = useId();
+  const dateId = useId();
 
+  // Typing waits a moment before searching, so each key press is not a request.
+  useEffect(() => {
+    const next = searchInput.trim();
+    if (next === search) return;
+    const timer = setTimeout(() => {
+      setSearch(next);
+      setOffset(0);
+    }, SEARCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [searchInput, search]);
+
+  const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
+  if (flags.size > 0) params.set("filter", [...flags].join(","));
+  if (days !== "") params.set("days", days);
+  if (search !== "") params.set("q", search);
   const listRes = useResource<ConversationsPage>(
-    `/api/admin/assistants/${assistantId}/conversations?limit=${PAGE_SIZE}&offset=${offset}`,
+    `/api/admin/assistants/${assistantId}/conversations?${params.toString()}`,
   );
 
-  if (selectedId !== null) {
+  if (openId !== null) {
     return (
       <Conversation
         assistantId={assistantId}
-        conversationId={selectedId}
+        conversationId={openId}
         onBack={() => {
-          setSelectedId(null);
+          navigateTo(LIST_PATH);
           listRes.reload();
         }}
       />
@@ -38,60 +126,135 @@ export function Conversations({ assistantId }: ConversationsProps) {
   }
 
   const page = listRes.value;
+  const filtered = flags.size > 0 || days !== "" || search !== "";
   const hasPrevious = offset > 0;
   const hasNext = page ? offset + page.limit < page.total : false;
+  const updating = listRes.status === "loading" && page !== undefined;
+
+  function toggleFlag(key: FlagKey) {
+    setFlags((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setOffset(0);
+  }
+
+  function clearFilters() {
+    setFlags(new Set());
+    setDays("");
+    setSearchInput("");
+    setSearch("");
+    setOffset(0);
+  }
 
   return (
-    <div className="screen">
+    <div className="screen screen-medium">
       <PageHeader
         title="Conversations"
         description="Read what visitors asked and how your assistant replied."
       />
 
-      {listRes.status === "loading" && !page ? (
-        <p className="muted">Loading conversations…</p>
-      ) : listRes.status === "error" ? (
-        <p className="error-text" role="alert">
-          {listRes.error}
-        </p>
-      ) : page && page.conversations.length === 0 ? (
-        <EmptyState
-          icon="conversations"
-          title="No conversations yet"
-          description="When visitors chat on your site, their conversations show up here."
+      <form
+        className="list-toolbar"
+        aria-label="Find conversations"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setSearch(searchInput.trim());
+          setOffset(0);
+        }}
+      >
+        <div className="field list-search">
+          <label htmlFor={searchId} className="sr-only">
+            Search conversations
+          </label>
+          <input
+            id={searchId}
+            type="search"
+            placeholder="Search questions and answers"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+          />
+        </div>
+        <fieldset className="filter-chips">
+          <legend className="sr-only">Show only</legend>
+          {FLAGS.map((flag) => (
+            <button
+              key={flag.key}
+              type="button"
+              className={flags.has(flag.key) ? "chip is-on" : "chip"}
+              aria-pressed={flags.has(flag.key)}
+              onClick={() => toggleFlag(flag.key)}
+            >
+              {flag.label}
+            </button>
+          ))}
+        </fieldset>
+        <div className="field list-date">
+          <label htmlFor={dateId} className="sr-only">
+            Started
+          </label>
+          <select
+            id={dateId}
+            className="select"
+            value={days}
+            onChange={(e) => {
+              setDays(e.target.value);
+              setOffset(0);
+            }}
+          >
+            {DATE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </form>
+
+      {listRes.status === "error" ? (
+        <ErrorState
+          title="Could not load conversations."
+          message={listRes.error}
+          onRetry={listRes.reload}
         />
-      ) : page ? (
-        <div className="stack">
-          <ul className="history-list">
+      ) : !page ? (
+        <ListSkeleton />
+      ) : page.conversations.length === 0 && !hasPrevious ? (
+        filtered ? (
+          <EmptyState
+            icon="conversations"
+            title="No conversations match"
+            description="Try other words, or show every conversation."
+            action={
+              <button type="button" className="btn btn-secondary" onClick={clearFilters}>
+                Clear filters
+              </button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon="conversations"
+            title="No conversations yet"
+            description="When visitors chat on your site, their conversations show up here."
+          />
+        )
+      ) : (
+        <div className="stack" aria-busy={updating}>
+          <p className="muted list-count" aria-live="polite">
+            {page.total === 0
+              ? "No conversations on this page."
+              : `Showing ${offset + 1}–${Math.min(offset + page.conversations.length, page.total)} of ${page.total}`}
+          </p>
+          <ul className={updating ? "conv-list is-updating" : "conv-list"}>
             {page.conversations.map((conv) => (
-              <li key={conv.id} className="source-card stack">
-                <div className="source-header">
-                  <div>
-                    <div className="source-title">
-                      {conv.firstQuestion ?? "Conversation without a question"}
-                    </div>
-                    <div className="source-meta">
-                      <span>
-                        {conv.turnCount === 1 ? "1 message" : `${conv.turnCount} messages`}
-                      </span>
-                      <span>Started {formatDate(conv.startedAt)}</span>
-                      {conv.hasUnanswered && <span className="badge badge-warn">Unanswered</span>}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => setSelectedId(conv.id)}
-                  >
-                    Open
-                  </button>
-                </div>
-              </li>
+              <ConversationRow key={conv.id} conv={conv} />
             ))}
           </ul>
 
           {(hasPrevious || hasNext) && (
-            <div className="actions">
+            <nav className="actions pager" aria-label="Pages">
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
@@ -108,10 +271,10 @@ export function Conversations({ assistantId }: ConversationsProps) {
               >
                 Next
               </button>
-            </div>
+            </nav>
           )}
         </div>
-      ) : null}
+      )}
     </div>
   );
 }

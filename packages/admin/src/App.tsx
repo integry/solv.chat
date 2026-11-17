@@ -15,6 +15,7 @@ import { Gaps } from "./screens/Gaps.js";
 import { Install } from "./screens/Install.js";
 import { Login } from "./screens/Login.js";
 import { Overview } from "./screens/Overview.js";
+import { OPEN_TRY_IT_EVENT } from "./screens/OverviewParts.js";
 import { Providers } from "./screens/Providers.js";
 import { Reports } from "./screens/Reports.js";
 import { Sources } from "./screens/Sources.js";
@@ -226,6 +227,19 @@ function AdminShell({
   const hasTryIt = selectedAssistant !== null && assistantChrome;
   const tryItVisible = hasTryIt && tryIt.open;
   const keyNotice = createdKeys[0] ?? null;
+
+  // The Overview checklist's "Open Try it" asks for the pane with an event:
+  // the shell owns the pane, and screens are not handed its controls.
+  const setTryItOpen = tryIt.setOpen;
+  useEffect(() => {
+    const onOpenTryIt = () => {
+      if (!hasTryIt) return;
+      focusTryItRef.current = true;
+      setTryItOpen(true);
+    };
+    window.addEventListener(OPEN_TRY_IT_EVENT, onOpenTryIt);
+    return () => window.removeEventListener(OPEN_TRY_IT_EVENT, onOpenTryIt);
+  }, [hasTryIt, setTryItOpen]);
 
   useEffect(() => {
     if (!tryItVisible || !focusTryItRef.current) return;

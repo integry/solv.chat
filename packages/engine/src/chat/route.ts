@@ -397,6 +397,10 @@ export async function adminChatRoute(
     return eventStreamOf({ type: "error", message: "Resuming actions is not supported yet." });
   }
 
+  // The Overview checklist's "Try a question" step: previews store no
+  // conversation, so this is the only record that the owner tried one.
+  await tenant.assistants.markTried(assistant.id, Date.now());
+
   return streamAnswerResponse({
     env,
     seams,
@@ -623,6 +627,12 @@ export async function publicConfigRoute(
   const published = await tenant.versions.published(assistant.id);
   if (published === null) {
     return Response.json({ error: "Not found." }, { status: 404 });
+  }
+
+  // The Overview checklist's "Install on your site" step. Written once: the
+  // lookup above already read the column, so later page loads skip the write.
+  if (origin !== null && assistant.widgetSeenAt === null) {
+    await tenant.assistants.markWidgetSeen(assistant.id, Date.now());
   }
 
   return Response.json(

@@ -97,7 +97,8 @@ const QUALIFIED_COLUMNS =
 
 /**
  * Unanswered replies joined to the question each one answers, through the
- * recorded `reply_to` link. `?1` org, `?2` assistant.
+ * recorded `reply_to` link. `?1` org, `?2` assistant. A question asked before
+ * the owner dismissed its group is left out; one asked after shows again.
  */
 const GAP_ROWS = `
   SELECT q.id AS question_id,
@@ -121,7 +122,14 @@ const GAP_ROWS = `
      AND a.role = 'assistant'
      AND a.answered = 0
      AND q.question_key IS NOT NULL
-     AND q.question_key <> ''`;
+     AND q.question_key <> ''
+     AND NOT EXISTS (
+       SELECT 1 FROM gap_dismissals gd
+        WHERE gd.org_id = a.org_id
+          AND gd.assistant_id = c.assistant_id
+          AND gd.question_key = q.question_key
+          AND gd.dismissed_at >= q.created_at
+     )`;
 
 const map = (row: Row): MessageRow => ({
   id: row.id,
@@ -447,8 +455,9 @@ export function messagesFor(db: D1Database, orgId: string) {
      */
     async gapGroups(
       assistantId: string,
-      page: { limit: number; offset: number },
+      page: { limit: number; offset: number; openOnly?: boolean },
     ): Promise<{ groups: GapGroupRow[]; total: number }> {
+      const openOnly = page.openOnly === true ? 1 : 0;
       const [rows, count] = await db.batch([
         prepare(
           db,
@@ -467,14 +476,20 @@ export function messagesFor(db: D1Database, orgId: string) {
            )
            SELECT question_key, question_content, asked_at, question_id, times, group_document_id
              FROM ranked
-            WHERE rn = 1
+            WHERE rn = 1 AND (?5 = 0 OR group_document_id IS NULL)
             ORDER BY times DESC, asked_at DESC, question_id DESC
             LIMIT ?3 OFFSET ?4`,
-        ).bind(orgId, assistantId, page.limit, page.offset),
+        ).bind(orgId, assistantId, page.limit, page.offset, openOnly),
         prepare(
           db,
-          `WITH gap AS (${GAP_ROWS}) SELECT COUNT(DISTINCT question_key) AS total FROM gap`,
-        ).bind(orgId, assistantId),
+          `WITH gap AS (${GAP_ROWS}),
+           grouped AS (
+             SELECT question_key, MAX(document_id) AS group_document_id
+               FROM gap
+              GROUP BY question_key
+           )
+           SELECT COUNT(*) AS total FROM grouped WHERE (?3 = 0 OR group_document_id IS NULL)`,
+        ).bind(orgId, assistantId, openOnly),
       ]);
 
       const groups = (
@@ -496,6 +511,33 @@ export function messagesFor(db: D1Database, orgId: string) {
       }));
       const total = ((count?.results ?? []) as Array<{ total: number }>)[0]?.total ?? 0;
       return { groups, total };
+    },
+
+    /**
+     * Hides a gap group until the question is asked again. `question` is the
+     * normalised key the group is listed under.
+     */
+    async dismissGap(assistantId: string, question: string, at: number): Promise<void> {
+      await prepareInsert(
+        db,
+        `INSERT INTO gap_dismissals (org_id, assistant_id, question_key, dismissed_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(org_id, assistant_id, question_key) DO UPDATE SET
+           dismissed_at = excluded.dismissed_at`,
+      )
+        .bind(orgId, assistantId, question, at)
+        .run();
+    },
+
+    /** Undoes `dismissGap`. True when there was a dismissal to remove. */
+    async restoreGap(assistantId: string, question: string): Promise<boolean> {
+      const res = await prepare(
+        db,
+        "DELETE FROM gap_dismissals WHERE org_id = ?1 AND assistant_id = ?2 AND question_key = ?3",
+      )
+        .bind(orgId, assistantId, question)
+        .run();
+      return (res.meta.changes ?? 0) > 0;
     },
 
     async linkGapAnswer(messageId: string, documentId: string, createdAt: number): Promise<void> {

@@ -82,6 +82,29 @@ export function reportsFor(db: D1Database, orgId: string) {
       };
     },
 
+    /**
+     * Visitor messages per UTC day in the range. Days with none are absent;
+     * the caller fills them in, since it knows the range it asked for.
+     */
+    async questionsPerDay(
+      assistantId: string,
+      range: ReportRange,
+    ): Promise<Array<{ day: string; questions: number }>> {
+      const res = await prepare(
+        db,
+        `SELECT strftime('%Y-%m-%d', m.created_at / 1000, 'unixepoch') AS day, COUNT(*) AS questions
+           FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+          WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'user'
+            AND m.created_at >= ?3 AND m.created_at <= ?4
+          GROUP BY day
+          ORDER BY day ASC`,
+      )
+        .bind(orgId, assistantId, range.fromMs, range.toMs)
+        .all<{ day: string; questions: number }>();
+      return res.results.map((row) => ({ day: row.day, questions: row.questions }));
+    },
+
     /** Cost over the range's days, from what the UsageSink recorded. */
     async costMicros(assistantId: string, range: ReportRange): Promise<number> {
       const row = await prepare(

@@ -626,6 +626,8 @@ describe("chat/answer", () => {
       chat: { embedder, retriever, provider },
     });
 
+    expect((await tenant.assistants.milestones("ast_1"))?.triedAt).toBeNull();
+
     const previewCtx = createExecutionContext();
     const previewRes = await previewApp.fetch(
       new Request("https://engine.example/api/admin/chat", {
@@ -657,6 +659,9 @@ describe("chat/answer", () => {
     }
 
     expect(await tenant.conversations.list("ast_1")).toHaveLength(0);
+    // The Overview checklist's "Try a question" step is recorded although the
+    // preview itself is not stored.
+    expect((await tenant.assistants.milestones("ast_1"))?.triedAt).toEqual(expect.any(Number));
     // The question's embedding, then the answer.
     expect(usageSpy).toHaveBeenCalledTimes(2);
     expect(seenRequests[0]?.messages).toHaveLength(3);

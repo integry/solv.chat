@@ -55,6 +55,40 @@ export function parseReportDays(raw: string | null): ReportDays {
   return days as ReportDays;
 }
 
+/** The four headline figures for one range, shared by Reports and Overview. */
+export interface PeriodFigures {
+  from: string;
+  to: string;
+  questions: number;
+  replies: number;
+  answeredShare: number;
+  thumbsDownShare: number;
+  costMicros: number;
+}
+
+export async function periodFigures(
+  tenant: Tenant,
+  assistantId: string,
+  range: ReportRange,
+): Promise<PeriodFigures> {
+  const [questions, shares, costMicros] = await Promise.all([
+    tenant.reports.questionCount(assistantId, range),
+    tenant.reports.replyShares(assistantId, range),
+    tenant.reports.costMicros(assistantId, range),
+  ]);
+  return {
+    from: range.fromDay,
+    to: range.toDay,
+    questions,
+    replies: shares.replies,
+    // Zero rather than null on an empty range: the screen shows a number with
+    // a plain sentence, and a dash makes an owner wonder if it is broken.
+    answeredShare: shares.replies === 0 ? 0 : shares.answered / shares.replies,
+    thumbsDownShare: shares.replies === 0 ? 0 : shares.thumbsDown / shares.replies,
+    costMicros,
+  };
+}
+
 export async function reportFor(
   tenant: Tenant,
   assistantId: string,
