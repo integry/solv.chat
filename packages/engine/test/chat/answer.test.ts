@@ -707,6 +707,82 @@ describe("chat/answer", () => {
     );
   });
 
+  it("owner preview answers when the Try it record cannot be written, and writes it only until it is set", async () => {
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        yield { kind: "text", text: "Draft answer" };
+        yield { kind: "usage", tokensIn: 5, tokensOut: 2 };
+      },
+    };
+    const previewApp = createApp(fakeSeams(), { chat: { embedder, retriever, provider } });
+    let failWrite = true;
+    let writes = 0;
+    const db = {
+      prepare(sql: string) {
+        if (sql.includes("SET tried_at")) {
+          writes += 1;
+          if (failWrite) {
+            return {
+              bind: () => ({
+                run: async () => {
+                  throw new Error("D1_ERROR: simulated");
+                },
+              }),
+            };
+          }
+        }
+        return env.DB.prepare(sql);
+      },
+      batch: (statements: D1PreparedStatement[]) => env.DB.batch(statements),
+    } as unknown as D1Database;
+    const preview = async () => {
+      const ctx = createExecutionContext();
+      const res = await previewApp.fetch(
+        new Request("https://engine.example/api/admin/chat", {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: "https://engine.example" },
+          body: JSON.stringify({
+            protocol: 1,
+            assistant: "pk_ans_1",
+            visitorId: "vis_admin",
+            message: "How do I reset my password?",
+            target: "draft",
+          }),
+        }),
+        { ...env, DB: db },
+        ctx,
+      );
+      const events = parseSseBody(await res.text());
+      await waitOnExecutionContext(ctx);
+      return events;
+    };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // The write fails: the preview still answers, and the failure is logged.
+      expect((await preview()).some((e) => e.type === "done")).toBe(true);
+      expect(errorSpy).toHaveBeenCalledWith(
+        "overview: milestone write failed",
+        expect.objectContaining({ milestone: "tried" }),
+      );
+      expect((await tenant.assistants.milestones("ast_1"))?.triedAt).toBeNull();
+      expect(writes).toBe(1);
+
+      // Still unset, so the next preview tries again and records it.
+      failWrite = false;
+      expect((await preview()).some((e) => e.type === "done")).toBe(true);
+      expect((await tenant.assistants.milestones("ast_1"))?.triedAt).toEqual(expect.any(Number));
+      expect(writes).toBe(2);
+
+      // Once set, a preview does not write it again.
+      expect((await preview()).some((e) => e.type === "done")).toBe(true);
+      expect(writes).toBe(2);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it("meters a failed stream's model usage only when reported, and always the question's embedding", async () => {
     const usageWithTokens = vi.fn(async () => {});
     const failingWithUsage: LlmProvider = {

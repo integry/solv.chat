@@ -109,6 +109,44 @@ describe("admin conversations API", () => {
     ]);
   });
 
+  it("lists a long-running conversation by its latest message, the time each row shows", async () => {
+    const ast = await seedAssistant(ORG_A);
+    const longRunning = await seedConversation(ORG_A, ast, 1000);
+    await seedMessage({
+      orgId: ORG_A,
+      conversationId: longRunning,
+      role: "user",
+      content: "First question?",
+      createdAt: 1001,
+    });
+    const recent = await seedConversation(ORG_A, ast, 2000);
+    await seedMessage({
+      orgId: ORG_A,
+      conversationId: recent,
+      role: "user",
+      content: "Quick question?",
+      createdAt: 2001,
+    });
+    // The first conversation continues after the second one ended.
+    await seedMessage({
+      orgId: ORG_A,
+      conversationId: longRunning,
+      role: "user",
+      content: "One more thing?",
+      createdAt: 3001,
+    });
+    // Started last, no message yet: it goes by when it started.
+    const empty = await seedConversation(ORG_A, ast, 2500);
+
+    const res = await call(appForOrg(ORG_A), `/api/admin/assistants/${ast}/conversations`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      conversations: Array<{ id: string; lastMessageAt: number }>;
+    };
+    expect(body.conversations.map((c) => c.id)).toEqual([longRunning, empty, recent]);
+    expect(body.conversations.map((c) => c.lastMessageAt)).toEqual([3001, 2500, 2001]);
+  });
+
   it("lists conversations newest-first and paged with first question, turn count, and unanswered flag", async () => {
     const astA = await seedAssistant(ORG_A);
     const c1 = await seedConversation(ORG_A, astA, 1000);

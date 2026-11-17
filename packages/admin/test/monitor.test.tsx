@@ -425,7 +425,7 @@ describe("Monitor screens", () => {
           attention: {
             openGaps: 3,
             failingTests: 1,
-            notIndexed: [{ sourceId: "src_1", label: "Docs", documents: 2 }],
+            notIndexed: [{ sourceId: "src_1", label: "Docs", failed: 1, waiting: 2 }],
           },
         }),
       });
@@ -443,7 +443,11 @@ describe("Monitor screens", () => {
           `/admin/gaps?assistant=${ASSISTANT.id}`,
         ],
         ["1 test failed in the last run", `/admin/tests?assistant=${ASSISTANT.id}`],
-        ["Docs: 2 pages were not indexed", `/admin/sources?assistant=${ASSISTANT.id}`],
+        ["Docs: 1 page could not be indexed", `/admin/sources?assistant=${ASSISTANT.id}`],
+        [
+          "Docs: 2 pages are taking longer than usual to index",
+          `/admin/sources?assistant=${ASSISTANT.id}`,
+        ],
       ]);
       expect(block.textContent).toContain("The OpenAI key must be entered again.");
     });
@@ -455,7 +459,7 @@ describe("Monitor screens", () => {
           attention: {
             openGaps: 3,
             failingTests: 1,
-            notIndexed: [{ sourceId: "src_1", label: "Docs", documents: 2 }],
+            notIndexed: [{ sourceId: "src_1", label: "Docs", failed: 1, waiting: 2 }],
           },
         }),
       });
@@ -745,7 +749,8 @@ describe("Monitor screens", () => {
       expect(await screen.findByRole("link", { name: /Do you ship to Spain\?/ })).toBeTruthy();
       expect(screen.queryByText("I could not find that.")).toBeNull();
       expect(window.location.pathname).toBe("/admin/conversations");
-      expect(window.location.search).toBe("");
+      // The sidebar's link names the assistant on show, as the screens' links do.
+      expect(window.location.search).toBe("?assistant=ast_1");
     });
 
     it("filters by flag and date and searches by text", async () => {
@@ -912,6 +917,101 @@ describe("Monitor screens", () => {
       expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe(
         "returns",
       );
+    });
+
+    it("brings back the search an earlier list entry had on Back and Forward", async () => {
+      const { calls } = installServer({
+        conversations: (search) => [
+          conversation({ firstQuestion: search.get("q") === "shipping" ? "Shipping?" : "Any?" }),
+        ],
+      });
+      // happy-dom restores the address on Back and Forward but fires no
+      // `popstate`, so it is sent here, as the browser would.
+      const popTo = (move: () => void) =>
+        act(() => {
+          move();
+          window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+        });
+      const searchBox = () => screen.getByLabelText("Search conversations") as HTMLInputElement;
+      const q = () => new URLSearchParams(window.location.search).get("q");
+      const lastSearch = () =>
+        calls
+          .filter((c) => c.path.endsWith("/conversations"))
+          .at(-1)
+          ?.search.get("q") ?? null;
+
+      await open(`/admin/conversations?q=shipping&assistant=${ASSISTANT.id}`);
+      fireEvent.click(await screen.findByRole("link", { name: /Shipping\?/ }));
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+      // Back to the list: a new entry, with the search it had.
+      fireEvent.click(screen.getByRole("button", { name: "Back to conversations" }));
+      expect(await screen.findByRole("link", { name: /Shipping\?/ })).toBeTruthy();
+      expect(q()).toBe("shipping");
+
+      // Cleared on this entry only.
+      fireEvent.change(searchBox(), { target: { value: "" } });
+      expect(await screen.findByRole("link", { name: /Any\?/ }, { timeout: 2000 })).toBeTruthy();
+      expect(q()).toBeNull();
+
+      // Back reopens the conversation, and Back again the first list entry.
+      popTo(() => window.history.back());
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+      popTo(() => window.history.back());
+      expect(await screen.findByRole("link", { name: /Shipping\?/ })).toBeTruthy();
+      expect(searchBox().value).toBe("shipping");
+      expect(lastSearch()).toBe("shipping");
+      // The address keeps what it had, rather than losing it to the cleared search.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(q()).toBe("shipping");
+
+      // Forward to the conversation, then to the entry where it was cleared.
+      popTo(() => window.history.forward());
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+      popTo(() => window.history.forward());
+      expect(await screen.findByRole("link", { name: /Any\?/ })).toBeTruthy();
+      expect(searchBox().value).toBe("");
+      expect(lastSearch()).toBeNull();
+      expect(q()).toBeNull();
+    });
+
+    it("keeps the assistant on show in the address after a sidebar link, so a reload keeps it", async () => {
+      installServer({ twoAssistants: true });
+      await open(`/admin/conversations?assistant=${ASSISTANT.id}`);
+      await screen.findByRole("link", { name: /Do you ship to Spain\?/ });
+      pickAssistant(OTHER_ASSISTANT.id);
+      await waitFor(() => expect(selectedAssistantId()).toBe(OTHER_ASSISTANT.id));
+
+      const nav = screen.getByRole("navigation", { name: "Primary" });
+      const href = (name: string) => within(nav).getByRole("link", { name }).getAttribute("href");
+      expect(href("Gaps")).toBe(`/admin/gaps?assistant=${OTHER_ASSISTANT.id}`);
+      expect(href("Sources")).toBe(`/admin/sources?assistant=${OTHER_ASSISTANT.id}`);
+      // Providers is for the whole organisation.
+      expect(href("Providers")).toBe("/admin/providers");
+
+      fireEvent.click(within(nav).getByRole("link", { name: "Gaps" }));
+      expect(await screen.findByRole("heading", { name: "Gaps", level: 1 })).toBeTruthy();
+      expect(window.location.search).toBe(`?assistant=${OTHER_ASSISTANT.id}`);
+
+      cleanup();
+      await open(`${window.location.pathname}${window.location.search}`);
+      await waitFor(() => expect(selectedAssistantId()).toBe(OTHER_ASSISTANT.id));
+    });
+
+    it("starts the list afresh from the sidebar, the address and the box agreeing", async () => {
+      installServer({
+        twoAssistants: true,
+        conversations: (search) => [
+          conversation({ firstQuestion: search.get("q") === "spain" ? "Spain?" : "Any?" }),
+        ],
+      });
+      await open(`/admin/conversations?q=spain&assistant=${ASSISTANT.id}`);
+      expect(await screen.findByRole("link", { name: /Spain\?/ })).toBeTruthy();
+
+      const nav = screen.getByRole("navigation", { name: "Primary" });
+      fireEvent.click(within(nav).getByRole("link", { name: "Conversations" }));
+      expect(await screen.findByRole("link", { name: /Any\?/ })).toBeTruthy();
+      expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe("");
+      expect(window.location.search).toBe(`?assistant=${ASSISTANT.id}`);
     });
 
     it("writes the answer in place when the host hides Gaps", async () => {

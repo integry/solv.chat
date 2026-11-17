@@ -689,6 +689,138 @@ describe("admin phase 1 screens", () => {
     );
   });
 
+  it("keeps a newer turn's in-place answer draft when an earlier turn's save completes", async () => {
+    let resolveFirstSave!: (res: Response) => void;
+    const firstSave = new Promise<Response>((resolve) => {
+      resolveFirstSave = resolve;
+    });
+    const saved = (n: number) =>
+      Response.json(
+        {
+          documentId: `doc_saved_${n}`,
+          sourceId: "src_entry_1",
+          url: `https://example.com/admin/sources#entry:${n}`,
+          counts: { written: 1, unchanged: 0, deleted: 0 },
+        },
+        { status: 201 },
+      );
+    const server = installFakeServer({
+      conversations: [
+        {
+          id: "cnv_two",
+          assistantId: "ast_1",
+          visitorId: "vis_1",
+          startedAt: 1_700_000_100_000,
+          pageUrl: "https://docs.example.com",
+          firstQuestion: "Question one?",
+          turnCount: 4,
+          hasUnanswered: true,
+        },
+      ],
+      conversationDetails: {
+        cnv_two: {
+          conversation: {
+            id: "cnv_two",
+            assistantId: "ast_1",
+            visitorId: "vis_1",
+            startedAt: 1_700_000_100_000,
+            pageUrl: "https://docs.example.com",
+          },
+          turns: [
+            {
+              id: "msg_q_1",
+              role: "user",
+              content: "Question one?",
+              citations: [],
+              answered: true,
+              createdAt: 1_700_000_101_000,
+              feedback: [],
+              answerDocumentId: null,
+              replyTo: null,
+            },
+            {
+              id: "msg_a_1",
+              role: "assistant",
+              content: "I could not find an answer.",
+              citations: [],
+              answered: false,
+              createdAt: 1_700_000_102_000,
+              feedback: [],
+              answerDocumentId: null,
+              replyTo: "msg_q_1",
+            },
+            {
+              id: "msg_q_2",
+              role: "user",
+              content: "Question two?",
+              citations: [],
+              answered: true,
+              createdAt: 1_700_000_103_000,
+              feedback: [],
+              answerDocumentId: null,
+              replyTo: null,
+            },
+            {
+              id: "msg_a_2",
+              role: "assistant",
+              content: "I could not find an answer.",
+              citations: [],
+              answered: false,
+              createdAt: 1_700_000_104_000,
+              feedback: [],
+              answerDocumentId: null,
+              replyTo: "msg_q_2",
+            },
+          ],
+        },
+      },
+      onAnswerPost: (body) => (body.fromMessageId === "msg_a_1" ? firstSave : saved(2)),
+    });
+    // With Gaps hidden, the answer is written in place under its turn.
+    render(<App options={{ hideScreens: ["gaps"] }} />);
+    fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
+    fireEvent.click(await findConversationRow());
+
+    const [writeFirst, writeSecond] = await screen.findAllByRole("button", {
+      name: "Write an answer for this",
+    });
+    if (!writeFirst || !writeSecond) throw new Error("Expected two unanswered turns");
+
+    fireEvent.click(writeFirst);
+    expect(((await screen.findByLabelText("Question")) as HTMLInputElement).value).toBe(
+      "Question one?",
+    );
+    fireEvent.change(screen.getByLabelText("Answer"), { target: { value: "Answer one." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
+    await waitFor(() => expect(server.answerPosts).toHaveLength(1));
+
+    // Turn 2's editor opens while turn 1's save is still running.
+    fireEvent.click(writeSecond);
+    await waitFor(() =>
+      expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Question two?"),
+    );
+    fireEvent.change(screen.getByLabelText("Answer"), { target: { value: "Draft answer two." } });
+
+    resolveFirstSave(saved(1));
+    expect(await screen.findByText(/Answer saved to your sources/)).toBeTruthy();
+    // Turn 1's save leaves turn 2's editor open, with its draft.
+    expect(screen.getAllByLabelText("Answer")).toHaveLength(1);
+    expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+      "Draft answer two.",
+    );
+    expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Question two?");
+
+    // And it saves on its own turn.
+    fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
+    await waitFor(() => expect(server.answerPosts).toHaveLength(2));
+    expect(server.answerPosts[1]).toEqual({
+      question: "Question two?",
+      answer: "Draft answer two.",
+      fromMessageId: "msg_a_2",
+    });
+    await waitFor(() => expect(screen.queryByLabelText("Answer")).toBeNull());
+  });
+
   it("renders Install with the empty-origins warning and copies the snippet", async () => {
     installFakeServer({ allowedOrigins: [] });
     const writeText = vi.fn().mockResolvedValue(undefined);

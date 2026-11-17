@@ -8,6 +8,7 @@ import {
   readQueryParam,
   replaceQueryParam,
   ScreenLink,
+  screenAddress,
 } from "../routing.js";
 import { RelativeTime } from "../ui/DateText.js";
 import { EmptyState } from "../ui/EmptyState.js";
@@ -51,13 +52,25 @@ function conversationQuery(conv: ConversationSummary): Record<string, string> {
   return { id: conv.id, assistant: conv.assistantId };
 }
 
-interface OpenAddress {
+/**
+ * The address as last arrived at: the first one, then each move, Back and
+ * Forward (`popstate`). The screen's own `replaceQueryParam` writes are not
+ * moves, so they leave it as it was.
+ */
+interface ConversationsAddress {
+  path: string;
   id: string | null;
   assistant: string | null;
+  q: string | null;
 }
 
-function readOpenAddress(): OpenAddress {
-  return { id: readQueryParam("id"), assistant: readQueryParam("assistant") };
+function readAddress(): ConversationsAddress {
+  return {
+    path: window.location.pathname,
+    id: readQueryParam("id"),
+    assistant: readQueryParam("assistant"),
+    q: readQueryParam("q"),
+  };
 }
 
 /**
@@ -68,10 +81,13 @@ function readOpenAddress(): OpenAddress {
  * assistant that is not in the list: it opens nothing and is cleared, so its
  * actions cannot land on the assistant shown instead.
  */
-function useOpenConversationId(assistantId: string): string | null {
-  const [address, setAddress] = useState(readOpenAddress);
+function useConversationsAddress(assistantId: string): {
+  openId: string | null;
+  address: ConversationsAddress;
+} {
+  const [address, setAddress] = useState(readAddress);
   useEffect(() => {
-    const onPopState = () => setAddress(readOpenAddress());
+    const onPopState = () => setAddress(readAddress());
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
@@ -79,10 +95,19 @@ function useOpenConversationId(assistantId: string): string | null {
   useEffect(() => {
     if (otherAssistant && address.id !== null) {
       window.history.replaceState(window.history.state, "", assistantPath(LIST_PATH, assistantId));
-      setAddress({ id: null, assistant: null });
+      setAddress(readAddress());
     }
   }, [otherAssistant, address.id, assistantId]);
-  return otherAssistant ? null : address.id;
+  return { openId: otherAssistant ? null : address.id, address };
+}
+
+/** Whether `address` is this assistant's list, rather than a conversation or another screen. */
+function isListAddress(address: ConversationsAddress, assistantId: string): boolean {
+  return (
+    address.path === LIST_PATH &&
+    address.id === null &&
+    (address.assistant === null || address.assistant === assistantId)
+  );
 }
 
 function ConversationRow({ conv }: { conv: ConversationSummary }) {
@@ -119,14 +144,30 @@ function ListSkeleton() {
 }
 
 export function Conversations({ assistantId }: ConversationsProps) {
-  const openId = useOpenConversationId(assistantId);
+  const { openId, address } = useConversationsAddress(assistantId);
   const [offset, setOffset] = useState(0);
-  const [searchInput, setSearchInput] = useState(() =>
-    toConversationSearch(readQueryParam("q") ?? ""),
-  );
+  const [searchInput, setSearchInput] = useState(() => toConversationSearch(address.q ?? ""));
   // What is sent: the box, cut to the length the list accepts. A pasted
   // question longer than that still finds its conversations by its start.
   const [search, setSearch] = useState(() => toConversationSearch(searchInput));
+  // Back, Forward and links that arrive at the list bring its search with
+  // them: the address is what the screen shows. Followed during render, not
+  // in an effect, so the effect below that writes the search into the address
+  // never sees the arrived address beside the search it replaced. An address
+  // with the search already on show leaves the box as it is (a switch of
+  // assistant mid-typing, say).
+  const [followedAddress, setFollowedAddress] = useState(address);
+  if (followedAddress !== address) {
+    setFollowedAddress(address);
+    if (isListAddress(address, assistantId)) {
+      const arrived = toConversationSearch(address.q ?? "");
+      if (arrived !== search) {
+        setSearchInput(arrived);
+        setSearch(arrived);
+        setOffset(0);
+      }
+    }
+  }
   const [flags, setFlags] = useState<ReadonlySet<FlagKey>>(new Set());
   const [days, setDays] = useState("");
   const searchId = useId();
@@ -182,7 +223,13 @@ export function Conversations({ assistantId }: ConversationsProps) {
         assistantId={assistantId}
         conversationId={openId}
         onBack={() => {
-          navigateTo(assistantPath(LIST_PATH, assistantId));
+          // The list comes back with the search it had, in the address too.
+          navigateTo(
+            screenAddress(LIST_PATH, {
+              assistant: assistantId,
+              ...(search === "" ? {} : { q: search }),
+            }),
+          );
           listRes.reload();
         }}
       />

@@ -194,7 +194,8 @@ export interface OverviewSetup {
 export interface OverviewAttention {
   openGaps: number;
   failingTests: number;
-  notIndexed: Array<{ sourceId: string; label: string; documents: number }>;
+  /** `failed`: indexing recorded a failure; `waiting`: none recorded, but overdue. */
+  notIndexed: Array<{ sourceId: string; label: string; failed: number; waiting: number }>;
 }
 
 export interface AssistantOverview {

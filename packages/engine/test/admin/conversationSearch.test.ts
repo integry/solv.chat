@@ -213,6 +213,25 @@ describe("conversation search", () => {
       expect(grouped.length).toBeGreaterThan(MAX_CONVERSATION_SEARCH_LENGTH);
       expect(await openQuestion(ORG_A, ast, grouped)).toEqual([conversation]);
     });
+
+    it("open a long question typed with combining accents, cut where an accent falls", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const now = Date.now();
+      const conversation = await seedConversation(ORG_A, ast, now - 1000);
+      // "E" + U+0301 lands on code units 200 and 201: a cut in code points
+      // would keep the bare "e", which the folded "é" does not contain (and,
+      // in capitals, the exact text does not match either).
+      const question = `${"A".repeat(MAX_CONVERSATION_SEARCH_LENGTH - 1)}E\u0301COLE fees?`;
+      await ask(ORG_A, conversation, question, now - 1000);
+
+      const report = await getJson<QuestionsBody>(
+        ORG_A,
+        `/api/admin/assistants/${ast}/report?days=7`,
+      );
+      const grouped = report.topQuestions[0]?.question ?? "";
+      expect(grouped.length).toBeGreaterThan(MAX_CONVERSATION_SEARCH_LENGTH);
+      expect(await openQuestion(ORG_A, ast, grouped)).toEqual([conversation]);
+    });
   });
 
   describe("messages written before search_text existed", () => {
@@ -387,6 +406,75 @@ describe("conversation search", () => {
       expect(await storedSearchText(reply)).toBe(searchableText("ΩΜΈΓΑ opens at nine."));
       expect(await search(ORG_A, ast, "ωμέγα")).toEqual([conversation]);
       expect(await search(ORG_A, ast, "one moment")).toEqual([]);
+    });
+
+    it("fold the newer text of a reply an older Worker completed while they were being folded", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const now = Date.now();
+      const conversation = await seedConversation(ORG_A, ast, now - 1000);
+      const reply = await legacyMessage(
+        ORG_A,
+        conversation,
+        "assistant",
+        "One moment.",
+        now - 1000,
+      );
+
+      // The fill reads "One moment."; before its write lands, an older Worker
+      // completes the reply, rewriting `content` and leaving `search_text`
+      // NULL, so migration 0019's trigger does not fire.
+      let rewritten = false;
+      const racing = {
+        prepare: (sql: string) => env.DB.prepare(sql),
+        async batch(statements: D1PreparedStatement[]) {
+          if (!rewritten) {
+            rewritten = true;
+            await env.DB.prepare("UPDATE messages SET content = ?3 WHERE org_id = ?1 AND id = ?2")
+              .bind(ORG_A, reply, "L'ÉCOLE opens at nine.")
+              .run();
+          }
+          return env.DB.batch(statements);
+        },
+      } as unknown as D1Database;
+
+      // One short round, yet the call does not report done after skipping it.
+      expect(await messagesFor(racing, ORG_A).fillSearchText()).toBe(true);
+      expect(rewritten).toBe(true);
+      expect(await storedSearchText(reply)).toBe(searchableText("L'ÉCOLE opens at nine."));
+      expect(await pendingCount(ORG_A)).toBe(0);
+      expect(await search(ORG_A, ast, "école")).toEqual([conversation]);
+      expect(await search(ORG_A, ast, "one moment")).toEqual([]);
+    });
+
+    it("report rows still pending when the last round skipped a rewritten one", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const now = Date.now();
+      const conversation = await seedConversation(ORG_A, ast, now - 1000);
+      const reply = await legacyMessage(
+        ORG_A,
+        conversation,
+        "assistant",
+        "One moment.",
+        now - 1000,
+      );
+      let rewritten = false;
+      const racing = {
+        prepare: (sql: string) => env.DB.prepare(sql),
+        async batch(statements: D1PreparedStatement[]) {
+          if (!rewritten) {
+            rewritten = true;
+            await env.DB.prepare("UPDATE messages SET content = ?3 WHERE org_id = ?1 AND id = ?2")
+              .bind(ORG_A, reply, "ÉCOLE")
+              .run();
+          }
+          return env.DB.batch(statements);
+        },
+      } as unknown as D1Database;
+
+      expect(await messagesFor(racing, ORG_A).fillSearchText({ rounds: 1 })).toBe(false);
+      expect(await storedSearchText(reply)).toBeNull();
+      expect(await messagesFor(env.DB, ORG_A).fillSearchText()).toBe(true);
+      expect(await storedSearchText(reply)).toBe(searchableText("ÉCOLE"));
     });
   });
 });

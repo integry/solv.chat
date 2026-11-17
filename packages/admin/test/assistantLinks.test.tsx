@@ -144,7 +144,7 @@ const LINKS = [
   {
     from: "/admin/overview",
     region: "Needs attention",
-    name: "Help centre: 3 pages were not indexed",
+    name: "Help centre: 3 pages could not be indexed",
     to: "/admin/sources",
     loads: "sources",
   },

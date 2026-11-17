@@ -57,7 +57,7 @@ export function monitorOverview(now: number): AssistantOverview {
     attention: {
       openGaps: 5,
       failingTests: 1,
-      notIndexed: [{ sourceId: "src_1", label: "Help centre", documents: 3 }],
+      notIndexed: [{ sourceId: "src_1", label: "Help centre", failed: 3, waiting: 0 }],
     },
   };
 }

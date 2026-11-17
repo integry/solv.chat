@@ -330,16 +330,34 @@ export function NeedsAttention({
     });
   }
   for (const source of attention?.notIndexed ?? []) {
-    items.push({
-      key: `source-${source.sourceId}`,
-      tone: "warning",
-      body: (
-        <ScreenLink to="sources" query={{ assistant: assistantId }}>
-          {source.label}: {source.documents}{" "}
-          {plural(source.documents, "page was not indexed", "pages were not indexed")}
-        </ScreenLink>
-      ),
-    });
+    if (source.failed > 0) {
+      items.push({
+        key: `source-failed-${source.sourceId}`,
+        tone: "danger",
+        body: (
+          <ScreenLink to="sources" query={{ assistant: assistantId }}>
+            {source.label}: {source.failed}{" "}
+            {plural(source.failed, "page could not be indexed", "pages could not be indexed")}
+          </ScreenLink>
+        ),
+      });
+    }
+    if (source.waiting > 0) {
+      items.push({
+        key: `source-waiting-${source.sourceId}`,
+        tone: "warning",
+        body: (
+          <ScreenLink to="sources" query={{ assistant: assistantId }}>
+            {source.label}: {source.waiting}{" "}
+            {plural(
+              source.waiting,
+              "page is taking longer than usual to index",
+              "pages are taking longer than usual to index",
+            )}
+          </ScreenLink>
+        ),
+      });
+    }
   }
   if (items.length === 0) return null;
   return (

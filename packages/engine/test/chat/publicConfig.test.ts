@@ -62,6 +62,53 @@ describe("chat/publicConfig", () => {
     expect((await tenant.assistants.milestones("ast_1"))?.widgetSeenAt).toBe(first);
   });
 
+  it("still loads the widget when the first-load record cannot be written", async () => {
+    const draft = await tenant.versions.createDraft({
+      id: "ver_seen_fail",
+      assistantId: "ast_1",
+      config: defaultVersionConfig(),
+      createdAt: 1000,
+    });
+    await tenant.versions.publishDraft("ast_1", draft.id, "ver_seen_fail_2", 2000);
+    // Every statement works except the milestone write, which fails like D1 would.
+    const failing = {
+      prepare(sql: string) {
+        if (sql.includes("SET widget_seen_at")) {
+          return {
+            bind: () => ({
+              run: async () => {
+                throw new Error("D1_ERROR: simulated");
+              },
+            }),
+          };
+        }
+        return env.DB.prepare(sql);
+      },
+      batch: (statements: D1PreparedStatement[]) => env.DB.batch(statements),
+    } as unknown as D1Database;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const ctx = createExecutionContext();
+      const res = await createTestApp().fetch(
+        new Request("https://engine.example/v1/assistants/pk_pub_1", {
+          headers: { origin: "https://site.example" },
+        }),
+        { ...env, DB: failing },
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ title: expect.any(String) });
+      expect(errorSpy).toHaveBeenCalledWith(
+        "overview: milestone write failed",
+        expect.objectContaining({ milestone: "widget_seen" }),
+      );
+      expect((await tenant.assistants.milestones("ast_1"))?.widgetSeenAt).toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it("returns 404 for an unknown key or a never-published assistant", async () => {
     await tenant.versions.createDraft({
       id: "ver_draft_only",

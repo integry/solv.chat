@@ -108,7 +108,9 @@ export function conversationsFor(db: D1Database, orgId: string) {
     },
 
     /**
-     * One page of an assistant's conversations, newest first. A search reads
+     * One page of an assistant's conversations, latest message first (the
+     * time each row shows; a conversation with none yet goes by when it
+     * started), so a long-running one moves up as it continues. A search reads
      * `search_text`, so rows written before it existed are folded first, a
      * bounded share per call. While some are left the search is not run (a
      * row still to fold could match, so any answer could leave it out):
@@ -177,7 +179,7 @@ export function conversationsFor(db: D1Database, orgId: string) {
                   EXISTS(${NOT_HELPFUL}) AS has_not_helpful,
                   EXISTS(${USED_TOOL}) AS used_tool
              ${where}
-            ORDER BY c.started_at DESC, c.id DESC
+            ORDER BY COALESCE(last_message_at, c.started_at) DESC, c.id DESC
             LIMIT ?9 OFFSET ?10`,
         )
           .bind(...params, options.limit, options.offset)

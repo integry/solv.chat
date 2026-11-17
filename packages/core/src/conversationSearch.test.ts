@@ -26,4 +26,15 @@ describe("toConversationSearch", () => {
     expect(search).toBe("a".repeat(MAX_CONVERSATION_SEARCH_LENGTH - 1));
     expect(() => encodeURIComponent(search)).not.toThrow();
   });
+
+  it("puts the text in NFC before cutting, so an accent stays with its letter", () => {
+    const text = `${"a".repeat(MAX_CONVERSATION_SEARCH_LENGTH - 1)}e\u0301cole`;
+    const search = toConversationSearch(text);
+    expect(search).toBe(`${"a".repeat(MAX_CONVERSATION_SEARCH_LENGTH - 1)}\u00e9`);
+    expect(search.length).toBe(MAX_CONVERSATION_SEARCH_LENGTH);
+  });
+
+  it("puts a short question in NFC too", () => {
+    expect(toConversationSearch("e\u0301cole")).toBe("\u00e9cole");
+  });
 });

@@ -109,6 +109,21 @@ async function publicAssistant(
   return orgId === null ? null : assistantByPublicKey(db, orgId, publicKey);
 }
 
+/**
+ * Writes an Overview checklist milestone without letting it fail the request
+ * it rides on. Only the error's message is logged, never the request.
+ */
+async function recordMilestone(name: string, write: () => Promise<void>): Promise<void> {
+  try {
+    await write();
+  } catch (err) {
+    console.error("overview: milestone write failed", {
+      milestone: name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 function readAssistantKey(body: unknown): string | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const raw = (body as Record<string, unknown>).assistant;
@@ -399,7 +414,11 @@ export async function adminChatRoute(
 
   // The Overview checklist's "Try a question" step: previews store no
   // conversation, so this is the only record that the owner tried one.
-  await tenant.assistants.markTried(assistant.id, Date.now());
+  // Written once (the lookup above read the column), and a failed write only
+  // leaves a step unticked: the preview answers anyway.
+  if (assistant.triedAt === null) {
+    await recordMilestone("tried", () => tenant.assistants.markTried(assistant.id, Date.now()));
+  }
 
   return streamAnswerResponse({
     env,
@@ -631,8 +650,11 @@ export async function publicConfigRoute(
 
   // The Overview checklist's "Install on your site" step. Written once: the
   // lookup above already read the column, so later page loads skip the write.
+  // A failed write only leaves a step unticked: the widget still loads.
   if (origin !== null && assistant.widgetSeenAt === null) {
-    await tenant.assistants.markWidgetSeen(assistant.id, Date.now());
+    await recordMilestone("widget_seen", () =>
+      tenant.assistants.markWidgetSeen(assistant.id, Date.now()),
+    );
   }
 
   return Response.json(

@@ -1,9 +1,10 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { defaultVersionConfig, MAX_CHAT_MESSAGE_LENGTH, newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
-import { NOT_INDEXED_AFTER_MS } from "../../src/admin/overview.js";
+import { NOT_INDEXED_AFTER_MS, overviewFor } from "../../src/admin/overview.js";
 import { conversationsFor } from "../../src/db/conversations.js";
 import { messagesFor, normalizeQuestionText } from "../../src/db/messages.js";
+import { forPrincipal } from "../../src/db/tenant.js";
 import { utcDay } from "../../src/util/time.js";
 import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
@@ -148,12 +149,17 @@ async function seedSource(orgId: string, assistantId: string, label: string): Pr
 async function seedDocument(
   orgId: string,
   sourceId: string,
-  options: { indexed: boolean; updatedAt: number },
+  options: {
+    indexed: boolean;
+    updatedAt: number;
+    /** A failure indexing recorded, and the content hash it was for. */
+    failedFor?: "current" | "earlier";
+  },
 ): Promise<string> {
   const id = newId("doc");
   await env.DB.prepare(
-    `INSERT INTO documents (id, org_id, source_id, external_id, url, title, content_hash, indexed_hash, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, 'Page', 'hash_1', ?6, ?7)`,
+    `INSERT INTO documents (id, org_id, source_id, external_id, url, title, content_hash, indexed_hash, updated_at, index_error, index_error_hash)
+     VALUES (?1, ?2, ?3, ?4, ?5, 'Page', 'hash_1', ?6, ?7, ?8, ?9)`,
   )
     .bind(
       id,
@@ -163,6 +169,12 @@ async function seedDocument(
       `https://docs.example.com/${id}`,
       options.indexed ? "hash_1" : null,
       options.updatedAt,
+      options.failedFor === undefined ? null : "embedding_failed",
+      options.failedFor === undefined
+        ? null
+        : options.failedFor === "current"
+          ? "hash_1"
+          : "hash_0",
     )
     .run();
   return id;
@@ -207,7 +219,7 @@ interface OverviewBody {
   attention: {
     openGaps: number;
     failingTests: number;
-    notIndexed: Array<{ sourceId: string; label: string; documents: number }>;
+    notIndexed: Array<{ sourceId: string; label: string; failed: number; waiting: number }>;
   };
 }
 
@@ -332,6 +344,40 @@ describe("admin Monitor screen APIs", () => {
       expect(count(now - 60_000)).toBe(1);
       expect(count(now - 2 * DAY)).toBe(2);
       expect(body.daily.reduce((sum, d) => sum + d.questions, 0)).toBe(3);
+    });
+
+    it("counts a question at either edge of the day where the two periods meet once", async () => {
+      const ast = await seedAssistant(ORG_A);
+      // Mid-afternoon UTC, so the previous period's last day ends hours after
+      // the same time of day 7 days ago.
+      const startOfToday = Date.UTC(2026, 10, 17);
+      const at = startOfToday + 15 * 60 * 60 * 1000;
+      const startOfCurrent = startOfToday - 6 * DAY;
+      const startOfPrevious = startOfToday - 13 * DAY;
+      const turns: Array<[string, number]> = [
+        ["Current, first moment?", startOfCurrent],
+        // Day −7, later than `at - 7 days`: the previous period's.
+        ["Previous, last moment?", startOfCurrent - 2],
+        ["Previous, late evening?", startOfCurrent - 60 * 60 * 1000],
+        ["Previous, first moment?", startOfPrevious],
+        ["Before both?", startOfPrevious - 2],
+      ];
+      for (const [question, createdAt] of turns) {
+        await seedTurn({ orgId: ORG_A, assistantId: ast, question, answered: true, createdAt });
+      }
+      const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+
+      const overview = await overviewFor(tenant, ast, { at, today: utcDay(at) });
+      expect(overview.period).toMatchObject({
+        from: utcDay(startOfCurrent),
+        to: utcDay(at),
+        questions: 1,
+      });
+      expect(overview.period.previous).toMatchObject({
+        from: utcDay(startOfPrevious),
+        to: utcDay(startOfCurrent - 1),
+        questions: 3,
+      });
     });
 
     it("ticks each getting-started step from stored state", async () => {
@@ -470,10 +516,43 @@ describe("admin Monitor screen APIs", () => {
       expect(body.attention).toEqual({
         openGaps: 1,
         failingTests: 1,
-        notIndexed: [{ sourceId: docs, label: "Docs", documents: 2 }],
+        notIndexed: [{ sourceId: docs, label: "Docs", failed: 0, waiting: 2 }],
       });
       // A test run goes through the same pipeline as Try it.
       expect(body.setup.tried).toBe(true);
+    });
+
+    it("reports a recorded indexing failure at once, apart from pages still waiting", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      const now = Date.now();
+      const stale = now - NOT_INDEXED_AFTER_MS - 1000;
+
+      const docs = await seedSource(ORG_A, ast, "Docs");
+      // Failed moments ago: reported without waiting 15 minutes.
+      await seedDocument(ORG_A, docs, { indexed: false, updatedAt: now, failedFor: "current" });
+      await seedDocument(ORG_A, docs, { indexed: false, updatedAt: stale, failedFor: "current" });
+      // A failure for earlier content: the new content is just waiting.
+      await seedDocument(ORG_A, docs, { indexed: false, updatedAt: stale, failedFor: "earlier" });
+      await seedDocument(ORG_A, docs, { indexed: false, updatedAt: now, failedFor: "earlier" });
+      // Indexed after an earlier failure: nothing to report.
+      await seedDocument(ORG_A, docs, { indexed: true, updatedAt: stale, failedFor: "earlier" });
+      const fresh = await seedSource(ORG_A, ast, "Blog");
+      await seedDocument(ORG_A, fresh, { indexed: false, updatedAt: now });
+      const failedOnly = await seedSource(ORG_A, ast, "Help");
+      await seedDocument(ORG_A, failedOnly, {
+        indexed: false,
+        updatedAt: now,
+        failedFor: "current",
+      });
+
+      const body = await getJson<OverviewBody>(app, `/api/admin/assistants/${ast}/overview`);
+      // Sources seeded in the same millisecond have no set order.
+      const byLabel = [...body.attention.notIndexed].sort((a, b) => a.label.localeCompare(b.label));
+      expect(byLabel).toEqual([
+        { sourceId: docs, label: "Docs", failed: 2, waiting: 1 },
+        { sourceId: failedOnly, label: "Help", failed: 1, waiting: 0 },
+      ]);
     });
   });
 

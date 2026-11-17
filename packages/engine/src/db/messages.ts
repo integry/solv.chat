@@ -406,6 +406,10 @@ export function messagesFor(db: D1Database, orgId: string) {
      * alone: every write of `content` also writes `search_text`, so a
      * non-NULL value is never older than the text (an older Worker's rewrite
      * of `content` alone is set back to NULL by migration 0019's trigger).
+     * Each write also needs `content` to be what was read: an older Worker
+     * can rewrite `content` alone between the read and the write, leaving
+     * `search_text` NULL, and the fold of the old text must not land then.
+     * Such a row stays NULL and is read again in the next round.
      * Each call folds a bounded number of rows: true means none are left,
      * false that some may be.
      */
@@ -415,7 +419,7 @@ export function messagesFor(db: D1Database, orgId: string) {
       const update = prepare(
         db,
         `UPDATE messages SET search_text = ?3
-          WHERE org_id = ?1 AND id = ?2 AND search_text IS NULL`,
+          WHERE org_id = ?1 AND id = ?2 AND search_text IS NULL AND content = ?4`,
       );
       for (let round = 0; round < rounds; round++) {
         const pending = await prepare(
@@ -425,10 +429,15 @@ export function messagesFor(db: D1Database, orgId: string) {
           .bind(orgId, batch)
           .all<{ id: string; content: string }>();
         if (pending.results.length === 0) return true;
-        await db.batch(
-          pending.results.map((row) => update.bind(orgId, row.id, searchableText(row.content))),
+        const written = await db.batch(
+          pending.results.map((row) =>
+            update.bind(orgId, row.id, searchableText(row.content), row.content),
+          ),
         );
-        if (pending.results.length < batch) return true;
+        // A row not written may still be NULL (its text changed since the
+        // read), however short this round was: the next round reads again.
+        const skipped = written.some((res) => (res.meta.changes ?? 0) === 0);
+        if (pending.results.length < batch && !skipped) return true;
       }
       return false;
     },

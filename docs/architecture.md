@@ -163,8 +163,9 @@ The Monitor screens read:
   tried in "Try it" or a test run, published, widget loaded on an allowed
   origin or a visitor question received, first visitor question) and what needs
   attention (open gaps, failed tests in the latest run, the configuration
-  error, sources with documents still not indexed 15 minutes after they were
-  written).
+  error, sources with documents that failed to index, reported as soon as the
+  failure is recorded, and sources with documents still not indexed 15 minutes
+  after they were written, reported separately).
 - Conversations: `filter=unanswered,not_helpful,used_tool`, `days=1|7|30|90`
   and `q=` (case-insensitive text in any message); unknown values are refused.
   `searchPending: true` means older messages are still being prepared for

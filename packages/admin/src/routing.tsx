@@ -64,6 +64,20 @@ export const MONITOR_SCREENS: ReadonlySet<string> = new Set([
   "gaps",
 ]);
 
+/** Built-in screens for the whole organisation rather than one assistant. */
+const ORG_SCREENS: ReadonlySet<string> = new Set(["providers"]);
+
+/**
+ * Where a sidebar item leads: a built-in assistant screen names the assistant
+ * on show, as links inside the screens do, so a reload or a new tab shows the
+ * same one. The organisation's screens and host screens keep their own path.
+ */
+export function navItemAddress(item: NavItem, assistantId: string | null): string {
+  const builtin = NAV_ITEMS.some((builtinItem) => builtinItem.id === item.id);
+  if (assistantId === null || !builtin || ORG_SCREENS.has(item.id)) return item.path;
+  return assistantPath(item.path, assistantId);
+}
+
 /** "Set it up" screens: the header offers Publish here. */
 export const BUILD_SCREENS: ReadonlySet<string> = new Set([
   "sources",
@@ -125,6 +139,20 @@ function pathOf(address: string): string {
 /** The assistant an address names, if any. */
 function assistantOf(search: string): string | null {
   return new URLSearchParams(search).get("assistant");
+}
+
+/**
+ * Whether `to` is the address `from` with only `assistant` added. An address
+ * naming no assistant shows the one on show, so going there from it is the
+ * same place: the entry is kept and only its address gains the assistant.
+ */
+function namesOnlyAssistant(from: string, to: string, assistant: string | null): boolean {
+  if (assistant === null || pathOf(from) !== pathOf(to)) return false;
+  const fromParams = new URLSearchParams(from.slice(pathOf(from).length));
+  const toParams = new URLSearchParams(to.slice(pathOf(to).length));
+  if (fromParams.has("assistant") || toParams.get("assistant") !== assistant) return false;
+  toParams.delete("assistant");
+  return toParams.toString() === fromParams.toString();
 }
 
 /**
@@ -288,12 +316,18 @@ export function useRoute(
       // Count from the entry the browser is on. A Back or Forward still waiting
       // for an answer has moved it away from the screen on show.
       const current = historyIndex(window.history.state) ?? indexRef.current;
-      if (currentAddress() !== path) {
-        indexRef.current = current + 1;
-        window.history.pushState(withHistoryIndex(null, indexRef.current), "", path);
-      } else {
+      const here = currentAddress();
+      if (here === path) {
         // Already at that address (a waiting Back or Forward went there): use its entry.
         indexRef.current = current;
+      } else if (namesOnlyAssistant(here, path, assistantRef.current)) {
+        // The same place, at an address naming no assistant (a sidebar link
+        // after Back to such an entry): use its entry, naming the assistant.
+        indexRef.current = current;
+        window.history.replaceState(window.history.state, "", path);
+      } else {
+        indexRef.current = current + 1;
+        window.history.pushState(withHistoryIndex(null, indexRef.current), "", path);
       }
       showAddress();
       // The router has already moved, so its own listener sees the same place.

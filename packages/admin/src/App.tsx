@@ -481,7 +481,12 @@ function AdminShell({
     </button>
   );
   const navigationList = (
-    <Navigation current={screen} onNavigate={handleNavigate} items={config.navItems} />
+    <Navigation
+      current={screen}
+      onNavigate={handleNavigate}
+      items={config.navItems}
+      assistantId={effectiveSelectedId}
+    />
   );
 
   const bodyClass = [

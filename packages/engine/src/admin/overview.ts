@@ -1,5 +1,6 @@
 import { defaultVersionConfig } from "@solvchat/core";
 import type { TopQuestionRow } from "../db/messages.js";
+import type { NotIndexedSource } from "../db/sources.js";
 import type { Tenant } from "../db/tenant.js";
 import type { EffectiveProviderSettings } from "../providers/config.js";
 import { utcDay } from "../util/time.js";
@@ -9,7 +10,10 @@ import { type PeriodFigures, periodFigures, rangeFor } from "./reports.js";
 /** The Overview's stated period: the last 7 days, against the 7 before. */
 export const OVERVIEW_DAYS = 7;
 const DAY_MS = 86_400_000;
-/** A document still not indexed this long after it was written is reported. */
+/**
+ * A document still not indexed this long after it was written, with no failure
+ * recorded, is reported as waiting. A recorded failure is reported at once.
+ */
 export const NOT_INDEXED_AFTER_MS = 15 * 60_000;
 
 export interface OverviewPeriod extends PeriodFigures {
@@ -32,8 +36,11 @@ export interface OverviewAttention {
   openGaps: number;
   /** Failed tests in the latest test run. */
   failingTests: number;
-  /** Sources with documents that did not get indexed. */
-  notIndexed: Array<{ sourceId: string; label: string; documents: number }>;
+  /**
+   * Sources with documents that did not get indexed: `failed` ones as soon as
+   * indexing records the failure, `waiting` ones once they are overdue.
+   */
+  notIndexed: NotIndexedSource[];
 }
 
 export interface AssistantOverview {
