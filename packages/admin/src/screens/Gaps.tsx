@@ -11,6 +11,7 @@ import { ScreenLink } from "../ui/ScreenLink.js";
 import { Skeleton } from "../ui/Skeleton.js";
 import { useToast } from "../ui/Toast.js";
 import { type EntryDraft, EntryEditor } from "./EntryEditor.js";
+import { IDLE_SAVE, type SaveState } from "./saveState.js";
 import { type TestDraft, TestEditor } from "./TestEditor.js";
 
 export interface GapsProps {
@@ -21,21 +22,25 @@ const PAGE_SIZE = 25;
 
 /**
  * The editor is open for one gap row, or for a question handed over from a
- * conversation. The screen holds the typed text, not the editor: the list a
- * row sits in can be replaced by an error, or the row can move to another
- * page, and the draft must outlive both.
+ * conversation. The screen holds the typed text and the save in progress, not
+ * the editor: the list a row sits in can be replaced by an error, or the row
+ * can move to another page, and both must outlive the move. Holding the save
+ * too keeps the moved editor disabled until the save ends, so nothing typed
+ * in the meantime is lost when the save's completion clears the draft.
  */
 interface AnswerSession {
   fromMessageId: string;
   /** Set when it belongs to a row in the list; null for a handed-over question. */
   gapKey: string | null;
   draft: EntryDraft;
+  save: SaveState;
 }
 
 interface TestSession {
   sessionId: number;
   gapKey: string;
   draft: TestDraft;
+  save: SaveState;
 }
 
 /** "Write an answer for this" in a conversation lands here with `?answer=…&question=…`. */
@@ -46,6 +51,7 @@ function readHandedOverAnswer(): AnswerSession | null {
     fromMessageId,
     gapKey: null,
     draft: { question: readQueryParam("question") ?? "", answer: "" },
+    save: IDLE_SAVE,
   };
 }
 
@@ -99,6 +105,7 @@ export function Gaps({ assistantId }: GapsProps) {
             fromMessageId: gap.exampleMessageId,
             gapKey: gap.question,
             draft: { question: gapTitle(gap), answer: "" },
+            save: IDLE_SAVE,
           },
     );
   }
@@ -110,6 +117,7 @@ export function Gaps({ assistantId }: GapsProps) {
       sessionId: nextTestSessionId.current++,
       gapKey: gap.question,
       draft: { question: gapTitle(gap), kind: "contains", detail: "" },
+      save: IDLE_SAVE,
     });
   }
 
@@ -160,6 +168,12 @@ export function Gaps({ assistantId }: GapsProps) {
             current?.fromMessageId === session.fromMessageId ? { ...current, draft } : current,
           )
         }
+        saveState={session.save}
+        onSaveStateChange={(save) =>
+          setAnswering((current) =>
+            current?.fromMessageId === session.fromMessageId ? { ...current, save } : current,
+          )
+        }
         onSaved={(_result, saved) => {
           if (saved.assistantId !== assistantId) return;
           setAnswering((current) =>
@@ -183,6 +197,12 @@ export function Gaps({ assistantId }: GapsProps) {
         onDraftChange={(draft) =>
           setAddingTest((current) =>
             current?.sessionId === sessionId ? { ...current, draft } : current,
+          )
+        }
+        saveState={session.save}
+        onSaveStateChange={(save) =>
+          setAddingTest((current) =>
+            current?.sessionId === sessionId ? { ...current, save } : current,
           )
         }
         onSaved={() => {

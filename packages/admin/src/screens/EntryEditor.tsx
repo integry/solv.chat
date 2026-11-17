@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, postJson, putJson } from "../api/client.js";
+import { IDLE_SAVE, type SaveState } from "./saveState.js";
 
 export interface EntrySaveSession {
   assistantId: string;
@@ -29,6 +30,13 @@ export interface EntryEditorProps {
    */
   draft?: EntryDraft | undefined;
   onDraftChange?: ((draft: EntryDraft) => void) | undefined;
+  /**
+   * The save in progress and its errors, held by the owner like `draft`. An
+   * owner that moves the editor while a save is in flight passes this so the
+   * editor it mounts in the new place is still disabled until the save ends.
+   */
+  saveState?: SaveState | undefined;
+  onSaveStateChange?: ((state: SaveState) => void) | undefined;
   onSaved?:
     | ((result: { documentId: string; sourceId: string }, session: EntrySaveSession) => void)
     | undefined;
@@ -44,6 +52,8 @@ export function EntryEditor({
   initialAnswer = "",
   draft,
   onDraftChange,
+  saveState,
+  onSaveStateChange,
   onSaved,
   onCancel,
 }: EntryEditorProps) {
@@ -52,9 +62,8 @@ export function EntryEditor({
     answer: initialAnswer,
   });
   const { question, answer } = draft ?? ownDraft;
-  const [saving, setSaving] = useState(false);
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [formError, setFormError] = useState<string | null>(null);
+  const [ownSaveState, setOwnSaveState] = useState<SaveState>(IDLE_SAVE);
+  const { saving, fieldErrors, formError } = saveState ?? ownSaveState;
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const sessionRef = useRef(0);
 
@@ -65,9 +74,7 @@ export function EntryEditor({
     void fromMessageId;
     sessionRef.current++;
     setOwnDraft({ question: initialQuestion, answer: initialAnswer });
-    setSaving(false);
-    setFieldErrors({});
-    setFormError(null);
+    setOwnSaveState(IDLE_SAVE);
     setStatusMessage(null);
   }, [assistantId, sourceId, documentId, fromMessageId, initialQuestion, initialAnswer]);
 
@@ -81,6 +88,14 @@ export function EntryEditor({
     }
   }
 
+  function updateSaveState(next: SaveState) {
+    if (saveState !== undefined) {
+      onSaveStateChange?.(next);
+    } else {
+      setOwnSaveState(next);
+    }
+  }
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (saving) return;
@@ -91,13 +106,12 @@ export function EntryEditor({
       ...(documentId !== undefined ? { documentId } : {}),
       ...(fromMessageId !== undefined ? { fromMessageId } : {}),
     };
-    setSaving(true);
-    setFieldErrors({});
-    setFormError(null);
+    updateSaveState({ saving: true, fieldErrors: {}, formError: null });
     setStatusMessage(null);
 
+    let result: { documentId: string; sourceId: string };
     try {
-      const result = isEditing
+      result = isEditing
         ? await putJson<{ documentId: string; sourceId: string }>(
             `/api/admin/sources/${sourceId}/entries/${documentId}`,
             { question, answer },
@@ -116,28 +130,29 @@ export function EntryEditor({
                 `/api/admin/assistants/${assistantId}/entries`,
                 { question, answer },
               );
-
-      if (sessionRef.current === submitSession) {
-        setStatusMessage("Answer saved.");
-        if (!isEditing) {
-          updateDraft({ question: "", answer: "" });
-        }
-      }
-      onSaved?.(result, session);
     } catch (err) {
       if (sessionRef.current === submitSession) {
-        if (err instanceof ApiError) {
-          setFieldErrors(err.fields);
-          setFormError(Object.keys(err.fields).length === 0 ? err.message : null);
-        } else {
-          setFormError("Could not save answer. Try again.");
-        }
+        updateSaveState(
+          err instanceof ApiError
+            ? {
+                saving: false,
+                fieldErrors: err.fields,
+                formError: Object.keys(err.fields).length === 0 ? err.message : null,
+              }
+            : { saving: false, fieldErrors: {}, formError: "Could not save answer. Try again." },
+        );
       }
-    } finally {
-      if (sessionRef.current === submitSession) {
-        setSaving(false);
+      return;
+    }
+
+    if (sessionRef.current === submitSession) {
+      updateSaveState(IDLE_SAVE);
+      setStatusMessage("Answer saved.");
+      if (!isEditing) {
+        updateDraft({ question: "", answer: "" });
       }
     }
+    onSaved?.(result, session);
   }
 
   return (

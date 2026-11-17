@@ -195,6 +195,10 @@ interface ServerOptions {
   holdRestore?: (release: () => void) => void;
   /** Asked before each gaps list request; true makes that request fail. */
   failGapsList?: () => boolean;
+  /** Holds each answer save until the test resolves it, with a reply of its own if given. */
+  holdAnswer?: (release: (reply?: Response) => void) => void;
+  /** Holds each test save until the test resolves it. */
+  holdTestSave?: (release: () => void) => void;
 }
 
 function installServer(options: ServerOptions = {}) {
@@ -276,6 +280,11 @@ function installServer(options: ServerOptions = {}) {
     }
     if (url.pathname === `${base}/answers` && method === "POST") {
       const from = (body as { fromMessageId: string }).fromMessageId;
+      const hold = options.holdAnswer;
+      if (hold) {
+        const reply = await new Promise<Response | undefined>((release) => hold(release));
+        if (reply) return reply;
+      }
       for (const g of gaps) if (g.exampleMessageId === from) g.handled = true;
       return Response.json(
         {
@@ -284,6 +293,15 @@ function installServer(options: ServerOptions = {}) {
           url: "https://example.com/e",
           counts: { written: 1, unchanged: 0, deleted: 0 },
         },
+        { status: 201 },
+      );
+    }
+    if (url.pathname === `${base}/tests` && method === "POST") {
+      const hold = options.holdTestSave;
+      if (hold) await new Promise<void>((release) => hold(release));
+      const { question, expectation } = body as { question: string; expectation: unknown };
+      return Response.json(
+        { test: { id: "tst_1", assistantId: ASSISTANT.id, question, expectation } },
         { status: 201 },
       );
     }
@@ -1166,6 +1184,156 @@ describe("Monitor screens", () => {
         "Draft for the last row.",
       );
       expect(screen.getAllByLabelText("Answer")).toHaveLength(1);
+    });
+
+    it("keeps a saving answer disabled when Next moves its editor above the list", async () => {
+      let release: ((reply?: Response) => void) | undefined;
+      const many = Array.from({ length: 26 }, (_, i) =>
+        gap({
+          question: `question ${i + 1}?`,
+          displayQuestion: `Question ${i + 1}?`,
+          exampleMessageId: `m${i + 1}`,
+          times: 30 - i,
+        }),
+      );
+      const { calls } = installServer({
+        gaps: many,
+        holdAnswer: (r) => {
+          release = r;
+        },
+      });
+      await open("/admin/gaps");
+      await screen.findByText("Question 1?");
+      const items = () => Array.from(document.querySelectorAll(".gap-item")) as HTMLElement[];
+      const first = items()[0];
+      if (!first) throw new Error("Expected a first gap");
+
+      fireEvent.click(within(first).getByRole("button", { name: "Write an answer" }));
+      fireEvent.change(within(first).getByLabelText("Answer"), {
+        target: { value: "Yes, to all of Spain." },
+      });
+      fireEvent.click(within(first).getByRole("button", { name: "Save answer" }));
+      await waitFor(() => expect(release).toBeDefined());
+      expect((within(first).getByLabelText("Answer") as HTMLTextAreaElement).disabled).toBe(true);
+
+      // The next page arrives while the save waits, so the editor leaves its
+      // row and is mounted again above the list. It must still be disabled:
+      // anything typed now would vanish when the save clears the draft.
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      await screen.findByText("Question 26?");
+      await waitFor(() => expect(screen.queryByText("Question 1?")).toBeNull());
+      const moved = screen.getByLabelText("Answer") as HTMLTextAreaElement;
+      expect(moved.closest(".gap-item")).toBeNull();
+      expect(moved.value).toBe("Yes, to all of Spain.");
+      expect(moved.disabled).toBe(true);
+      expect((screen.getByLabelText("Question") as HTMLInputElement).disabled).toBe(true);
+      const saveButton = screen.getByRole("button", { name: "Saving…" }) as HTMLButtonElement;
+      expect(saveButton.disabled).toBe(true);
+      expect(screen.queryByRole("button", { name: "Cancel" })).toBeTruthy();
+      expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      await act(async () => release?.());
+      await waitFor(() => expect(screen.queryByLabelText("Answer")).toBeNull());
+      expect(await screen.findByText(/Answer saved to your sources/)).toBeTruthy();
+      const saves = calls.filter((c) => c.path.endsWith("/answers"));
+      expect(saves).toHaveLength(1);
+      expect(saves[0]?.body).toEqual({
+        question: "Question 1?",
+        answer: "Yes, to all of Spain.",
+        fromMessageId: "m1",
+      });
+    });
+
+    it("shows a failed save's error in the moved editor and lets the owner fix the text", async () => {
+      let release: ((reply?: Response) => void) | undefined;
+      let fail = false;
+      installServer({
+        gaps: [gap(), gap({ question: "sso?", displayQuestion: "SSO?", exampleMessageId: "m2" })],
+        failGapsList: () => fail,
+        holdAnswer: (r) => {
+          release = r;
+        },
+      });
+      await open("/admin/gaps");
+      await screen.findByText("SSO?");
+      const items = () => Array.from(document.querySelectorAll(".gap-item")) as HTMLElement[];
+      const second = items()[1];
+      if (!second) throw new Error("Expected two gaps");
+
+      fireEvent.click(within(second).getByRole("button", { name: "Write an answer" }));
+      fireEvent.change(within(second).getByLabelText("Answer"), {
+        target: { value: "Yes, with SAML." },
+      });
+      fireEvent.click(within(second).getByRole("button", { name: "Save answer" }));
+      await waitFor(() => expect(release).toBeDefined());
+
+      // An unrelated dismissal's reload fails, which moves the editor above the list.
+      fail = true;
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss “Do you ship to Spain?”" }));
+      expect(await screen.findByText("Could not load gaps.")).toBeTruthy();
+      expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).disabled).toBe(true);
+
+      await act(async () => {
+        release?.(
+          Response.json(
+            { error: "Check the answer.", fields: ["answer: The answer is too short."] },
+            { status: 400 },
+          ),
+        );
+      });
+      expect(await screen.findByText("The answer is too short.")).toBeTruthy();
+      const answer = screen.getByLabelText("Answer") as HTMLTextAreaElement;
+      expect(answer.disabled).toBe(false);
+      expect(answer.value).toBe("Yes, with SAML.");
+      expect(screen.getByRole("button", { name: "Save answer" })).toBeTruthy();
+      fireEvent.change(answer, { target: { value: "Yes, with SAML and OIDC." } });
+      expect(answer.value).toBe("Yes, with SAML and OIDC.");
+    });
+
+    it("keeps a saving test disabled when a failed reload moves its editor above the list", async () => {
+      let release: (() => void) | undefined;
+      let fail = false;
+      const { calls } = installServer({
+        gaps: [gap(), gap({ question: "sso?", displayQuestion: "SSO?", exampleMessageId: "m2" })],
+        failGapsList: () => fail,
+        holdTestSave: (r) => {
+          release = r;
+        },
+      });
+      await open("/admin/gaps");
+      await screen.findByText("SSO?");
+      const items = () => Array.from(document.querySelectorAll(".gap-item")) as HTMLElement[];
+      const second = items()[1];
+      if (!second) throw new Error("Expected two gaps");
+
+      fireEvent.click(within(second).getByRole("button", { name: "Add to tests" }));
+      fireEvent.change(within(second).getByLabelText("Words"), { target: { value: "SAML" } });
+      fireEvent.click(within(second).getByRole("button", { name: "Save test" }));
+      await waitFor(() => expect(release).toBeDefined());
+
+      fail = true;
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss “Do you ship to Spain?”" }));
+      expect(await screen.findByText("Could not load gaps.")).toBeTruthy();
+      expect(items()).toHaveLength(0);
+      const words = screen.getByLabelText("Words") as HTMLInputElement;
+      expect(words.value).toBe("SAML");
+      expect(words.disabled).toBe(true);
+      expect((screen.getByLabelText("Question") as HTMLInputElement).disabled).toBe(true);
+      expect((screen.getByRole("button", { name: "Saving…" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      await act(async () => release?.());
+      await waitFor(() => expect(screen.queryByLabelText("Words")).toBeNull());
+      expect(await screen.findByText("Added to tests.")).toBeTruthy();
+      const saves = calls.filter((c) => c.path.endsWith("/tests") && c.method === "POST");
+      expect(saves).toHaveLength(1);
+      expect(saves[0]?.body).toEqual({
+        question: "SSO?",
+        expectation: { kind: "contains", phrase: "SAML" },
+      });
     });
 
     it("keeps the typed answer when Write an answer is pressed again on the same gap", async () => {

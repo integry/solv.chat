@@ -2,6 +2,7 @@ import type { TestExpectation } from "@solvchat/core";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, patchJson, postJson } from "../api/client.js";
 import type { AnswerTest } from "../api/types.js";
+import { IDLE_SAVE, type SaveState } from "./saveState.js";
 
 /**
  * The four expectations in the owner's words. The key is the wire value; the
@@ -77,6 +78,13 @@ export interface TestEditorProps {
    */
   draft?: TestDraft | undefined;
   onDraftChange?: ((draft: TestDraft) => void) | undefined;
+  /**
+   * The save in progress and its errors, held by the owner like `draft`. An
+   * owner that moves the editor while a save is in flight passes this so the
+   * editor it mounts in the new place is still disabled until the save ends.
+   */
+  saveState?: SaveState | undefined;
+  onSaveStateChange?: ((state: SaveState) => void) | undefined;
   onSaved: (test: AnswerTest) => void;
   onCancel?: (() => void) | undefined;
 }
@@ -94,9 +102,8 @@ export function TestEditor(props: TestEditorProps) {
   const [ownDraft, setOwnDraft] = useState<TestDraft>(() => initialDraftOf(props));
   const current = props.draft ?? ownDraft;
   const { question, kind, detail } = current;
-  const [busy, setBusy] = useState(false);
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [formError, setFormError] = useState<string | null>(null);
+  const [ownSaveState, setOwnSaveState] = useState<SaveState>(IDLE_SAVE);
+  const { saving: busy, fieldErrors, formError } = props.saveState ?? ownSaveState;
   const sessionRef = useRef(0);
 
   const latestInitialRef = useRef(initialDraftOf(props));
@@ -116,9 +123,7 @@ export function TestEditor(props: TestEditorProps) {
     identityRef.current = { assistantId: props.assistantId, testId: props.testId };
     sessionRef.current++;
     setOwnDraft(latestInitialRef.current);
-    setBusy(false);
-    setFieldErrors({});
-    setFormError(null);
+    setOwnSaveState(IDLE_SAVE);
   }, [props.assistantId, props.testId]);
 
   const chosen = EXPECTATIONS.find((option) => option.kind === kind) ?? EXPECTATIONS[0];
@@ -132,17 +137,45 @@ export function TestEditor(props: TestEditorProps) {
     }
   }
 
+  function updateSaveState(next: SaveState) {
+    if (props.saveState !== undefined) {
+      props.onSaveStateChange?.(next);
+    } else {
+      setOwnSaveState(next);
+    }
+  }
+
+  /** Puts a failed save's errors under the boxes they belong to, the rest above the buttons. */
+  function failureState(err: unknown): SaveState {
+    if (!(err instanceof ApiError)) {
+      return { saving: false, fieldErrors: {}, formError: "Could not save that test." };
+    }
+    const renderedKeys = new Set([
+      "question",
+      ...(chosen.field !== null ? ["expectation.phrase", "expectation.url"] : []),
+    ]);
+    const unmatched = Object.entries(err.fields)
+      .filter(([key]) => !renderedKeys.has(key))
+      .map(([, message]) => message);
+    const formError =
+      unmatched.length > 0
+        ? unmatched.join(" ")
+        : Object.keys(err.fields).length === 0
+          ? err.message
+          : null;
+    return { saving: false, fieldErrors: err.fields, formError };
+  }
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (busy) return;
     const submitSession = sessionRef.current;
-    setBusy(true);
-    setFieldErrors({});
-    setFormError(null);
+    updateSaveState({ saving: true, fieldErrors: {}, formError: null });
+    let saved: { test: AnswerTest };
     try {
       const expectation =
         chosen.field === null ? { kind } : { kind, [chosen.field]: detail.trim() };
-      const saved = props.testId
+      saved = props.testId
         ? await patchJson<{ test: AnswerTest }>(`/api/admin/tests/${props.testId}`, {
             question,
             expectation,
@@ -151,32 +184,16 @@ export function TestEditor(props: TestEditorProps) {
             question,
             expectation,
           });
-      props.onSaved(saved.test);
     } catch (err) {
       if (sessionRef.current === submitSession) {
-        if (err instanceof ApiError) {
-          setFieldErrors(err.fields);
-          const renderedKeys = new Set([
-            "question",
-            ...(chosen.field !== null ? ["expectation.phrase", "expectation.url"] : []),
-          ]);
-          const unmatched = Object.entries(err.fields)
-            .filter(([key]) => !renderedKeys.has(key))
-            .map(([, message]) => message);
-          if (unmatched.length > 0) {
-            setFormError(unmatched.join(" "));
-          } else if (Object.keys(err.fields).length === 0) {
-            setFormError(err.message);
-          }
-        } else {
-          setFormError("Could not save that test.");
-        }
+        updateSaveState(failureState(err));
       }
-    } finally {
-      if (sessionRef.current === submitSession) {
-        setBusy(false);
-      }
+      return;
     }
+    if (sessionRef.current === submitSession) {
+      updateSaveState(IDLE_SAVE);
+    }
+    props.onSaved(saved.test);
   }
 
   return (
@@ -208,7 +225,7 @@ export function TestEditor(props: TestEditorProps) {
           disabled={busy}
           onChange={(e) => {
             updateDraft({ kind: e.target.value as TestExpectation["kind"] });
-            setFieldErrors({});
+            updateSaveState({ saving: false, fieldErrors: {}, formError });
           }}
         >
           {EXPECTATIONS.map((option) => (
