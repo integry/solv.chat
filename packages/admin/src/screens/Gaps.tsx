@@ -1,6 +1,9 @@
 import { useRef, useState } from "react";
 import type { GapSummary, GapsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { EmptyState } from "../ui/EmptyState.js";
+import { formatDateTime } from "../ui/format.js";
+import { PageHeader } from "../ui/PageHeader.js";
 import { EntryEditor } from "./EntryEditor.js";
 import { TestEditor } from "./TestEditor.js";
 
@@ -11,7 +14,7 @@ export interface GapsProps {
 const PAGE_SIZE = 25;
 
 function formatDate(timestamp: number): string {
-  return new Date(timestamp).toLocaleString();
+  return formatDateTime(timestamp);
 }
 
 export function Gaps({ assistantId }: GapsProps) {
@@ -34,15 +37,10 @@ export function Gaps({ assistantId }: GapsProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Gaps</h1>
-          <p className="muted">
-            Questions your assistant could not answer yet. Write an answer to add it to your
-            sources.
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="Gaps"
+        description="Questions your assistant could not answer yet. Write an answer to add it to your sources."
+      />
 
       {statusMessage && (
         <p className="notice-text" role="status">
@@ -90,7 +88,11 @@ export function Gaps({ assistantId }: GapsProps) {
           {gapsRes.error}
         </p>
       ) : gaps.length === 0 && !hasPrevious ? (
-        <p className="muted">No unanswered questions yet.</p>
+        <EmptyState
+          icon="gaps"
+          title="No unanswered questions yet"
+          description="Questions your assistant could not answer show up here, ready for you to answer."
+        />
       ) : (
         <div className="stack">
           {gaps.length === 0 ? (

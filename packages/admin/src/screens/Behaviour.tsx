@@ -5,6 +5,8 @@ import { FailedTestsError, publishAssistant } from "../api/publish.js";
 import type { TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { useAssistantMutation } from "../shell/useAssistantMutations.js";
+import { formatDateTime } from "../ui/format.js";
+import { PageHeader } from "../ui/PageHeader.js";
 import { FailedTestsPanel } from "./FailedTestsPanel.js";
 import { History } from "./History.js";
 
@@ -226,9 +228,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         const res = await publishAssistant(assistantId, force, runId);
         publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
-        setStatusMessage(
-          `Published (${new Date(res.version.publishedAt ?? Date.now()).toLocaleString()}).`,
-        );
+        setStatusMessage(`Published (${formatDateTime(res.version.publishedAt ?? Date.now())}).`);
         setHistoryTick((n) => n + 1);
         draft.reload();
       });
@@ -245,31 +245,31 @@ export function Behaviour({ assistantId }: BehaviourProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Behaviour</h1>
-          <p className="muted">Control how your assistant greets visitors and responds.</p>
-        </div>
-        <div className="screen-actions">
-          {unsaved && <span className="unsaved-badge">Unsaved changes</span>}
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => setShowHistory((prev) => !prev)}
-          >
-            History
-          </button>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={busy || unsaved}
-            aria-describedby={unsaved ? "behaviour-publish-hint" : undefined}
-            onClick={() => void handlePublish(false)}
-          >
-            {publishing ? "Publishing…" : "Publish"}
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title="Behaviour"
+        description="Control how your assistant greets visitors and responds."
+        actions={
+          <>
+            {unsaved && <span className="unsaved-badge">Unsaved changes</span>}
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setShowHistory((prev) => !prev)}
+            >
+              History
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={busy || unsaved}
+              aria-describedby={unsaved ? "behaviour-publish-hint" : undefined}
+              onClick={() => void handlePublish(false)}
+            >
+              {publishing ? "Publishing…" : "Publish"}
+            </button>
+          </>
+        }
+      />
       {unsaved && !busy && (
         <p id="behaviour-publish-hint" className="field-hint">
           Save your changes before publishing.

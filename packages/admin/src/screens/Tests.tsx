@@ -3,6 +3,8 @@ import { useRef, useState } from "react";
 import { ApiError, deleteJson, postJson } from "../api/client.js";
 import type { AnswerTest, TestOutcome, TestResult, TestRunResponse } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { EmptyState } from "../ui/EmptyState.js";
+import { PageHeader } from "../ui/PageHeader.js";
 import { describeExpectation, TestEditor } from "./TestEditor.js";
 
 export interface TestsProps {
@@ -108,35 +110,35 @@ export function Tests({ assistantId }: TestsProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Tests</h1>
-          <p className="muted">
-            Questions your assistant must keep getting right. Publish runs these first.
-          </p>
-        </div>
-        <div className="screen-actions">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={running || tests.length === 0}
-            onClick={() => void handleRunAll()}
-          >
-            {running ? "Running…" : "Run now"}
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={running}
-            onClick={() => {
-              setEditingSession(null);
-              setAddingSessionId((prev) => (prev === null ? nextEditorSessionId.current++ : null));
-            }}
-          >
-            Add test
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title="Tests"
+        description="Questions your assistant must keep getting right. Publish runs these first."
+        actions={
+          <>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={running || tests.length === 0}
+              onClick={() => void handleRunAll()}
+            >
+              {running ? "Running…" : "Run now"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={running}
+              onClick={() => {
+                setEditingSession(null);
+                setAddingSessionId((prev) =>
+                  prev === null ? nextEditorSessionId.current++ : null,
+                );
+              }}
+            >
+              Add test
+            </button>
+          </>
+        }
+      />
 
       {running && (
         <p className="muted" role="status">
@@ -185,7 +187,11 @@ export function Tests({ assistantId }: TestsProps) {
           {testsRes.error}
         </p>
       ) : tests.length === 0 ? (
-        <p className="muted">No tests yet. Add a question your assistant should get right.</p>
+        <EmptyState
+          icon="tests"
+          title="No tests yet"
+          description="Add a question your assistant should get right."
+        />
       ) : (
         <ul className="history-list">
           {tests.map((test) => {

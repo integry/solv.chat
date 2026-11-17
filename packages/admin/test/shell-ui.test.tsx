@@ -1,0 +1,517 @@
+import { defaultVersionConfig } from "@solvchat/core";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Assistant, VersionRow } from "../src/api/types.js";
+import { App, type HeaderSlotProps, type MountAdminOptions } from "../src/index.js";
+import { expectNoSeriousA11yViolations } from "./support/axe.js";
+import { assistantButton, findAssistantButton, selectedAssistantId } from "./support/switcher.js";
+
+type Config = VersionRow["config"];
+
+function makeAssistant(id: string, name: string): Assistant {
+  return {
+    id,
+    orgId: "org_00000000000000000000",
+    name,
+    publicKey: `pk_${id}`,
+    allowedOrigins: [],
+    hasIngestKey: true,
+    createdAt: 1_700_000_000_000,
+  };
+}
+
+function configWith(greeting: string): Config {
+  const config = defaultVersionConfig();
+  config.behaviour = { ...config.behaviour, greeting };
+  return config;
+}
+
+interface AssistantState {
+  draft: Config;
+  published: Config | null;
+}
+
+interface ServerOptions {
+  /** Answers the first unforced publish with 409 and a failed test run. */
+  failTests?: boolean;
+}
+
+function installServer(
+  entries: Array<{ assistant: Assistant; state: AssistantState }>,
+  options: ServerOptions = {},
+) {
+  const assistants = entries.map((e) => e.assistant);
+  const states = new Map(entries.map((e) => [e.assistant.id, e.state]));
+  const calls: Array<{ method: string; path: string; body: unknown }> = [];
+  const row = (id: string, state: VersionRow["state"], config: Config): VersionRow => ({
+    id: `ver_${state}_${id}`,
+    orgId: "org_00000000000000000000",
+    assistantId: id,
+    state,
+    config,
+    createdAt: 1_700_000_000_000,
+    publishedAt: state === "draft" ? null : 1_700_000_100_000,
+  });
+
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
+    const path = new URL(url, "https://example.com").pathname;
+    const method = (init?.method ?? "GET").toUpperCase();
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    calls.push({ method, path, body });
+
+    if (path === "/api/admin/assistants" && method === "GET") {
+      return Response.json({ assistants });
+    }
+    const match = /^\/api\/admin\/assistants\/([^/]+)\/(versions|draft|publish)$/.exec(path);
+    const state = match ? states.get(match[1] ?? "") : undefined;
+    if (match && state) {
+      const id = match[1] as string;
+      if (match[2] === "versions") {
+        const versions = [row(id, "draft", state.draft)];
+        if (state.published) versions.push(row(id, "published", state.published));
+        return Response.json({ versions });
+      }
+      if (match[2] === "draft" && method === "GET") {
+        return Response.json({ draft: row(id, "draft", state.draft) });
+      }
+      if (match[2] === "draft" && method === "PUT") {
+        state.draft = { ...state.draft, ...(body as Partial<Config>) };
+        return Response.json({ draft: row(id, "draft", state.draft) });
+      }
+      if (match[2] === "publish" && method === "POST") {
+        const force = (body as { force?: boolean } | undefined)?.force === true;
+        if (options.failTests && !force) {
+          return Response.json(
+            {
+              error: "Some tests did not pass.",
+              run: {
+                id: "run_1",
+                results: [
+                  {
+                    testId: "tst_1",
+                    question: "What is the refund policy?",
+                    expectation: { kind: "contains", phrase: "30 days" },
+                    outcome: "failed",
+                    reason: "The answer did not mention 30 days.",
+                    excerpt: "",
+                  },
+                ],
+              },
+            },
+            { status: 409 },
+          );
+        }
+        state.published = state.draft;
+        return Response.json({ version: row(id, "published", state.published) });
+      }
+    }
+    if (path === "/api/admin/chat" && method === "POST") {
+      const message = (body as { message: string }).message;
+      return new Response(
+        `event: token\ndata: ${JSON.stringify({ text: `Draft reply to: ${message}` })}\n\n` +
+          `event: done\ndata: ${JSON.stringify({ messageId: "m1", conversationId: "c1" })}\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }
+    if (path.endsWith("/overview")) {
+      return Response.json({ messages: 0, answeredShare: 1, todayCostMicros: 0, topQuestions: [] });
+    }
+    if (path.endsWith("/sources")) return Response.json({ sources: [] });
+    return Response.json({});
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return { calls, states };
+}
+
+const LIVE: AssistantState = { draft: configWith("Hi"), published: configWith("Hi") };
+const CHANGED: AssistantState = { draft: configWith("Hello there"), published: configWith("Hi") };
+const NEVER: AssistantState = { draft: configWith("Hi"), published: null };
+
+function oneAssistant(state: AssistantState) {
+  return installServer([
+    { assistant: makeAssistant("ast_1", "Docs Bot"), state: structuredClone(state) },
+  ]);
+}
+
+function setNarrow(narrow: boolean) {
+  vi.spyOn(window, "matchMedia").mockImplementation(
+    (query: string) =>
+      ({
+        matches: narrow && query.includes("max-width: 899px"),
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      }) as MediaQueryList,
+  );
+}
+
+function go(path: string) {
+  window.history.replaceState(null, "", path);
+}
+
+function header(): HTMLElement {
+  return document.querySelector("header.shell-header") as HTMLElement;
+}
+
+beforeEach(() => {
+  window.localStorage.clear();
+  go("/admin/overview");
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  window.localStorage.clear();
+});
+
+function Billing() {
+  return <h1>Billing</h1>;
+}
+
+function OrgName(_: HeaderSlotProps) {
+  return <span data-testid="org">Acme</span>;
+}
+
+function OrgSwitch(_: HeaderSlotProps) {
+  return (
+    <button type="button" data-testid="org-switch">
+      Switch org
+    </button>
+  );
+}
+
+describe("grouped navigation", () => {
+  it("groups built-in screens under headings with icons, then host sections", async () => {
+    oneAssistant(LIVE);
+    const icon = <svg data-testid="billing-icon" aria-hidden="true" viewBox="0 0 16 16" />;
+    const options: MountAdminOptions = {
+      extraNavItems: [
+        { id: "billing", label: "Billing", path: "/admin/billing", section: "Account", icon },
+        { id: "faq", label: "Help", path: "/admin/help", section: "Settings" },
+      ],
+      extraScreens: { billing: Billing, faq: Billing },
+    };
+    render(<App options={options} />);
+    const nav = await screen.findByRole("navigation", { name: "Primary" });
+
+    const groups = within(nav)
+      .getAllByRole("heading", { level: 2 })
+      .map((h) => {
+        const list = within(nav).getByRole("list", { name: h.textContent ?? "" });
+        return [
+          h.textContent,
+          within(list)
+            .getAllByRole("link")
+            .map((a) => a.textContent),
+        ];
+      });
+    expect(groups).toEqual([
+      ["Monitor", ["Overview", "Reports", "Conversations", "Gaps"]],
+      ["Build", ["Sources", "Behaviour", "Tools", "Widget", "Tests"]],
+      ["Go live", ["Install"]],
+      ["Settings", ["Providers", "Help"]],
+      ["Account", ["Billing"]],
+    ]);
+
+    // Built-in items carry decorative icons; a host item can bring its own.
+    for (const link of within(nav).getAllByRole("link")) {
+      if (link.textContent === "Help") continue;
+      expect(link.querySelector(".nav-icon[aria-hidden='true'] svg")).toBeTruthy();
+    }
+    expect(within(nav).getByTestId("billing-icon")).toBeTruthy();
+    expect(within(nav).getByRole("link", { name: "Overview" }).getAttribute("aria-current")).toBe(
+      "page",
+    );
+    await findAssistantButton();
+    await expectNoSeriousA11yViolations();
+  });
+});
+
+describe("narrow screens", () => {
+  it("collapses the header and opens the navigation in a focus-trapped drawer", async () => {
+    setNarrow(true);
+    oneAssistant(LIVE);
+    render(<App options={{ headerStart: OrgName, headerEnd: OrgSwitch }} />);
+
+    const menuButton = await screen.findByRole("button", { name: "Menu" });
+    // Header: product name, host start slot, current screen, Try it, menu button.
+    expect(within(header()).getByText("solv.chat")).toBeTruthy();
+    expect(within(header()).getByTestId("org")).toBeTruthy();
+    expect(header().querySelector(".shell-current")?.textContent).toBe("Overview");
+    expect(header().querySelector(".switcher")).toBeNull();
+    expect(within(header()).queryByRole("button", { name: "Sign out" })).toBeNull();
+    expect(within(header()).queryByTestId("org-switch")).toBeNull();
+    expect(menuButton.getAttribute("aria-expanded")).toBe("false");
+
+    // Closed drawer is out of the accessibility tree.
+    expect(screen.queryByRole("navigation", { name: "Primary" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Menu" })).toBeNull();
+
+    menuButton.focus();
+    fireEvent.click(menuButton);
+    const drawer = screen.getByRole("dialog", { name: "Menu" });
+    expect(drawer.getAttribute("aria-modal")).toBe("true");
+    expect(menuButton.getAttribute("aria-expanded")).toBe("true");
+    expect(drawer.contains(document.activeElement)).toBe(true);
+
+    // Switcher and publish status at the top, host end slot and Sign out at the bottom.
+    await waitFor(() => expect(within(drawer).getByText("Live")).toBeTruthy());
+    const top = drawer.querySelector(".drawer-top") as HTMLElement;
+    expect(within(top).getByRole("button", { name: /^Assistant Docs Bot/ })).toBeTruthy();
+    const bottom = drawer.querySelector(".drawer-bottom") as HTMLElement;
+    expect(within(bottom).getByTestId("org-switch")).toBeTruthy();
+    expect(within(bottom).getByRole("button", { name: "Sign out" })).toBeTruthy();
+    await expectNoSeriousA11yViolations();
+
+    // Tab wraps within the drawer.
+    const signOut = within(bottom).getByRole("button", { name: "Sign out" });
+    signOut.focus();
+    fireEvent.keyDown(signOut, { key: "Tab" });
+    expect(document.activeElement).toBe(within(drawer).getByRole("button", { name: "Close menu" }));
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(signOut);
+
+    // Escape closes and returns focus to the menu button.
+    fireEvent.keyDown(signOut, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Menu" })).toBeNull();
+    expect(document.activeElement).toBe(menuButton);
+
+    // The backdrop closes it too.
+    fireEvent.click(menuButton);
+    fireEvent.click(document.querySelector(".shell-backdrop") as HTMLElement);
+    expect(screen.queryByRole("dialog", { name: "Menu" })).toBeNull();
+
+    // Choosing a screen closes the drawer and names the new screen in the header.
+    fireEvent.click(menuButton);
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Menu" })).getByRole("link", { name: "Gaps" }),
+    );
+    expect(screen.queryByRole("dialog", { name: "Menu" })).toBeNull();
+    expect(header().querySelector(".shell-current")?.textContent).toBe("Gaps");
+    expect(window.location.pathname).toBe("/admin/gaps");
+  });
+
+  it("opens Try it as a sheet that Escape closes", async () => {
+    setNarrow(true);
+    oneAssistant(LIVE);
+    go("/admin/behaviour");
+    render(<App />);
+    const toggle = await screen.findByRole("button", { name: "Try it" });
+    // Narrow screens never open the sheet on their own.
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    const pane = screen.getByRole("complementary", { name: "Try it" });
+    expect(pane.className).toContain("try-it-overlay");
+    expect(document.activeElement).toBe(within(pane).getByLabelText("Ask a question"));
+    fireEvent.keyDown(within(pane).getByLabelText("Ask a question"), { key: "Escape" });
+    expect(screen.queryByRole("complementary", { name: "Try it" })).toBeNull();
+    expect(document.activeElement).toBe(toggle);
+  });
+});
+
+describe("Try it toggle", () => {
+  it("is closed on Monitor screens and open on Build screens by default", async () => {
+    oneAssistant(LIVE);
+    render(<App />);
+    const toggle = await screen.findByRole("button", { name: "Try it" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe("try-it-pane");
+    expect(screen.queryByRole("complementary", { name: "Try it" })).toBeNull();
+
+    const link = screen.getByRole("link", { name: "Behaviour" });
+    link.focus();
+    fireEvent.click(link);
+    await screen.findByRole("heading", { name: "Behaviour", level: 1 });
+    const pane = screen.getByRole("complementary", { name: "Try it" });
+    // Opening because of navigation does not steal focus.
+    expect(document.activeElement).toBe(link);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    // It says plainly that it uses the draft.
+    expect(within(pane).getByText("Draft")).toBeTruthy();
+    expect(pane.textContent).toMatch(/Uses your saved draft\. Visitors still get the published/);
+    await expectNoSeriousA11yViolations();
+  });
+
+  it("remembers the choice per browser and keeps the transcript when closed", async () => {
+    oneAssistant(LIVE);
+    go("/admin/behaviour");
+    const { unmount } = render(<App />);
+    const pane = await screen.findByRole("complementary", { name: "Try it" });
+    const input = within(pane).getByLabelText("Ask a question");
+    fireEvent.change(input, { target: { value: "How do I install?" } });
+    fireEvent.click(within(pane).getByRole("button", { name: "Send" }));
+    await within(pane).findByText("Draft reply to: How do I install?");
+
+    fireEvent.click(within(pane).getByRole("button", { name: "Close Try it" }));
+    expect(screen.queryByRole("complementary", { name: "Try it" })).toBeNull();
+    expect(pane.isConnected).toBe(true);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Try it" }));
+
+    // Closed on a Build screen stays closed on other Build screens...
+    fireEvent.click(screen.getByRole("link", { name: "Sources" }));
+    await screen.findByRole("heading", { name: "Sources", level: 1 });
+    expect(screen.queryByRole("complementary", { name: "Try it" })).toBeNull();
+
+    // ...and opening it on a Monitor screen is remembered separately.
+    fireEvent.click(screen.getByRole("link", { name: "Reports" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try it" }));
+    const reopened = screen.getByRole("complementary", { name: "Try it" });
+    expect(reopened).toBe(pane);
+    expect(document.activeElement).toBe(within(reopened).getByLabelText("Ask a question"));
+    expect(within(reopened).getByText("Draft reply to: How do I install?")).toBeTruthy();
+    expect(JSON.parse(window.localStorage.getItem("solvchat.admin.tryIt") ?? "{}")).toEqual({
+      build: false,
+      monitor: true,
+    });
+
+    unmount();
+    go("/admin/overview");
+    render(<App />);
+    await screen.findByRole("complementary", { name: "Try it" });
+    fireEvent.click(screen.getByRole("link", { name: "Sources" }));
+    await screen.findByRole("heading", { name: "Sources", level: 1 });
+    expect(screen.queryByRole("complementary", { name: "Try it" })).toBeNull();
+  });
+});
+
+describe("publish status", () => {
+  it.each([
+    ["Live", LIVE, true],
+    ["Unpublished changes", CHANGED, false],
+    ["Not published yet", NEVER, false],
+  ] as const)("shows %s next to the assistant", async (label, state, publishDisabled) => {
+    oneAssistant(state);
+    go("/admin/behaviour");
+    render(<App />);
+    await findAssistantButton();
+    const badge = await within(header()).findByText(label);
+    expect(badge.className).toContain("status-badge");
+    const publish = within(header()).getByRole("button", { name: "Publish draft" });
+    expect((publish as HTMLButtonElement).disabled).toBe(publishDisabled);
+    await expectNoSeriousA11yViolations();
+  });
+
+  it("shows the status but no Publish on Monitor screens", async () => {
+    oneAssistant(CHANGED);
+    render(<App />);
+    await findAssistantButton();
+    await within(header()).findByText("Unpublished changes");
+    expect(within(header()).queryByRole("button", { name: "Publish draft" })).toBeNull();
+    expect(within(header()).queryByRole("button", { name: "More publish options" })).toBeNull();
+  });
+
+  it("publishes from the header, runs tests first, and updates the status", async () => {
+    const server = installServer(
+      [{ assistant: makeAssistant("ast_1", "Docs Bot"), state: structuredClone(CHANGED) }],
+      { failTests: true },
+    );
+    go("/admin/sources");
+    render(<App />);
+    await findAssistantButton();
+    fireEvent.click(await within(header()).findByRole("button", { name: "Publish draft" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Not published" });
+    expect(within(dialog).getByText("What is the refund policy?")).toBeTruthy();
+    expect(within(header()).getByText("Unpublished changes")).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Publish anyway" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(await within(header()).findByText("Live")).toBeTruthy();
+    expect((await screen.findByRole("status")).textContent).toMatch(/Published/);
+    const publishes = server.calls.filter((c) => c.path.endsWith("/publish"));
+    expect(publishes.map((c) => c.body)).toEqual([undefined, { force: true, runId: "run_1" }]);
+  });
+
+  it("discards unpublished changes after confirming, and the screen reloads", async () => {
+    const server = oneAssistant(CHANGED);
+    go("/admin/behaviour");
+    render(<App />);
+    const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
+    await waitFor(() => expect(greeting.value).toBe("Hello there"));
+    await within(header()).findByText("Unpublished changes");
+
+    fireEvent.click(within(header()).getByRole("button", { name: "More publish options" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Discard changes" }));
+    const dialog = screen.getByRole("dialog", { name: "Discard unpublished changes?" });
+    // Cancel is focused first so Enter never discards by accident.
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Cancel" }));
+    const confirm = within(dialog).getByRole("button", { name: "Discard changes" });
+    expect(confirm.className).toContain("btn-danger");
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+
+    await within(header()).findByText("Live");
+    await waitFor(() => expect(greeting.value).toBe("Hi"));
+    const put = server.calls.find((c) => c.method === "PUT" && c.path.endsWith("/draft"));
+    expect((put?.body as Config | undefined)?.behaviour.greeting).toBe("Hi");
+    expect(server.states.get("ast_1")?.draft.behaviour.greeting).toBe("Hi");
+  });
+
+  it("refreshes after a screen saves", async () => {
+    oneAssistant(LIVE);
+    go("/admin/behaviour");
+    render(<App />);
+    const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
+    await within(header()).findByText("Live");
+    fireEvent.change(greeting, { target: { value: "Welcome!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await within(header()).findByText("Unpublished changes")).toBeTruthy();
+  });
+});
+
+describe("assistant switcher", () => {
+  it("lists assistants with their status in a listbox ending in New assistant", async () => {
+    installServer([
+      { assistant: makeAssistant("ast_1", "Docs Bot"), state: structuredClone(LIVE) },
+      { assistant: makeAssistant("ast_2", "Shop Bot"), state: structuredClone(NEVER) },
+    ]);
+    render(<App />);
+    const button = await findAssistantButton();
+    expect(button.getAttribute("aria-haspopup")).toBe("listbox");
+    button.focus();
+    fireEvent.keyDown(button, { key: "ArrowDown" });
+
+    const listbox = screen.getByRole("listbox", { name: "Assistant" });
+    expect(document.activeElement).toBe(listbox);
+    await waitFor(() => {
+      expect(
+        within(listbox)
+          .getAllByRole("option")
+          .map((o) => o.textContent),
+      ).toEqual(["Docs BotLive", "Shop BotNot published yet", "New assistant"]);
+    });
+    const [first, second] = within(listbox).getAllByRole("option");
+    expect(first?.getAttribute("aria-selected")).toBe("true");
+    expect(listbox.getAttribute("aria-activedescendant")).toBe(first?.id);
+    await expectNoSeriousA11yViolations();
+
+    fireEvent.keyDown(listbox, { key: "ArrowDown" });
+    expect(listbox.getAttribute("aria-activedescendant")).toBe(second?.id);
+    fireEvent.keyDown(listbox, { key: "Enter" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(selectedAssistantId()).toBe("ast_2");
+    expect(document.activeElement).toBe(assistantButton());
+    await within(header()).findByText("Not published yet");
+
+    // Escape closes without changing the selection; End + Enter opens the create form.
+    fireEvent.keyDown(assistantButton(), { key: "ArrowDown" });
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(selectedAssistantId()).toBe("ast_2");
+
+    fireEvent.keyDown(assistantButton(), { key: "ArrowDown" });
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "End" });
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "Enter" });
+    const form = screen.getByRole("region", { name: "New assistant" });
+    expect(document.activeElement).toBe(within(form).getByLabelText("Name"));
+    await expectNoSeriousA11yViolations();
+  });
+});

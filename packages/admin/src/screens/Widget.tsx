@@ -5,6 +5,8 @@ import { FailedTestsError, publishAssistant } from "../api/publish.js";
 import type { Assistant, TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { useAssistantMutation } from "../shell/useAssistantMutations.js";
+import { formatDateTime } from "../ui/format.js";
+import { PageHeader } from "../ui/PageHeader.js";
 import { FailedTestsPanel } from "./FailedTestsPanel.js";
 import { History } from "./History.js";
 
@@ -366,9 +368,7 @@ export function Widget({ assistantId }: WidgetProps) {
         const res = await publishAssistant(assistantId, force, runId);
         publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
-        setStatusMessage(
-          `Published (${new Date(res.version.publishedAt ?? Date.now()).toLocaleString()}).`,
-        );
+        setStatusMessage(`Published (${formatDateTime(res.version.publishedAt ?? Date.now())}).`);
         setHistoryTick((n) => n + 1);
         draftRes.reload();
       });
@@ -386,31 +386,31 @@ export function Widget({ assistantId }: WidgetProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Widget</h1>
-          <p className="muted">Choose how the chat button and window look on your site.</p>
-        </div>
-        <div className="screen-actions">
-          {unsaved && <span className="unsaved-badge">Unsaved changes</span>}
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => setShowHistory((prev) => !prev)}
-          >
-            History
-          </button>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={busy || unsaved}
-            aria-describedby={unsaved ? "widget-publish-hint" : undefined}
-            onClick={() => void handlePublish(false)}
-          >
-            {publishing ? "Publishing…" : "Publish"}
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title="Widget"
+        description="Choose how the chat button and window look on your site."
+        actions={
+          <>
+            {unsaved && <span className="unsaved-badge">Unsaved changes</span>}
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setShowHistory((prev) => !prev)}
+            >
+              History
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={busy || unsaved}
+              aria-describedby={unsaved ? "widget-publish-hint" : undefined}
+              onClick={() => void handlePublish(false)}
+            >
+              {publishing ? "Publishing…" : "Publish"}
+            </button>
+          </>
+        }
+      />
       {unsaved && !busy && (
         <p id="widget-publish-hint" className="field-hint">
           Save your changes before publishing.

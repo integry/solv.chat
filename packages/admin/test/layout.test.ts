@@ -5,9 +5,17 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { defaultVersionConfig } from "@solvchat/core";
+import axe from "axe-core";
 import { createServer, type ViteDevServer } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AnswerTest, Assistant, AssistantReport, McpServerSummary } from "../src/api/types.js";
+import type {
+  AnswerTest,
+  Assistant,
+  AssistantReport,
+  McpServerSummary,
+  VersionRow,
+} from "../src/api/types.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const ADMIN_ROOT = resolve(TEST_DIR, "..");
@@ -127,6 +135,22 @@ const TESTS: AnswerTest[] = [
     },
   },
 ];
+
+const PUBLISHED_CONFIG = defaultVersionConfig();
+const DRAFT_CONFIG = defaultVersionConfig();
+DRAFT_CONFIG.behaviour = { ...DRAFT_CONFIG.behaviour, greeting: "Hello! Ask me about the docs." };
+
+function versionRow(state: VersionRow["state"], config: VersionRow["config"]): VersionRow {
+  return {
+    id: `ver_${state}`,
+    orgId: ASSISTANT.orgId,
+    assistantId: ASSISTANT.id,
+    state,
+    config,
+    createdAt: 1_700_000_000_000,
+    publishedAt: state === "draft" ? null : 1_700_000_100_000,
+  };
+}
 
 function findChromeBinary(): string {
   const candidates = [
@@ -373,6 +397,32 @@ describe("Admin layout regressions (Chromium)", () => {
                 res.end(JSON.stringify({ tests: TESTS }));
                 return;
               }
+              if (pathname === `/assistants/${ASSISTANT.id}/versions`) {
+                res.end(
+                  JSON.stringify({
+                    versions: [
+                      versionRow("draft", DRAFT_CONFIG),
+                      versionRow("published", PUBLISHED_CONFIG),
+                    ],
+                  }),
+                );
+                return;
+              }
+              if (pathname === `/assistants/${ASSISTANT.id}/draft`) {
+                res.end(JSON.stringify({ draft: versionRow("draft", DRAFT_CONFIG) }));
+                return;
+              }
+              if (pathname === `/assistants/${ASSISTANT.id}/overview`) {
+                res.end(
+                  JSON.stringify({
+                    messages: 120,
+                    answeredShare: 0.82,
+                    todayCostMicros: 41_000,
+                    topQuestions: [{ question: "How do I install the widget?", count: 14 }],
+                  }),
+                );
+                return;
+              }
               res.end(JSON.stringify({}));
             });
           },
@@ -600,4 +650,116 @@ describe("Admin layout regressions (Chromium)", () => {
       }
     }
   }, 15_000);
+  async function waitFor(expression: string, what: string) {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (await cdp.evaluate<boolean>(`Boolean(${expression})`)) {
+        await cdp.evaluate<void>(
+          "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))",
+        );
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    throw new Error(`Timed out waiting for ${what}`);
+  }
+
+  const horizontalOverflow = () =>
+    cdp.evaluate<number>(
+      "document.documentElement.scrollWidth - document.documentElement.clientWidth",
+    );
+
+  it("has no horizontal scroll at 320px on any shell screen, drawer open or closed", async () => {
+    for (const path of [
+      "/admin/overview",
+      "/admin/reports",
+      "/admin/behaviour",
+      "/admin/tools",
+      "/admin/tests",
+    ]) {
+      await openScreen(path, 320, ".shell-main h1");
+      expect({ path, overflow: await horizontalOverflow() }).toEqual({ path, overflow: 0 });
+    }
+
+    await openScreen("/admin/behaviour", 320, ".shell-main h1");
+    await cdp.evaluate<void>(`document.querySelector("button[aria-label='Menu']").click()`);
+    await waitFor(`document.querySelector("#shell-drawer:not([hidden]) .status-badge")`, "drawer");
+    expect(await horizontalOverflow()).toBe(0);
+    const drawer = await cdp.evaluate<{ right: number; width: number }>(`(() => {
+      const r = document.querySelector("#shell-drawer").getBoundingClientRect();
+      return { right: r.right, width: r.width };
+    })()`);
+    expect(drawer.right).toBeLessThanOrEqual(320);
+  }, 30_000);
+
+  it("keeps the phone header to one short row so content starts near the top at 380px", async () => {
+    await openScreen("/admin/overview", 380, ".shell-main h1");
+    const metrics = await cdp.evaluate<{
+      headerHeight: number;
+      h1Top: number;
+      navVisible: boolean;
+      current: string;
+    }>(`(() => {
+      const header = document.querySelector("header.shell-header").getBoundingClientRect();
+      const h1 = document.querySelector(".shell-main h1").getBoundingClientRect();
+      const nav = document.querySelector("nav[aria-label='Primary']");
+      return {
+        headerHeight: header.height,
+        h1Top: h1.top,
+        navVisible: Boolean(nav && nav.getClientRects().length > 0),
+        current: document.querySelector(".shell-current")?.textContent ?? "",
+      };
+    })()`);
+    expect(metrics.headerHeight).toBeLessThanOrEqual(56);
+    expect(metrics.h1Top).toBeLessThan(110);
+    expect(metrics.navVisible).toBe(false);
+    expect(metrics.current).toBe("Overview");
+  }, 15_000);
+
+  it("lays out sidebar, content and Try it at 1280px", async () => {
+    const columns = () =>
+      cdp.evaluate<{ nav: number; main: number; tryIt: number }>(`(() => {
+        const width = (sel) => {
+          const el = document.querySelector(sel);
+          return el && el.getClientRects().length ? el.getBoundingClientRect().width : 0;
+        };
+        return { nav: width(".shell-sidebar"), main: width(".shell-main"), tryIt: width(".try-it") };
+      })()`);
+
+    await openScreen("/admin/overview", 1280, ".shell-main h1");
+    const overview = await columns();
+    expect(overview.tryIt).toBe(0);
+    expect(overview.nav).toBe(220);
+    expect(overview.main).toBe(1280 - 220);
+
+    await openScreen("/admin/behaviour", 1280, ".try-it:not([hidden])");
+    const behaviour = await columns();
+    expect(behaviour.tryIt).toBe(360);
+    expect(behaviour.main).toBe(1280 - 220 - 360);
+    expect(await horizontalOverflow()).toBe(0);
+  }, 15_000);
+
+  it("passes axe, colour contrast included, on the shell at 1280px and 380px", async () => {
+    const runAxe = async () => {
+      await cdp.evaluate<void>(axe.source);
+      return cdp.evaluate<string[]>(`axe
+        .run(document, { resultTypes: ["violations"] })
+        .then((r) =>
+          r.violations
+            .filter((v) => v.impact === "serious" || v.impact === "critical")
+            .map((v) => v.id + ": " + v.nodes.map((n) => n.target.join(" ")).join(", ")),
+        )`);
+    };
+
+    for (const width of [1280, 380]) {
+      await openScreen("/admin/behaviour", width, ".shell-main h1");
+      await waitFor(`document.querySelector(".status-badge") || ${width < 900}`, "status");
+      expect({ width, violations: await runAxe() }).toEqual({ width, violations: [] });
+    }
+
+    await openScreen("/admin/behaviour", 380, ".shell-main h1");
+    await cdp.evaluate<void>(`document.querySelector("button[aria-label='Menu']").click()`);
+    await waitFor(`document.querySelector("#shell-drawer:not([hidden]) .status-badge")`, "drawer");
+    expect({ drawer: await runAxe() }).toEqual({ drawer: [] });
+  }, 30_000);
 });

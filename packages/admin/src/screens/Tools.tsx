@@ -2,6 +2,8 @@ import { type FormEvent, useRef, useState } from "react";
 import { ApiError, deleteJson, patchJson, postJson } from "../api/client.js";
 import type { McpServerSummary, McpToolView } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { EmptyState } from "../ui/EmptyState.js";
+import { PageHeader } from "../ui/PageHeader.js";
 
 export interface ToolsProps {
   assistantId: string;
@@ -555,15 +557,10 @@ export function Tools({ assistantId }: ToolsProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Tools</h1>
-          <p className="muted">
-            Connect an external tool server (MCP) so your assistant can look things up in your own
-            systems while it answers.
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="Tools"
+        description="Connect an external tool server (MCP) so your assistant can look things up in your own systems while it answers."
+      />
 
       <CredentialWarning />
 
@@ -578,7 +575,11 @@ export function Tools({ assistantId }: ToolsProps) {
           {serversRes.error}
         </p>
       ) : servers.length === 0 ? (
-        <p className="muted">No tool servers yet. Add one below to get started.</p>
+        <EmptyState
+          icon="tools"
+          title="No tool servers yet"
+          description="Add one below to get started."
+        />
       ) : (
         <ul className="source-list">
           {servers.map((server) => (

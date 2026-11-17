@@ -9,6 +9,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
 import type { Assistant, TestResult, VersionRow } from "../src/api/types.js";
+import {
+  findAssistantButton,
+  openNewAssistantForm,
+  pickAssistant,
+  selectedAssistantId,
+} from "./support/switcher.js";
 
 function makeAssistant(id: string, name: string, allowedOrigins: string[] = []): Assistant {
   return {
@@ -452,20 +458,20 @@ describe("admin app", () => {
     window.history.replaceState(null, "", "/admin/behaviour");
     render(<App />);
 
-    const select = (await screen.findByLabelText("Assistant")) as HTMLSelectElement;
+    await findAssistantButton();
     await waitFor(() => {
-      expect(select.value).toBe("ast_1");
+      expect(selectedAssistantId()).toBe("ast_1");
     });
 
-    fireEvent.change(select, { target: { value: "ast_2" } });
-    expect(select.value).toBe("ast_2");
+    pickAssistant("ast_2");
+    expect(selectedAssistantId()).toBe("ast_2");
 
-    fireEvent.click(screen.getByRole("button", { name: "New assistant" }));
+    openNewAssistantForm();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Third Bot" } });
     fireEvent.click(screen.getByRole("button", { name: "Create assistant" }));
 
     await waitFor(() => {
-      expect((screen.getByLabelText("Assistant") as HTMLSelectElement).value).toBe("ast_3");
+      expect(selectedAssistantId()).toBe("ast_3");
     });
     // The new assistant's ingest key is shown once, in a read-only field to
     // copy (screens.test.tsx covers dismissing it).
@@ -647,8 +653,8 @@ describe("admin app", () => {
       "Conversations",
       "Gaps",
       "Sources",
-      "Tools",
       "Behaviour",
+      "Tools",
       "Widget",
       "Tests",
       "Install",
@@ -911,8 +917,7 @@ describe("admin app", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     // Switch to ast_2: its Publish button should not be blocked by ast_1's save.
-    const select = screen.getByLabelText("Assistant") as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "ast_2" } });
+    pickAssistant("ast_2");
     await waitFor(() => {
       expect((screen.getByLabelText("First thing it says") as HTMLInputElement).value).not.toBe(
         "Ast1 updated",
@@ -923,7 +928,7 @@ describe("admin app", () => {
     );
 
     // Switch back to ast_1 while save is still in flight: Publish is still disabled.
-    fireEvent.change(select, { target: { value: "ast_1" } });
+    pickAssistant("ast_1");
     await waitFor(() => {
       expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(
         true,
@@ -1070,9 +1075,8 @@ describe("admin app", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     // Switch away and back while save is still in flight.
-    const select = screen.getByLabelText("Assistant") as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "ast_2" } });
-    fireEvent.change(select, { target: { value: "ast_1" } });
+    pickAssistant("ast_2");
+    pickAssistant("ast_1");
 
     const returnedGreeting = (await screen.findByLabelText(
       "First thing it says",
@@ -1164,10 +1168,10 @@ describe("admin app", () => {
     window.history.replaceState(null, "", "/admin/behaviour");
     render(<App />);
 
-    const select = (await screen.findByLabelText("Assistant")) as HTMLSelectElement;
+    await findAssistantButton();
 
     // 1. Give assistant B an existing transcript.
-    fireEvent.change(select, { target: { value: "ast_b" } });
+    pickAssistant("ast_b");
     server.setNextChatResponse(() =>
       sseResponse([
         { event: "token", data: { text: "B existing reply" } },
@@ -1181,7 +1185,7 @@ describe("admin app", () => {
     expect(await screen.findByText("B existing reply")).toBeTruthy();
 
     // 2. Switch to assistant A and send a question that streams partially before waiting.
-    fireEvent.change(select, { target: { value: "ast_a" } });
+    pickAssistant("ast_a");
     const streamA = createControlledSseResponse();
     let signalA: AbortSignal | undefined;
     server.setNextChatResponse((_body, init) => {
@@ -1199,7 +1203,7 @@ describe("admin app", () => {
     expect(signalA?.aborted).toBe(false);
 
     // 3. Switch back to B while A is still streaming; B's input should stay enabled and Clear should only clear B.
-    fireEvent.change(select, { target: { value: "ast_b" } });
+    pickAssistant("ast_b");
     expect(await screen.findByText("B existing reply")).toBeTruthy();
     expect((screen.getByLabelText("Ask a question") as HTMLInputElement).disabled).toBe(false);
 
@@ -1212,7 +1216,7 @@ describe("admin app", () => {
     streamA.push("done", { messageId: "msg_a1", conversationId: "conv_a1" });
     streamA.close();
 
-    fireEvent.change(select, { target: { value: "ast_a" } });
+    pickAssistant("ast_a");
     expect(await screen.findByText("Partial A complete")).toBeTruthy();
 
     await waitFor(() => {
@@ -1244,7 +1248,7 @@ describe("admin app", () => {
     window.history.replaceState(null, "", "/admin/behaviour");
     render(<App />);
 
-    const select = (await screen.findByLabelText("Assistant")) as HTMLSelectElement;
+    await findAssistantButton();
 
     // Start streaming on A.
     const streamA = createControlledSseResponse();
@@ -1261,7 +1265,7 @@ describe("admin app", () => {
     expect(await screen.findByText("A working")).toBeTruthy();
 
     // Switch to B and start streaming on B concurrently.
-    fireEvent.change(select, { target: { value: "ast_b" } });
+    pickAssistant("ast_b");
     const streamB1 = createControlledSseResponse();
     let signalB1: AbortSignal | undefined;
     server.setNextChatResponse((_body, init) => {
@@ -1309,7 +1313,7 @@ describe("admin app", () => {
     // Complete A's stream and verify A was unaffected.
     streamA.push("done", { messageId: "msg_a", conversationId: "conv_a" });
     streamA.close();
-    fireEvent.change(select, { target: { value: "ast_a" } });
+    pickAssistant("ast_a");
     expect(await screen.findByText("A working")).toBeTruthy();
   });
 

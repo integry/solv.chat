@@ -7,6 +7,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import { streamDraftChat } from "../api/chat.js";
 import type { Assistant } from "../api/types.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
+import { Icon } from "../ui/Icon.js";
 
 interface Citation {
   id: string;
@@ -27,6 +28,12 @@ export interface TryItPaneProps {
   assistant: Assistant;
   /** Hides the pane without unmounting it, so the conversation is kept. */
   hidden?: boolean;
+  /** Element id, for the header toggle's `aria-controls`. */
+  id?: string;
+  /** Shows a close button that calls this. */
+  onClose?: () => void;
+  /** True when shown as a sheet over the page (narrow screens): Escape closes it. */
+  overlay?: boolean;
 }
 
 function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
@@ -40,7 +47,13 @@ function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
  * Mounted once in the shell outside `<main>` so the owner keeps their draft
  * conversation while moving between screens.
  */
-export function TryItPane({ assistant, hidden = false }: TryItPaneProps) {
+export function TryItPane({
+  assistant,
+  hidden = false,
+  id,
+  onClose,
+  overlay = false,
+}: TryItPaneProps) {
   const [turnsByAssistant, setTurnsByAssistant] = useState<Record<string, Turn[]>>({});
   const [conversationIds, setConversationIds] = useState<Record<string, string>>({});
   const [inputsByAssistant, setInputsByAssistant] = useState<Record<string, string>>({});
@@ -234,22 +247,45 @@ export function TryItPane({ assistant, hidden = false }: TryItPaneProps) {
   }
 
   return (
-    <aside className="try-it" aria-label="Try it" hidden={hidden}>
+    <aside
+      id={id}
+      className={overlay ? "try-it try-it-overlay" : "try-it"}
+      aria-label="Try it"
+      hidden={hidden}
+      onKeyDown={(event) => {
+        if (overlay && onClose && event.key === "Escape" && !event.defaultPrevented) {
+          event.preventDefault();
+          onClose();
+        }
+      }}
+    >
       <div className="try-it-header">
         <div>
           <h2 className="try-it-title">Try it</h2>
-          <p className="muted">Tests your draft</p>
+          <p className="try-it-draft">
+            <span className="badge badge-tone-info">Draft</span>
+            <span className="muted">
+              Uses your saved draft. Visitors still get the published version.
+            </span>
+          </p>
         </div>
-        {turns.length > 0 && (
-          <button type="button" className="btn btn-secondary btn-sm" onClick={handleClear}>
-            Clear
-          </button>
-        )}
+        <div className="try-it-header-actions">
+          {turns.length > 0 && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={handleClear}>
+              Clear
+            </button>
+          )}
+          {onClose && (
+            <button type="button" className="btn-icon" aria-label="Close Try it" onClick={onClose}>
+              <Icon name="close" />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="try-it-log" role="log" aria-live="polite">
         {turns.length === 0 ? (
-          <p className="muted">Ask a question to preview your draft assistant.</p>
+          <p className="muted">Ask a question to see how your draft answers.</p>
         ) : (
           turns.map((turn) => (
             <div key={turn.id} className={`turn turn-${turn.role}`}>

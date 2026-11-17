@@ -103,7 +103,9 @@ describe("Reports screen", () => {
     fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
 
     expect(await screen.findByRole("heading", { name: "Reports" })).toBeTruthy();
-    expect(screen.getByText("How your assistant did from 2026-10-16 to 2026-11-15.")).toBeTruthy();
+    expect(
+      screen.getByText("How your assistant did from 16 Oct 2026 to 15 Nov 2026."),
+    ).toBeTruthy();
 
     // Four stat cards with Overview formatting and plain explanations.
     expect(screen.getByText("42")).toBeTruthy();
@@ -155,7 +157,7 @@ describe("Reports screen", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
-    await screen.findByText("How your assistant did from 2026-08-17 to 2026-11-15.");
+    await screen.findByText("How your assistant did from 17 Aug 2026 to 15 Nov 2026.");
 
     fireEvent.change(await screen.findByLabelText("Period"), { target: { value: "7" } });
     await waitFor(() =>
@@ -166,7 +168,7 @@ describe("Reports screen", () => {
       ).toBe(true),
     );
     expect(
-      await screen.findByText("How your assistant did from 2026-11-08 to 2026-11-15."),
+      await screen.findByText("How your assistant did from 8 Nov 2026 to 15 Nov 2026."),
     ).toBeTruthy();
   });
 
@@ -235,9 +237,10 @@ describe("Reports screen", () => {
 
     fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
     expect(
-      await screen.findByText(
-        "Nothing yet for this period. Once visitors ask questions, their answers show up here.",
-      ),
+      await screen.findByRole("heading", { name: "Nothing yet for this period" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText("Once visitors ask questions, their answers show up here."),
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Download CSV" })).toBeNull();
   });
@@ -270,11 +273,7 @@ describe("Reports screen", () => {
 
       fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
       expect(await screen.findByText("$0.25")).toBeTruthy();
-      expect(
-        screen.queryByText(
-          "Nothing yet for this period. Once visitors ask questions, their answers show up here.",
-        ),
-      ).toBeNull();
+      expect(screen.queryByRole("heading", { name: "Nothing yet for this period" })).toBeNull();
 
       const downloadBtn = screen.getByRole("button", { name: "Download CSV" });
       fireEvent.click(downloadBtn);
@@ -332,7 +331,7 @@ describe("Reports screen", () => {
       render(<App />);
       fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
       expect(
-        await screen.findByText("How your assistant did from 2026-10-16 to 2026-11-15."),
+        await screen.findByText("How your assistant did from 16 Oct 2026 to 15 Nov 2026."),
       ).toBeTruthy();
       expect(screen.getByRole("button", { name: "Download CSV" })).toBeTruthy();
 
@@ -354,7 +353,7 @@ describe("Reports screen", () => {
       );
 
       expect(
-        await screen.findByText("How your assistant did from 2026-11-08 to 2026-11-15."),
+        await screen.findByText("How your assistant did from 8 Nov 2026 to 15 Nov 2026."),
       ).toBeTruthy();
       expect(screen.getByText("11")).toBeTruthy();
 

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ApiError, postJson } from "../api/client.js";
 import type { InstallInfo } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { PageHeader } from "../ui/PageHeader.js";
 
 export interface InstallProps {
   assistantId: string;
@@ -55,12 +56,7 @@ export function Install({ assistantId }: InstallProps) {
 
   return (
     <div className="screen">
-      <div className="screen-header">
-        <div>
-          <h1>Install</h1>
-          <p className="muted">Add the chat widget to your website.</p>
-        </div>
-      </div>
+      <PageHeader title="Install" description="Add the chat widget to your website." />
 
       {installRes.status === "loading" && !installRes.value ? (
         <p className="muted">Loading install snippet…</p>

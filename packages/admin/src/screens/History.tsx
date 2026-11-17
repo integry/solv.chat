@@ -3,6 +3,7 @@ import { ApiError, postJson } from "../api/client.js";
 import type { VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { useAssistantMutation } from "../shell/useAssistantMutations.js";
+import { formatDateTime } from "../ui/format.js";
 
 export interface HistoryProps {
   assistantId: string;
@@ -84,7 +85,7 @@ export function History({ assistantId, refreshKey = 0, onRestored }: HistoryProp
                   <span className={`badge badge-${version.state}`}>
                     {STATE_LABELS[version.state]}
                   </span>
-                  <span className="history-date">{new Date(timestamp).toLocaleString()}</span>
+                  <span className="history-date">{formatDateTime(timestamp)}</span>
                 </div>
                 {version.state === "archived" && (
                   <button
