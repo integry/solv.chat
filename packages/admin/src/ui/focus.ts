@@ -53,6 +53,11 @@ export function useFocusTrap(
 
   function onKeyDown(event: KeyboardEvent) {
     if (!active || event.defaultPrevented) return;
+    // React bubbles events from portals through the component tree, so a
+    // dialog opened from inside this container (rendered into document.body)
+    // reaches this handler too. That dialog owns its keys; leave them alone.
+    const root = ref.current;
+    if (root && event.target instanceof Node && !root.contains(event.target)) return;
     if (event.key === "Escape") {
       if (optionsRef.current.onEscape) {
         event.preventDefault();
@@ -61,9 +66,7 @@ export function useFocusTrap(
       }
       return;
     }
-    if (event.key !== "Tab") return;
-    const root = ref.current;
-    if (!root) return;
+    if (event.key !== "Tab" || !root) return;
     const items = focusableWithin(root);
     const first = items[0];
     const last = items[items.length - 1];

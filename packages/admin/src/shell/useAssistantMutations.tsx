@@ -3,6 +3,8 @@ import {
   type ReactNode,
   useCallback,
   useContext,
+  useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -20,6 +22,12 @@ export interface AssistantMutationState {
   tick: number;
   /** Kind of the most recent mutation that completed successfully for this assistant. */
   lastKind: AssistantMutationKind | null;
+  /**
+   * True while a mounted editor (Behaviour, Widget) holds edits that are not
+   * saved. Publishing sends the saved draft, so every publish entry point
+   * waits for these to be saved first.
+   */
+  unsaved: boolean;
 }
 
 export type MutationRunResult<T> = { ran: true; value: T } | { ran: false };
@@ -35,6 +43,7 @@ interface Coordinator {
     kind: AssistantMutationKind,
     fn: () => Promise<T>,
   ) => Promise<MutationRunResult<T>>;
+  setUnsaved: (assistantId: string, reporter: string, unsaved: boolean) => void;
 }
 
 const AssistantMutationsContext = createContext<Coordinator | null>(null);
@@ -47,6 +56,8 @@ function useLocalCoordinator(): Coordinator {
   const [ticksByAssistant, setTicksByAssistant] = useState<
     Record<string, { tick: number; lastKind: AssistantMutationKind }>
   >({});
+  // Ids of the editors reporting unsaved edits, per assistant.
+  const [unsavedByAssistant, setUnsavedByAssistant] = useState<Record<string, string[]>>({});
 
   const getState = useCallback(
     (assistantId: string): AssistantMutationState => {
@@ -60,10 +71,24 @@ function useLocalCoordinator(): Coordinator {
         busy: active !== null,
         tick: entry?.tick ?? 0,
         lastKind: entry?.lastKind ?? null,
+        unsaved: (unsavedByAssistant[assistantId]?.length ?? 0) > 0,
       };
     },
-    [activeByAssistant, ticksByAssistant],
+    [activeByAssistant, ticksByAssistant, unsavedByAssistant],
   );
+
+  const setUnsaved = useCallback((assistantId: string, reporter: string, unsaved: boolean) => {
+    setUnsavedByAssistant((prev) => {
+      const current = prev[assistantId] ?? [];
+      const has = current.includes(reporter);
+      if (has === unsaved) return prev;
+      const nextList = unsaved ? [...current, reporter] : current.filter((r) => r !== reporter);
+      const next = { ...prev };
+      if (nextList.length > 0) next[assistantId] = nextList;
+      else delete next[assistantId];
+      return next;
+    });
+  }, []);
 
   const run = useCallback(
     async <T,>(
@@ -99,7 +124,7 @@ function useLocalCoordinator(): Coordinator {
     [],
   );
 
-  return useMemo(() => ({ getState, run }), [getState, run]);
+  return useMemo(() => ({ getState, run, setUnsaved }), [getState, run, setUnsaved]);
 }
 
 /**
@@ -129,4 +154,20 @@ export function useAssistantMutation(assistantId: string): AssistantMutationHand
   );
 
   return { ...state, run };
+}
+
+/**
+ * Tells the shell whether this editor has unsaved edits for `assistantId`, so
+ * publish controls outside the screen (the header) can wait for a save. The
+ * report is withdrawn when the editor unmounts.
+ */
+export function useReportUnsavedEdits(assistantId: string, unsaved: boolean): void {
+  const ctx = useContext(AssistantMutationsContext);
+  const reporter = useId();
+  const setUnsaved = ctx?.setUnsaved;
+  useEffect(() => {
+    if (!setUnsaved) return;
+    setUnsaved(assistantId, reporter, unsaved);
+    return () => setUnsaved(assistantId, reporter, false);
+  }, [setUnsaved, assistantId, reporter, unsaved]);
 }

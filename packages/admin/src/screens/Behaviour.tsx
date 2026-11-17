@@ -4,7 +4,7 @@ import { ApiError, putJson } from "../api/client.js";
 import { FailedTestsError, publishAssistant } from "../api/publish.js";
 import type { TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { useAssistantMutation } from "../shell/useAssistantMutations.js";
+import { useAssistantMutation, useReportUnsavedEdits } from "../shell/useAssistantMutations.js";
 import { formatDateTime } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
 import { FailedTestsPanel } from "./FailedTestsPanel.js";
@@ -149,6 +149,19 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     }
   }, [assistantId, draft.value?.draft.id, initializedFor, savedBehaviour]);
 
+  const current: BehaviourConfig = {
+    greeting,
+    persona,
+    fallbackText,
+    suggestedQuestions: parseQuestions(questionsText),
+  };
+  const unsaved =
+    savedBehaviour !== undefined &&
+    initializedFor !== null &&
+    !behaviourEqual(current, savedBehaviour);
+  // The header's Publish sends the saved draft too, so it waits for a save.
+  useReportUnsavedEdits(assistantId, unsaved);
+
   if (draft.status === "loading" && !savedBehaviour) {
     return <p className="muted">Loading behaviour…</p>;
   }
@@ -162,14 +175,6 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   if (!savedBehaviour) {
     return null;
   }
-
-  const current: BehaviourConfig = {
-    greeting,
-    persona,
-    fallbackText,
-    suggestedQuestions: parseQuestions(questionsText),
-  };
-  const unsaved = initializedFor !== null && !behaviourEqual(current, savedBehaviour);
 
   async function handleSave(event: FormEvent) {
     event.preventDefault();
@@ -290,6 +295,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         <FailedTestsPanel
           run={failedRun}
           busy={busy}
+          publishBlocked={unsaved}
           onFix={() => setFailedRun(null)}
           onPublishAnyway={() => void handlePublish(true, failedRun.id)}
         />

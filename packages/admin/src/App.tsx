@@ -381,13 +381,12 @@ function AdminShell({
                   <Icon name="close" size={20} />
                 </button>
               </div>
-              {assistantChrome && (
-                <div className="drawer-top">
-                  {switcher}
-                  {publishControls}
-                </div>
-              )}
-              {!assistantChrome && switcher}
+              {/* One stable parent on every screen: moving the switcher between
+                  parents would remount it and lose a half-filled New assistant form. */}
+              <div className="drawer-top" hidden={!assistantChrome}>
+                {switcher}
+                {publishControls}
+              </div>
               {navigation}
               <div className="drawer-bottom">
                 {headerEnd}

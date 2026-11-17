@@ -117,10 +117,13 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
 
   if (!snapshot) return null;
   const { state, published } = snapshot;
-  const canPublish = state !== "live" && !mutation.busy;
+  // Publishing sends the saved draft, so edits still open on the screen would
+  // be left out; the owner saves them first, as the screen's own Publish asks.
+  const { unsaved } = mutation;
+  const canPublish = state !== "live" && !mutation.busy && !unsaved;
 
   async function handlePublish(force = false, runId?: string) {
-    if (mutation.busy) return;
+    if (mutation.busy || mutation.unsaved) return;
     try {
       const result = await mutation.run("publishing", () =>
         publishAssistant(assistantId, force, runId),
@@ -170,7 +173,11 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
             className="btn btn-primary btn-sm"
             disabled={!canPublish}
             title={
-              state === "live" ? "Nothing new to publish." : "Runs your tests, then publishes."
+              unsaved
+                ? "Save your changes before publishing."
+                : state === "live"
+                  ? "Nothing new to publish."
+                  : "Runs your tests, then publishes."
             }
             onClick={() => void handlePublish(false)}
           >
@@ -216,6 +223,7 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
           <FailedTestsPanel
             run={failedRun}
             busy={mutation.busy}
+            publishBlocked={unsaved}
             onFix={() => setFailedRun(null)}
             onPublishAnyway={() => void handlePublish(true, failedRun.id)}
           />

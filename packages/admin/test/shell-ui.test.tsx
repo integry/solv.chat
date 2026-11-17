@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Assistant, VersionRow } from "../src/api/types.js";
 import { App, type HeaderSlotProps, type MountAdminOptions } from "../src/index.js";
 import { expectNoSeriousA11yViolations } from "./support/axe.js";
-import { assistantButton, findAssistantButton, selectedAssistantId } from "./support/switcher.js";
+import {
+  assistantButton,
+  findAssistantButton,
+  openNewAssistantForm,
+  selectedAssistantId,
+} from "./support/switcher.js";
 
 type Config = VersionRow["config"];
 
@@ -64,6 +69,8 @@ function installServer(
     if (path === "/api/admin/assistants" && method === "GET") {
       return Response.json({ assistants });
     }
+    const single = assistants.find((a) => path === `/api/admin/assistants/${a.id}`);
+    if (single && method === "GET") return Response.json({ assistant: single });
     const match = /^\/api\/admin\/assistants\/([^/]+)\/(versions|draft|publish)$/.exec(path);
     const state = match ? states.get(match[1] ?? "") : undefined;
     if (match && state) {
@@ -464,6 +471,153 @@ describe("publish status", () => {
     fireEvent.change(greeting, { target: { value: "Welcome!" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await within(header()).findByText("Unpublished changes")).toBeTruthy();
+  });
+});
+
+describe("header Publish with unsaved edits on the screen", () => {
+  it.each([
+    ["behaviour", "First thing it says"],
+    ["widget", "Title"],
+  ] as const)("waits for %s edits to be saved first", async (screenId, fieldLabel) => {
+    const server = oneAssistant(CHANGED);
+    go(`/admin/${screenId}`);
+    render(<App />);
+    const field = (await screen.findByLabelText(fieldLabel)) as HTMLInputElement;
+    await waitFor(() => expect(field.value).not.toBe(""));
+    await within(header()).findByText("Unpublished changes");
+    const publish = within(header()).getByRole("button", {
+      name: "Publish draft",
+    }) as HTMLButtonElement;
+    expect(publish.disabled).toBe(false);
+
+    fireEvent.change(field, { target: { value: "Not saved yet" } });
+    await waitFor(() => expect(publish.disabled).toBe(true));
+    expect(publish.title).toBe("Save your changes before publishing.");
+    fireEvent.click(publish);
+    expect(server.calls.some((c) => c.path.endsWith("/publish"))).toBe(false);
+
+    // Saving lets the header publish again, and it publishes what was saved.
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(publish.disabled).toBe(false));
+    await act(async () => {
+      fireEvent.click(publish);
+    });
+    await within(header()).findByText("Live");
+    const published = server.states.get("ast_1")?.published;
+    const value =
+      screenId === "behaviour" ? published?.behaviour.greeting : published?.widget.title;
+    expect(value).toBe("Not saved yet");
+  });
+
+  it("disables Publish anyway in the failed-tests dialog while edits are unsaved", async () => {
+    const server = installServer(
+      [{ assistant: makeAssistant("ast_1", "Docs Bot"), state: structuredClone(CHANGED) }],
+      { failTests: true },
+    );
+    go("/admin/behaviour");
+    render(<App />);
+    const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
+    await waitFor(() => expect(greeting.value).toBe("Hello there"));
+    fireEvent.click(await within(header()).findByRole("button", { name: "Publish draft" }));
+    const dialog = await screen.findByRole("dialog", { name: "Not published" });
+    const anyway = within(dialog).getByRole("button", {
+      name: "Publish anyway",
+    }) as HTMLButtonElement;
+    await waitFor(() => expect(anyway.disabled).toBe(false));
+
+    fireEvent.change(greeting, { target: { value: "Edited behind the dialog" } });
+    await waitFor(() => expect(anyway.disabled).toBe(true));
+    expect(within(dialog).getByText("Save your changes before publishing.")).toBeTruthy();
+    fireEvent.click(anyway);
+    const forced = server.calls.filter(
+      (c) => c.path.endsWith("/publish") && (c.body as { force?: boolean })?.force === true,
+    );
+    expect(forced).toHaveLength(0);
+  });
+});
+
+describe("dialogs opened from the narrow-screen drawer", () => {
+  it("keep Tab inside the dialog instead of the drawer behind it", async () => {
+    setNarrow(true);
+    installServer(
+      [{ assistant: makeAssistant("ast_1", "Docs Bot"), state: structuredClone(CHANGED) }],
+      { failTests: true },
+    );
+    go("/admin/sources");
+    render(<App />);
+    await screen.findByRole("heading", { name: "Sources", level: 1 });
+    fireEvent.click(within(header()).getByRole("button", { name: "Menu" }));
+    const drawer = screen.getByRole("dialog", { name: "Menu" });
+    await within(drawer).findByText("Unpublished changes");
+
+    // Discard confirmation: Cancel is first, so Tab is normal traversal.
+    fireEvent.click(within(drawer).getByRole("button", { name: "More publish options" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Discard changes" }));
+    const confirm = screen.getByRole("dialog", { name: "Discard unpublished changes?" });
+    const cancel = within(confirm).getByRole("button", { name: "Cancel" });
+    expect(document.activeElement).toBe(cancel);
+    expect(fireEvent.keyDown(cancel, { key: "Tab" })).toBe(true);
+    expect(document.activeElement).toBe(cancel);
+    // Wrapping at the dialog's edge is still the dialog's own.
+    fireEvent.keyDown(cancel, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(
+      within(confirm).getByRole("button", { name: "Discard changes" }),
+    );
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Discard unpublished changes?" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Menu" })).toBe(drawer);
+
+    // The failed-tests dialog from the drawer's Publish behaves the same.
+    fireEvent.click(within(drawer).getByRole("button", { name: "Publish draft" }));
+    const failed = await screen.findByRole("dialog", { name: "Not published" });
+    const fix = within(failed).getByRole("button", { name: "Go back and fix it" });
+    await waitFor(() => expect((fix as HTMLButtonElement).disabled).toBe(false));
+    fix.focus();
+    expect(fireEvent.keyDown(fix, { key: "Tab" })).toBe(true);
+    expect(document.activeElement).toBe(fix);
+  });
+});
+
+describe("narrow-screen switcher on unscoped host screens", () => {
+  it("keeps a half-filled New assistant form across an unscoped screen", async () => {
+    setNarrow(true);
+    oneAssistant(LIVE);
+    const options: MountAdminOptions = {
+      extraNavItems: [
+        {
+          id: "billing",
+          label: "Billing",
+          path: "/admin/billing",
+          section: "Account",
+          assistantScoped: false,
+        },
+      ],
+      extraScreens: { billing: Billing },
+    };
+    render(<App options={options} />);
+    const menu = await screen.findByRole("button", { name: "Menu" });
+    fireEvent.click(menu);
+    await findAssistantButton();
+    openNewAssistantForm();
+    const name = screen.getByLabelText("Name") as HTMLInputElement;
+    fireEvent.change(name, { target: { value: "Half typed" } });
+
+    fireEvent.click(menu);
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Menu" })).getByRole("link", { name: "Billing" }),
+    );
+    await screen.findByRole("heading", { name: "Billing", level: 1 });
+    fireEvent.click(menu);
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+    expect((document.querySelector(".switcher") as HTMLElement).hidden).toBe(true);
+
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Menu" })).getByRole("link", { name: "Overview" }),
+    );
+    fireEvent.click(menu);
+    const again = screen.getByLabelText("Name") as HTMLInputElement;
+    expect(again).toBe(name);
+    expect(again.value).toBe("Half typed");
   });
 });
 

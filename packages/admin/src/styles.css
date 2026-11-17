@@ -391,6 +391,7 @@ a {
 }
 
 .switcher[hidden],
+.drawer-top[hidden],
 .try-it[hidden] {
   display: none;
 }

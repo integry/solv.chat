@@ -4,7 +4,7 @@ import { ApiError, patchJson, putJson } from "../api/client.js";
 import { FailedTestsError, publishAssistant } from "../api/publish.js";
 import type { Assistant, TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { useAssistantMutation } from "../shell/useAssistantMutations.js";
+import { useAssistantMutation, useReportUnsavedEdits } from "../shell/useAssistantMutations.js";
 import { formatDateTime } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
 import { FailedTestsPanel } from "./FailedTestsPanel.js";
@@ -228,6 +228,26 @@ export function Widget({ assistantId }: WidgetProps) {
     }
   }, [assistantId, initOriginsKey, savedAssistant]);
 
+  const currentWidget: WidgetConfig = { title, accentColor, position };
+  const currentOrigins = parseOrigins(originsText);
+  const currentActions: ActionsConfig = {
+    builtins,
+    allowedOrigins: parseOrigins(actionOriginsText),
+  };
+  const widgetChanged =
+    savedWidget !== undefined && initWidgetKey !== null && !widgetEqual(currentWidget, savedWidget);
+  const actionsChanged =
+    savedActions !== undefined &&
+    initWidgetKey !== null &&
+    !actionsEqual(currentActions, savedActions);
+  const originsChanged =
+    savedAssistant !== undefined &&
+    initOriginsKey !== null &&
+    !arraysEqual(currentOrigins, savedAssistant.allowedOrigins);
+  const unsaved = widgetChanged || originsChanged || actionsChanged;
+  // The header's Publish sends the saved draft too, so it waits for a save.
+  useReportUnsavedEdits(assistantId, unsaved);
+
   if (
     (draftRes.status === "loading" && !savedWidget) ||
     (assistantRes.status === "loading" && !savedAssistant)
@@ -251,18 +271,6 @@ export function Widget({ assistantId }: WidgetProps) {
   if (!savedWidget || !savedActions || !savedAssistant) {
     return null;
   }
-
-  const currentWidget: WidgetConfig = { title, accentColor, position };
-  const currentOrigins = parseOrigins(originsText);
-  const currentActions: ActionsConfig = {
-    builtins,
-    allowedOrigins: parseOrigins(actionOriginsText),
-  };
-  const widgetChanged = initWidgetKey !== null && !widgetEqual(currentWidget, savedWidget);
-  const actionsChanged = initWidgetKey !== null && !actionsEqual(currentActions, savedActions);
-  const originsChanged =
-    initOriginsKey !== null && !arraysEqual(currentOrigins, savedAssistant.allowedOrigins);
-  const unsaved = widgetChanged || originsChanged || actionsChanged;
 
   async function handleSave(event: FormEvent) {
     event.preventDefault();
@@ -431,6 +439,7 @@ export function Widget({ assistantId }: WidgetProps) {
         <FailedTestsPanel
           run={failedRun}
           busy={busy}
+          publishBlocked={unsaved}
           onFix={() => setFailedRun(null)}
           onPublishAnyway={() => void handlePublish(true, failedRun.id)}
         />
