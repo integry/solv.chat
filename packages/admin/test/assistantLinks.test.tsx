@@ -211,6 +211,50 @@ describe("links to an assistant's own screens", () => {
     expect(paths.filter((p) => p.startsWith(`/api/admin/assistants/${FIRST.id}/`))).toEqual([]);
   });
 
+  it("keeps the second assistant in the Gaps address, so a reload shows it again", async () => {
+    const { paths } = installServer();
+    // The address a question link leaves behind, with no handed-over answer.
+    window.history.pushState(null, "", `/admin/gaps?assistant=${SECOND.id}`);
+    render(<App />);
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${SECOND.id}/gaps`));
+    expect(await screen.findByRole("heading", { name: "No unanswered questions" })).toBeTruthy();
+    // Gaps takes consumed parameters out of the address but leaves the assistant.
+    expect(window.location.pathname).toBe("/admin/gaps");
+    expect(window.location.search).toBe(`?assistant=${SECOND.id}`);
+
+    // A reload: a fresh shell started from the address Gaps left behind.
+    cleanup();
+    paths.length = 0;
+    render(<App />);
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${SECOND.id}/gaps`));
+    expect(selectedAssistantId()).toBe(SECOND.id);
+    expect(paths.filter((p) => p.startsWith(`/api/admin/assistants/${FIRST.id}/`))).toEqual([]);
+  });
+
+  it("drops a handed-over answer from the Gaps address but keeps its assistant", async () => {
+    const { paths } = installServer();
+    const handedOver = new URLSearchParams({
+      answer: "msg_1",
+      question: "Do you ship to Spain?",
+      assistant: SECOND.id,
+    });
+    window.history.pushState(null, "", `/admin/gaps?${handedOver.toString()}`);
+    render(<App />);
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${SECOND.id}/gaps`));
+    expect(((await screen.findByLabelText("Question")) as HTMLInputElement).value).toBe(
+      "Do you ship to Spain?",
+    );
+    expect(window.location.search).toBe(`?assistant=${SECOND.id}`);
+
+    cleanup();
+    paths.length = 0;
+    render(<App />);
+    await waitFor(() => expect(paths).toContain(`/api/admin/assistants/${SECOND.id}/gaps`));
+    expect(selectedAssistantId()).toBe(SECOND.id);
+    // The editor does not reopen on a reload.
+    expect(screen.queryByLabelText("Question")).toBeNull();
+  });
+
   it("leaves Providers, which is for the whole organisation, without an assistant", async () => {
     installServer();
     const link = await linkOnSecondAssistant(

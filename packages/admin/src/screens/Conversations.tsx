@@ -2,7 +2,7 @@ import { toConversationSearch } from "@solvchat/core";
 import { useEffect, useId, useState } from "react";
 import type { ConversationSummary, ConversationsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { navigateTo, readQueryParam } from "../routing.js";
+import { assistantPath, navigateTo, readQueryParam } from "../routing.js";
 import { RelativeTime } from "../ui/DateText.js";
 import { EmptyState } from "../ui/EmptyState.js";
 import { ErrorState } from "../ui/ErrorState.js";
@@ -72,10 +72,10 @@ function useOpenConversationId(assistantId: string): string | null {
   const otherAssistant = address.assistant !== null && address.assistant !== assistantId;
   useEffect(() => {
     if (otherAssistant && address.id !== null) {
-      window.history.replaceState(window.history.state, "", LIST_PATH);
+      window.history.replaceState(window.history.state, "", assistantPath(LIST_PATH, assistantId));
       setAddress({ id: null, assistant: null });
     }
-  }, [otherAssistant, address.id]);
+  }, [otherAssistant, address.id, assistantId]);
   return otherAssistant ? null : address.id;
 }
 
@@ -165,7 +165,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
         assistantId={assistantId}
         conversationId={openId}
         onBack={() => {
-          navigateTo(LIST_PATH);
+          navigateTo(assistantPath(LIST_PATH, assistantId));
           listRes.reload();
         }}
       />

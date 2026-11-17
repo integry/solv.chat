@@ -17,9 +17,17 @@ export interface ConversationProps {
   onBack: () => void;
 }
 
-/** Where "Write an answer for this" goes: Gaps, with the editor open and filled in. */
-export function gapAnswerPath(fromMessageId: string, question: string): string {
-  const params = new URLSearchParams({ answer: fromMessageId, question });
+/**
+ * Where "Write an answer for this" goes: Gaps, with the editor open and filled
+ * in. It names the assistant, so once Gaps has taken the question out of the
+ * address, a reload still shows this assistant.
+ */
+export function gapAnswerPath(
+  assistantId: string,
+  fromMessageId: string,
+  question: string,
+): string {
+  const params = new URLSearchParams({ answer: fromMessageId, question, assistant: assistantId });
   return `/admin/gaps?${params.toString()}`;
 }
 
@@ -193,7 +201,9 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                         onClick={() =>
                           // The reply's own id: the engine links the answer
                           // through the question the reply records.
-                          navigateTo(gapAnswerPath(turn.id, questionTurn?.content ?? ""))
+                          navigateTo(
+                            gapAnswerPath(assistantId, turn.id, questionTurn?.content ?? ""),
+                          )
                         }
                       >
                         Write an answer for this

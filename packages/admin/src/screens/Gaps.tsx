@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, postJson } from "../api/client.js";
 import type { GapSummary, GapsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
-import { assistantPath, clearQueryParams, readQueryParam } from "../routing.js";
+import { assistantPath, dropQueryParams, readQueryParam } from "../routing.js";
 import { RelativeTime } from "../ui/DateText.js";
 import { EmptyState } from "../ui/EmptyState.js";
 import { ErrorState } from "../ui/ErrorState.js";
@@ -52,9 +52,10 @@ export function Gaps({ assistantId }: GapsProps) {
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
   // The handed-over question is now in state; drop it from the address so a
-  // reload does not open the editor again.
+  // reload does not open the editor again. The assistant stays named, so the
+  // reload shows this assistant's gaps and not the first one's.
   useEffect(() => {
-    clearQueryParams();
+    dropQueryParams(["answer", "question"]);
   }, []);
 
   const page = gapsRes.value;

@@ -217,6 +217,9 @@ function installServer(options: ServerOptions = {}) {
     if (url.pathname === `/api/admin/assistants/${OTHER_ASSISTANT.id}/conversations`) {
       return Response.json({ conversations: [], total: 0, limit: 25, offset: 0 });
     }
+    if (url.pathname === `/api/admin/assistants/${OTHER_ASSISTANT.id}/gaps` && method === "GET") {
+      return Response.json({ gaps: [], total: 0, limit: 25, offset: 0 });
+    }
     if (url.pathname === `${base}/overview`) {
       if (typeof options.overview === "function") return options.overview();
       return Response.json(options.overview ?? overview());
@@ -590,7 +593,8 @@ describe("Monitor screens", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Back to conversations" }));
       expect(await screen.findByRole("link", { name: /Do you ship to Spain\?/ })).toBeTruthy();
-      expect(window.location.search).toBe("");
+      // The list still names its assistant, so a reload shows the same one.
+      expect(window.location.search).toBe("?assistant=ast_1");
     });
 
     it("goes back to the list when Conversations is picked in the sidebar", async () => {
@@ -776,8 +780,9 @@ describe("Monitor screens", () => {
       expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe(
         "Do you ship to Spain?",
       );
-      // The handed-over question leaves the address, so a reload does not reopen it.
-      expect(window.location.search).toBe("");
+      // The handed-over question leaves the address, so a reload does not reopen
+      // it; the assistant stays, so the reload shows the same assistant.
+      expect(window.location.search).toBe(`?assistant=${ASSISTANT.id}`);
 
       fireEvent.change(screen.getByLabelText("Answer"), { target: { value: "Yes, in 3 days." } });
       fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
@@ -800,7 +805,39 @@ describe("Monitor screens", () => {
       expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
       expect(screen.queryByText("I could not find that.")).toBeNull();
       expect(screen.queryByRole("button", { name: "Add to tests" })).toBeNull();
-      expect(window.location.search).toBe("");
+      // The address now names the assistant on show, not the one it came from.
+      expect(window.location.search).toBe(`?assistant=${OTHER_ASSISTANT.id}`);
+    });
+
+    it("keeps the second assistant in the address when Back and Write an answer leave a conversation", async () => {
+      const { calls } = installServer({ twoAssistants: true });
+      await open(`/admin/conversations?id=cnv_2&assistant=${OTHER_ASSISTANT.id}`);
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Back to conversations" }));
+      expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
+      expect(window.location.search).toBe(`?assistant=${OTHER_ASSISTANT.id}`);
+
+      // Reopen it (what Back in the browser does) and hand a question to Gaps.
+      act(() => {
+        window.history.pushState(
+          null,
+          "",
+          `/admin/conversations?id=cnv_2&assistant=${OTHER_ASSISTANT.id}`,
+        );
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Write an answer for this" }));
+      expect(await screen.findByRole("heading", { name: "Gaps", level: 1 })).toBeTruthy();
+      await waitFor(() =>
+        expect(
+          calls.some((c) => c.path === `/api/admin/assistants/${OTHER_ASSISTANT.id}/gaps`),
+        ).toBe(true),
+      );
+      expect(window.location.pathname).toBe("/admin/gaps");
+      expect(window.location.search).toBe(`?assistant=${OTHER_ASSISTANT.id}`);
+      expect(selectedAssistantId()).toBe(OTHER_ASSISTANT.id);
     });
 
     it("opens a shared link under the assistant it names", async () => {

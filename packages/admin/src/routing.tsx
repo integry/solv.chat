@@ -109,11 +109,18 @@ export function readQueryParam(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name);
 }
 
-/** Drops query parameters a screen has consumed, without a new history entry. */
-export function clearQueryParams(): void {
-  if (window.location.search !== "") {
-    window.history.replaceState(window.history.state, "", window.location.pathname);
-  }
+/**
+ * Drops the named query parameters a screen has consumed, without a new
+ * history entry. Others stay: `assistant` in particular, so a reload of the
+ * address still shows the same assistant.
+ */
+export function dropQueryParams(names: readonly string[]): void {
+  const params = new URLSearchParams(window.location.search);
+  if (!names.some((name) => params.has(name))) return;
+  for (const name of names) params.delete(name);
+  const query = params.toString();
+  const address = query === "" ? window.location.pathname : `${window.location.pathname}?${query}`;
+  window.history.replaceState(window.history.state, "", address);
 }
 
 export function useRoute(
