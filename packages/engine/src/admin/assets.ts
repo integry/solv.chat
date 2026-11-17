@@ -1,3 +1,4 @@
+import { ADMIN_CSP, ADMIN_PREVIEW_CSP } from "@solvchat/core";
 import { ADMIN_ASSETS, ADMIN_HTML } from "../adminBundle.js";
 
 export interface AdminAssetEntry {
@@ -16,16 +17,8 @@ export function assetBody(asset: AdminAssetEntry): string | ArrayBuffer {
   return bytes.buffer;
 }
 
-const ADMIN_CSP = [
-  "default-src 'none'",
-  "script-src 'self'",
-  "style-src 'self'",
-  "connect-src 'self'",
-  "img-src 'self'",
-  "base-uri 'self'",
-  "form-action 'self'",
-  "frame-ancestors 'none'",
-].join("; ");
+/** The Widget screen's preview page: unhashed, so it is revalidated, not cached for a year. */
+const PREVIEW_PAGE = "/admin/preview.html";
 
 /**
  * Serves the admin bundle. Any unmatched /admin path returns index.html so
@@ -34,17 +27,26 @@ const ADMIN_CSP = [
  *
  * no-store on the HTML and a long max-age on hashed assets: the HTML names the
  * current asset hashes, so a cached HTML would keep an owner on an old build
- * indefinitely, while hashed files can never be stale by definition.
+ * indefinitely, while hashed files can never be stale by definition. Files
+ * outside /admin/assets/ (the Widget preview page, script and stylesheet) keep
+ * the same name across builds, so they are revalidated on every load.
  */
 export function adminAsset(url: URL): Response {
   const asset: AdminAssetEntry | undefined = ADMIN_ASSETS[url.pathname];
   if (asset !== undefined) {
-    return new Response(assetBody(asset), {
-      headers: {
-        "content-type": asset.type,
-        "cache-control": "public, max-age=31536000, immutable",
-      },
-    });
+    const headers: Record<string, string> = {
+      "content-type": asset.type,
+      "cache-control": url.pathname.startsWith("/admin/assets/")
+        ? "public, max-age=31536000, immutable"
+        : "no-cache",
+    };
+    if (url.pathname === PREVIEW_PAGE) {
+      headers["x-content-type-options"] = "nosniff";
+      headers["referrer-policy"] = "same-origin";
+      // Only the admin may frame it; the page repeats the rest in a <meta>.
+      headers["content-security-policy"] = `${ADMIN_PREVIEW_CSP}; frame-ancestors 'self'`;
+    }
+    return new Response(assetBody(asset), { headers });
   }
   if (url.pathname.startsWith("/admin/assets/")) {
     return Response.json({ error: "Not found." }, { status: 404 });

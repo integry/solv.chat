@@ -22,6 +22,8 @@ export interface DataTableProps<Row> {
   showCaption?: boolean;
   /** Shown instead of the table when there are no rows. */
   empty?: ReactNode;
+  /** Extra class on the table, for screen-specific column widths. */
+  className?: string;
 }
 
 /**
@@ -35,10 +37,11 @@ export function DataTable<Row>({
   caption,
   showCaption = false,
   empty,
+  className,
 }: DataTableProps<Row>) {
   if (rows.length === 0 && empty !== undefined) return <>{empty}</>;
   return (
-    <table className="data-table">
+    <table className={className ? `data-table ${className}` : "data-table"}>
       <caption className={showCaption ? "data-table-caption" : "sr-only"}>{caption}</caption>
       <thead>
         <tr>

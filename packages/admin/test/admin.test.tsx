@@ -1,3 +1,7 @@
+/**
+ * The Widget screen's preview frame would load /widget.js; the widget has its own tests.
+ * @vitest-environment-options {"settings": {"disableJavaScriptFileLoading": true, "handleDisabledFileLoadingAsSuccess": true, "navigation": {"disableChildFrameNavigation": true}}}
+ */
 import {
   CHAT_PROTOCOL_VERSION,
   defaultVersionConfig,
@@ -85,8 +89,15 @@ interface FakeServerOptions {
   signedIn?: boolean;
   assistants?: Assistant[];
   failingTests?: TestResult[];
+  /** An origin the fake API refuses although it is well formed. */
+  rejectOrigin?: string;
 }
 
+/**
+ * Confirms the shell's "Leave without saving?" dialog when it is open. Used
+ * where a test leaves a screen while its edits are still being saved: the
+ * save carries on either way, and what the test checks is what follows.
+ */
 function createDeferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -212,6 +223,15 @@ function installFakeServer(options: FakeServerOptions = {}) {
         };
         for (let i = 0; i < body.allowedOrigins.length; i++) {
           const origin = body.allowedOrigins[i] ?? "";
+          if (options.rejectOrigin !== undefined && origin === options.rejectOrigin) {
+            return Response.json(
+              {
+                error: "That is not valid.",
+                fields: [`allowedOrigins[${i}]: is already used by another assistant`],
+              },
+              { status: 400 },
+            );
+          }
           if (!origin.startsWith("https://") && !origin.startsWith("http://")) {
             return Response.json(
               {
@@ -508,18 +528,34 @@ describe("admin app", () => {
     );
   });
 
-  it("shows the API field error when Widget allowed origins are invalid", async () => {
-    installFakeServer({ signedIn: true });
+  it("catches an invalid Widget website line before saving and sends nothing", async () => {
+    const server = installFakeServer({ signedIn: true });
     window.history.replaceState(null, "", "/admin/widget");
     render(<App />);
 
-    const origins = await screen.findByLabelText("Allowed origins");
-    fireEvent.change(origins, { target: { value: "not-a-url" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
+    const origins = await screen.findByLabelText("Websites that may show the chat");
+    fireEvent.change(origins, { target: { value: "https://docs.example.com\nnot-a-url" } });
     expect(
-      await screen.findByText("must be an absolute URL such as https://example.com"),
+      await screen.findByText(
+        "Line 2 (not-a-url): must be an absolute URL such as https://example.com",
+      ),
     ).toBeTruthy();
+    expect(origins.getAttribute("aria-invalid")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(server.calls.some((c) => c.method === "PATCH")).toBe(false);
+    expect(document.activeElement).toBe(origins);
+  });
+
+  it("still shows the API's field error for a website line that looks valid", async () => {
+    installFakeServer({ signedIn: true, rejectOrigin: "https://taken.example.com" });
+    window.history.replaceState(null, "", "/admin/widget");
+    render(<App />);
+
+    const origins = await screen.findByLabelText("Websites that may show the chat");
+    fireEvent.change(origins, { target: { value: "https://taken.example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("is already used by another assistant")).toBeTruthy();
   });
 
   it("saves Widget actions.builtins and actions.allowedOrigins and maps field errors", async () => {
@@ -537,10 +573,15 @@ describe("admin app", () => {
       "Other sites it may send visitors to",
     ) as HTMLTextAreaElement;
 
-    // Invalid action origin maps actions.allowedOrigins[0] field error.
+    // An origin with a path is caught on its line before anything is sent.
     fireEvent.change(actionOrigins, { target: { value: "https://bad.example/path" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(await screen.findByText("must be an origin only, with no path")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "Line 1 (https://bad.example/path): must be an origin only, with no path",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText("Draft saved.")).toBeNull();
 
     // Valid values save cleanly.
     fireEvent.click(toggle);
@@ -699,7 +740,7 @@ describe("admin app", () => {
     render(<App />);
 
     const title = (await screen.findByLabelText("Title")) as HTMLInputElement;
-    const origins = screen.getByLabelText("Allowed origins") as HTMLTextAreaElement;
+    const origins = screen.getByLabelText("Websites that may show the chat") as HTMLTextAreaElement;
 
     fireEvent.change(origins, { target: { value: "https://first.example.com" } });
     fireEvent.change(title, { target: { value: "First Title" } });
@@ -772,8 +813,9 @@ describe("admin app", () => {
     });
     expect(screen.getByText("Unsaved changes")).toBeTruthy();
 
-    // Verify the same serialization on Widget.
+    // Verify the same serialization on Widget. Leaving with that edit asks first.
     fireEvent.click(screen.getByRole("link", { name: "Widget" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Leave without saving" }));
     const widgetTitle = (await screen.findByLabelText("Title")) as HTMLInputElement;
     fireEvent.change(widgetTitle, { target: { value: "Updated Widget" } });
 
@@ -863,7 +905,7 @@ describe("admin app", () => {
     expect(await screen.findByLabelText("Password")).toBeTruthy();
   });
 
-  it("F4: blocks Publish on Widget while a Behaviour draft save is in flight across navigation", async () => {
+  it("F4: blocks Publish while a Behaviour draft save is in flight, then moves to Widget", async () => {
     const server = installFakeServer({ signedIn: true });
     window.history.replaceState(null, "", "/admin/behaviour");
     render(<App />);
@@ -874,13 +916,16 @@ describe("admin app", () => {
     const saveDeferred = server.holdNextDraftSave();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    // Navigate to Widget while Behaviour's save is still outstanding.
+    // Ask for Widget while Behaviour's save is still outstanding: the move waits.
     fireEvent.click(screen.getByRole("link", { name: "Widget" }));
-    await screen.findByLabelText("Title");
+    expect(screen.queryByRole("button", { name: "Leave without saving" })).toBeNull();
+    expect(screen.getByLabelText("First thing it says")).toBeTruthy();
 
-    const widgetPublishBtn = screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement;
-    expect(widgetPublishBtn.disabled).toBe(true);
-    fireEvent.click(widgetPublishBtn);
+    const behaviourPublishBtn = screen.getByRole("button", {
+      name: "Publish",
+    }) as HTMLButtonElement;
+    expect(behaviourPublishBtn.disabled).toBe(true);
+    fireEvent.click(behaviourPublishBtn);
     expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/publish"))).toBe(
       false,
     );
@@ -890,14 +935,16 @@ describe("admin app", () => {
     const restoreButtons = await screen.findAllByRole("button", { name: "Restore" });
     expect((restoreButtons[0] as HTMLButtonElement).disabled).toBe(true);
 
-    // Once the save completes, Publish and Restore become enabled.
+    // Once the save completes, the move goes ahead and Widget's Publish and Restore are enabled.
     saveDeferred.resolve();
-    await waitFor(() => {
-      expect(widgetPublishBtn.disabled).toBe(false);
-      expect((restoreButtons[0] as HTMLButtonElement).disabled).toBe(false);
-    });
+    await screen.findByLabelText("Title");
+    const onWidgetPublish = screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement;
+    await waitFor(() => expect(onWidgetPublish.disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    const widgetRestore = await screen.findAllByRole("button", { name: "Restore" });
+    expect((widgetRestore[0] as HTMLButtonElement).disabled).toBe(false);
 
-    fireEvent.click(widgetPublishBtn);
+    fireEvent.click(onWidgetPublish);
     expect(await screen.findByText(/^Published \(/)).toBeTruthy();
     expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/publish"))).toBe(true);
   });
@@ -916,8 +963,17 @@ describe("admin app", () => {
     const saveDeferred = server.holdNextDraftSave();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    // Switch to ast_2: its Publish button should not be blocked by ast_1's save.
+    // Switching to ast_2 waits for ast_1's save; ast_1's Publish stays disabled meanwhile.
     pickAssistant("ast_2");
+    expect(screen.queryByRole("button", { name: "Leave without saving" })).toBeNull();
+    expect(selectedAssistantId()).toBe("ast_1");
+    expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    // Once it is saved, ast_2 opens and its Publish is not blocked.
+    saveDeferred.resolve();
+    await waitFor(() => expect(selectedAssistantId()).toBe("ast_2"));
     await waitFor(() => {
       expect((screen.getByLabelText("First thing it says") as HTMLInputElement).value).not.toBe(
         "Ast1 updated",
@@ -927,15 +983,8 @@ describe("admin app", () => {
       false,
     );
 
-    // Switch back to ast_1 while save is still in flight: Publish is still disabled.
+    // Back on ast_1, the saved greeting is there and Publish is enabled.
     pickAssistant("ast_1");
-    await waitFor(() => {
-      expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(
-        true,
-      );
-    });
-
-    saveDeferred.resolve();
     await waitFor(() => {
       expect((screen.getByRole("button", { name: "Publish" }) as HTMLButtonElement).disabled).toBe(
         false,
@@ -996,7 +1045,7 @@ describe("admin app", () => {
 
     const title = (await screen.findByLabelText("Title")) as HTMLInputElement;
     const accent = screen.getByLabelText("Accent colour") as HTMLInputElement;
-    const origins = screen.getByLabelText("Allowed origins") as HTMLTextAreaElement;
+    const origins = screen.getByLabelText("Websites that may show the chat") as HTMLTextAreaElement;
 
     fireEvent.change(title, { target: { value: "Unsaved Widget Title" } });
     fireEvent.change(accent, { target: { value: "#123456" } });
@@ -1017,7 +1066,7 @@ describe("admin app", () => {
     expect(screen.getByText("Unsaved changes")).toBeTruthy();
   });
 
-  it("F7: preserves Widget edits made while background reload is in flight after a cross-screen save", async () => {
+  it("F7: a move asked for during a Behaviour save opens Widget ready to edit once it is saved", async () => {
     const server = installFakeServer({ signedIn: true });
     window.history.replaceState(null, "", "/admin/behaviour");
     render(<App />);
@@ -1028,36 +1077,27 @@ describe("admin app", () => {
     const saveDeferred = server.holdNextDraftSave();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    // Navigate to Widget while Behaviour's save is still pending.
+    // Ask for Widget while Behaviour's save is still pending: Behaviour stays.
     fireEvent.click(screen.getByRole("link", { name: "Widget" }));
-    const title = (await screen.findByLabelText("Title")) as HTMLInputElement;
-    const origins = screen.getByLabelText("Allowed origins") as HTMLTextAreaElement;
-    expect(title.disabled).toBe(true);
-    expect(origins.disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "Leave without saving" })).toBeNull();
+    expect(window.location.pathname).toBe("/admin/behaviour");
 
-    // Hold the background reload GETs triggered when the Behaviour save finishes.
-    const assistantGetDeferred = server.holdNextAssistantGet();
-    const draftGetDeferred = server.holdNextDraftGet();
     saveDeferred.resolve();
-
+    const title = (await screen.findByLabelText("Title")) as HTMLInputElement;
+    const origins = screen.getByLabelText("Websites that may show the chat") as HTMLTextAreaElement;
+    expect(window.location.pathname).toBe("/admin/widget");
     await waitFor(() => {
       expect(title.disabled).toBe(false);
       expect(origins.disabled).toBe(false);
     });
 
-    // Edit Widget fields while the reload GETs are still pending.
-    fireEvent.change(title, { target: { value: "Edited during reload" } });
-    fireEvent.change(origins, { target: { value: "https://edited-during-reload.example.com" } });
-
-    assistantGetDeferred.resolve();
-    draftGetDeferred.resolve();
-
-    // Give effects a tick to process the resolved reload responses.
+    fireEvent.change(title, { target: { value: "Edited after the move" } });
+    fireEvent.change(origins, { target: { value: "https://edited-after-move.example.com" } });
     await waitFor(() => {
       expect(screen.getByText("Unsaved changes")).toBeTruthy();
     });
-    expect(title.value).toBe("Edited during reload");
-    expect(origins.value).toBe("https://edited-during-reload.example.com");
+    expect(title.value).toBe("Edited after the move");
+    expect(origins.value).toBe("https://edited-after-move.example.com");
   });
 
   it("F7: preserves Behaviour edits made while background reload is in flight on return", async () => {
@@ -1074,9 +1114,11 @@ describe("admin app", () => {
     const saveDeferred = server.holdNextDraftSave();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    // Switch away and back while save is still in flight.
+    // Switch away and back while save is still in flight. Picking ast_1 again
+    // drops the switch that was waiting for the save.
     pickAssistant("ast_2");
     pickAssistant("ast_1");
+    expect(selectedAssistantId()).toBe("ast_1");
 
     const returnedGreeting = (await screen.findByLabelText(
       "First thing it says",
@@ -1099,6 +1141,7 @@ describe("admin app", () => {
       expect(screen.getByText("Unsaved changes")).toBeTruthy();
     });
     expect(returnedGreeting.value).toBe("Newer edit during reload");
+    expect(selectedAssistantId()).toBe("ast_1");
   });
 
   it("F8: rejects oversized Try it messages, excludes failed exchanges from history, and caps resent history length", async () => {

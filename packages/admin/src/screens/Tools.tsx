@@ -2,8 +2,13 @@ import { type FormEvent, useRef, useState } from "react";
 import { ApiError, deleteJson, patchJson, postJson } from "../api/client.js";
 import type { McpServerSummary, McpToolView } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { ConfirmDialog } from "../ui/Dialog.js";
 import { EmptyState } from "../ui/EmptyState.js";
+import { ErrorState } from "../ui/ErrorState.js";
 import { PageHeader } from "../ui/PageHeader.js";
+import { Skeleton } from "../ui/Skeleton.js";
+import { StatusBadge } from "../ui/StatusBadge.js";
+import { Notice, useToast } from "../ui/Toast.js";
 
 export interface ToolsProps {
   assistantId: string;
@@ -115,7 +120,7 @@ function ServerForm({
   onAdded,
 }: {
   assistantId: string;
-  onAdded: (refreshError?: string) => void;
+  onAdded: (server: McpServerSummary, refreshError?: string) => void;
 }) {
   const [label, setLabel] = useState("");
   const [url, setUrl] = useState("");
@@ -150,7 +155,7 @@ function ServerForm({
       setUrl("");
       setNeedsCredential(false);
       setHeaderName("Authorization");
-      onAdded(res.refreshError);
+      onAdded(res.server, res.refreshError);
     } catch (err) {
       if (err instanceof ApiError) {
         setFieldErrors(err.fields);
@@ -164,13 +169,21 @@ function ServerForm({
   }
 
   return (
-    <form className="source-card stack" onSubmit={handleSubmit}>
-      <h2 className="section-heading">Add a tool server</h2>
+    <form
+      id="add-tool-server"
+      className="source-card stack"
+      aria-labelledby="add-tool-server-heading"
+      onSubmit={handleSubmit}
+    >
+      <h2 id="add-tool-server-heading" className="section-heading">
+        Add a tool server
+      </h2>
 
       <div className="field">
         <label htmlFor="tool-label">What this is</label>
         <input
           id="tool-label"
+          autoComplete="off"
           type="text"
           value={label}
           disabled={busy}
@@ -497,9 +510,16 @@ export function Tools({ assistantId }: ToolsProps) {
   } | null>(null);
   const nextEditSessionRef = useRef(0);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [refreshCounts, setRefreshCounts] = useState<Record<string, number>>({});
+  // What the last add or refresh in this visit said about each server. The
+  // engine does not keep a connection state, so this is only shown once known.
+  const [connection, setConnection] = useState<
+    Record<string, { ok: true } | { ok: false; message: string }>
+  >({});
+  const toast = useToast();
 
   function toggleEditor(serverId: string) {
     setConfirmDeleteId(null);
@@ -524,11 +544,14 @@ export function Tools({ assistantId }: ToolsProps) {
     try {
       await postJson(`/api/admin/mcp-servers/${serverId}/refresh`);
       setRefreshCounts((prev) => ({ ...prev, [serverId]: (prev[serverId] ?? 0) + 1 }));
+      setConnection((prev) => ({ ...prev, [serverId]: { ok: true } }));
       serversRes.reload();
     } catch (err) {
       // A 502 here means the owner's server failed, not this app; the engine's
       // message is already written for a person.
-      setActionError(err instanceof ApiError ? err.message : "Could not reach that server.");
+      const message = err instanceof ApiError ? err.message : "Could not reach that server.";
+      setConnection((prev) => ({ ...prev, [serverId]: { ok: false, message } }));
+      setActionError(message);
     } finally {
       setBusyId(null);
     }
@@ -537,48 +560,73 @@ export function Tools({ assistantId }: ToolsProps) {
   async function remove(serverId: string) {
     if (busyId !== null) return;
     setBusyId(serverId);
-    setActionError(null);
+    setDeleteError(null);
     try {
       await deleteJson(`/api/admin/mcp-servers/${serverId}`);
       setExpandedId((current) => (current === serverId ? null : current));
       setEditingSession((current) => (current?.serverId === serverId ? null : current));
       setConfirmDeleteId(null);
+      toast.success("Tool server removed.");
       serversRes.reload();
     } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : "Could not delete that server.");
+      setDeleteError(err instanceof ApiError ? err.message : "Could not delete that server.");
     } finally {
       setBusyId(null);
     }
   }
 
+  const header = (
+    <PageHeader
+      title="Tools"
+      description="Connect an external tool server (MCP) so your assistant can look things up in your own systems while it answers."
+    />
+  );
+
   if (serversRes.status === "loading" && !serversRes.value) {
-    return <p className="muted">Loading tools…</p>;
+    return (
+      <div className="screen">
+        {header}
+        <Skeleton label="Loading tools…" lines={4} />
+      </div>
+    );
   }
+
+  const deleting = servers.find((s) => s.id === confirmDeleteId) ?? null;
 
   return (
     <div className="screen">
-      <PageHeader
-        title="Tools"
-        description="Connect an external tool server (MCP) so your assistant can look things up in your own systems while it answers."
-      />
+      {header}
 
       <CredentialWarning />
 
-      {actionError && (
-        <p className="error-text" role="alert">
-          {actionError}
-        </p>
-      )}
+      {actionError && <Notice tone="error">{actionError}</Notice>}
 
       {serversRes.status === "error" ? (
-        <p className="error-text" role="alert">
-          {serversRes.error}
-        </p>
+        <ErrorState
+          title="Could not load your tool servers."
+          detail={serversRes.error}
+          onRetry={serversRes.reload}
+        />
       ) : servers.length === 0 ? (
         <EmptyState
           icon="tools"
           title="No tool servers yet"
-          description="Add one below to get started."
+          description={
+            <>
+              A tool server is a small web service from your own systems that your assistant can
+              call while it answers. For example, an order-lookup server lets it answer "Where is
+              order 1042?" with the real delivery date.
+            </>
+          }
+          action={
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => document.getElementById("tool-label")?.focus()}
+            >
+              Add a tool server
+            </button>
+          }
         />
       ) : (
         <ul className="source-list">
@@ -589,6 +637,12 @@ export function Tools({ assistantId }: ToolsProps) {
                   <div className="source-label">{server.label}</div>
                   <div className="muted">{server.url}</div>
                   <div className="source-meta">
+                    {connection[server.id] &&
+                      (connection[server.id]?.ok ? (
+                        <StatusBadge tone="success">Connected</StatusBadge>
+                      ) : (
+                        <StatusBadge tone="danger">Could not connect</StatusBadge>
+                      ))}
                     <span className="badge">
                       {server.hasSecret ? "Credential: set" : "Credential: not set"}
                     </span>
@@ -630,7 +684,8 @@ export function Tools({ assistantId }: ToolsProps) {
                     disabled={busyId === server.id}
                     onClick={() => {
                       setEditingSession(null);
-                      setConfirmDeleteId(confirmDeleteId === server.id ? null : server.id);
+                      setDeleteError(null);
+                      setConfirmDeleteId(server.id);
                     }}
                   >
                     Delete
@@ -638,28 +693,11 @@ export function Tools({ assistantId }: ToolsProps) {
                 </div>
               </div>
 
-              {confirmDeleteId === server.id && (
-                <section className="switcher-form" aria-label="Confirm delete">
-                  <p className="muted">Remove this server and its tools?</p>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      className="btn btn-primary btn-sm"
-                      disabled={busyId === server.id}
-                      onClick={() => void remove(server.id)}
-                    >
-                      {busyId === server.id ? "Deleting…" : "Confirm delete"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      disabled={busyId === server.id}
-                      onClick={() => setConfirmDeleteId(null)}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </section>
+              {connection[server.id]?.ok === false && (
+                <Notice tone="warning">
+                  {(connection[server.id] as { message: string }).message} Check the address and
+                  key, then press Refresh.
+                </Notice>
               )}
 
               {editingSession?.serverId === server.id && (
@@ -691,9 +729,36 @@ export function Tools({ assistantId }: ToolsProps) {
 
       <ServerForm
         assistantId={assistantId}
-        onAdded={(refreshError) => {
-          setActionError(refreshError ?? null);
+        onAdded={(server, refreshError) => {
+          setActionError(null);
+          setConnection((prev) => ({
+            ...prev,
+            [server.id]:
+              refreshError === undefined ? { ok: true } : { ok: false, message: refreshError },
+          }));
+          if (refreshError === undefined) {
+            toast.success(
+              `Connected to ${server.label}. Switch on the tools visitors may use, then publish.`,
+            );
+          }
+          // Show what was found straight away: the tools, off, ready to switch on.
+          setExpandedId(server.id);
           serversRes.reload();
+        }}
+      />
+
+      <ConfirmDialog
+        open={deleting !== null}
+        title={deleting ? `Delete ${deleting.label}?` : "Delete tool server?"}
+        description="Your assistant stops using its tools straight away, and its stored key is deleted. This cannot be undone."
+        confirmLabel="Delete server"
+        busyLabel="Deleting…"
+        tone="danger"
+        busy={deleting !== null && busyId === deleting.id}
+        error={deleteError}
+        onCancel={() => setConfirmDeleteId(null)}
+        onConfirm={() => {
+          if (deleting) void remove(deleting.id);
         }}
       />
     </div>

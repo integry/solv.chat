@@ -22,7 +22,10 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./styles.css": "./lib/styles.css"
+    "./styles.css": "./lib/styles.css",
+    "./preview.html": "./dist/preview.html",
+    "./preview.js": "./dist/preview.js",
+    "./preview.css": "./dist/preview.css"
   },
   "files": [
     "dist",

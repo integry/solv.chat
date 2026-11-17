@@ -1,19 +1,28 @@
 // @vitest-environment node
 
-import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultVersionConfig } from "@solvchat/core";
+import { ADMIN_CSP, ADMIN_PREVIEW_CSP, defaultVersionConfig } from "@solvchat/core";
 import axe from "axe-core";
-import { createServer, type ViteDevServer } from "vite";
+import { build, createServer, type ViteDevServer } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type {
   AnswerTest,
   Assistant,
   AssistantReport,
+  InstallInfo,
   McpServerSummary,
+  ProviderSettingsView,
+  SourceSummary,
   VersionRow,
 } from "../src/api/types.js";
 
@@ -136,6 +145,76 @@ const TESTS: AnswerTest[] = [
   },
 ];
 
+const SOURCES: SourceSummary[] = [
+  {
+    id: "src_push",
+    orgId: ASSISTANT.orgId,
+    assistantId: ASSISTANT.id,
+    kind: "push",
+    label: "Push",
+    settings: {},
+    createdAt: 1_700_000_000_000,
+    documentCount: 128,
+    lastUpdatedAt: 1_700_000_100_000,
+    indexingCount: 0,
+    failedCount: 0,
+    indexError: null,
+  },
+  {
+    id: "src_entry",
+    orgId: ASSISTANT.orgId,
+    assistantId: ASSISTANT.id,
+    kind: "entry",
+    label: "Answers you wrote",
+    settings: {},
+    createdAt: 1_700_000_000_000,
+    documentCount: 6,
+    lastUpdatedAt: 1_700_000_100_000,
+    indexingCount: 0,
+    failedCount: 0,
+    indexError: null,
+  },
+  {
+    id: "src_map",
+    orgId: ASSISTANT.orgId,
+    assistantId: ASSISTANT.id,
+    kind: "sitemap",
+    label: "a-rather-long-blog-hostname-for-wrapping.example.com",
+    settings: { url: "https://blog.example.com/sitemap.xml" },
+    createdAt: 1_700_000_000_000,
+    documentCount: 24,
+    lastUpdatedAt: 1_700_000_100_000,
+    indexingCount: 0,
+    failedCount: 2,
+    indexError: "too_long",
+  },
+];
+
+const INSTALL: InstallInfo = {
+  assistantId: ASSISTANT.id,
+  publicKey: ASSISTANT.publicKey,
+  allowedOrigins: ASSISTANT.allowedOrigins,
+  snippet: `<script src="https://chat.example.com/widget.js" defer></script>\n<solv-chat assistant="${ASSISTANT.publicKey}"></solv-chat>`,
+  lastSeen: { pageUrl: "https://docs.example.com/a/very/long/path/to/getting-started", at: 1 },
+};
+
+const PROVIDERS: ProviderSettingsView = {
+  settings: {
+    llmProvider: { value: "anthropic", source: "none" },
+    llmTier: { value: "fast", source: "environment" },
+    llmModel: { value: null, source: "none" },
+    embeddingsProvider: { value: "openai", source: "stored" },
+  },
+  keysManaged: false,
+  ownKeysAllowed: true,
+  keys: {
+    anthropic: { source: "stored", updatedAt: 1_700_000_000_000, unreadable: false },
+    openai: { source: "environment", updatedAt: null, unreadable: false },
+    openrouter: { source: "none", updatedAt: null, unreadable: false },
+  },
+  configError: null,
+};
+
 const PUBLISHED_CONFIG = defaultVersionConfig();
 const DRAFT_CONFIG = defaultVersionConfig();
 DRAFT_CONFIG.behaviour = { ...DRAFT_CONFIG.behaviour, greeting: "Hello! Ask me about the docs." };
@@ -171,6 +250,12 @@ function findChromeBinary(): string {
   );
 }
 
+interface CdpEvent {
+  method: string;
+  params: Record<string, unknown>;
+  sessionId?: string | undefined;
+}
+
 class CdpClient {
   private ws: WebSocket;
   private nextId = 1;
@@ -179,15 +264,30 @@ class CdpClient {
     { resolve: (value: unknown) => void; reject: (err: Error) => void }
   >();
 
+  private listeners = new Set<(event: CdpEvent) => void>();
+
   private constructor(ws: WebSocket) {
     this.ws = ws;
     this.ws.addEventListener("message", (event) => {
       const msg = JSON.parse(String(event.data)) as {
         id?: number;
+        method?: string;
+        params?: Record<string, unknown>;
+        sessionId?: string;
         result?: unknown;
         error?: { message?: string };
       };
-      if (msg.id === undefined) return;
+      if (msg.id === undefined) {
+        if (msg.method) {
+          const cdpEvent: CdpEvent = {
+            method: msg.method,
+            params: msg.params ?? {},
+            sessionId: msg.sessionId,
+          };
+          for (const listener of this.listeners) listener(cdpEvent);
+        }
+        return;
+      }
       const entry = this.pending.get(msg.id);
       if (!entry) return;
       this.pending.delete(msg.id);
@@ -210,26 +310,44 @@ class CdpClient {
     return new CdpClient(ws);
   }
 
-  send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  /** Events from the page and from any attached session (flattened). */
+  onEvent(listener: (event: CdpEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  send<T = unknown>(
+    method: string,
+    params: Record<string, unknown> = {},
+    sessionId?: string,
+  ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolveMsg, rejectMsg) => {
       this.pending.set(id, {
         resolve: resolveMsg as (value: unknown) => void,
         reject: rejectMsg,
       });
-      this.ws.send(JSON.stringify({ id, method, params }));
+      this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
 
-  async evaluate<T>(expression: string): Promise<T> {
+  async evaluate<T>(
+    expression: string,
+    target: { sessionId?: string; contextId?: number } = {},
+  ): Promise<T> {
     const res = await this.send<{
       result?: { value?: T };
       exceptionDetails?: { text?: string; exception?: { description?: string } };
-    }>("Runtime.evaluate", {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-    });
+    }>(
+      "Runtime.evaluate",
+      {
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+        ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
+      },
+      target.sessionId,
+    );
     if (res.exceptionDetails) {
       throw new Error(
         res.exceptionDetails.exception?.description ??
@@ -274,6 +392,9 @@ async function launchChromium(): Promise<{
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
+      // Its own process group, so cleanup can stop the renderer and GPU
+      // helpers too; they keep writing to the profile after the parent dies.
+      detached: true,
       env: {
         ...process.env,
         DBUS_SESSION_BUS_ADDRESS: "/dev/null",
@@ -362,6 +483,129 @@ async function launchChromium(): Promise<{
   }
 }
 
+/** The admin API the screens read, answered from the fixtures above. `url` is relative to /api/admin. */
+function answerAdminApi(req: IncomingMessage, res: ServerResponse): void {
+  const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+  res.setHeader("Content-Type", "application/json");
+  if (pathname === "/assistants") {
+    res.end(JSON.stringify({ assistants: [ASSISTANT] }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/mcp-servers`) {
+    res.end(JSON.stringify({ servers: SERVERS }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/report`) {
+    res.end(JSON.stringify(REPORT));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}`) {
+    res.end(JSON.stringify({ assistant: ASSISTANT }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/sources`) {
+    res.end(JSON.stringify({ sources: SOURCES }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/install`) {
+    res.end(JSON.stringify(INSTALL));
+    return;
+  }
+  if (pathname === "/providers") {
+    res.end(JSON.stringify(PROVIDERS));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/test-runs`) {
+    res.end(JSON.stringify({ runs: [] }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/tests`) {
+    res.end(JSON.stringify({ tests: TESTS }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/versions`) {
+    res.end(
+      JSON.stringify({
+        versions: [versionRow("draft", DRAFT_CONFIG), versionRow("published", PUBLISHED_CONFIG)],
+      }),
+    );
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/draft`) {
+    res.end(JSON.stringify({ draft: versionRow("draft", DRAFT_CONFIG) }));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/overview`) {
+    res.end(
+      JSON.stringify({
+        messages: 120,
+        answeredShare: 0.82,
+        todayCostMicros: 41_000,
+        topQuestions: [{ question: "How do I install the widget?", count: 14 }],
+      }),
+    );
+    return;
+  }
+  res.end(JSON.stringify({}));
+}
+
+const WORKSPACE_ROOT = resolve(ADMIN_ROOT, "../..");
+const WIDGET_BUNDLE = resolve(WORKSPACE_ROOT, "packages/widget/dist/widget.js");
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+};
+
+/**
+ * Serves a production build of the admin the way the engine Worker does
+ * (`packages/engine/src/admin/assets.ts`): the shell with the admin policy,
+ * the preview page with its own, plus `/widget.js` and the fake API. The Vite
+ * dev server cannot stand in here: its inline React preamble breaks under
+ * the policy, and it sends none.
+ */
+function serveBuiltAdmin(distDir: string): Server {
+  const indexHtml = readFileSync(resolve(distDir, "index.html"));
+  return createHttpServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname.startsWith("/api/admin/")) {
+      req.url = url.pathname.slice("/api/admin".length) + url.search;
+      answerAdminApi(req, res);
+      return;
+    }
+    if (url.pathname === "/widget.js") {
+      res.writeHead(200, { "content-type": CONTENT_TYPES[".js"] });
+      res.end(readFileSync(WIDGET_BUNDLE));
+      return;
+    }
+    if (url.pathname.startsWith("/admin/")) {
+      const file = resolve(distDir, url.pathname.slice("/admin/".length));
+      if (file.startsWith(distDir + sep) && existsSync(file) && statSync(file).isFile()) {
+        const headers: Record<string, string> = {
+          "content-type": CONTENT_TYPES[extname(file)] ?? "application/octet-stream",
+        };
+        if (url.pathname === "/admin/preview.html") {
+          headers["content-security-policy"] = `${ADMIN_PREVIEW_CSP}; frame-ancestors 'self'`;
+        }
+        res.writeHead(200, headers);
+        res.end(readFileSync(file));
+        return;
+      }
+    }
+    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
+      res.writeHead(200, {
+        "content-type": CONTENT_TYPES[".html"],
+        "x-frame-options": "DENY",
+        "content-security-policy": ADMIN_CSP,
+      });
+      res.end(indexHtml);
+      return;
+    }
+    res.writeHead(404).end();
+  });
+}
+
 describe("Admin layout regressions (Chromium)", () => {
   let viteServer: ViteDevServer;
   let baseUrl: string;
@@ -378,53 +622,7 @@ describe("Admin layout regressions (Chromium)", () => {
         {
           name: "admin-layout-test-api-stub",
           configureServer(server) {
-            server.middlewares.use("/api/admin", (req, res) => {
-              const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
-              res.setHeader("Content-Type", "application/json");
-              if (pathname === "/assistants") {
-                res.end(JSON.stringify({ assistants: [ASSISTANT] }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/mcp-servers`) {
-                res.end(JSON.stringify({ servers: SERVERS }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/report`) {
-                res.end(JSON.stringify(REPORT));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/tests`) {
-                res.end(JSON.stringify({ tests: TESTS }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/versions`) {
-                res.end(
-                  JSON.stringify({
-                    versions: [
-                      versionRow("draft", DRAFT_CONFIG),
-                      versionRow("published", PUBLISHED_CONFIG),
-                    ],
-                  }),
-                );
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/draft`) {
-                res.end(JSON.stringify({ draft: versionRow("draft", DRAFT_CONFIG) }));
-                return;
-              }
-              if (pathname === `/assistants/${ASSISTANT.id}/overview`) {
-                res.end(
-                  JSON.stringify({
-                    messages: 120,
-                    answeredShare: 0.82,
-                    todayCostMicros: 41_000,
-                    topQuestions: [{ question: "How do I install the widget?", count: 14 }],
-                  }),
-                );
-                return;
-              }
-              res.end(JSON.stringify({}));
-            });
+            server.middlewares.use("/api/admin", answerAdminApi);
           },
         },
       ],
@@ -448,11 +646,28 @@ describe("Admin layout regressions (Chromium)", () => {
       const exited = new Promise<void>((resolveExit) => {
         chromeProc.once("exit", () => resolveExit());
       });
-      chromeProc.kill("SIGKILL");
+      try {
+        if (chromeProc.pid !== undefined) process.kill(-chromeProc.pid, "SIGKILL");
+      } catch {
+        chromeProc.kill("SIGKILL");
+      }
       await Promise.race([exited, new Promise((r) => setTimeout(r, 2000))]);
     }
     if (userDataDir) {
-      rmSync(userDataDir, { recursive: true, force: true });
+      // A helper can still be flushing its cache as it exits: retry for a few
+      // seconds, then leave the folder to the OS rather than fail the run.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          rmSync(userDataDir, { recursive: true, force: true });
+          break;
+        } catch (err) {
+          if (attempt >= 20) {
+            console.warn(`Could not remove ${userDataDir}:`, err);
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
     }
     await viteServer?.close();
   });
@@ -616,40 +831,6 @@ describe("Admin layout regressions (Chromium)", () => {
     }
   }, 15_000);
 
-  it("vertically centers Tests status badges with Edit and Delete buttons at 1440px and 390px", async () => {
-    interface AlignmentMetrics {
-      badgeHeight: number;
-      buttonHeight: number;
-      badgeCenterY: number;
-      buttonCenterY: number;
-    }
-
-    const measureAlignment = () =>
-      cdp.evaluate<AlignmentMetrics[]>(`(() => {
-        return Array.from(document.querySelectorAll(".actions"))
-          .filter((actions) => actions.querySelector(".badge") && actions.querySelector("button"))
-          .map((actions) => {
-            const badge = actions.querySelector(".badge").getBoundingClientRect();
-            const button = actions.querySelector("button").getBoundingClientRect();
-            return {
-              badgeHeight: badge.height,
-              buttonHeight: button.height,
-              badgeCenterY: badge.top + badge.height / 2,
-              buttonCenterY: button.top + button.height / 2,
-            };
-          });
-      })()`);
-
-    for (const width of [1440, 390]) {
-      await openScreen("/admin/tests", width, ".actions .badge");
-      const rows = await measureAlignment();
-      expect(rows).toHaveLength(3);
-      for (const row of rows) {
-        expect(row.badgeHeight).toBeLessThan(row.buttonHeight - 2);
-        expect(Math.abs(row.badgeCenterY - row.buttonCenterY)).toBeLessThanOrEqual(1.5);
-      }
-    }
-  }, 15_000);
   async function waitFor(expression: string, what: string) {
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
@@ -668,6 +849,60 @@ describe("Admin layout regressions (Chromium)", () => {
     cdp.evaluate<number>(
       "document.documentElement.scrollWidth - document.documentElement.clientWidth",
     );
+
+  it("keeps each Tests result badge level with its row's buttons, Edit and Delete on one line, at 1440px and 390px", async () => {
+    interface RowMetrics {
+      badgeHeight: number;
+      buttonHeight: number;
+      badgeTop: number;
+      badgeBottom: number;
+      editTop: number;
+      editBottom: number;
+      deleteTop: number;
+      rowRight: number;
+      deleteRight: number;
+    }
+
+    const measureRows = () =>
+      cdp.evaluate<RowMetrics[]>(`(() => {
+        return Array.from(document.querySelectorAll(".tests-table tbody tr")).map((row) => {
+          const badge = row.querySelector(".status-badge").getBoundingClientRect();
+          const [edit, del] = Array.from(row.querySelectorAll(".actions button")).map((b) =>
+            b.getBoundingClientRect(),
+          );
+          const tr = row.getBoundingClientRect();
+          return {
+            badgeHeight: badge.height,
+            buttonHeight: edit.height,
+            badgeTop: badge.top,
+            badgeBottom: badge.bottom,
+            editTop: edit.top,
+            editBottom: edit.bottom,
+            deleteTop: del.top,
+            rowRight: tr.right,
+            deleteRight: del.right,
+          };
+        });
+      })()`);
+
+    for (const width of [1440, 390]) {
+      await openScreen("/admin/tests", width, ".tests-table tbody tr .status-badge");
+      const rows = await measureRows();
+      expect(rows).toHaveLength(3);
+      for (const row of rows) {
+        expect(row.badgeHeight).toBeLessThan(row.buttonHeight - 2);
+        // Edit and Delete share one line and stay inside the row.
+        expect(Math.abs(row.editTop - row.deleteTop)).toBeLessThanOrEqual(1);
+        expect(row.deleteRight).toBeLessThanOrEqual(row.rowRight + 0.5);
+        if (width >= 600) {
+          // On a wide screen the badge sits on the same line as the buttons.
+          expect(row.badgeTop).toBeLessThan(row.editBottom);
+          expect(row.badgeBottom).toBeGreaterThan(row.editTop);
+        }
+      }
+      expect(await horizontalOverflow()).toBe(0);
+    }
+  }, 20_000);
 
   it("has no horizontal scroll at 320px on any shell screen, drawer open or closed", async () => {
     for (const path of [
@@ -716,6 +951,58 @@ describe("Admin layout regressions (Chromium)", () => {
     expect(metrics.current).toBe("Overview");
   }, 15_000);
 
+  it("shows the Build, Go live and Settings screens without sideways scroll and passes axe, contrast included, at 1280px and 380px", async () => {
+    await cdp.evaluate<void>(axe.source);
+    const screens: Array<[string, string]> = [
+      ["/admin/sources", ".sources-table"],
+      ["/admin/behaviour", "#behaviour-greeting"],
+      ["/admin/widget", ".widget-preview-frame"],
+      ["/admin/tools", "ul.source-list"],
+      ["/admin/tests", ".tests-table"],
+      ["/admin/install", ".install-steps"],
+      ["/admin/providers", "#llm-provider"],
+    ];
+    for (const width of [1280, 380]) {
+      for (const [path, ready] of screens) {
+        await openScreen(path, width, ready);
+        expect({ path, width, overflow: await horizontalOverflow() }).toEqual({
+          path,
+          width,
+          overflow: 0,
+        });
+        await cdp.evaluate<void>(axe.source);
+        const violations = await cdp.evaluate<string[]>(`axe
+          .run(document.querySelector(".shell-main"), { resultTypes: ["violations"] })
+          .then((r) =>
+            r.violations
+              .filter((v) => v.impact === "serious" || v.impact === "critical")
+              .map((v) => v.id + ": " + v.nodes.map((n) => n.target.join(" ")).join(", ")),
+          )`);
+        expect({ path, width, violations }).toEqual({ path, width, violations: [] });
+      }
+    }
+  }, 90_000);
+
+  it("puts the widget preview beside the form when there is room, and under it at 380px", async () => {
+    const layout = () =>
+      cdp.evaluate<{
+        formRight: number;
+        previewLeft: number;
+        formBottom: number;
+        previewTop: number;
+      }>(`(() => {
+        const form = document.querySelector(".widget-layout > form").getBoundingClientRect();
+        const preview = document.querySelector(".widget-preview-column").getBoundingClientRect();
+        return { formRight: form.right, previewLeft: preview.left, formBottom: form.bottom, previewTop: preview.top };
+      })()`);
+    await openScreen("/admin/widget", 1280, ".widget-preview-frame");
+    const wide = await layout();
+    expect(wide.previewLeft).toBeGreaterThanOrEqual(wide.formRight);
+    await openScreen("/admin/widget", 380, ".widget-preview-frame");
+    const narrow = await layout();
+    expect(narrow.previewTop).toBeGreaterThanOrEqual(narrow.formBottom);
+  }, 20_000);
+
   it("lays out sidebar, content and Try it at 1280px", async () => {
     const columns = () =>
       cdp.evaluate<{ nav: number; main: number; tryIt: number }>(`(() => {
@@ -732,10 +1019,17 @@ describe("Admin layout regressions (Chromium)", () => {
     expect(overview.nav).toBe(220);
     expect(overview.main).toBe(1280 - 220);
 
-    await openScreen("/admin/behaviour", 1280, ".try-it:not([hidden])");
-    const behaviour = await columns();
+    await openScreen("/admin/behaviour", 1280, "#behaviour-greeting");
+    await waitFor(`document.querySelector(".try-it:not([hidden])")`, "Try it");
+    // Measured together: a screen taller than the window gets the page's
+    // scrollbar, which comes out of the main column.
+    const behaviour = await cdp.evaluate<{ main: number; tryIt: number; scrollbar: number }>(`({
+      main: document.querySelector(".shell-main").getBoundingClientRect().width,
+      tryIt: document.querySelector(".try-it").getBoundingClientRect().width,
+      scrollbar: window.innerWidth - document.documentElement.clientWidth,
+    })`);
     expect(behaviour.tryIt).toBe(360);
-    expect(behaviour.main).toBe(1280 - 220 - 360);
+    expect(behaviour.main + behaviour.scrollbar).toBe(1280 - 220 - 360);
     expect(await horizontalOverflow()).toBe(0);
   }, 15_000);
 
@@ -901,4 +1195,168 @@ describe("Admin layout regressions (Chromium)", () => {
     })()`);
     expect(back).toEqual({ same: true, value: "Half typed" });
   }, 20_000);
+
+  describe("Widget preview under the admin's real policy", () => {
+    let builtDir: string;
+    let builtServer: Server;
+    let builtUrl: string;
+
+    beforeAll(async () => {
+      if (!existsSync(WIDGET_BUNDLE)) {
+        execFileSync("npm", ["run", "build", "-w", "@solvchat/widget"], {
+          cwd: WORKSPACE_ROOT,
+          stdio: "pipe",
+        });
+      }
+      builtDir = mkdtempSync(resolve(tmpdir(), "solvchat-admin-built-"));
+      await build({
+        root: ADMIN_ROOT,
+        logLevel: "silent",
+        build: { outDir: builtDir, emptyOutDir: true },
+      });
+      builtServer = serveBuiltAdmin(builtDir);
+      await new Promise<void>((r) => builtServer.listen(0, "127.0.0.1", r));
+      const addr = builtServer.address();
+      if (!addr || typeof addr === "string") throw new Error("no built admin server port");
+      builtUrl = `http://127.0.0.1:${addr.port}`;
+    }, 120_000);
+
+    afterAll(async () => {
+      builtServer?.closeAllConnections();
+      await new Promise((r) => builtServer?.close(r));
+      if (builtDir) rmSync(builtDir, { recursive: true, force: true });
+    });
+
+    it("shows title and accent edits inside the preview frame with no policy violation", async () => {
+      const violations: string[] = [];
+      // The sandboxed frame may run in its own process; then it is a
+      // separate target and is evaluated through its session.
+      let frameSession: string | undefined;
+      const RECORDER = `addEventListener("securitypolicyviolation", (e) =>
+        globalThis.__reportCsp(location.href + " " + e.violatedDirective + " " + e.blockedURI), true);`;
+      const watch = async (sessionId?: string) => {
+        await cdp.send("Log.enable", {}, sessionId);
+        await cdp.send("Runtime.enable", {}, sessionId);
+        await cdp.send("Runtime.addBinding", { name: "__reportCsp" }, sessionId);
+        return cdp.send<{ identifier: string }>(
+          "Page.addScriptToEvaluateOnNewDocument",
+          { source: RECORDER },
+          sessionId,
+        );
+      };
+      const off = cdp.onEvent((event) => {
+        if (event.method === "Log.entryAdded") {
+          const text = (event.params.entry as { text?: string }).text ?? "";
+          if (/Content Security Policy|Refused to/i.test(text)) violations.push(text);
+        } else if (event.method === "Runtime.bindingCalled") {
+          if (event.params.name === "__reportCsp") violations.push(String(event.params.payload));
+        } else if (event.method === "Target.attachedToTarget") {
+          const sessionId = event.params.sessionId as string;
+          const info = event.params.targetInfo as { type: string };
+          if (info.type === "iframe") frameSession = sessionId;
+          void watch(sessionId)
+            .catch(() => {})
+            .finally(() => cdp.send("Runtime.runIfWaitingForDebugger", {}, sessionId));
+        }
+      });
+      const { identifier } = await watch();
+      await cdp.send("Target.setAutoAttach", {
+        autoAttach: true,
+        waitForDebuggerOnStart: true,
+        flatten: true,
+      });
+
+      const frameTarget = async (): Promise<{ sessionId?: string; contextId?: number } | null> => {
+        if (frameSession) return { sessionId: frameSession };
+        const { frameTree } = await cdp.send<{
+          frameTree: { childFrames?: Array<{ frame: { id: string; url: string } }> };
+        }>("Page.getFrameTree");
+        const child = frameTree.childFrames?.find((f) =>
+          f.frame.url.endsWith("/admin/preview.html"),
+        );
+        if (!child) return null;
+        const { executionContextId } = await cdp.send<{ executionContextId: number }>(
+          "Page.createIsolatedWorld",
+          { frameId: child.frame.id, worldName: "preview-check" },
+        );
+        return { contextId: executionContextId };
+      };
+      interface Shown {
+        title: string | null;
+        accent: string | null;
+        background: string;
+      }
+      const shown = async (): Promise<Shown | null> => {
+        const target = await frameTarget();
+        if (!target) return null;
+        return cdp
+          .evaluate<Shown>(
+            `(() => {
+              const el = document.querySelector("solv-chat");
+              return {
+                title: el?.shadowRoot?.querySelector(".solv-title")?.textContent ?? null,
+                accent: el?.style.getPropertyValue("--solv-accent") || null,
+                background: getComputedStyle(document.body).backgroundColor,
+              };
+            })()`,
+            target,
+          )
+          .catch(() => null);
+      };
+      const waitForShown = async (want: Partial<Shown>) => {
+        let last: Shown | null = null;
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          last = await shown();
+          if (last && Object.entries(want).every(([k, v]) => last?.[k as keyof Shown] === v)) {
+            return last;
+          }
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        throw new Error(
+          `Preview never showed ${JSON.stringify(want)}; last ${JSON.stringify(last)}; ` +
+            `violations ${JSON.stringify(violations)}`,
+        );
+      };
+      const typeInto = async (id: string, text: string) => {
+        await cdp.evaluate<void>(`(() => {
+          const el = document.getElementById(${JSON.stringify(id)});
+          el.focus();
+          el.select();
+        })()`);
+        await cdp.send("Input.insertText", { text });
+      };
+
+      try {
+        await cdp.send("Emulation.setDeviceMetricsOverride", {
+          width: 1280,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        await cdp.send("Page.navigate", { url: `${builtUrl}/admin/widget` });
+        // The saved settings reach the frame, and its stylesheet applies.
+        await waitForShown({
+          title: "Ask a question",
+          accent: "#2563eb",
+          background: "rgb(226, 232, 240)",
+        });
+
+        await typeInto("widget-title", "Help desk");
+        await typeInto("widget-accent", "#0f766e");
+        await waitForShown({ title: "Help desk", accent: "#0f766e" });
+        expect(violations).toEqual([]);
+      } finally {
+        off();
+        await cdp.send("Target.setAutoAttach", {
+          autoAttach: false,
+          waitForDebuggerOnStart: false,
+          flatten: true,
+        });
+        await cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
+        await cdp.send("Runtime.removeBinding", { name: "__reportCsp" });
+        await cdp.send("Log.disable");
+      }
+    }, 30_000);
+  });
 });

@@ -43,6 +43,20 @@ export function parseOriginValue(raw: unknown, field: string, errors: Errors): s
   return url.origin;
 }
 
+/**
+ * Checks one origin the way the API does, for per-line feedback in an editor:
+ * the normalised origin, or the same message the API would return.
+ */
+export function checkOrigin(
+  raw: string,
+): { ok: true; origin: string } | { ok: false; error: string } {
+  const errors = new Errors();
+  const origin = parseOriginValue(raw.trim(), "origin", errors);
+  if (origin !== null) return { ok: true, origin };
+  const [first] = errors.list;
+  return { ok: false, error: first?.replace(/^origin: /, "") ?? "is not a valid origin" };
+}
+
 /** Validates and normalises assistant creation/update input. */
 export function parseAssistantInput(value: unknown): Result<AssistantInput> {
   if (!isPlainObject(value)) return fail("body: must be a JSON object");

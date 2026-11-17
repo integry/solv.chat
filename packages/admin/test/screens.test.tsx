@@ -778,7 +778,9 @@ describe("admin phase 1 screens", () => {
       ),
     ).toBeTruthy();
 
-    const snippetBox = screen.getByLabelText("Paste this into your site") as HTMLTextAreaElement;
+    const snippetBox = screen.getByLabelText(
+      "Paste this into your site, once per page that should show the chat.",
+    ) as HTMLTextAreaElement;
     expect(snippetBox.value).toContain("pk_ast_1");
     expect(snippetBox.value).toContain("https://example.com/widget.js");
 
@@ -868,11 +870,17 @@ describe("admin phase 1 screens", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("link", { name: "Install" }));
+    const developers = (await screen.findByText("For developers")).closest("details");
+    if (!developers) throw new Error("no For developers section");
+    expect(developers.open).toBe(false);
+    developers.open = true;
     expect(((await screen.findByLabelText("Assistant ID")) as HTMLInputElement).value).toBe(
       "ast_1",
     );
 
+    // Rotating breaks the old key, so it asks first.
     fireEvent.click(screen.getByRole("button", { name: "Rotate ingest key" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Rotate key" }));
     expect(await screen.findByText(/previous key stopped working immediately/)).toBeTruthy();
     expect((screen.getByLabelText("New ingest key") as HTMLInputElement).value).toBe(
       "ik_rotated_once",

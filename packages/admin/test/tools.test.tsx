@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
 import type { Assistant, McpServerSummary, McpToolView } from "../src/api/types.js";
+import { expectNoSeriousA11yViolations } from "./support/axe.js";
 
 function makeAssistant(): Assistant {
   return {
@@ -50,6 +51,10 @@ interface FakeServerOptions {
   nextPostError?: { status: number; body: unknown };
   nextRefreshError?: { status: number; body: unknown };
   refreshedTools?: McpToolView[];
+  /** The add succeeds but listing the new server's tools failed with this message. */
+  nextAddRefreshError?: string;
+  /** How many server-list GETs fail before one succeeds. */
+  failServersLoad?: number;
   onRequest?: (method: string, path: string) => Promise<void> | void;
 }
 
@@ -58,6 +63,8 @@ function installFakeServer(options: FakeServerOptions = {}) {
   let servers: McpServerSummary[] = options.servers ? options.servers.map((s) => ({ ...s })) : [];
   let nextPostError = options.nextPostError;
   let nextRefreshError = options.nextRefreshError;
+  let nextAddRefreshError = options.nextAddRefreshError;
+  let serverLoadFailures = options.failServersLoad ?? 0;
   const toolsByServer: Record<string, McpToolView[]> = {};
   if (options.toolsByServer) {
     for (const [id, list] of Object.entries(options.toolsByServer)) {
@@ -90,6 +97,10 @@ function installFakeServer(options: FakeServerOptions = {}) {
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/mcp-servers` && method === "GET") {
+      if (serverLoadFailures > 0) {
+        serverLoadFailures--;
+        return Response.json({ error: "The database is busy." }, { status: 503 });
+      }
       return Response.json({ servers });
     }
 
@@ -102,9 +113,11 @@ function installFakeServer(options: FakeServerOptions = {}) {
         return Response.json(err.body, { status: err.status });
       }
       const id = `mcp_${servers.length + 1}`;
-      const newTools: McpToolView[] = [
-        makeTool({ id: `tool_${id}_1`, serverId: id, name: "get_status", allowed: false }),
-      ];
+      const refreshError = nextAddRefreshError;
+      nextAddRefreshError = undefined;
+      const newTools: McpToolView[] = refreshError
+        ? []
+        : [makeTool({ id: `tool_${id}_1`, serverId: id, name: "get_status", allowed: false })];
       toolsByServer[id] = newTools;
       const created = makeServer({
         id,
@@ -117,7 +130,10 @@ function installFakeServer(options: FakeServerOptions = {}) {
         allowedCount: 0,
       });
       servers = [...servers, created];
-      return Response.json({ server: created, tools: newTools }, { status: 201 });
+      return Response.json(
+        { server: created, tools: newTools, ...(refreshError ? { refreshError } : {}) },
+        { status: 201 },
+      );
     }
 
     const serverPatchMatch = /^\/api\/admin\/mcp-servers\/([^/]+)$/.exec(path);
@@ -272,8 +288,9 @@ describe("Tools screen", () => {
     expect(screen.getByText("Credential: not set")).toBeTruthy();
     expect(screen.getByText("0 of 1 tools on")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "View tools" }));
+    // The new server's tools open straight away, so the owner can switch them on.
     expect(await screen.findByText("get_status")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Hide tools" })).toBeTruthy();
     const toggle = screen.getByRole("checkbox", { name: /Off/i }) as HTMLInputElement;
     expect(toggle.checked).toBe(false);
   });
@@ -376,10 +393,12 @@ describe("Tools screen", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     expect(server.deletes).toHaveLength(0);
-    expect(await screen.findByText(/Remove this server and its tools/i)).toBeTruthy();
+    const dialog = await screen.findByRole("dialog", { name: "Delete Order lookup?" });
+    expect(within(dialog).getByText(/stops using its tools straight away/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete server" }));
     await waitFor(() => expect(server.deletes).toEqual(["mcp_1"]));
+    expect(await screen.findByText("Tool server removed.")).toBeTruthy();
     expect(await screen.findByText(/No tool servers yet/i)).toBeTruthy();
   });
 
@@ -742,5 +761,114 @@ describe("Tools screen", () => {
       expect(actions).toBeTruthy();
       expect(actions?.querySelectorAll("button")).toHaveLength(4);
     }
+  });
+
+  it("explains what a tool server is when there are none, with an example", async () => {
+    installFakeServer();
+    window.history.replaceState(null, "", "/admin/tools");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "No tool servers yet" })).toBeTruthy();
+    expect(screen.getByText(/A tool server is a small web service/)).toBeTruthy();
+    expect(screen.getByText(/Where is order 1042\?/)).toBeTruthy();
+    // The credential warning stays even with nothing added.
+    expect(screen.getByRole("note").textContent).toMatch(/only read/i);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add a tool server" }));
+    expect(document.activeElement).toBe(screen.getByLabelText("What this is"));
+  });
+
+  it("says it connected after adding, and the tools found can be switched on there", async () => {
+    const server = installFakeServer();
+    window.history.replaceState(null, "", "/admin/tools");
+    render(<App />);
+
+    fireEvent.change(await screen.findByLabelText("What this is"), {
+      target: { value: "Status page" },
+    });
+    fireEvent.change(screen.getByLabelText("Address"), {
+      target: { value: "https://status.example.com/mcp" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add server" }));
+
+    expect(await screen.findByText("Connected")).toBeTruthy();
+    expect(await screen.findByText(/Connected to Status page\./)).toBeTruthy();
+    const toggle = (await screen.findByRole("checkbox", { name: /Off/i })) as HTMLInputElement;
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(server.patches).toEqual([
+        { path: "/api/admin/mcp-servers/mcp_1/tools/tool_mcp_1_1", body: { allowed: true } },
+      ]),
+    );
+    expect(
+      (
+        (await screen.findByRole("checkbox", {
+          name: /Visitors can use this/i,
+        })) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+  });
+
+  it("says it could not connect when the server was added but its tools could not be listed", async () => {
+    installFakeServer({ nextAddRefreshError: "That tool server could not be reached." });
+    window.history.replaceState(null, "", "/admin/tools");
+    render(<App />);
+
+    fireEvent.change(await screen.findByLabelText("What this is"), {
+      target: { value: "Flaky" },
+    });
+    fireEvent.change(screen.getByLabelText("Address"), {
+      target: { value: "https://flaky.example.com/mcp" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add server" }));
+
+    expect(await screen.findByText("Could not connect")).toBeTruthy();
+    expect(
+      await screen.findByText(/That tool server could not be reached\. Check the address and key/),
+    ).toBeTruthy();
+    expect(screen.queryByText("Connected")).toBeNull();
+    expect(await screen.findByText(/This server offered no tools/)).toBeTruthy();
+  });
+
+  it("sends no DELETE when the owner cancels deleting a server", async () => {
+    const server = installFakeServer({ servers: [makeServer()] });
+    window.history.replaceState(null, "", "/admin/tools");
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete Order lookup?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(server.deletes).toEqual([]);
+    expect(screen.getByText("Order lookup")).toBeTruthy();
+  });
+
+  it("shows an error with Try again when the servers cannot load, and recovers", async () => {
+    installFakeServer({ servers: [makeServer()], failServersLoad: 1 });
+    window.history.replaceState(null, "", "/admin/tools");
+    render(<App />);
+
+    expect(await screen.findByText("Could not load your tool servers.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Order lookup")).toBeTruthy();
+  });
+
+  it("has no serious accessibility problems, empty or with a server and the delete dialog", async () => {
+    installFakeServer();
+    window.history.replaceState(null, "", "/admin/tools");
+    const first = render(<App />);
+    await screen.findByRole("heading", { name: "No tool servers yet" });
+    await expectNoSeriousA11yViolations(document.body);
+    first.unmount();
+    vi.unstubAllGlobals();
+
+    installFakeServer({ servers: [makeServer()], toolsByServer: { mcp_1: [makeTool()] } });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "View tools" }));
+    await screen.findByText("lookup_order");
+    await expectNoSeriousA11yViolations(document.body);
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await screen.findByRole("dialog", { name: "Delete Order lookup?" });
+    await expectNoSeriousA11yViolations(document.body);
   });
 });

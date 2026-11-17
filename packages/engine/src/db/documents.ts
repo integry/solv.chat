@@ -35,6 +35,12 @@ export interface DocumentRow {
   updatedAt: number;
 }
 
+/**
+ * Why a document could not be indexed. Codes, not messages: the admin words
+ * them, and a provider's own error text never reaches the database.
+ */
+export type IndexErrorCode = "too_long" | "missing_body" | "embedding_failed";
+
 export interface DocumentSummaryRow {
   id: string;
   sourceId: string;
@@ -406,6 +412,22 @@ export function documentsFor(db: D1Database, orgId: string) {
         title: row.title,
         sourceKind: row.kind,
       }));
+    },
+
+    /**
+     * Records why the document's current content could not be indexed. Only
+     * applies while `contentHash` is still the document's content: a newer
+     * push or save replaces the hash, which makes the error stale.
+     */
+    async markIndexError(id: string, contentHash: string, code: IndexErrorCode): Promise<boolean> {
+      const res = await prepare(
+        db,
+        `UPDATE documents SET index_error = ?4, index_error_hash = ?3
+         WHERE org_id = ?1 AND id = ?2 AND content_hash = ?3`,
+      )
+        .bind(orgId, id, contentHash, code)
+        .run();
+      return (res.meta.changes ?? 0) > 0;
     },
 
     async replaceChunks(

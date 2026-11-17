@@ -8,7 +8,14 @@ import {
   type ResolvedAdminConfig,
   resolveAdminConfig,
 } from "./extension.js";
-import { BUILD_SCREENS, type BuiltinScreenId, MONITOR_SCREENS, useRoute } from "./routing.js";
+import {
+  type AdminNavigation,
+  AdminNavigationContext,
+  BUILD_SCREENS,
+  type BuiltinScreenId,
+  MONITOR_SCREENS,
+  useRoute,
+} from "./routing.js";
 import { Behaviour } from "./screens/Behaviour.js";
 import { Conversations } from "./screens/Conversations.js";
 import { Gaps } from "./screens/Gaps.js";
@@ -31,8 +38,13 @@ import { Navigation } from "./shell/Navigation.js";
 import type { CreatedAssistant } from "./shell/NewAssistantForm.js";
 import { PublishControls } from "./shell/PublishStatus.js";
 import { TryItPane } from "./shell/TryItPane.js";
-import { AssistantMutationsProvider } from "./shell/useAssistantMutations.js";
+import {
+  AssistantMutationsProvider,
+  useAnySaveRunning,
+  useAssistantMutation,
+} from "./shell/useAssistantMutations.js";
 import { useSession } from "./shell/useSession.js";
+import { ConfirmDialog } from "./ui/Dialog.js";
 import { useFocusTrap, useMediaQuery } from "./ui/focus.js";
 import { Icon } from "./ui/Icon.js";
 import { Skeleton } from "./ui/Skeleton.js";
@@ -133,6 +145,10 @@ function useTryItOpen(screen: string | null, narrow: boolean) {
   return { open, setOpen };
 }
 
+interface PendingLeave {
+  leave: () => void;
+}
+
 function AdminShell({
   config,
   onSignOut,
@@ -140,7 +156,72 @@ function AdminShell({
   config: ResolvedAdminConfig;
   onSignOut: () => Promise<void>;
 }) {
-  const { screen, navigate } = useRoute(config.navItems, config.defaultScreen);
+  // Set while the owner decides whether to leave a screen with unsaved edits.
+  const [pendingLeave, setPendingLeave] = useState<PendingLeave | null>(null);
+  const unsavedRef = useRef(false);
+  const savingRef = useRef(false);
+  // A move asked for while a save runs. It waits for the save: the save can
+  // still fail, and leaving then would lose both the edits and the error.
+  const deferredLeaveRef = useRef<PendingLeave | null>(null);
+  // The router's `restore`, set once the router below exists.
+  const restoreRef = useRef<() => void>(() => {});
+
+  /**
+   * Runs a move, then puts the address back if a Back or Forward moved it and
+   * this move replaced that one (switching assistant keeps the screen on show).
+   */
+  const proceed = useCallback((pending: PendingLeave) => {
+    pending.leave();
+    restoreRef.current();
+  }, []);
+
+  /**
+   * Runs `leave` now, or after the owner agrees to drop unsaved edits.
+   * While a save runs, the move waits until the save finishes and is decided then.
+   * Staying, whatever the move was, puts the address back with `restore`.
+   */
+  const guardLeave = useCallback(
+    (leave: () => void) => {
+      if (savingRef.current) {
+        // The newest move replaces an older one still waiting, as below.
+        deferredLeaveRef.current = { leave };
+      } else if (unsavedRef.current) {
+        // A newer request replaces one still on screen.
+        setPendingLeave({ leave });
+      } else {
+        proceed({ leave });
+      }
+    },
+    [proceed],
+  );
+
+  const { screen, navigate, shows, restore } = useRoute(
+    config.navItems,
+    config.defaultScreen,
+    guardLeave,
+  );
+  restoreRef.current = restore;
+
+  /**
+   * Asking for the place already on show drops a move still waiting for a
+   * save, and undoes a Back or Forward that was waiting with it.
+   */
+  const stayPut = useCallback(() => {
+    deferredLeaveRef.current = null;
+    restore();
+  }, [restore]);
+
+  /**
+   * Moves to another screen once the leave check allows it. The screen on show
+   * is not always the one at the address: a Back or Forward can be waiting.
+   */
+  const moveTo = useCallback(
+    (path: string) => {
+      if (shows(path)) stayPut();
+      else guardLeave(() => navigate(path));
+    },
+    [shows, stayPut, guardLeave, navigate],
+  );
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -166,7 +247,7 @@ function AdminShell({
 
   function handleNavigate(path: string) {
     setDrawerOpen(false);
-    navigate(path);
+    moveTo(path);
   }
 
   function handleCreated({ assistant, ingestKey }: CreatedAssistant) {
@@ -216,6 +297,46 @@ function AdminShell({
       ? selectedId
       : (assistants[0]?.id ?? null);
   const selectedAssistant = assistants.find((a) => a.id === effectiveSelectedId) ?? null;
+  const selectedMutation = useAssistantMutation(effectiveSelectedId ?? "");
+  const saving = selectedMutation.saving;
+  unsavedRef.current = selectedMutation.unsaved;
+  savingRef.current = saving;
+  const isUnsavedNow = selectedMutation.isUnsavedNow;
+  // Once the save finishes, a move that waited for it goes ahead if the edits
+  // are saved, and asks first if the save failed and they are still unsaved.
+  // The editor reports its new state in an effect of this same commit, before
+  // this one runs, so `isUnsavedNow` already reflects the save's outcome.
+  useEffect(() => {
+    if (saving) return;
+    const deferred = deferredLeaveRef.current;
+    if (!deferred) return;
+    deferredLeaveRef.current = null;
+    if (isUnsavedNow()) setPendingLeave(deferred);
+    else proceed(deferred);
+  }, [saving, isUnsavedNow, proceed]);
+  // Closing the tab is different: it can cancel a save that has not reached the
+  // server, so the browser asks until every save has finished.
+  const anySaveRunning = useAnySaveRunning();
+  const protectUnload = selectedMutation.unsaved || anySaveRunning;
+
+  // Closing or reloading the tab asks the browser's own question.
+  useEffect(() => {
+    if (!protectUnload) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [protectUnload]);
+
+  const navigation: AdminNavigation = useMemo(
+    () => ({
+      navigate: moveTo,
+      pathFor: (id: string) => config.navItems.find((item) => item.id === id)?.path ?? null,
+    }),
+    [config.navItems, moveTo],
+  );
   const ExtraScreen =
     screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
   // Host screens registered with `assistantScoped: false` hide the assistant chrome.
@@ -239,8 +360,12 @@ function AdminShell({
       assistants={assistants}
       selectedId={effectiveSelectedId}
       onSelect={(id) => {
-        setSelectedId(id);
         setDrawerOpen(false);
+        if (id === effectiveSelectedId) {
+          stayPut();
+          return;
+        }
+        guardLeave(() => setSelectedId(id));
       }}
       onCreated={handleCreated}
       createdKey={narrow ? null : keyNotice}
@@ -295,7 +420,7 @@ function AdminShell({
       Try it
     </button>
   );
-  const navigation = (
+  const navigationList = (
     <Navigation current={screen} onNavigate={handleNavigate} items={config.navItems} />
   );
 
@@ -316,145 +441,168 @@ function AdminShell({
     .join(" ");
 
   return (
-    <div className={shellClass}>
-      <header className="shell-header">
-        <div className="shell-brand">solv.chat</div>
-        {HeaderStart && (
-          <div className="shell-header-slot">
-            <HeaderStart api={ADMIN_API_HELPERS} />
-          </div>
-        )}
-        {narrow && (
-          <div className="shell-current" aria-hidden={currentItem === null ? true : undefined}>
-            {currentItem?.label ?? ""}
-          </div>
-        )}
-        {narrow && tryItToggle}
-        {narrow && (
-          <button
-            type="button"
-            className="btn-icon shell-menu-button"
-            aria-label="Menu"
-            aria-expanded={drawerOpen}
-            aria-controls={DRAWER_ID}
-            onClick={() => {
-              // The Try it sheet sits above the drawer; close it so the menu is usable.
-              if (tryIt.open) tryIt.setOpen(false);
-              setDrawerOpen(true);
-            }}
-          >
-            <Icon name="menu" size={20} />
-          </button>
-        )}
-        {narrow && drawerOpen && (
-          <div className="shell-backdrop" aria-hidden="true" onClick={() => setDrawerOpen(false)} />
-        )}
-        {/* One element at one place in the tree on every screen and at every width:
+    <AdminNavigationContext.Provider value={navigation}>
+      <div className={shellClass}>
+        <header className="shell-header">
+          <div className="shell-brand">solv.chat</div>
+          {HeaderStart && (
+            <div className="shell-header-slot">
+              <HeaderStart api={ADMIN_API_HELPERS} />
+            </div>
+          )}
+          {narrow && (
+            <div className="shell-current" aria-hidden={currentItem === null ? true : undefined}>
+              {currentItem?.label ?? ""}
+            </div>
+          )}
+          {narrow && tryItToggle}
+          {narrow && (
+            <button
+              type="button"
+              className="btn-icon shell-menu-button"
+              aria-label="Menu"
+              aria-expanded={drawerOpen}
+              aria-controls={DRAWER_ID}
+              onClick={() => {
+                // The Try it sheet sits above the drawer; close it so the menu is usable.
+                if (tryIt.open) tryIt.setOpen(false);
+                setDrawerOpen(true);
+              }}
+            >
+              <Icon name="menu" size={20} />
+            </button>
+          )}
+          {narrow && drawerOpen && (
+            <div
+              className="shell-backdrop"
+              aria-hidden="true"
+              onClick={() => setDrawerOpen(false)}
+            />
+          )}
+          {/* One element at one place in the tree on every screen and at every width:
             wide screens lay its contents out in the header row (display: contents),
             narrow screens show it as the drawer. Moving the switcher or the host slot
             between parents would remount them and lose a half-filled form. */}
-        <div
-          ref={drawerRef}
-          id={DRAWER_ID}
-          className={narrow ? "shell-sidebar shell-drawer" : "shell-header-controls"}
-          hidden={narrow && !drawerOpen}
-          {...(narrow
-            ? {
-                role: "dialog",
-                "aria-modal": true,
-                "aria-label": "Menu",
-                onKeyDown: drawerTrap.onKeyDown,
-              }
-            : {})}
-        >
-          {narrow && (
-            <div className="drawer-header">
-              <span className="shell-brand">solv.chat</span>
-              <button
-                type="button"
-                className="btn-icon"
-                aria-label="Close menu"
-                onClick={() => setDrawerOpen(false)}
-              >
-                <Icon name="close" size={20} />
-              </button>
-            </div>
-          )}
-          <div className="drawer-top" hidden={!assistantChrome}>
-            {switcher}
-            {publishControls}
-          </div>
-          {narrow && navigation}
-          {!narrow && <div className="shell-header-spacer" />}
-          <div className="drawer-bottom">
-            {headerEnd}
-            {!narrow && tryItToggle}
-            {signOut}
-          </div>
-        </div>
-      </header>
-      {signOutError && (
-        <div className="shell-alert" role="alert">
-          <p className="error-text">{signOutError}</p>
-        </div>
-      )}
-
-      <div className={bodyClass}>
-        {!narrow && <div className="shell-sidebar">{navigation}</div>}
-
-        <main className="shell-main">
-          {narrow && keyNotice && assistantChrome && (
-            <div className="shell-key-notice">
-              <IngestKeyNotice
-                key={keyNotice.assistantId}
-                createdKey={keyNotice}
-                pendingCount={Math.max(createdKeys.length - 1, 0)}
-                onDismiss={() =>
-                  setCreatedKeys((prev) =>
-                    prev.filter((k) => k.assistantId !== keyNotice.assistantId),
-                  )
+          <div
+            ref={drawerRef}
+            id={DRAWER_ID}
+            className={narrow ? "shell-sidebar shell-drawer" : "shell-header-controls"}
+            hidden={narrow && !drawerOpen}
+            {...(narrow
+              ? {
+                  role: "dialog",
+                  "aria-modal": true,
+                  "aria-label": "Menu",
+                  onKeyDown: drawerTrap.onKeyDown,
                 }
-              />
+              : {})}
+          >
+            {narrow && (
+              <div className="drawer-header">
+                <span className="shell-brand">solv.chat</span>
+                <button
+                  type="button"
+                  className="btn-icon"
+                  aria-label="Close menu"
+                  onClick={() => setDrawerOpen(false)}
+                >
+                  <Icon name="close" size={20} />
+                </button>
+              </div>
+            )}
+            <div className="drawer-top" hidden={!assistantChrome}>
+              {switcher}
+              {publishControls}
             </div>
-          )}
-          {ExtraScreen ? (
-            <ExtraScreen
-              assistant={selectedAssistant}
-              assistantId={selectedAssistant?.id ?? null}
-              api={ADMIN_API_HELPERS}
-            />
-          ) : screen === null ? (
-            <div className="screen">
-              <p className="muted">No screens available.</p>
+            {narrow && navigationList}
+            {!narrow && <div className="shell-header-spacer" />}
+            <div className="drawer-bottom">
+              {headerEnd}
+              {!narrow && tryItToggle}
+              {signOut}
             </div>
-          ) : screen === "providers" ? (
-            <Providers />
-          ) : assistantsRes.status === "loading" && assistants.length === 0 ? (
-            <Skeleton label="Loading assistants…" lines={4} />
-          ) : assistantsRes.status === "error" ? (
-            <p className="error-text" role="alert">
-              {assistantsRes.error}
-            </p>
-          ) : selectedAssistant === null ? (
-            <FirstRun onCreated={handleFirstRunCreated} />
-          ) : (
-            renderBuiltinScreen(screen as BuiltinScreenId, selectedAssistant.id)
-          )}
-        </main>
-
-        {/* Mounted once outside <main> so moving between screens, closing the pane
-            or visiting an unscoped screen keeps the transcript. */}
-        {selectedAssistant !== null && (
-          <TryItPane
-            id={TRY_IT_ID}
-            assistant={selectedAssistant}
-            hidden={!tryItVisible}
-            overlay={narrow}
-            onClose={closeTryIt}
-          />
+          </div>
+        </header>
+        {signOutError && (
+          <div className="shell-alert" role="alert">
+            <p className="error-text">{signOutError}</p>
+          </div>
         )}
+
+        <div className={bodyClass}>
+          {!narrow && <div className="shell-sidebar">{navigationList}</div>}
+
+          <main className="shell-main">
+            {narrow && keyNotice && assistantChrome && (
+              <div className="shell-key-notice">
+                <IngestKeyNotice
+                  key={keyNotice.assistantId}
+                  createdKey={keyNotice}
+                  pendingCount={Math.max(createdKeys.length - 1, 0)}
+                  onDismiss={() =>
+                    setCreatedKeys((prev) =>
+                      prev.filter((k) => k.assistantId !== keyNotice.assistantId),
+                    )
+                  }
+                />
+              </div>
+            )}
+            {ExtraScreen ? (
+              <ExtraScreen
+                assistant={selectedAssistant}
+                assistantId={selectedAssistant?.id ?? null}
+                api={ADMIN_API_HELPERS}
+              />
+            ) : screen === null ? (
+              <div className="screen">
+                <p className="muted">No screens available.</p>
+              </div>
+            ) : screen === "providers" ? (
+              <Providers />
+            ) : assistantsRes.status === "loading" && assistants.length === 0 ? (
+              <Skeleton label="Loading assistants…" lines={4} />
+            ) : assistantsRes.status === "error" ? (
+              <p className="error-text" role="alert">
+                {assistantsRes.error}
+              </p>
+            ) : selectedAssistant === null ? (
+              <FirstRun onCreated={handleFirstRunCreated} />
+            ) : (
+              renderBuiltinScreen(screen as BuiltinScreenId, selectedAssistant.id)
+            )}
+          </main>
+
+          {/* Mounted once outside <main> so moving between screens, closing the pane
+            or visiting an unscoped screen keeps the transcript. */}
+          {selectedAssistant !== null && (
+            <TryItPane
+              id={TRY_IT_ID}
+              assistant={selectedAssistant}
+              hidden={!tryItVisible}
+              overlay={narrow}
+              onClose={closeTryIt}
+            />
+          )}
+        </div>
+        <ConfirmDialog
+          open={pendingLeave !== null}
+          title="Leave without saving?"
+          description="You have changes on this screen that are not saved. If you leave now, they are lost."
+          confirmLabel="Leave without saving"
+          cancelLabel="Stay here"
+          tone="danger"
+          onCancel={() => {
+            setPendingLeave(null);
+            restore();
+          }}
+          onConfirm={() => {
+            const pending = pendingLeave;
+            setPendingLeave(null);
+            if (pending) proceed(pending);
+          }}
+        />
       </div>
-    </div>
+    </AdminNavigationContext.Provider>
   );
 }
 

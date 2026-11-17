@@ -1,4 +1,13 @@
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import {
+  createContext,
+  type MouseEvent,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 export type BuiltinScreenId =
   | "overview"
@@ -83,35 +92,186 @@ export function matchScreen(
   return found ? found.id : fallback;
 }
 
+/**
+ * Asks whether to leave the current screen, and calls `leave` to go ahead. To
+ * stay, the caller calls `restore`, which also undoes a Back or Forward.
+ */
+export type ConfirmLeave = (leave: () => void) => void;
+
+const HISTORY_INDEX_KEY = "solvAdminIndex";
+
+function historyIndex(state: unknown): number | null {
+  if (state === null || typeof state !== "object") return null;
+  const value = (state as Record<string, unknown>)[HISTORY_INDEX_KEY];
+  return typeof value === "number" ? value : null;
+}
+
+function withHistoryIndex(state: unknown, index: number): Record<string, unknown> {
+  const base =
+    state !== null && typeof state === "object" ? (state as Record<string, unknown>) : {};
+  return { ...base, [HISTORY_INDEX_KEY]: index };
+}
+
 export function useRoute(
   navItems: readonly NavItem[] = NAV_ITEMS,
   defaultScreen?: string,
+  confirmLeave?: ConfirmLeave,
 ): {
   screen: string | null;
   navigate: (path: string) => void;
+  /**
+   * Whether `path` leads to the screen on show. While a Back or Forward waits
+   * for an answer, the address belongs to another screen.
+   */
+  shows: (path: string) => boolean;
+  /**
+   * Puts the address back on the entry of the screen on show, if a Back or
+   * Forward that is no longer going ahead moved it. Otherwise does nothing.
+   */
+  restore: () => void;
 } {
   const [screen, setScreen] = useState<string | null>(() =>
     matchScreen(window.location.pathname, navItems, defaultScreen),
   );
+  // The screen on show and the history entry it belongs to. Back and Forward
+  // change the address before we hear about them, so these are what "Stay
+  // here" returns to.
+  const screenRef = useRef(screen);
+  const indexRef = useRef(0);
+  const confirmRef = useRef(confirmLeave);
+  confirmRef.current = confirmLeave;
+
+  const show = useCallback((next: string | null) => {
+    screenRef.current = next;
+    setScreen(next);
+  }, []);
 
   useEffect(() => {
-    setScreen(matchScreen(window.location.pathname, navItems, defaultScreen));
-    const onPopState = () => {
-      setScreen(matchScreen(window.location.pathname, navItems, defaultScreen));
+    const current = historyIndex(window.history.state);
+    if (current === null) {
+      window.history.replaceState(withHistoryIndex(window.history.state, indexRef.current), "");
+    } else {
+      indexRef.current = current;
+    }
+    show(matchScreen(window.location.pathname, navItems, defaultScreen));
+
+    const onPopState = (event: PopStateEvent) => {
+      const next = matchScreen(window.location.pathname, navItems, defaultScreen);
+      const arrived = historyIndex(event.state);
+      const commit = () => {
+        // Read the address again: it may have moved on while the owner decided.
+        const index = historyIndex(window.history.state);
+        if (index !== null) indexRef.current = index;
+        show(matchScreen(window.location.pathname, navItems, defaultScreen));
+      };
+      if (next === screenRef.current || !confirmRef.current) {
+        if (arrived !== null) indexRef.current = arrived;
+        show(next);
+        return;
+      }
+      confirmRef.current(commit);
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [navItems, defaultScreen]);
+  }, [navItems, defaultScreen, show]);
 
   const navigate = useCallback(
     (path: string) => {
+      // Count from the entry the browser is on. A Back or Forward still waiting
+      // for an answer has moved it away from the screen on show.
+      const current = historyIndex(window.history.state) ?? indexRef.current;
       if (window.location.pathname !== path) {
-        window.history.pushState(null, "", path);
+        indexRef.current = current + 1;
+        window.history.pushState(withHistoryIndex(null, indexRef.current), "", path);
+      } else {
+        // Already at that address (a waiting Back or Forward went there): use its entry.
+        indexRef.current = current;
       }
-      setScreen(matchScreen(window.location.pathname, navItems, defaultScreen));
+      show(matchScreen(window.location.pathname, navItems, defaultScreen));
     },
+    [navItems, defaultScreen, show],
+  );
+
+  const shows = useCallback(
+    (path: string) => matchScreen(path, navItems, defaultScreen) === screenRef.current,
     [navItems, defaultScreen],
   );
 
-  return { screen, navigate };
+  const restore = useCallback(() => {
+    const index = historyIndex(window.history.state);
+    const committed = indexRef.current;
+    if (index !== null) {
+      // Step back to the entry the owner is still on.
+      if (index !== committed) window.history.go(committed - index);
+      return;
+    }
+    if (matchScreen(window.location.pathname, navItems, defaultScreen) === screenRef.current) {
+      return;
+    }
+    // An entry we did not create: put the current screen's address back.
+    const path = navItems.find((item) => item.id === screenRef.current)?.path;
+    if (path) {
+      window.history.pushState(withHistoryIndex(null, committed + 1), "", path);
+      indexRef.current = committed + 1;
+    }
+  }, [navItems, defaultScreen]);
+
+  return { screen, navigate, shows, restore };
+}
+
+/** How a screen moves to another screen: through the shell, so its checks apply. */
+export interface AdminNavigation {
+  navigate: (path: string) => void;
+  /** The path of a visible screen, or null when it is hidden or unknown. */
+  pathFor: (id: string) => string | null;
+}
+
+export const AdminNavigationContext = createContext<AdminNavigation | null>(null);
+
+const FALLBACK_NAVIGATION: AdminNavigation = {
+  navigate: (path) => window.location.assign(path),
+  pathFor: (id) => NAV_ITEMS.find((item) => item.id === id)?.path ?? null,
+};
+
+export function useAdminNavigation(): AdminNavigation {
+  return useContext(AdminNavigationContext) ?? FALLBACK_NAVIGATION;
+}
+
+/**
+ * A link to another admin screen. Renders its children as plain text when
+ * that screen is hidden, so a screen never points at something missing.
+ */
+export function ScreenLink({
+  to,
+  children,
+  className,
+}: {
+  to: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  const { navigate, pathFor } = useAdminNavigation();
+  const path = pathFor(to);
+  if (path === null) return <>{children}</>;
+  return (
+    <a
+      href={path}
+      className={className}
+      onClick={(event: MouseEvent<HTMLAnchorElement>) => {
+        if (
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey ||
+          event.button !== 0
+        ) {
+          return;
+        }
+        event.preventDefault();
+        navigate(path);
+      }}
+    >
+      {children}
+    </a>
+  );
 }
