@@ -32,6 +32,30 @@ const ToastContext = createContext<ToastApi | null>(null);
 /** Auto-dismiss delay for success and info messages, in milliseconds. */
 export const TOAST_TIMEOUT_MS = 6000;
 
+/** How many messages show at once before older success and info messages make room. */
+const MAX_TOASTS = 4;
+
+/**
+ * Adds a message and trims the oldest success and info messages until at most
+ * `MAX_TOASTS` show. Errors are never trimmed (they stay until dismissed), and
+ * neither is the message just added, so the list can go over the limit when
+ * several errors are waiting.
+ */
+function addToast(prev: ToastMessage[], toast: ToastMessage): ToastMessage[] {
+  const next = [...prev];
+  let excess = next.length + 1 - MAX_TOASTS;
+  for (let i = 0; i < next.length && excess > 0; ) {
+    if (next[i]?.kind === "error") {
+      i++;
+    } else {
+      next.splice(i, 1);
+      excess--;
+    }
+  }
+  next.push(toast);
+  return next;
+}
+
 /**
  * Holds the admin's feedback messages and renders them in two live regions:
  * `role="status"` for success and info, `role="alert"` for errors. The admin
@@ -52,7 +76,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const show = useCallback(
     (message: string, kind: ToastKind = "info") => {
       const id = nextId.current++;
-      setToasts((prev) => [...prev.slice(-3), { id, kind, message }]);
+      setToasts((prev) => addToast(prev, { id, kind, message }));
       if (kind !== "error") {
         timers.current.set(
           id,

@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ConfirmDialog,
@@ -446,6 +446,25 @@ function ToastButtons() {
   );
 }
 
+function NumberedToasts() {
+  const toast = useToast();
+  const count = useRef(0);
+  return (
+    <main>
+      <button type="button" onClick={() => toast.success(`Saved ${++count.current}.`)}>
+        Next
+      </button>
+      <button type="button" onClick={() => toast.error("Could not publish.")}>
+        Fail
+      </button>
+    </main>
+  );
+}
+
+function statusTexts() {
+  return screen.queryAllByRole("status").map((el) => el.textContent);
+}
+
 describe("Toast", () => {
   it("announces success as status and errors as alert; success fades, errors stay", async () => {
     vi.useFakeTimers();
@@ -475,6 +494,41 @@ describe("Toast", () => {
 
     fireEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps an undismissed error when newer messages fill the list", () => {
+    vi.useFakeTimers();
+    render(
+      <ToastProvider>
+        <NumberedToasts />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Fail" }));
+    for (let i = 0; i < 4; i++) fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    expect(screen.getByRole("alert").textContent).toContain("Could not publish.");
+    // Only success messages make room: the oldest one went, the newest three show.
+    expect(statusTexts()).toEqual(["Saved 2.", "Saved 3.", "Saved 4."]);
+
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(screen.queryAllByRole("status")).toHaveLength(0);
+    expect(screen.getByRole("alert").textContent).toContain("Could not publish.");
+  });
+
+  it("keeps every waiting error and still shows the newest message", () => {
+    render(
+      <ToastProvider>
+        <NumberedToasts />
+      </ToastProvider>,
+    );
+    for (let i = 0; i < 5; i++) fireEvent.click(screen.getByRole("button", { name: "Fail" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    expect(screen.getAllByRole("alert")).toHaveLength(5);
+    expect(statusTexts()).toEqual(["Saved 2."]);
   });
 
   it("passes axe with messages showing", async () => {
