@@ -230,7 +230,7 @@ describe("migrations", () => {
       ),
     ]);
 
-    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0018_"));
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0019_"));
     const updates = (migration?.queries ?? []).filter((q) =>
       /\bUPDATE\s+messages\s+SET\s+search_text\b/i.test(q),
     );

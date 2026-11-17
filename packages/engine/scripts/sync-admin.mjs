@@ -22,7 +22,7 @@ if (!existsSync(indexHtmlPath) || process.argv.includes("--rebuild")) {
 
 // Served as text; anything else (images, fonts) is base64 in the bundle so a
 // UTF-8 round trip cannot corrupt its bytes.
-const TEXT_EXTENSIONS = new Set([".js", ".mjs", ".css", ".svg", ".json", ".txt"]);
+const TEXT_EXTENSIONS = new Set([".html", ".js", ".mjs", ".css", ".svg", ".json", ".txt"]);
 
 const MIME_TYPES = {
   ".png": "image/png",
@@ -33,6 +33,7 @@ const MIME_TYPES = {
   ".ico": "image/x-icon",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
+  ".html": "text/html; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
   ".mjs": "application/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",

@@ -157,6 +157,108 @@ describe("ingest consumer", () => {
     errors.mockRestore();
   });
 
+  it("records why indexing failed, and the source's status says so until new content is indexed", async () => {
+    const { assistantId, sourceId } = await seedOrgAndAssistant();
+    const { documentId, hash, tenant } = await seedDocument(sourceId, "Doc", "# A\n\nText.");
+    const status = async () => {
+      const [source] = (await tenant.sources.listWithStats(assistantId)).filter(
+        (s) => s.id === sourceId,
+      );
+      return {
+        indexing: source?.indexingCount,
+        failed: source?.failedCount,
+        retrying: source?.retryingCount,
+        error: source?.indexError,
+      };
+    };
+    expect(await status()).toEqual({ indexing: 1, failed: 0, retrying: 0, error: null });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const failing = makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash });
+    await runIngestBatch(
+      { messages: [failing] },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: {
+          dimensions: 1536,
+          async embed() {
+            throw new Error("provider said sk-secret-should-not-be-stored");
+          },
+        },
+        retriever: memoryRetriever(),
+      },
+    );
+    warn.mockRestore();
+    expect(failing.retried).toBe(true);
+    // The Queue retries this one, so the admin keeps checking.
+    expect(await status()).toEqual({
+      indexing: 0,
+      failed: 1,
+      retrying: 1,
+      error: "embedding_failed",
+    });
+    const stored = await env.DB.prepare("SELECT index_error FROM documents WHERE id = ?1")
+      .bind(documentId)
+      .first<{ index_error: string }>();
+    expect(stored?.index_error).toBe("embedding_failed");
+
+    // A retry that succeeds makes the error stale.
+    await runIngestBatch(
+      { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash })] },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever: memoryRetriever(),
+      },
+    );
+    expect(await status()).toEqual({ indexing: 0, failed: 0, retrying: 0, error: null });
+  });
+
+  it("records too_long for a body with too many sections, and a new push clears it", async () => {
+    const { assistantId, sourceId } = await seedOrgAndAssistant();
+    const { documentId, hash, tenant } = await seedDocument(sourceId, "Huge", deepLeafDocument());
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    await runIngestBatch(
+      { messages: [makeMessage({ orgId: TEST_ORG_ID, documentId, contentHash: hash })] },
+      {
+        db: env.DB,
+        resolveOrg: acceptQueuedOrg,
+        docs: env.DOCS,
+        embedder: fakeEmbedder(),
+        retriever: memoryRetriever(),
+      },
+    );
+    errors.mockRestore();
+    const failed = (await tenant.sources.listWithStats(assistantId)).find((s) => s.id === sourceId);
+    expect(failed?.failedCount).toBe(1);
+    // Not retried: only a new push can fix it.
+    expect(failed?.retryingCount).toBe(0);
+    expect(failed?.indexError).toBe("too_long");
+
+    const hash2 = await contentHash("Huge", "# Short\n\nNow fine.");
+    await tenant.documents.upsert({
+      id: documentId,
+      sourceId,
+      externalId: "doc-1",
+      url: "https://example.com/doc",
+      title: "Huge",
+      contentHash: hash2,
+      bodyKey: documentObjectKey(TEST_ORG_ID, documentId),
+      updatedAt: Date.now(),
+    });
+    expect(hash2).not.toBe(hash);
+    const pending = (await tenant.sources.listWithStats(assistantId)).find(
+      (s) => s.id === sourceId,
+    );
+    expect(pending?.failedCount).toBe(0);
+    expect(pending?.indexingCount).toBe(1);
+    expect(pending?.indexError).toBeNull();
+  });
+
   it("embeds each chunk with its heading path, so an entry's question is searchable", async () => {
     const { sourceId } = await seedOrgAndAssistant();
     const { documentId, hash } = await seedDocument(

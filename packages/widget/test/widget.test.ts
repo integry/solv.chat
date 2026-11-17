@@ -516,6 +516,42 @@ describe("<solv-chat>", () => {
     }
   });
 
+  it("preview() shows the given config with the panel open and never makes a request", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    globalThis.fetch = fetchMock as typeof fetch;
+    const el = mountWidget("pk_preview");
+    await flushAsync();
+    fetchMock.mockClear();
+    const preview = el as HTMLElement & { preview(config: unknown): void };
+
+    preview.preview({
+      widget: { title: "Help desk", accentColor: "#112233", position: "left" },
+      behaviour: { greeting: "Hi there", suggestedQuestions: ["Prices?", "Hours?"] },
+      actions: { builtins: true, allowedOrigins: [] },
+    });
+    const root = shadow(el);
+    expect(mustQuery<HTMLElement>(root, ".solv-title").textContent).toBe("Help desk");
+    expect(mustQuery<HTMLElement>(root, ".solv-panel").hidden).toBe(false);
+    expect(el.getAttribute("data-position")).toBe("left");
+    expect(el.style.getPropertyValue("--solv-accent")).toBe("#112233");
+    expect(Array.from(root.querySelectorAll(".solv-chip")).map((chip) => chip.textContent)).toEqual(
+      ["Prices?", "Hours?"],
+    );
+
+    // Updating the preview replaces what is shown.
+    preview.preview({ widget: { title: "Ask us" }, behaviour: { greeting: "Hello" } });
+    expect(mustQuery<HTMLElement>(root, ".solv-title").textContent).toBe("Ask us");
+    expect(root.querySelectorAll(".solv-chip")).toHaveLength(0);
+
+    // Sending (typed or a suggested question) does nothing in a preview.
+    const input = mustQuery<HTMLTextAreaElement>(root, ".solv-input");
+    input.value = "Will this be sent?";
+    mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+    await flushAsync();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(root.querySelectorAll(".solv-bubble--user")).toHaveLength(0);
+  });
+
   it("registers <solv-chat> as a side-effect-only module with no named exports", async () => {
     const mod = await import("../src/widget.js");
     expect(Object.keys(mod)).toEqual([]);

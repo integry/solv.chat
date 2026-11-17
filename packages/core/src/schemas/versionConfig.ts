@@ -41,7 +41,20 @@ export interface VersionConfig {
   actions: ActionsConfig;
 }
 
-const MAX_SUGGESTED_QUESTIONS = 6;
+/**
+ * Character and item limits the parser enforces, exported so editors can show
+ * them next to each field instead of repeating the numbers.
+ */
+export const CONFIG_LIMITS = {
+  greeting: 500,
+  persona: 4000,
+  fallbackText: 500,
+  suggestedQuestion: 200,
+  suggestedQuestions: 6,
+  title: 80,
+} as const;
+
+const MAX_SUGGESTED_QUESTIONS = CONFIG_LIMITS.suggestedQuestions;
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
 /** Returns a fresh default assistant version configuration. */
@@ -72,17 +85,17 @@ function parseBehaviourSection(raw: unknown, target: BehaviourConfig, errors: Er
     return;
   }
   if (raw.greeting !== undefined) {
-    const greeting = readTrimmedString(raw.greeting, 1, 500);
+    const greeting = readTrimmedString(raw.greeting, 1, CONFIG_LIMITS.greeting);
     if (greeting === null) errors.add("behaviour.greeting", "must be 1 to 500 characters");
     else target.greeting = greeting;
   }
   if (raw.persona !== undefined) {
-    const persona = readTrimmedString(raw.persona, 0, 4000);
+    const persona = readTrimmedString(raw.persona, 0, CONFIG_LIMITS.persona);
     if (persona === null) errors.add("behaviour.persona", "must be at most 4000 characters");
     else target.persona = persona;
   }
   if (raw.fallbackText !== undefined) {
-    const fallbackText = readTrimmedString(raw.fallbackText, 1, 500);
+    const fallbackText = readTrimmedString(raw.fallbackText, 1, CONFIG_LIMITS.fallbackText);
     if (fallbackText === null) errors.add("behaviour.fallbackText", "must be 1 to 500 characters");
     else target.fallbackText = fallbackText;
   }
@@ -98,7 +111,7 @@ function parseBehaviourSection(raw: unknown, target: BehaviourConfig, errors: Er
       }
       const questions: string[] = [];
       raw.suggestedQuestions.slice(0, MAX_SUGGESTED_QUESTIONS).forEach((item, i) => {
-        const q = readTrimmedString(item, 1, 200);
+        const q = readTrimmedString(item, 1, CONFIG_LIMITS.suggestedQuestion);
         if (q === null) {
           errors.add(`behaviour.suggestedQuestions[${i}]`, "must be 1 to 200 characters");
         } else {
@@ -116,7 +129,7 @@ function parseWidgetSection(raw: unknown, target: WidgetConfig, errors: Errors):
     return;
   }
   if (raw.title !== undefined) {
-    const title = readTrimmedString(raw.title, 1, 80);
+    const title = readTrimmedString(raw.title, 1, CONFIG_LIMITS.title);
     if (title === null) errors.add("widget.title", "must be 1 to 80 characters");
     else target.title = title;
   }

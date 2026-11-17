@@ -63,6 +63,12 @@ export interface KeyProvider {
    * the admin hides key-entry fields.
    */
   readonly managed?: boolean | undefined;
+  /**
+   * Only read when `managed` is true. True lets an owner store their own
+   * keys anyway (the admin offers "Use my own key"); `modelKey` must then
+   * prefer a stored key. False or absent keeps key entry refused.
+   */
+  readonly ownKeysAllowed?: boolean | undefined;
   modelKey(orgId: string, provider: LlmProviderName): Promise<string>;
   embeddingKey(orgId: string, provider?: EmbeddingsProviderName): Promise<string>;
 }

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   CHAT_PROTOCOL_VERSION,
   type ChatEvent,
+  CONFIG_LIMITS,
+  checkOrigin,
   defaultVersionConfig,
   Errors,
   fail,
@@ -754,5 +756,37 @@ describe("parseFeedbackRequest", () => {
       expect(res.errors.some((e) => e.startsWith("messageId:"))).toBe(true);
       expect(res.errors.some((e) => e.startsWith("value:"))).toBe(true);
     }
+  });
+});
+
+describe("checkOrigin", () => {
+  it("accepts an origin and returns it normalised", () => {
+    expect(checkOrigin("  https://Docs.Example.com ")).toEqual({
+      ok: true,
+      origin: "https://docs.example.com",
+    });
+  });
+
+  it("returns the same message the API gives, without the field name", () => {
+    expect(checkOrigin("docs.example.com")).toEqual({
+      ok: false,
+      error: "must be an absolute URL such as https://example.com",
+    });
+    expect(checkOrigin("https://docs.example.com/help")).toEqual({
+      ok: false,
+      error: "must be an origin only, with no path",
+    });
+  });
+});
+
+describe("CONFIG_LIMITS", () => {
+  it("is what the parser enforces", () => {
+    const tooLong = "x".repeat(CONFIG_LIMITS.greeting + 1);
+    const res = parseVersionConfig({ behaviour: { greeting: tooLong } });
+    expect(res.ok).toBe(false);
+    const ok = parseVersionConfig({
+      behaviour: { greeting: "x".repeat(CONFIG_LIMITS.greeting) },
+    });
+    expect(ok.ok).toBe(true);
   });
 });

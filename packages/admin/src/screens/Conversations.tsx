@@ -265,7 +265,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
       {listRes.status === "error" ? (
         <ErrorState
           title="Could not load conversations."
-          message={listRes.error}
+          detail={listRes.error}
           onRetry={listRes.reload}
         />
       ) : !page ? (

@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { ApiError, postJson, putJson } from "../api/client.js";
 import { IDLE_SAVE, type SaveState } from "./saveState.js";
 
@@ -41,6 +41,8 @@ export interface EntryEditorProps {
     | ((result: { documentId: string; sourceId: string }, session: EntrySaveSession) => void)
     | undefined;
   onCancel?: (() => void) | undefined;
+  /** Inside another card that already names it: no card or heading of its own. */
+  embedded?: boolean | undefined;
 }
 
 export function EntryEditor({
@@ -56,6 +58,7 @@ export function EntryEditor({
   onSaveStateChange,
   onSaved,
   onCancel,
+  embedded = false,
 }: EntryEditorProps) {
   const [ownDraft, setOwnDraft] = useState<EntryDraft>({
     question: initialQuestion,
@@ -66,6 +69,10 @@ export function EntryEditor({
   const { saving, fieldErrors, formError } = saveState ?? ownSaveState;
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const sessionRef = useRef(0);
+  // Sources can show the edit form and the new-answer form at once: each needs its own ids.
+  const fieldId = useId();
+  const questionId = `${fieldId}-question`;
+  const answerId = `${fieldId}-answer`;
 
   useEffect(() => {
     void assistantId;
@@ -147,7 +154,7 @@ export function EntryEditor({
 
     if (sessionRef.current === submitSession) {
       updateSaveState(IDLE_SAVE);
-      setStatusMessage("Answer saved.");
+      setStatusMessage("Answer saved. Your assistant can use it in a minute or two.");
       if (!isEditing) {
         updateDraft({ question: "", answer: "" });
       }
@@ -156,12 +163,18 @@ export function EntryEditor({
   }
 
   return (
-    <form className="source-card stack" onSubmit={(e) => void handleSubmit(e)}>
-      <h2 className="section-heading">{isEditing ? "Edit answer" : "Write an answer"}</h2>
+    <form
+      className={embedded ? "stack" : "source-card stack"}
+      aria-label={embedded ? "Write an answer" : undefined}
+      onSubmit={(e) => void handleSubmit(e)}
+    >
+      {!embedded && (
+        <h2 className="section-heading">{isEditing ? "Edit answer" : "Write an answer"}</h2>
+      )}
       <div className="field">
-        <label htmlFor="entry-question">Question</label>
+        <label htmlFor={questionId}>Question</label>
         <input
-          id="entry-question"
+          id={questionId}
           type="text"
           value={question}
           disabled={saving}
@@ -176,9 +189,9 @@ export function EntryEditor({
       </div>
 
       <div className="field">
-        <label htmlFor="entry-answer">Answer</label>
+        <label htmlFor={answerId}>Answer</label>
         <textarea
-          id="entry-answer"
+          id={answerId}
           rows={4}
           value={answer}
           disabled={saving}

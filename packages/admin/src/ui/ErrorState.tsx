@@ -1,26 +1,35 @@
 import { Icon } from "./Icon.js";
 
 export interface ErrorStateProps {
-  /** What could not be done, e.g. "Could not load conversations." */
+  /** What could not be loaded, as a sentence: "Could not load your sources." */
   title: string;
-  /** The server's message, if any. */
-  message?: string | null | undefined;
-  /** Shows "Try again" when given. */
+  /** The server's message, when there is one. */
+  detail?: string | null | undefined;
+  /** Shown as a "Try again" button when given. */
   onRetry?: (() => void) | undefined;
+  /** Disables the button while a retry is running. */
+  retrying?: boolean;
 }
 
-/** Shown in place of content that failed to load, with a way to try again. */
-export function ErrorState({ title, message, onRetry }: ErrorStateProps) {
+/** Shown in place of a screen's content when loading it failed. */
+export function ErrorState({ title, detail, onRetry, retrying = false }: ErrorStateProps) {
   return (
     <div className="error-state" role="alert">
-      <Icon name="alert" size={20} className="error-state-icon" />
       <div className="error-state-text">
-        <p className="error-state-title">{title}</p>
-        {message && message !== title && <p className="muted">{message}</p>}
+        <Icon name="alert" />
+        <div>
+          <p className="error-state-title">{title}</p>
+          {detail && detail !== title && <p className="muted">{detail}</p>}
+        </div>
       </div>
       {onRetry && (
-        <button type="button" className="btn btn-secondary btn-sm" onClick={onRetry}>
-          Try again
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          disabled={retrying}
+          onClick={onRetry}
+        >
+          {retrying ? "Trying again…" : "Try again"}
         </button>
       )}
     </div>

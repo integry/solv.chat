@@ -154,7 +154,7 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
       {detailRes.status === "error" ? (
         <ErrorState
           title="Could not load this conversation."
-          message={detailRes.error}
+          detail={detailRes.error}
           onRetry={detailRes.reload}
         />
       ) : otherAssistant ? (

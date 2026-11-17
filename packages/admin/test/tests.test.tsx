@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
-import type { AnswerTest, Assistant, TestRunResponse } from "../src/api/types.js";
+import type { AnswerTest, Assistant, TestRunResponse, TestRunRow } from "../src/api/types.js";
+import { expectNoSeriousA11yViolations } from "./support/axe.js";
 
 function makeAssistant(): Assistant {
   return {
@@ -29,10 +30,13 @@ function installFakeServer(options?: {
   onPostTest?: () => Promise<void>;
   onPatchTest?: () => Promise<void>;
   onDeleteTest?: () => Promise<void>;
+  runs?: TestRunRow[];
+  failTestsLoad?: number;
 }) {
   const assistant = makeAssistant();
   const tests: AnswerTest[] = options?.tests ? [...options.tests] : [];
   let nextId = 1;
+  let testsLoadFailures = options?.failTestsLoad ?? 0;
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -45,7 +49,15 @@ function installFakeServer(options?: {
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/tests` && method === "GET") {
+      if (testsLoadFailures > 0) {
+        testsLoadFailures--;
+        return Response.json({ error: "The database is busy." }, { status: 503 });
+      }
       return Response.json({ tests: [...tests] });
+    }
+
+    if (path === `/api/admin/assistants/${assistant.id}/test-runs` && method === "GET") {
+      return Response.json({ runs: options?.runs ?? [] });
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/tests` && method === "POST") {
@@ -153,7 +165,8 @@ describe("Tests screen", () => {
 
     expect(await screen.findByRole("heading", { name: "Tests" })).toBeTruthy();
     expect(await screen.findByRole("heading", { name: "No tests yet" })).toBeTruthy();
-    expect(screen.getByText("Add a question your assistant should get right.")).toBeTruthy();
+    expect(screen.getByText(/Tests guard publishing\./)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add your first test" })).toBeTruthy();
     const runBtn = screen.getByRole("button", { name: "Run now" }) as HTMLButtonElement;
     expect(runBtn.disabled).toBe(true);
   });
@@ -202,7 +215,6 @@ describe("Tests screen", () => {
     expect(screen.getByText('It must mention "$29"')).toBeTruthy();
     expect(screen.getByText("Passed")).toBeTruthy();
     expect(screen.getByText('Said "$29".')).toBeTruthy();
-    expect(screen.getByText("Pro costs $29 per month.")).toBeTruthy();
 
     expect(screen.getByText("Can I get a refund?")).toBeTruthy();
     expect(screen.getByText("It must link to https://example.com/refunds")).toBeTruthy();
@@ -210,6 +222,8 @@ describe("Tests screen", () => {
     expect(
       screen.getByText("Did not cite https://example.com/refunds. Cited: nothing."),
     ).toBeTruthy();
+    // The answer that failed is quoted next to the reason.
+    expect(screen.getByText("Refunds are handled case by case.")).toBeTruthy();
   });
 
   it("adds each of the four expectations and shows the extra field only when needed", async () => {
@@ -296,7 +310,7 @@ describe("Tests screen", () => {
     render(<App />);
 
     expect(await screen.findByText("Old question?")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit test: Old question?" }));
 
     fireEvent.change(screen.getByLabelText("Question"), {
       target: { value: "Updated question?" },
@@ -309,10 +323,13 @@ describe("Tests screen", () => {
     expect(await screen.findByText("Updated question?")).toBeTruthy();
     expect(screen.getByText('It must mention "updated"')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete test: Updated question?" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete this test?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete test" }));
     await waitFor(() => {
       expect(screen.queryByText("Updated question?")).toBeNull();
     });
+    expect(await screen.findByText("Test deleted.")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "No tests yet" })).toBeTruthy();
   });
 
@@ -395,7 +412,6 @@ describe("Tests screen", () => {
     expect(screen.getByText("Failed")).toBeTruthy();
     expect(screen.getByText("Not run")).toBeTruthy();
     expect(screen.getByText('Said "yes".')).toBeTruthy();
-    expect(screen.getByText("Yes, we support that.")).toBeTruthy();
     expect(screen.getByText('Did not say "never".')).toBeTruthy();
     expect(screen.getByText("Here is the answer.")).toBeTruthy();
     expect(
@@ -468,7 +484,7 @@ describe("Tests screen", () => {
     expect(await screen.findByText("Passed")).toBeTruthy();
     expect(screen.getByText('Said "$29".')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit test: What does Pro cost?" }));
     fireEvent.change(screen.getByLabelText("Words"), { target: { value: "$99" } });
     fireEvent.click(screen.getByRole("button", { name: "Save test" }));
 
@@ -543,14 +559,12 @@ describe("Tests screen", () => {
     render(<App />);
 
     await screen.findByText("Question A?");
-    const [editA] = screen.getAllByRole("button", { name: "Edit" });
-    if (!editA) throw new Error("Expected Edit button for Question A");
-    fireEvent.click(editA);
+    fireEvent.click(screen.getByRole("button", { name: "Edit test: Question A?" }));
     fireEvent.change(screen.getByLabelText("Words"), { target: { value: "alpha-updated" } });
     fireEvent.click(screen.getByRole("button", { name: "Save test" }));
 
     // While A's save is in flight, switch to editing B and enter changes.
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit test: Question B?" }));
     expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Question B?");
     fireEvent.change(screen.getByLabelText("Words"), { target: { value: "beta-draft" } });
 
@@ -566,7 +580,17 @@ describe("Tests screen", () => {
     const firstPost = createDeferred<void>();
     let postCount = 0;
     installFakeServer({
-      tests: [],
+      tests: [
+        {
+          id: "tst_0",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Existing?",
+          expectation: { kind: "declines" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+      ],
       onPostTest: async () => {
         postCount++;
         if (postCount === 1) await firstPost.promise;
@@ -575,14 +599,15 @@ describe("Tests screen", () => {
     window.history.replaceState(null, "", "/admin/tests");
     render(<App />);
 
-    await screen.findByRole("heading", { name: "Tests" });
+    await screen.findByText("Existing?");
     fireEvent.click(screen.getByRole("button", { name: "Add test" }));
     fireEvent.change(screen.getByLabelText("Question"), { target: { value: "First question?" } });
     fireEvent.change(screen.getByLabelText("Words"), { target: { value: "first" } });
     fireEvent.click(screen.getByRole("button", { name: "Save test" }));
 
-    // Close and reopen Add test while the first save is still in flight.
-    fireEvent.click(screen.getByRole("button", { name: "Add test" }));
+    // Leave the add form (Cancel is disabled mid-save, so via Edit) and open a new one
+    // while the first save is still in flight.
+    fireEvent.click(screen.getByRole("button", { name: "Edit test: Existing?" }));
     fireEvent.click(screen.getByRole("button", { name: "Add test" }));
     fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Second draft?" } });
 
@@ -622,14 +647,12 @@ describe("Tests screen", () => {
     render(<App />);
 
     await screen.findByText("Question A?");
-    const [deleteA] = screen.getAllByRole("button", { name: "Delete" });
-    if (!deleteA) throw new Error("Expected Delete button for Question A");
-    fireEvent.click(deleteA);
+    fireEvent.click(screen.getByRole("button", { name: "Delete test: Question A?" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete this test?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete test" }));
 
     // While A's delete is pending, edit and save B.
-    const [, editB] = screen.getAllByRole("button", { name: "Edit" });
-    if (!editB) throw new Error("Expected Edit button for Question B");
-    fireEvent.click(editB);
+    fireEvent.click(screen.getByRole("button", { name: "Edit test: Question B?" }));
     fireEvent.change(screen.getByLabelText("Question"), {
       target: { value: "Question B updated?" },
     });
@@ -672,13 +695,13 @@ describe("Tests screen", () => {
     render(<App />);
 
     await screen.findByText("Question A?");
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit test: Question A?" }));
     fireEvent.change(screen.getByLabelText("Words"), { target: { value: "alpha-updated" } });
     fireEvent.click(screen.getByRole("button", { name: "Save test" }));
 
     // Leave the editor via Add test, then reopen the same test and enter new unsaved input.
     fireEvent.click(screen.getByRole("button", { name: "Add test" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit test: Question A?" }));
     fireEvent.change(screen.getByLabelText("Question"), {
       target: { value: "Question A newer draft?" },
     });
@@ -700,7 +723,7 @@ describe("Tests screen", () => {
     expect((screen.getByLabelText("Words") as HTMLInputElement).value).toBe("alpha-newer-draft");
   });
 
-  it("places the status badge inside .actions alongside Edit and Delete", async () => {
+  it("shows each test as a table row with the result badge in its own Result cell", async () => {
     installFakeServer({
       tests: [
         {
@@ -717,9 +740,180 @@ describe("Tests screen", () => {
     window.history.replaceState(null, "", "/admin/tests");
     render(<App />);
 
-    const badge = await screen.findByText("Not run yet");
-    const actions = badge.closest(".actions");
-    expect(actions).toBeTruthy();
-    expect(actions?.querySelectorAll("button")).toHaveLength(2);
+    const table = await screen.findByRole("table", { name: "Tests" });
+    const headers = within(table)
+      .getAllByRole("columnheader")
+      .map((th) => th.textContent);
+    expect(headers).toEqual(["Question", "Result", "What it answered", "Actions"]);
+    const badge = within(table).getByText("Not run yet");
+    expect(badge.closest("td")?.getAttribute("data-label")).toBe("Result");
+    const row = badge.closest("tr") as HTMLElement;
+    expect(within(row).getByRole("button", { name: "Edit test: Question A?" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Delete test: Question A?" })).toBeTruthy();
+  });
+
+  it("shows when the tests last ran, from stored runs and after Run now", async () => {
+    const twoHoursAgo = Date.now() - 2 * 3600 * 1000;
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Question A?",
+          expectation: { kind: "contains", phrase: "alpha" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+      ],
+      runs: [
+        {
+          id: "run_old",
+          versionId: "ver_1",
+          startedAt: twoHoursAgo - 3600 * 1000,
+          results: [],
+          passed: true,
+        },
+        { id: "run_new", versionId: "ver_1", startedAt: twoHoursAgo, results: [], passed: false },
+      ],
+      runResponse: {
+        runId: "run_2",
+        passed: true,
+        results: [
+          {
+            testId: "tst_1",
+            question: "Question A?",
+            expectation: { kind: "contains", phrase: "alpha" },
+            outcome: "passed",
+            reason: 'Said "alpha".',
+            excerpt: "alpha",
+          },
+        ],
+      },
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    const { container } = render(<App />);
+
+    expect(await screen.findByText("2 hours ago")).toBeTruthy();
+    expect(container.querySelector(".test-summary")?.textContent).toContain("Last run");
+
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    expect(await screen.findByText("All tests passed.")).toBeTruthy();
+    await waitFor(() => {
+      expect(container.querySelector(".test-summary")?.textContent).toMatch(
+        /Last run (now|\d+ seconds? ago).*1 passed/,
+      );
+    });
+  });
+
+  it("says the tests have not run when there are no stored runs", async () => {
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Question A?",
+          expectation: { kind: "declines" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+    expect(await screen.findByText(/Not run yet\. Press Run now/)).toBeTruthy();
+  });
+
+  it("sends no DELETE when the owner cancels the confirmation", async () => {
+    const server = installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Keep me?",
+          expectation: { kind: "declines" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete test: Keep me?" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete this test?" });
+    expect(within(dialog).getByText(/"Keep me\?" will no longer be checked/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    expect(server.fetchMock.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
+    expect(screen.getByText("Keep me?")).toBeTruthy();
+  });
+
+  it("opens the add form from the empty state", async () => {
+    installFakeServer({ tests: [] });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add your first test" }));
+    expect(screen.getByLabelText("Question")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "No tests yet" })).toBeNull();
+  });
+
+  it("shows an error with Try again when the tests cannot load, and recovers", async () => {
+    installFakeServer({
+      failTestsLoad: 1,
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Back again?",
+          expectation: { kind: "declines" },
+          createdAt: 1_700_000_000_000,
+          latestResult: null,
+        },
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    expect(await screen.findByText("Could not load your tests.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Back again?")).toBeTruthy();
+  });
+
+  it("has no serious accessibility problems with results and the delete dialog open", async () => {
+    installFakeServer({
+      tests: [
+        {
+          id: "tst_1",
+          orgId: "org_00000000000000000000",
+          assistantId: "ast_1",
+          question: "Can I get a refund?",
+          expectation: { kind: "contains", phrase: "30 days" },
+          createdAt: 1_700_000_000_000,
+          latestResult: {
+            testId: "tst_1",
+            question: "Can I get a refund?",
+            expectation: { kind: "contains", phrase: "30 days" },
+            outcome: "failed",
+            reason: 'Did not say "30 days".',
+            excerpt: "Ask support.",
+          },
+        },
+      ],
+    });
+    window.history.replaceState(null, "", "/admin/tests");
+    render(<App />);
+
+    await screen.findByText("Ask support.");
+    await expectNoSeriousA11yViolations(document.body);
+    fireEvent.click(screen.getByRole("button", { name: "Delete test: Can I get a refund?" }));
+    await screen.findByRole("dialog", { name: "Delete this test?" });
+    await expectNoSeriousA11yViolations(document.body);
   });
 });

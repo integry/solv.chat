@@ -218,7 +218,7 @@ export function Reports({ assistantId }: ReportsProps) {
       {reportRes.status === "error" ? (
         <ErrorState
           title="Could not load the report."
-          message={reportRes.error}
+          detail={reportRes.error}
           onRetry={reportRes.reload}
         />
       ) : !report ? (

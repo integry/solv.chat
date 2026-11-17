@@ -258,7 +258,7 @@ export function Gaps({ assistantId }: GapsProps) {
       {addingTest && !addingTestInList && testEditorFor(addingTest)}
 
       {gapsRes.status === "error" ? (
-        <ErrorState title="Could not load gaps." message={gapsRes.error} onRetry={gapsRes.reload} />
+        <ErrorState title="Could not load gaps." detail={gapsRes.error} onRetry={gapsRes.reload} />
       ) : !page ? (
         <div className="source-card">
           <Skeleton label="Loading gaps…" lines={5} />

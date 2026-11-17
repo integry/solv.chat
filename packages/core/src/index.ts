@@ -1,3 +1,4 @@
+export { ADMIN_CSP, ADMIN_PREVIEW_CSP } from "./csp.js";
 export { type IdPrefix, isId, newId } from "./ids.js";
 export { Errors, fail, ok, type Result } from "./result.js";
 export {
@@ -8,7 +9,7 @@ export {
   type TestExpectation,
   type TestInput,
 } from "./schemas/answerTest.js";
-export { type AssistantInput, parseAssistantInput } from "./schemas/assistant.js";
+export { type AssistantInput, checkOrigin, parseAssistantInput } from "./schemas/assistant.js";
 export {
   type ActionResult,
   CHAT_PROTOCOL_VERSION,
@@ -55,6 +56,7 @@ export {
 export {
   type ActionsConfig,
   type BehaviourConfig,
+  CONFIG_LIMITS,
   defaultVersionConfig,
   type LimitsConfig,
   parseVersionConfig,

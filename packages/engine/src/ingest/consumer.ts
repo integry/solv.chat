@@ -1,5 +1,6 @@
 import { newId } from "@solvchat/core";
-import { forQueuedIngest } from "../db/tenant.js";
+import type { DocumentRow, IndexErrorCode } from "../db/documents.js";
+import { forQueuedIngest, type Tenant } from "../db/tenant.js";
 import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
 import type { UsageSink } from "../seams/types.js";
 import { chunkMarkdown, exceedsChunkBudget } from "./chunk.js";
@@ -93,9 +94,35 @@ async function processIngestMessage(
     return;
   }
 
+  try {
+    await indexDocument(message, deps, tenant, document, source.assistantId, orgId);
+  } catch (err) {
+    // Recorded on every failed attempt, so the admin shows "Failed" rather
+    // than "Indexing…" while the Queue retries; a later success marks the
+    // content indexed and the error no longer applies. Only a code is stored.
+    const code: IndexErrorCode =
+      err instanceof MissingBodyError ? "missing_body" : "embedding_failed";
+    await bestEffort("ingest consumer: could not record index error", document.id, () =>
+      tenant.documents.markIndexError(document.id, contentHash, code),
+    );
+    throw err;
+  }
+}
+
+class MissingBodyError extends Error {}
+
+async function indexDocument(
+  message: Message<unknown>,
+  deps: IngestConsumerDeps,
+  tenant: Tenant,
+  document: DocumentRow,
+  assistantId: string,
+  orgId: string,
+): Promise<void> {
+  const contentHash = document.contentHash;
   const object = document.bodyKey !== null ? await deps.docs.get(document.bodyKey) : null;
   if (object === null) {
-    throw new Error(`missing document body for ${document.id}`);
+    throw new MissingBodyError(`missing document body for ${document.id}`);
   }
 
   const markdown = await object.text();
@@ -110,6 +137,9 @@ async function processIngestMessage(
       externalId: document.externalId,
       chunks: parts.length,
     });
+    await bestEffort("ingest consumer: could not record index error", document.id, () =>
+      tenant.documents.markIndexError(document.id, contentHash, "too_long"),
+    );
     message.ack();
     return;
   }
@@ -125,7 +155,6 @@ async function processIngestMessage(
     // Metered per provider request, as soon as each one is billed: when a
     // later request or the upsert fails, the message retries and pays again
     // for the requests that succeeded, and the owner's figure should say so.
-    const assistantId = source.assistantId;
     const embedded = await deps.embedder.embed(chunks.map(embeddingInput), async (tokens) => {
       await deps.usage?.record({
         orgId,
@@ -151,7 +180,7 @@ async function processIngestMessage(
           chunkId: chunk.id,
           vector,
           orgId,
-          assistantId: source.assistantId,
+          assistantId,
         };
       }),
     );

@@ -76,7 +76,7 @@ export function Overview({ assistantId }: OverviewProps) {
       {overviewRes.status === "error" ? (
         <ErrorState
           title="Could not load the overview."
-          message={overviewRes.error}
+          detail={overviewRes.error}
           onRetry={overviewRes.reload}
         />
       ) : !overview ? (
