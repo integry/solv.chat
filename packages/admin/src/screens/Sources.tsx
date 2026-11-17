@@ -181,9 +181,12 @@ function ImportProgress({ done, total, label }: { done: number; total: number; l
 function SitemapImport({
   assistantId,
   onImported,
+  onImportingChange,
 }: {
   assistantId: string;
   onImported: () => void;
+  /** Tells the Add content panel to stay on this choice until the import ends. */
+  onImportingChange: (importing: boolean) => void;
 }) {
   const [sitemapUrl, setSitemapUrl] = useState("");
   const [preview, setPreview] = useState<{ url: string; urls: string[] } | null>(null);
@@ -194,6 +197,10 @@ function SitemapImport({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const importing = progress !== null;
+
+  useEffect(() => {
+    onImportingChange(importing);
+  }, [importing, onImportingChange]);
 
   async function handlePreview(event: FormEvent) {
     event.preventDefault();
@@ -484,7 +491,15 @@ export function Sources({ assistantId }: SourcesProps) {
   // Also keep checking while a failure is retried: the Queue can still index it.
   const anyIndexing = sources.some((s) => (s.indexingCount ?? 0) > 0 || mayRecover(s));
 
-  const [addChoice, setAddChoice] = useState<AddChoice | null>(null);
+  // The chosen way to add stays set after Close, so reopening shows the same one.
+  const [addChoice, setAddChoice] = useState<AddChoice>("write");
+  // Mounted from the first open on and only hidden after that: switching
+  // choices or closing never throws away a draft answer or a sitemap selection.
+  const [addMounted, setAddMounted] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  // While pages are importing, the panel stays open on the sitemap choice so
+  // its progress and any error with a retry stay on screen.
+  const [sitemapImporting, setSitemapImporting] = useState(false);
   const [expandedSourceId, setExpandedSourceId] = useState<string | null>(null);
   const [docsState, setDocsState] = useState<{
     sourceId: string | null;
@@ -636,9 +651,20 @@ export function Sources({ assistantId }: SourcesProps) {
     requestAnimationFrame(() => docsPanelRef.current?.focus());
   }
 
-  function chooseAdd(choice: AddChoice) {
-    setAddChoice(choice);
+  function openAdd() {
+    setAddMounted(true);
+    setAddOpen(true);
     requestAnimationFrame(() => addPanelRef.current?.focus());
+  }
+
+  function closeAdd() {
+    if (sitemapImporting) return;
+    setAddOpen(false);
+  }
+
+  function chooseAdd(choice: AddChoice) {
+    if (sitemapImporting && choice !== "sitemap") return;
+    setAddChoice(choice);
   }
 
   async function handleEditEntry(sourceId: string, doc: DocumentSummary) {
@@ -843,9 +869,10 @@ export function Sources({ assistantId }: SourcesProps) {
           <button
             type="button"
             className="btn btn-primary"
-            aria-expanded={addChoice !== null}
+            aria-expanded={addOpen}
             aria-controls="add-content"
-            onClick={() => (addChoice === null ? chooseAdd("write") : setAddChoice(null))}
+            disabled={addOpen && sitemapImporting}
+            onClick={() => (addOpen ? closeAdd() : openAdd())}
           >
             <Icon name="plus" />
             Add content
@@ -868,13 +895,13 @@ export function Sources({ assistantId }: SourcesProps) {
       )}
 
       {sources.length === 0 ? (
-        addChoice === null && (
+        !addOpen && (
           <EmptyState
             icon="sources"
             title="No sources yet"
             description="Write an answer, import pages from a sitemap, or push them from your site's build."
             action={
-              <button type="button" className="btn btn-primary" onClick={() => chooseAdd("write")}>
+              <button type="button" className="btn btn-primary" onClick={openAdd}>
                 Add content
               </button>
             }
@@ -1032,13 +1059,14 @@ export function Sources({ assistantId }: SourcesProps) {
         />
       )}
 
-      {addChoice !== null && (
+      {addMounted && (
         <section
           ref={addPanelRef}
           id="add-content"
           className="source-card stack add-content"
           aria-labelledby="add-content-heading"
           tabIndex={-1}
+          hidden={!addOpen}
         >
           <div className="source-row-header">
             <h2 id="add-content-heading" className="section-heading">
@@ -1047,7 +1075,8 @@ export function Sources({ assistantId }: SourcesProps) {
             <button
               type="button"
               className="btn btn-secondary btn-sm"
-              onClick={() => setAddChoice(null)}
+              disabled={sitemapImporting}
+              onClick={closeAdd}
             >
               Close
             </button>
@@ -1064,7 +1093,8 @@ export function Sources({ assistantId }: SourcesProps) {
                   name="add-content-choice"
                   value={choice.id}
                   checked={addChoice === choice.id}
-                  onChange={() => setAddChoice(choice.id)}
+                  disabled={sitemapImporting && choice.id !== "sitemap"}
+                  onChange={() => chooseAdd(choice.id)}
                 />
                 <Icon name={choice.icon} size={20} />
                 <span className="choice-card-text">
@@ -1074,8 +1104,11 @@ export function Sources({ assistantId }: SourcesProps) {
               </label>
             ))}
           </fieldset>
+          {sitemapImporting && (
+            <p className="field-hint">You can add something else once the import finishes.</p>
+          )}
 
-          {addChoice === "write" && (
+          <div hidden={addChoice !== "write"}>
             <EntryEditor
               embedded
               assistantId={assistantId}
@@ -1090,11 +1123,17 @@ export function Sources({ assistantId }: SourcesProps) {
                 }
               }}
             />
-          )}
-          {addChoice === "sitemap" && (
-            <SitemapImport assistantId={assistantId} onImported={() => sourcesRes.reload()} />
-          )}
-          {addChoice === "cli" && <CliInstructions assistantId={assistantId} />}
+          </div>
+          <div hidden={addChoice !== "sitemap"}>
+            <SitemapImport
+              assistantId={assistantId}
+              onImported={sourcesRes.reload}
+              onImportingChange={setSitemapImporting}
+            />
+          </div>
+          <div hidden={addChoice !== "cli"}>
+            <CliInstructions assistantId={assistantId} />
+          </div>
         </section>
       )}
 

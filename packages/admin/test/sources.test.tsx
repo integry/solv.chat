@@ -1437,6 +1437,145 @@ describe("admin Sources screen", () => {
     expect(
       await screen.findByText(/npx @solvchat\/cli push \.\/docs --endpoint .* --assistant ast_1/),
     ).toBeTruthy();
-    expect(screen.queryByLabelText("Question")).toBeNull();
+    // Hidden, not thrown away: the write form is out of view and out of the accessibility tree.
+    expect(screen.queryByRole("textbox", { name: "Question" })).toBeNull();
+  });
+
+  it("keeps a draft answer and a sitemap selection when switching between choices", async () => {
+    installSourcesFakeServer();
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+    await screen.findByText("Your site");
+    await openAddContent();
+    fireEvent.change(screen.getByRole("textbox", { name: "Question" }), {
+      target: { value: "Do you ship abroad?" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Answer" }), {
+      target: { value: "Yes, to most countries." },
+    });
+
+    fireEvent.click(screen.getByRole("radio", { name: /Import from a sitemap/ }));
+    expect(screen.queryByRole("textbox", { name: "Question" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Sitemap URL"), {
+      target: { value: "https://docs.example.com/sitemap.xml" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch URLs" }));
+    fireEvent.click(await screen.findByLabelText("https://docs.example.com/pricing"));
+
+    fireEvent.click(screen.getByRole("radio", { name: /Write an answer/ }));
+    expect((screen.getByRole("textbox", { name: "Question" }) as HTMLInputElement).value).toBe(
+      "Do you ship abroad?",
+    );
+    expect((screen.getByRole("textbox", { name: "Answer" }) as HTMLTextAreaElement).value).toBe(
+      "Yes, to most countries.",
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: /Push from your build/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /Import from a sitemap/ }));
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: "https://docs.example.com/pricing",
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false);
+    expect(screen.getByText(/2 of 3 selected/)).toBeTruthy();
+  });
+
+  it("keeps the draft and the chosen way to add after Close, and shows them on reopening", async () => {
+    installSourcesFakeServer();
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+    await screen.findByText("Your site");
+    await openAddContent();
+    fireEvent.change(screen.getByRole("textbox", { name: "Question" }), {
+      target: { value: "Can I pause my plan?" },
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /Import from a sitemap/ }));
+    fireEvent.change(screen.getByLabelText("Sitemap URL"), {
+      target: { value: "https://docs.example.com/sitemap.xml" },
+    });
+
+    const panel = screen.getByRole("region", { name: "Add content" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("region", { name: "Add content" })).toBeNull();
+    const headerButton = screen.getByRole("button", { name: "Add content" });
+    expect(headerButton.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(headerButton);
+    expect(headerButton.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      (screen.getByRole("radio", { name: /Import from a sitemap/ }) as HTMLInputElement).checked,
+    ).toBe(true);
+    expect((screen.getByLabelText("Sitemap URL") as HTMLInputElement).value).toBe(
+      "https://docs.example.com/sitemap.xml",
+    );
+    fireEvent.click(screen.getByRole("radio", { name: /Write an answer/ }));
+    expect((screen.getByRole("textbox", { name: "Question" }) as HTMLInputElement).value).toBe(
+      "Can I pause my plan?",
+    );
+  });
+
+  it("stays on the import, with its progress and error, until the import ends", async () => {
+    const previewUrls = Array.from({ length: 8 }, (_, i) => `https://docs.example.com/p${i}`);
+    let release!: () => void;
+    let calls = 0;
+    const server = installSourcesFakeServer({
+      previewUrls,
+      onSitemapImport() {
+        calls++;
+        if (calls !== 2) return null;
+        // The second batch waits, then fails.
+        return new Promise<void>((resolve) => (release = resolve)).then(() =>
+          Response.json({ error: "Queue send failed." }, { status: 500 }),
+        );
+      },
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    render(<App />);
+    await screen.findByText("Your site");
+    await openAddContent("Import from a sitemap");
+    fireEvent.change(screen.getByLabelText("Sitemap URL"), {
+      target: { value: "https://docs.example.com/sitemap.xml" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch URLs" }));
+    await screen.findByLabelText("https://docs.example.com/p7");
+    fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
+    expect(await screen.findByText("Importing 5 of 8 pages…")).toBeTruthy();
+
+    const panel = screen.getByRole("region", { name: "Add content" });
+    const close = within(panel).getByRole("button", { name: "Close" }) as HTMLButtonElement;
+    const headerButton = screen.getByRole("button", { name: "Add content" }) as HTMLButtonElement;
+    const write = screen.getByRole("radio", { name: /Write an answer/ }) as HTMLInputElement;
+    const cli = screen.getByRole("radio", { name: /Push from your build/ }) as HTMLInputElement;
+    expect(close.disabled).toBe(true);
+    expect(headerButton.disabled).toBe(true);
+    expect(write.disabled).toBe(true);
+    expect(cli.disabled).toBe(true);
+    expect(screen.getByText("You can add something else once the import finishes.")).toBeTruthy();
+
+    // Neither control leaves the import while it runs.
+    fireEvent.click(write);
+    fireEvent.click(close);
+    fireEvent.click(headerButton);
+    expect(
+      (screen.getByRole("radio", { name: /Import from a sitemap/ }) as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(screen.getByRole("progressbar", { name: "Importing" })).toBeTruthy();
+
+    release();
+    expect(await screen.findByText("Queue send failed.")).toBeTruthy();
+    await waitFor(() => expect(close.disabled).toBe(false));
+    expect(write.disabled).toBe(false);
+    expect(headerButton.disabled).toBe(false);
+
+    // The pages still to import stay selected, so switching away and back keeps the retry.
+    fireEvent.click(write);
+    fireEvent.click(screen.getByRole("radio", { name: /Import from a sitemap/ }));
+    expect(screen.getByText("Queue send failed.")).toBeTruthy();
+    expect(screen.getByText(/3 of 8 selected/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
+    expect(await screen.findByText(/^Imported 3 pages\./)).toBeTruthy();
+    expect(server.createdSitemapSourceCount).toBe(1);
   });
 });
