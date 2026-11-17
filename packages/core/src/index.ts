@@ -30,6 +30,10 @@ export {
   type UnknownChatEvent,
 } from "./schemas/chat.js";
 export {
+  MAX_CONVERSATION_SEARCH_LENGTH,
+  toConversationSearch,
+} from "./schemas/conversationSearch.js";
+export {
   type DocumentInput,
   MAX_DOCUMENT_MARKDOWN_BYTES,
   parseDocumentInput,

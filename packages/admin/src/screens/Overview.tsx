@@ -5,6 +5,7 @@ import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
 import { ScreenLink } from "../ui/ScreenLink.js";
 import { Skeleton } from "../ui/Skeleton.js";
+import { questionConversationsPath } from "./conversationLinks.js";
 import {
   costChange,
   countChange,
@@ -150,9 +151,7 @@ export function Overview({ assistantId }: OverviewProps) {
                 <ul className="history-list">
                   {overview.topQuestions.map((item) => (
                     <li key={item.question} className="history-item">
-                      <ScreenLink
-                        to={`/admin/conversations?q=${encodeURIComponent(item.question)}`}
-                      >
+                      <ScreenLink to={questionConversationsPath(assistantId, item.question)}>
                         {item.question}
                       </ScreenLink>
                       <span className="badge">{formatTimes(item.count)}</span>

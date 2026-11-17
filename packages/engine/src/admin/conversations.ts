@@ -1,3 +1,4 @@
+import { MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
 import type {
   ConversationFilter,
   ConversationRow,
@@ -77,7 +78,8 @@ const FILTER_FLAGS = {
 export const CONVERSATION_DAY_OPTIONS = [1, 7, 30, 90] as const;
 
 const DAY_MS = 86_400_000;
-const MAX_SEARCH = 200;
+// Shared with the admin, whose question links bound their search to it.
+const MAX_SEARCH = MAX_CONVERSATION_SEARCH_LENGTH;
 
 /**
  * Reads `?filter=unanswered,not_helpful,used_tool`, `?days=1|7|30|90` and

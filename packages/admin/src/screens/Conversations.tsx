@@ -1,3 +1,4 @@
+import { toConversationSearch } from "@solvchat/core";
 import { useEffect, useId, useState } from "react";
 import type { ConversationSummary, ConversationsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
@@ -112,7 +113,9 @@ function ListSkeleton() {
 export function Conversations({ assistantId }: ConversationsProps) {
   const openId = useOpenConversationId(assistantId);
   const [offset, setOffset] = useState(0);
-  const [searchInput, setSearchInput] = useState(() => readQueryParam("q") ?? "");
+  const [searchInput, setSearchInput] = useState(() =>
+    toConversationSearch(readQueryParam("q") ?? ""),
+  );
   const [search, setSearch] = useState(searchInput.trim());
   const [flags, setFlags] = useState<ReadonlySet<FlagKey>>(new Set());
   const [days, setDays] = useState("");

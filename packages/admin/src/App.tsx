@@ -150,7 +150,7 @@ function AdminShell({
   const { screen, navigate } = useRoute(config.navItems, config.defaultScreen);
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
-  // A shared conversation link names its assistant; start on that one. An id
+  // Conversation and question links name their assistant; start on that one. An id
   // that is not in the list falls back to the first assistant below.
   const [selectedId, setSelectedId] = useState<string | null>(() => readQueryParam("assistant"));
   const [signingOut, setSigningOut] = useState(false);

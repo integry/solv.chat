@@ -479,7 +479,7 @@ describe("Monitor screens", () => {
 
       const asked = await screen.findByRole("link", { name: "how do i reset my password?" });
       expect(asked.getAttribute("href")).toBe(
-        "/admin/conversations?q=how%20do%20i%20reset%20my%20password%3F",
+        `/admin/conversations?q=how+do+i+reset+my+password%3F&assistant=${ASSISTANT.id}`,
       );
       const csv = screen.getByRole("button", { name: "Download CSV" });
       const hint = document.getElementById(csv.getAttribute("aria-describedby") ?? "");

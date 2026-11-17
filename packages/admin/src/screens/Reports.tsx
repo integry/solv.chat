@@ -10,6 +10,7 @@ import { PageHeader } from "../ui/PageHeader.js";
 import { ScreenLink } from "../ui/ScreenLink.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { Skeleton } from "../ui/Skeleton.js";
+import { questionConversationsPath } from "./conversationLinks.js";
 import { formatCost, formatPercent, formatTimes } from "./figures.js";
 
 export interface ReportsProps {
@@ -257,7 +258,7 @@ export function Reports({ assistantId }: ReportsProps) {
               heading="Most asked questions"
               explanation="What visitors want to know. Open one to read those conversations."
               rows={report.topQuestions}
-              linkTo={(question) => `/admin/conversations?q=${encodeURIComponent(question)}`}
+              linkTo={(question) => questionConversationsPath(assistantId, question)}
             />
             <QuestionTable
               heading="Most often unanswered"
