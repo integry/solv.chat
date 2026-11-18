@@ -129,6 +129,18 @@ export function sourcesFor(db: D1Database, orgId: string) {
     return resolved;
   }
 
+  /** The named (non-default) push source with `label`, or null when none exists yet. */
+  async function getPushByLabel(assistantId: string, label: string): Promise<SourceRow | null> {
+    const row = await prepare(
+      db,
+      `SELECT ${COLUMNS} FROM sources
+        WHERE org_id = ?1 AND assistant_id = ?2 AND kind = 'push' AND is_default = 0 AND label = ?3`,
+    )
+      .bind(orgId, assistantId, label)
+      .first<Row>();
+    return row ? map(row) : null;
+  }
+
   return {
     async list(assistantId: string): Promise<SourceRow[]> {
       const res = await prepare(
@@ -242,6 +254,34 @@ export function sourcesFor(db: D1Database, orgId: string) {
       createdAt: number;
     }): Promise<SourceRow> {
       return getOrCreateDefaultByKind("push", "Push", input);
+    },
+
+    getPushByLabel,
+
+    /**
+     * Returns the named push source with `label`, creating it on first use.
+     * The `sources_push_label` index makes concurrent first pushes converge
+     * on one row.
+     */
+    async getOrCreatePushByLabel(input: {
+      id: string;
+      assistantId: string;
+      label: string;
+      createdAt: number;
+    }): Promise<SourceRow> {
+      await prepareInsert(
+        db,
+        `INSERT INTO sources (id, org_id, assistant_id, kind, label, settings, is_default, created_at)
+         VALUES (?2, ?1, ?3, 'push', ?4, '{}', 0, ?5)
+         ON CONFLICT(org_id, assistant_id, label) WHERE kind = 'push' AND is_default = 0 DO NOTHING`,
+      )
+        .bind(orgId, input.id, input.assistantId, input.label, input.createdAt)
+        .run();
+      const resolved = await getPushByLabel(input.assistantId, input.label);
+      if (!resolved) {
+        throw new Error(`failed to resolve push source "${input.label}" for ${input.assistantId}`);
+      }
+      return resolved;
     },
 
     async getDefaultEntry(assistantId: string): Promise<SourceRow | null> {

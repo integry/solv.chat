@@ -396,6 +396,82 @@ describe("migrations", () => {
     expect(await lastMessageAt()).toEqual({ cnv_a: 100, cnv_b: 70 });
   });
 
+  it("upgrades push sources sharing a label through 0022 without losing any", async () => {
+    const orgId = "org_00000000000000000000";
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0022_"));
+    const queries = migration?.queries ?? [];
+    expect(queries.length).toBe(2);
+    const source = (id: string, assistant: string, kind: string, label: string, at: number) =>
+      env.DB.prepare(
+        "INSERT INTO sources (id, org_id, assistant_id, kind, label, is_default, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+      ).bind(id, orgId, assistant, kind, label, at);
+    const doc = (id: string, sourceId: string) =>
+      env.DB.prepare(
+        "INSERT INTO documents (id, org_id, source_id, external_id, url, title, content_hash, updated_at) VALUES (?1, ?2, ?3, 'page', 'https://a.test/p', 'P', 'h', 1)",
+      ).bind(id, orgId, sourceId);
+
+    // The state before 0022: its index did not exist yet.
+    await env.DB.prepare("DROP INDEX sources_push_label").run();
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'A', 'pk_1', 1), ('ast_2', ?1, 'B', 'pk_2', 1)",
+        ).bind(orgId),
+        source("src_c", "ast_1", "push", "Docs", 300),
+        source("src_b", "ast_1", "push", "Docs", 100),
+        source("src_a", "ast_1", "push", "Docs", 100),
+        source("src_d", "ast_1", "push", "Blog", 100),
+        source("src_e", "ast_2", "push", "Docs", 500),
+        source("src_f", "ast_1", "sitemap", "Docs", 50),
+        // Labels that already read like the replacements for src_b and src_h.
+        source("src_h", "ast_2", "push", "Docs", 600),
+        source("src_i", "ast_2", "push", "Docs (src_h)", 50),
+        source("src_j", "ast_2", "push", "Docs (src_h) (src_i)", 40),
+        source("src_k", "ast_1", "push", "Docs (src_b)", 50),
+        doc("doc_a", "src_a"),
+        doc("doc_b", "src_b"),
+        doc("doc_c", "src_c"),
+        doc("doc_k", "src_k"),
+      ]);
+    } finally {
+      for (const sql of queries) await env.DB.prepare(sql).run();
+    }
+
+    const sources = await env.DB.prepare(
+      "SELECT id, label FROM sources WHERE org_id = ?1 ORDER BY id",
+    )
+      .bind(orgId)
+      .all<{ id: string; label: string }>();
+    expect(Object.fromEntries(sources.results.map((r) => [r.id, r.label]))).toEqual({
+      // The oldest keeps the label (ties broken by id); the rest stay, renamed.
+      src_a: "Docs",
+      src_b: "Docs (src_b)",
+      src_c: "Docs (src_c)",
+      src_d: "Blog",
+      // Another assistant and another kind are not duplicates.
+      src_e: "Docs",
+      src_f: "Docs",
+      // A label equal to a replacement is renamed too, and so on down the chain.
+      src_h: "Docs (src_h)",
+      src_i: "Docs (src_h) (src_i)",
+      src_j: "Docs (src_h) (src_i) (src_j)",
+      src_k: "Docs (src_b) (src_k)",
+    });
+    const docs = await env.DB.prepare(
+      "SELECT id, source_id FROM documents WHERE org_id = ?1 ORDER BY id",
+    )
+      .bind(orgId)
+      .all<{ id: string; source_id: string }>();
+    expect(docs.results).toEqual([
+      { id: "doc_a", source_id: "src_a" },
+      { id: "doc_b", source_id: "src_b" },
+      { id: "doc_c", source_id: "src_c" },
+      { id: "doc_k", source_id: "src_k" },
+    ]);
+    // The index is in place afterwards.
+    await expect(source("src_g", "ast_1", "push", "Docs", 900).run()).rejects.toThrow();
+  });
+
   it("uses unique, sequential numeric prefixes for every migration", () => {
     const names = env.TEST_MIGRATIONS.map((m) => m.name);
     const prefixes = names.map((name) => {
