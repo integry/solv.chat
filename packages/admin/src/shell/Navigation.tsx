@@ -1,11 +1,13 @@
 import { type ReactNode, useId } from "react";
-import { NAV_GROUPS, NAV_ITEMS, type NavItem } from "../routing.js";
+import { NAV_GROUPS, NAV_ITEMS, type NavItem, navItemAddress } from "../routing.js";
 import { Icon, type IconName } from "../ui/Icon.js";
 
 export interface NavigationProps {
   current: string | null;
   onNavigate: (path: string) => void;
   items?: readonly NavItem[];
+  /** The assistant on show: assistant screens' links name it. */
+  assistantId?: string | null;
 }
 
 const BUILTIN_ICONS: Record<string, IconName> = {
@@ -32,13 +34,19 @@ function itemIcon(item: NavItem): ReactNode {
   return item.icon ?? null;
 }
 
-function renderNavItem(item: NavItem, current: string | null, onNavigate: (path: string) => void) {
+function renderNavItem(
+  item: NavItem,
+  current: string | null,
+  onNavigate: (path: string) => void,
+  assistantId: string | null,
+) {
   const active = item.id === current;
   const icon = itemIcon(item);
+  const address = navItemAddress(item, assistantId);
   return (
     <li key={item.id}>
       <a
-        href={item.path}
+        href={address}
         className={active ? "nav-link nav-link-active" : "nav-link"}
         aria-current={active ? "page" : undefined}
         onClick={(event) => {
@@ -52,7 +60,7 @@ function renderNavItem(item: NavItem, current: string | null, onNavigate: (path:
             return;
           }
           event.preventDefault();
-          onNavigate(item.path);
+          onNavigate(address);
         }}
       >
         {icon !== null && (
@@ -104,7 +112,12 @@ export function groupNavItems(items: readonly NavItem[]): Group[] {
  * Primary admin navigation: Monitor, Build, Go live and Settings, then any
  * host sections.
  */
-export function Navigation({ current, onNavigate, items = NAV_ITEMS }: NavigationProps) {
+export function Navigation({
+  current,
+  onNavigate,
+  items = NAV_ITEMS,
+  assistantId = null,
+}: NavigationProps) {
   const baseId = useId();
   const groups = groupNavItems(items);
 
@@ -120,7 +133,7 @@ export function Navigation({ current, onNavigate, items = NAV_ITEMS }: Navigatio
               </h2>
             )}
             <ul className="nav-list" aria-labelledby={group.label !== null ? headingId : undefined}>
-              {group.items.map((item) => renderNavItem(item, current, onNavigate))}
+              {group.items.map((item) => renderNavItem(item, current, onNavigate, assistantId))}
             </ul>
           </div>
         );

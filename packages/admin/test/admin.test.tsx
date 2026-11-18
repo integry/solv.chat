@@ -334,8 +334,6 @@ function installFakeServer(options: FakeServerOptions = {}) {
     const overviewMatch = /^\/api\/admin\/assistants\/([^/]+)\/overview$/.exec(path);
     if (overviewMatch?.[1] && method === "GET") {
       return Response.json({
-        messages: 0,
-        answeredShare: 0,
         topQuestions: [],
         todayCostMicros: 0,
       });

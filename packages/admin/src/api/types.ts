@@ -1,4 +1,19 @@
-import type { SourceKind, TestExpectation, VersionConfig } from "@solvchat/core";
+import type {
+  OverviewAttention,
+  OverviewPeriod,
+  OverviewSetup,
+  SourceKind,
+  TestExpectation,
+  VersionConfig,
+} from "@solvchat/core";
+
+// Overview and Reports shapes are declared once, in core, beside the engine's.
+export type {
+  OverviewAttention,
+  OverviewPeriod,
+  OverviewSetup,
+  PeriodFigures,
+} from "@solvchat/core";
 
 export interface Assistant {
   id: string;
@@ -62,6 +77,9 @@ export interface ConversationSummary {
   firstQuestion: string | null;
   turnCount: number;
   hasUnanswered: boolean;
+  hasNotHelpful?: boolean;
+  usedTool?: boolean;
+  lastMessageAt?: number;
 }
 
 export interface ConversationsPage {
@@ -69,6 +87,13 @@ export interface ConversationsPage {
   total: number;
   limit: number;
   offset: number;
+  /**
+   * The engine is still preparing older messages for search, so it did not
+   * search: the list is empty and the same request should be sent again.
+   */
+  searchPending?: boolean;
+  /** While `searchPending`: how many messages are still to be prepared. */
+  searchRemaining?: number;
 }
 
 export interface ConversationFeedback {
@@ -161,14 +186,16 @@ export interface AssistantReport {
 }
 
 export interface AssistantOverview {
-  messages: number;
-  answeredShare: number;
   topQuestions: TopQuestion[];
   todayCostMicros: number;
   todayCostUnknown?: boolean;
   dailyCostCapMicros?: number;
   costUnit?: "usd" | "credits";
   configError?: string | null;
+  period?: OverviewPeriod;
+  daily?: Array<{ day: string; questions: number }>;
+  setup?: OverviewSetup;
+  attention?: OverviewAttention;
 }
 
 export interface InstallInfo {

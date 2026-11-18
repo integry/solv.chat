@@ -11,6 +11,8 @@ export interface EmptyStateProps {
   action?: ReactNode;
   /** Heading level for the title; default 2 (screens own the `<h1>`). */
   headingLevel?: 2 | 3 | 4;
+  /** `compact` is a one-line version for a section inside a card. Default `default`. */
+  size?: "default" | "compact";
 }
 
 /** Shown in place of a list or table that has nothing in it yet. */
@@ -20,12 +22,17 @@ export function EmptyState({
   icon = "inbox",
   action,
   headingLevel = 2,
+  size = "default",
 }: EmptyStateProps) {
   const Heading = `h${headingLevel}` as const;
   return (
-    <div className="empty-state">
+    <div className={size === "compact" ? "empty-state empty-state-compact" : "empty-state"}>
       <div className="empty-state-icon" aria-hidden="true">
-        {typeof icon === "string" ? <Icon name={icon as IconName} size={24} /> : icon}
+        {typeof icon === "string" ? (
+          <Icon name={icon as IconName} size={size === "compact" ? 16 : 24} />
+        ) : (
+          icon
+        )}
       </div>
       <Heading className="empty-state-title">{title}</Heading>
       {description !== undefined && description !== null && (

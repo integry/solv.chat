@@ -47,7 +47,9 @@ on first run. No query may omit the `org_id` filter; route handlers receive it
 from the auth seam and pass it down.
 
 - `orgs` — id, name.
-- `assistants` — id, org_id, name, public_key (used by the widget), allowed_origins.
+- `assistants` — id, org_id, name, public_key (used by the widget), allowed_origins,
+  tried_at and widget_seen_at (first "Try it" question and first widget load on an
+  allowed origin; set once, for the Overview checklist).
 - `assistant_versions` — id, assistant_id, state (`draft` | `published` | `archived`),
   config JSON (behaviour, widget, tool allowlist), created_at, published_at.
   Exactly one draft and at most one published version per assistant. Publishing
@@ -64,9 +66,17 @@ from the auth seam and pass it down.
 - `chunks` — id, document_id, ordinal, text, heading_path. Vectors live in Vectorize
   keyed by chunk id, with `org_id` and `assistant_id` as metadata filters.
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
-  the widget's localStorage), started_at, page_url.
+  the widget's localStorage), started_at, page_url, last_message_at (when the
+  newest message was written, `started_at` while there is none; kept by
+  triggers, and the order of the Conversations list).
 - `messages` — id, conversation_id, role, content, citations JSON, tool_calls JSON,
-  tokens_in, tokens_out, answered (boolean: did retrieval find support).
+  tokens_in, tokens_out, answered (boolean: did retrieval find support),
+  search_text (content in Unicode lowercase, NFC, final sigma "ς" as "σ",
+  whitespace runs collapsed like the question key, for the Conversations search. For rows written before it
+  existed, the migration fills it for ASCII text and the engine folds the rest
+  of the searched assistant's messages before it runs a search, a bounded
+  share per request; until none are left a search answers `searchPending: true`
+  with no results instead of searching).
 - `feedback` — message_id, value (`up` | `down`), note.
 - `mcp_servers` — id, assistant_id, label, url, auth_kind (`none` | `static_header`),
   secret_ciphertext, enabled.
@@ -75,6 +85,8 @@ from the auth seam and pass it down.
   must-not-contain, or must-decline).
 - `test_runs` — id, version_id, started_at, results JSON, passed.
 - `usage_daily` — org_id, assistant_id, day, messages, tokens_in, tokens_out, cost_micros.
+- `gap_dismissals` — org_id, assistant_id, question_key, dismissed_at. A dismissed gap
+  group is hidden until the question is asked again after `dismissed_at`.
 
 Migrations are plain SQL files under `packages/engine/migrations`, applied with
 `wrangler d1 migrations`.
@@ -146,6 +158,35 @@ identical message. Resources mirror the admin
 navigation: assistants, versions (draft, publish, history, rollback), sources and
 documents, MCP servers and tools, tests and runs, conversations, gaps, overview
 numbers, install snippet.
+
+The Monitor screens read:
+
+- Overview: the four Reports figures for the last 7 UTC days and the 7 before,
+  questions per day, the getting-started checklist (content added, a question
+  tried in "Try it" or a test run, published, widget loaded on an allowed
+  origin or a visitor question received, first visitor question) and what needs
+  attention (open gaps, failed tests in the latest run, the configuration
+  error, sources with documents that failed to index, reported as soon as the
+  failure is recorded, and sources with documents still not indexed 15 minutes
+  after they were written, reported separately).
+- Conversations: `filter=unanswered,not_helpful,used_tool`, `days=1|7|30|90`,
+  `q=` (case-insensitive text in any message) and `question=` (a grouped
+  question: conversations where a visitor asked it, matched by its key; what
+  question links in Overview and Reports open), with `askedFrom=` and
+  `askedTo=` (inclusive UTC days, `YYYY-MM-DD`; only with `question=`) keeping
+  the asks made in those days, the period a Reports count is for. `days=` is
+  when a conversation started, a separate filter; unknown values are refused.
+  The admin keeps all of them in the screen's address.
+  `searchPending: true` means older messages are still being prepared for
+  search: nothing was searched, `searchRemaining` says how many of the
+  assistant's messages are left, and the admin asks again until it is false.
+- Gaps: `status=open` leaves out groups with a written answer newer than the
+  group's latest ask (asked again after it, a group is open again, as after a
+  dismissal). Overview's open gaps and Reports' "Most often unanswered" leave
+  out the same groups, and the asks from before a dismissal (not counted, but
+  an answer written from one still answers its group). Left out,
+  `status` lists every group; any other value is refused;
+  `POST …/gaps/dismiss` and `POST …/gaps/restore` take `{ question }`.
 
 ## Answering a message
 
@@ -408,8 +449,9 @@ Install
 - A "Try it" pane is always available and talks to the draft.
 - Draft and Publish: edits change the draft; Publish runs the tests and promotes
   it; History lists versions with rollback.
-- Gaps and Conversations offer one-click fixes: "Write the right answer" (creates
-  an entry source), "Add to tests".
+- Gaps and Conversations offer one-click fixes: "Write an answer" on Gaps (creates
+  an entry source and removes the gap; Conversations' "Write an answer for this"
+  opens it on Gaps, filled in), "Dismiss" with undo on Gaps, "Add to tests" on both.
 - Plain words on every control. No model, temperature or chunking settings.
 - Leaving a screen (a link, the browser's Back or Forward, or switching
   assistant) with unsaved edits on Behaviour or Widget asks first; "Stay here"
@@ -473,7 +515,9 @@ Options accepted by `mountAdmin`:
 - `onSignOut` — optional sign-out handler replacing the default `/api/admin/logout`
   request.
 - `hideScreens` — built-in screen ids to omit from navigation and routing (for
-  example, when keys are fully managed).
+  example, when keys are fully managed). Screens never link to a hidden screen:
+  the link's text stays, without the link. With Gaps hidden, "Write an answer
+  for this" on a conversation opens the answer editor in place.
 - `headerStart` / `headerEnd` — optional components rendered in the top bar after
   the product name and before the Sign out button, with `{ api }`. Below 900px
   `headerEnd` moves with Sign out to the bottom of the navigation drawer.

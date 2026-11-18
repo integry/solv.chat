@@ -38,6 +38,16 @@ export interface SourceWithStatsRow extends SourceRow {
   indexError: IndexErrorCode | null;
 }
 
+/** A source with documents that need attention on the Overview. */
+export interface NotIndexedSource {
+  sourceId: string;
+  label: string;
+  /** Documents whose current content could not be indexed. */
+  failed: number;
+  /** Documents with no recorded failure, still not indexed well after their last write. */
+  waiting: number;
+}
+
 interface StatsRow extends Row {
   document_count: number;
   last_updated_at: number | null;
@@ -169,6 +179,39 @@ export function sourcesFor(db: D1Database, orgId: string) {
           row.index_error !== null && INDEX_ERROR_CODES.has(row.index_error)
             ? (row.index_error as IndexErrorCode)
             : null,
+      }));
+    },
+
+    /**
+     * Sources with documents whose current content is not indexed, counted
+     * two ways. `failed`: indexing recorded a failure for this content
+     * (`index_error_hash`), reported at once, however recent. `waiting`: no
+     * failure recorded, but still not indexed though last written before
+     * `writtenBefore`; one written moments ago is just waiting its turn.
+     */
+    async notIndexed(assistantId: string, writtenBefore: number): Promise<NotIndexedSource[]> {
+      const res = await prepare(
+        db,
+        `SELECT s.id AS source_id, s.label AS label,
+                SUM(CASE WHEN d.index_error_hash = d.content_hash THEN 1 ELSE 0 END) AS failed,
+                SUM(CASE WHEN (d.index_error_hash IS NULL OR d.index_error_hash <> d.content_hash)
+                          AND d.updated_at < ?3
+                         THEN 1 ELSE 0 END) AS waiting
+           FROM sources s
+           JOIN documents d ON d.org_id = s.org_id AND d.source_id = s.id
+          WHERE s.org_id = ?1 AND s.assistant_id = ?2
+            AND (d.indexed_hash IS NULL OR d.indexed_hash <> d.content_hash)
+          GROUP BY s.id
+         HAVING (failed > 0 OR waiting > 0)
+          ORDER BY s.created_at ASC`,
+      )
+        .bind(orgId, assistantId, writtenBefore)
+        .all<{ source_id: string; label: string; failed: number; waiting: number }>();
+      return res.results.map((row) => ({
+        sourceId: row.source_id,
+        label: row.label,
+        failed: Number(row.failed),
+        waiting: Number(row.waiting),
       }));
     },
 

@@ -89,8 +89,6 @@ function installFakeServer(options: FakeServerOptions = {}) {
     }
     if (path === `/api/admin/assistants/${assistant.id}/overview` && method === "GET") {
       return Response.json({
-        messages: 0,
-        answeredShare: 1,
         topQuestions: [],
         todayCostMicros: 0,
       });

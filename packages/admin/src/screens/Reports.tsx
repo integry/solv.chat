@@ -1,11 +1,17 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import type { AssistantReport, TopQuestion } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { buildCsv } from "../csv.js";
+import { ScreenLink, useAdminNavigation } from "../routing.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
 import { EmptyState } from "../ui/EmptyState.js";
+import { ErrorState } from "../ui/ErrorState.js";
 import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
+import { SegmentedControl } from "../ui/SegmentedControl.js";
+import { questionConversationsQuery } from "./conversationLinks.js";
+import { formatCost, formatPercent, formatTimes } from "./figures.js";
+import { StatsSkeleton } from "./StatsSkeleton.js";
 
 export interface ReportsProps {
   assistantId: string;
@@ -14,17 +20,7 @@ export interface ReportsProps {
 /** The three the specification names. */
 const RANGES = [7, 30, 90] as const;
 
-// Same shapes as the Overview screen: one number should not be written two
-// ways in one product.
-function formatUsd(costMicros: number): string {
-  const dollars = costMicros / 1_000_000;
-  if (costMicros > 0 && dollars < 0.01) return "< $0.01";
-  return `$${dollars.toFixed(2)}`;
-}
-
-function formatPercent(share: number): string {
-  return `${Math.round(share * 100)}%`;
-}
+const formatUsd = (costMicros: number) => formatCost(costMicros, "usd");
 
 function csvFor(report: AssistantReport): string {
   return buildCsv([
@@ -62,14 +58,22 @@ function csvFor(report: AssistantReport): string {
   ]);
 }
 
-function QuestionTable({
+function NoneInPeriod() {
+  return <EmptyState size="compact" icon="inbox" title="None in this period" headingLevel={3} />;
+}
+
+function ReportList({
   heading,
   explanation,
-  rows,
+  empty,
+  children,
+  footer,
 }: {
   heading: string;
   explanation: string;
-  rows: readonly TopQuestion[];
+  empty: boolean;
+  children: ReactNode;
+  footer?: ReactNode;
 }) {
   return (
     <section className="source-card stack" aria-label={heading}>
@@ -77,24 +81,52 @@ function QuestionTable({
         <h2 className="section-heading">{heading}</h2>
         <p className="muted">{explanation}</p>
       </div>
-      {rows.length === 0 ? (
-        <p className="muted">None in this period.</p>
-      ) : (
-        <ul className="history-list">
-          {rows.map((item) => (
-            <li key={item.question} className="history-item">
-              <span>{item.question}</span>
-              <span className="badge">{item.count === 1 ? "1 time" : `${item.count} times`}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      {empty ? <NoneInPeriod /> : <ul className="history-list">{children}</ul>}
+      {footer}
     </section>
   );
 }
 
+function QuestionTable({
+  heading,
+  explanation,
+  rows,
+  linkTo,
+}: {
+  heading: string;
+  explanation: string;
+  rows: readonly TopQuestion[];
+  linkTo: (question: string) => { to: string; query: Record<string, string> };
+}) {
+  return (
+    <ReportList heading={heading} explanation={explanation} empty={rows.length === 0}>
+      {rows.map((item) => (
+        <li key={item.question} className="history-item">
+          <ScreenLink {...linkTo(item.question)}>{item.question}</ScreenLink>
+          <span className="badge">{formatTimes(item.count)}</span>
+        </li>
+      ))}
+    </ReportList>
+  );
+}
+
+function PageLink({ url, title }: { url: string; title: string }) {
+  // Filtered like every other citation link in the admin: the URL came from
+  // ingested content.
+  return isSafeHttpUrl(url) ? (
+    <a href={url} target="_blank" rel="noreferrer">
+      {title || url}
+    </a>
+  ) : (
+    <span>{title || url}</span>
+  );
+}
+
+const RANGE_OPTIONS = RANGES.map((value) => ({ value, label: `${value} days` }));
+
 export function Reports({ assistantId }: ReportsProps) {
   const [days, setDays] = useState<(typeof RANGES)[number]>(30);
+  const gapsShown = useAdminNavigation().pathFor("gaps") !== null;
   const reportRes = useResource<AssistantReport>(
     `/api/admin/assistants/${assistantId}/report?days=${days}`,
   );
@@ -123,7 +155,7 @@ export function Reports({ assistantId }: ReportsProps) {
     report.costMicros === 0;
 
   return (
-    <div className="screen">
+    <div className="screen screen-wide">
       <PageHeader
         title="Reports"
         description={
@@ -133,134 +165,131 @@ export function Reports({ assistantId }: ReportsProps) {
         }
         actions={
           <>
-            <label htmlFor="report-range" className="sr-only">
-              Period
-            </label>
-            <select
-              id="report-range"
-              className="select"
+            <SegmentedControl
+              label="Period"
+              options={RANGE_OPTIONS}
               value={days}
-              onChange={(e) => setDays(Number(e.target.value) as (typeof RANGES)[number])}
-            >
-              {RANGES.map((option) => (
-                <option key={option} value={option}>
-                  Last {option} days
-                </option>
-              ))}
-            </select>
+              onChange={(next) => setDays(next)}
+            />
             {/* Offered only with something to download: an empty CSV is a
                 support question, not a feature. */}
             {report && !empty && (
-              <button type="button" className="btn btn-secondary" onClick={download}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                aria-describedby="report-csv-hint"
+                onClick={download}
+              >
                 Download CSV
               </button>
             )}
           </>
         }
       />
+      {report && !empty && (
+        <p id="report-csv-hint" className="muted report-csv-hint">
+          The CSV holds the four figures and the four lists below, for {formatDate(report.from)} to{" "}
+          {formatDate(report.to)}.
+        </p>
+      )}
 
       {reportRes.status === "error" ? (
-        <p className="error-text" role="alert">
-          {reportRes.error}
-        </p>
+        <ErrorState
+          title="Could not load the report."
+          detail={reportRes.error}
+          onRetry={reportRes.reload}
+        />
       ) : !report ? (
-        <p className="muted">Loading report…</p>
+        <StatsSkeleton label="Loading report…" />
       ) : empty ? (
         <EmptyState
           icon="reports"
           title="Nothing yet for this period"
           description="Once visitors ask questions, their answers show up here."
         />
-      ) : report ? (
+      ) : (
         <div className="stack">
-          <div className="overview-grid">
-            <section className="source-card stack" aria-label="Questions asked">
+          <div className="overview-grid overview-grid-4">
+            <section className="source-card stat-card" aria-label="Questions asked">
               <div className="stat-label">Questions asked</div>
               <div className="stat-value">{report.questions}</div>
               <p className="muted">How many questions visitors asked in this period.</p>
             </section>
-            <section className="source-card stack" aria-label="Answered share">
+            <section className="source-card stat-card" aria-label="Answered share">
               <div className="stat-label">Answered share</div>
               <div className="stat-value">{formatPercent(report.answeredShare)}</div>
               <p className="muted">Share of answers your assistant could give from your content.</p>
             </section>
-            <section className="source-card stack" aria-label="Marked not helpful">
+            <section className="source-card stat-card" aria-label="Marked not helpful">
               <div className="stat-label">Marked not helpful</div>
               <div className="stat-value">{formatPercent(report.thumbsDownShare)}</div>
               <p className="muted">Share of answers a visitor said did not help.</p>
             </section>
-            <section className="source-card stack" aria-label="Cost">
+            <section className="source-card stat-card" aria-label="Cost">
               <div className="stat-label">Cost</div>
               <div className="stat-value">{formatUsd(report.costMicros)}</div>
               <p className="muted">Estimated cost for this period.</p>
             </section>
           </div>
 
-          <QuestionTable
-            heading="Most asked questions"
-            explanation="What visitors want to know."
-            rows={report.topQuestions}
-          />
-          <QuestionTable
-            heading="Most often unanswered"
-            explanation="Write an answer for these on the Gaps screen."
-            rows={report.topGaps}
-          />
+          <div className="report-columns">
+            <QuestionTable
+              heading="Most asked questions"
+              explanation="What visitors want to know, and how many times it was asked. Open one to read the conversations it was asked in."
+              rows={report.topQuestions}
+              linkTo={(question) => ({
+                to: "conversations",
+                query: questionConversationsQuery(assistantId, question, {
+                  from: report.from,
+                  to: report.to,
+                }),
+              })}
+            />
+            <QuestionTable
+              heading="Most often unanswered"
+              explanation={
+                gapsShown
+                  ? "Write an answer for these on the Gaps screen."
+                  : "Questions your assistant could not answer from your content."
+              }
+              rows={report.topGaps}
+              linkTo={() => ({ to: "gaps", query: { assistant: assistantId } })}
+            />
 
-          <section className="source-card stack" aria-label="Pages used most">
-            <div>
-              <h2 className="section-heading">Pages used most</h2>
-              <p className="muted">The content your assistant answers from.</p>
-            </div>
-            {report.topSources.length === 0 ? (
-              <p className="muted">None in this period.</p>
-            ) : (
-              <ul className="history-list">
-                {report.topSources.map((item) => (
-                  <li key={item.url} className="history-item">
-                    {/* Filtered like every other citation link in the admin: the
-                        URL came from ingested content. */}
-                    {isSafeHttpUrl(item.url) ? (
-                      <a href={item.url} target="_blank" rel="noreferrer">
-                        {item.title || item.url}
-                      </a>
-                    ) : (
-                      <span>{item.title || item.url}</span>
-                    )}
-                    <span className="badge">
-                      {item.count === 1 ? "1 time" : `${item.count} times`}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+            <ReportList
+              heading="Pages used most"
+              explanation="The content your assistant answers from."
+              empty={report.topSources.length === 0}
+            >
+              {report.topSources.map((item) => (
+                <li key={item.url} className="history-item">
+                  <PageLink url={item.url} title={item.title} />
+                  <span className="badge">{formatTimes(item.count)}</span>
+                </li>
+              ))}
+            </ReportList>
 
-          <section className="source-card stack" aria-label="Pages never used">
-            <div>
-              <h2 className="section-heading">Pages never used</h2>
-              <p className="muted">
-                Nobody was shown these in this period. They may be out of date, or nobody asks about
-                them.
-              </p>
-            </div>
-            {report.uncitedSources.length === 0 ? (
-              <p className="muted">None in this period.</p>
-            ) : (
-              <ul className="history-list">
-                {report.uncitedSources.map((item) => (
-                  <li key={item.url} className="history-item">
-                    <span>{item.title || item.url}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {report.uncitedTotal > report.uncitedSources.length && (
-              <p className="muted">and {report.uncitedTotal - report.uncitedSources.length} more</p>
-            )}
-          </section>
+            <ReportList
+              heading="Pages never used"
+              explanation="Nobody was shown these in this period. They may be out of date, or nobody asks about them."
+              empty={report.uncitedSources.length === 0}
+              footer={
+                report.uncitedTotal > report.uncitedSources.length ? (
+                  <p className="muted">
+                    and {report.uncitedTotal - report.uncitedSources.length} more
+                  </p>
+                ) : null
+              }
+            >
+              {report.uncitedSources.map((item) => (
+                <li key={item.url} className="history-item">
+                  <PageLink url={item.url} title={item.title} />
+                </li>
+              ))}
+            </ReportList>
+          </div>
         </div>
-      ) : null}
+      )}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import { streamDraftChat } from "../api/chat.js";
 import type { Assistant } from "../api/types.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
+import { TRY_IT_ANSWERED_EVENT } from "../screens/OverviewParts.js";
 import { Icon } from "../ui/Icon.js";
 
 interface Citation {
@@ -211,6 +212,7 @@ export function TryItPane({
           if (mountedRef.current) {
             setConversationIds((prev) => ({ ...prev, [assistantId]: ev.conversationId }));
           }
+          window.dispatchEvent(new CustomEvent(TRY_IT_ANSWERED_EVENT, { detail: assistantId }));
         } else if (ev.type === "error") {
           failed = true;
           markTurnsFailed(assistantId, userTurnId, assistantTurnId, ev.message);

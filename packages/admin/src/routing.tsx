@@ -64,6 +64,20 @@ export const MONITOR_SCREENS: ReadonlySet<string> = new Set([
   "gaps",
 ]);
 
+/** Built-in screens for the whole organisation rather than one assistant. */
+const ORG_SCREENS: ReadonlySet<string> = new Set(["providers"]);
+
+/**
+ * Where a sidebar item leads: a built-in assistant screen names the assistant
+ * on show, as links inside the screens do, so a reload or a new tab shows the
+ * same one. The organisation's screens and host screens keep their own path.
+ */
+export function navItemAddress(item: NavItem, assistantId: string | null): string {
+  const builtin = NAV_ITEMS.some((builtinItem) => builtinItem.id === item.id);
+  if (assistantId === null || !builtin || ORG_SCREENS.has(item.id)) return item.path;
+  return screenAddress(item.path, { assistant: assistantId });
+}
+
 /** "Set it up" screens: the header offers Publish here. */
 export const BUILD_SCREENS: ReadonlySet<string> = new Set([
   "sources",
@@ -112,12 +126,116 @@ function withHistoryIndex(state: unknown, index: number): Record<string, unknown
   return { ...base, [HISTORY_INDEX_KEY]: index };
 }
 
+/** The current address within the app: path and query. */
+function currentAddress(): string {
+  return `${window.location.pathname}${window.location.search}`;
+}
+
+/** The path part of an address, without its query or fragment. */
+function pathOf(address: string): string {
+  return address.split(/[?#]/, 1)[0] ?? address;
+}
+
+/** The assistant an address names, if any. */
+function assistantOf(search: string): string | null {
+  return new URLSearchParams(search).get("assistant");
+}
+
+/**
+ * Whether `to` is the address `from` with only `assistant` added. An address
+ * naming no assistant shows the one on show, so going there from it is the
+ * same place: the entry is kept and only its address gains the assistant.
+ */
+function namesOnlyAssistant(from: string, to: string, assistant: string | null): boolean {
+  if (assistant === null || pathOf(from) !== pathOf(to)) return false;
+  const fromParams = new URLSearchParams(from.slice(pathOf(from).length));
+  const toParams = new URLSearchParams(to.slice(pathOf(to).length));
+  if (fromParams.has("assistant") || toParams.get("assistant") !== assistant) return false;
+  toParams.delete("assistant");
+  return toParams.toString() === fromParams.toString();
+}
+
+/**
+ * Moves to another admin path from inside a screen (screens are not handed
+ * the shell's `navigate`). The shell listens for `popstate`, so it follows.
+ */
+export function navigateTo(path: string): void {
+  if (currentAddress() !== path) {
+    const index = historyIndex(window.history.state) ?? 0;
+    window.history.pushState(withHistoryIndex(null, index + 1), "", path);
+  }
+  // The state goes with the event, so the shell counts this entry as it does
+  // a Back or Forward, and asks first when the move leaves unsaved edits.
+  window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+}
+
+/**
+ * The current address with `assistantId` as its assistant. On a built-in
+ * screen an open conversation (`id`) belongs to the assistant it was opened
+ * under, so it is dropped; the rest of the query (a search, say) stays. With
+ * `keepQuery` (a host screen, whose query is its own) only `assistant` changes.
+ */
+export function withAssistant(assistantId: string, options: { keepQuery?: boolean } = {}): string {
+  const params = new URLSearchParams(window.location.search);
+  params.set("assistant", assistantId);
+  if (options.keepQuery !== true) params.delete("id");
+  return `${window.location.pathname}?${params.toString()}`;
+}
+
+/** Reads one query parameter of the current address. */
+export function readQueryParam(name: string): string | null {
+  return new URLSearchParams(window.location.search).get(name);
+}
+
+/**
+ * Drops the named query parameters a screen has consumed, without a new
+ * history entry. Others stay: `assistant` in particular, so a reload of the
+ * address still shows the same assistant.
+ */
+export function dropQueryParams(names: readonly string[]): void {
+  const params = new URLSearchParams(window.location.search);
+  if (!names.some((name) => params.has(name))) return;
+  for (const name of names) params.delete(name);
+  const query = params.toString();
+  const address = query === "" ? window.location.pathname : `${window.location.pathname}?${query}`;
+  window.history.replaceState(window.history.state, "", address);
+}
+
+/**
+ * Sets query parameters of the current address (dropping those set to null),
+ * without a new history entry. The rest of the query stays.
+ */
+export function replaceQueryParams(values: Readonly<Record<string, string | null>>): void {
+  const params = new URLSearchParams(window.location.search);
+  const entries = Object.entries(values);
+  if (
+    entries.every(([name, value]) =>
+      value === null ? !params.has(name) : params.get(name) === value,
+    )
+  ) {
+    return;
+  }
+  for (const [name, value] of entries) {
+    if (value === null) params.delete(name);
+    else params.set(name, value);
+  }
+  const query = params.toString();
+  const address = query === "" ? window.location.pathname : `${window.location.pathname}?${query}`;
+  window.history.replaceState(window.history.state, "", address);
+}
+
 export function useRoute(
   navItems: readonly NavItem[] = NAV_ITEMS,
   defaultScreen?: string,
   confirmLeave?: ConfirmLeave,
 ): {
   screen: string | null;
+  /**
+   * The assistant the addresses on show have named, or null while none has.
+   * It changes only once a move goes ahead, so a Back still waiting for an answer
+   * does not switch the assistant early.
+   */
+  assistant: string | null;
   navigate: (path: string) => void;
   /**
    * Whether `path` leads to the screen on show. While a Back or Forward waits
@@ -129,22 +247,38 @@ export function useRoute(
    * Forward that is no longer going ahead moved it. Otherwise does nothing.
    */
   restore: () => void;
+  /**
+   * Corrects the current address in place (no new history entry), e.g. an
+   * assistant the address names that is not in the list. Screens that follow
+   * the address hear about it as they do a move.
+   */
+  replaceAddress: (path: string) => void;
 } {
   const [screen, setScreen] = useState<string | null>(() =>
     matchScreen(window.location.pathname, navItems, defaultScreen),
   );
-  // The screen on show and the history entry it belongs to. Back and Forward
-  // change the address before we hear about them, so these are what "Stay
-  // here" returns to.
+  const [assistant, setAssistant] = useState<string | null>(() =>
+    assistantOf(window.location.search),
+  );
+  // The screen on show, the assistant its address names and the history entry
+  // it belongs to. Back and Forward change the address before we hear about
+  // them, so these are what "Stay here" returns to.
   const screenRef = useRef(screen);
+  const assistantRef = useRef(assistant);
   const indexRef = useRef(0);
   const confirmRef = useRef(confirmLeave);
   confirmRef.current = confirmLeave;
 
-  const show = useCallback((next: string | null) => {
+  /** Shows the screen of the current address. */
+  const showAddress = useCallback(() => {
+    const next = matchScreen(window.location.pathname, navItems, defaultScreen);
+    // An address naming no assistant (a bare screen path) keeps the one on show.
+    const nextAssistant = assistantOf(window.location.search) ?? assistantRef.current;
     screenRef.current = next;
+    assistantRef.current = nextAssistant;
     setScreen(next);
-  }, []);
+    setAssistant(nextAssistant);
+  }, [navItems, defaultScreen]);
 
   useEffect(() => {
     const current = historyIndex(window.history.state);
@@ -153,47 +287,72 @@ export function useRoute(
     } else {
       indexRef.current = current;
     }
-    show(matchScreen(window.location.pathname, navItems, defaultScreen));
+    showAddress();
 
     const onPopState = (event: PopStateEvent) => {
       const next = matchScreen(window.location.pathname, navItems, defaultScreen);
+      const nextAssistant = assistantOf(window.location.search);
       const arrived = historyIndex(event.state);
       const commit = () => {
         // Read the address again: it may have moved on while the owner decided.
         const index = historyIndex(window.history.state);
         if (index !== null) indexRef.current = index;
-        show(matchScreen(window.location.pathname, navItems, defaultScreen));
+        showAddress();
       };
-      if (next === screenRef.current || !confirmRef.current) {
+      // The same screen of the same assistant (a new query, say) leaves nothing
+      // behind. An address naming no assistant keeps the one on show.
+      const samePlace =
+        next === screenRef.current &&
+        (nextAssistant === null || nextAssistant === assistantRef.current);
+      if (samePlace || !confirmRef.current) {
         if (arrived !== null) indexRef.current = arrived;
-        show(next);
+        showAddress();
         return;
       }
       confirmRef.current(commit);
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [navItems, defaultScreen, show]);
+  }, [navItems, defaultScreen, showAddress]);
 
+  // The same move as a screen's: the query is compared too, and `popstate`
+  // tells screens that follow the address (an open conversation).
   const navigate = useCallback(
     (path: string) => {
       // Count from the entry the browser is on. A Back or Forward still waiting
       // for an answer has moved it away from the screen on show.
       const current = historyIndex(window.history.state) ?? indexRef.current;
-      if (window.location.pathname !== path) {
-        indexRef.current = current + 1;
-        window.history.pushState(withHistoryIndex(null, indexRef.current), "", path);
-      } else {
+      const here = currentAddress();
+      if (here === path) {
         // Already at that address (a waiting Back or Forward went there): use its entry.
         indexRef.current = current;
+      } else if (namesOnlyAssistant(here, path, assistantRef.current)) {
+        // The same place, at an address naming no assistant (a sidebar link
+        // after Back to such an entry): use its entry, naming the assistant.
+        indexRef.current = current;
+        window.history.replaceState(window.history.state, "", path);
+      } else {
+        indexRef.current = current + 1;
+        window.history.pushState(withHistoryIndex(null, indexRef.current), "", path);
       }
-      show(matchScreen(window.location.pathname, navItems, defaultScreen));
+      showAddress();
+      // The router has already moved, so its own listener sees the same place.
+      window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
     },
-    [navItems, defaultScreen, show],
+    [showAddress],
+  );
+
+  const replaceAddress = useCallback(
+    (path: string) => {
+      window.history.replaceState(window.history.state, "", path);
+      showAddress();
+      window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+    },
+    [showAddress],
   );
 
   const shows = useCallback(
-    (path: string) => matchScreen(path, navItems, defaultScreen) === screenRef.current,
+    (path: string) => matchScreen(pathOf(path), navItems, defaultScreen) === screenRef.current,
     [navItems, defaultScreen],
   );
 
@@ -211,12 +370,16 @@ export function useRoute(
     // An entry we did not create: put the current screen's address back.
     const path = navItems.find((item) => item.id === screenRef.current)?.path;
     if (path) {
-      window.history.pushState(withHistoryIndex(null, committed + 1), "", path);
+      const address =
+        assistantRef.current === null
+          ? path
+          : screenAddress(path, { assistant: assistantRef.current });
+      window.history.pushState(withHistoryIndex(null, committed + 1), "", address);
       indexRef.current = committed + 1;
     }
   }, [navItems, defaultScreen]);
 
-  return { screen, navigate, shows, restore };
+  return { screen, assistant, navigate, shows, restore, replaceAddress };
 }
 
 /** How a screen moves to another screen: through the shell, so its checks apply. */
@@ -224,13 +387,23 @@ export interface AdminNavigation {
   navigate: (path: string) => void;
   /** The path of a visible screen, or null when it is hidden or unknown. */
   pathFor: (id: string) => string | null;
+  /**
+   * Whether the router takes `path` to the screen on show, aliases included
+   * (`/admin/conversations/`, or `/admin` for the default screen). False
+   * while a Back or Forward that waits for an answer has moved the address
+   * to another screen.
+   */
+  shows: (path: string) => boolean;
 }
 
 export const AdminNavigationContext = createContext<AdminNavigation | null>(null);
 
 const FALLBACK_NAVIGATION: AdminNavigation = {
-  navigate: (path) => window.location.assign(path),
+  // Outside the shell (a screen on its own) there is no leave check to run.
+  navigate: navigateTo,
   pathFor: (id) => NAV_ITEMS.find((item) => item.id === id)?.path ?? null,
+  // A screen on its own is what any address shows.
+  shows: () => true,
 };
 
 export function useAdminNavigation(): AdminNavigation {
@@ -238,25 +411,44 @@ export function useAdminNavigation(): AdminNavigation {
 }
 
 /**
- * A link to another admin screen. Renders its children as plain text when
- * that screen is hidden, so a screen never points at something missing.
+ * The address of a screen's path with a query, e.g. `/admin/gaps?assistant=a`.
+ * No query (or an empty one) is the bare path.
+ */
+export function screenAddress(path: string, query?: Readonly<Record<string, string>>): string {
+  const search = new URLSearchParams(query ?? {}).toString();
+  return search === "" ? path : `${path}?${search}`;
+}
+
+/**
+ * A link to another admin screen, by its id, with an optional query (the
+ * assistant it is for, a search). Renders its children as plain text when
+ * that screen is hidden or unknown, so a screen never points at something
+ * missing. A plain click moves through the shell, so leaving unsaved edits
+ * asks first; a modified click (new tab, new window) is left to the browser.
  */
 export function ScreenLink({
   to,
+  query,
   children,
   className,
+  "aria-label": ariaLabel,
 }: {
+  /** A screen id, e.g. `gaps`. */
   to: string;
+  query?: Readonly<Record<string, string>> | undefined;
   children: ReactNode;
-  className?: string;
+  className?: string | undefined;
+  "aria-label"?: string | undefined;
 }) {
   const { navigate, pathFor } = useAdminNavigation();
   const path = pathFor(to);
   if (path === null) return <>{children}</>;
+  const address = screenAddress(path, query);
   return (
     <a
-      href={path}
+      href={address}
       className={className}
+      aria-label={ariaLabel}
       onClick={(event: MouseEvent<HTMLAnchorElement>) => {
         if (
           event.metaKey ||
@@ -268,7 +460,7 @@ export function ScreenLink({
           return;
         }
         event.preventDefault();
-        navigate(path);
+        navigate(address);
       }}
     >
       {children}

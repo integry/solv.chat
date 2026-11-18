@@ -38,6 +38,11 @@ export {
 export { Icon, type IconName, type IconProps } from "./ui/Icon.js";
 export { PageHeader, type PageHeaderProps } from "./ui/PageHeader.js";
 export { RowMenu, type RowMenuItem, type RowMenuProps } from "./ui/RowMenu.js";
+export {
+  SegmentedControl,
+  type SegmentedControlProps,
+  type SegmentedOption,
+} from "./ui/SegmentedControl.js";
 export { Skeleton, type SkeletonProps } from "./ui/Skeleton.js";
 export { StatusBadge, type StatusBadgeProps, type StatusTone } from "./ui/StatusBadge.js";
 export {

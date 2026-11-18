@@ -23,6 +23,60 @@ function makeAssistant(allowedOrigins: string[] = []): Assistant {
   };
 }
 
+/** The first row in the Conversations list (each row is one link). */
+async function findConversationRow(): Promise<HTMLElement> {
+  await screen.findByText(/Showing 1/);
+  const row = document.querySelector<HTMLElement>(".conv-row");
+  if (!row) throw new Error("No conversation row");
+  return row;
+}
+
+function makeOverview(overrides: Partial<AssistantOverview> = {}): AssistantOverview {
+  return {
+    topQuestions: [{ question: "pricing?", count: 5 }],
+    todayCostMicros: 15_000,
+    dailyCostCapMicros: 2_000_000,
+    configError: null,
+    period: {
+      days: 7,
+      from: "2026-11-10",
+      to: "2026-11-16",
+      questions: 12,
+      replies: 12,
+      answeredShare: 0.75,
+      thumbsDownShare: 0.25,
+      costMicros: 20_000,
+      previous: {
+        from: "2026-11-03",
+        to: "2026-11-09",
+        questions: 9,
+        replies: 9,
+        answeredShare: 0.8,
+        thumbsDownShare: 0.25,
+        costMicros: 10_000,
+      },
+    },
+    daily: [
+      { day: "2026-11-10", questions: 1 },
+      { day: "2026-11-11", questions: 0 },
+      { day: "2026-11-12", questions: 3 },
+      { day: "2026-11-13", questions: 2 },
+      { day: "2026-11-14", questions: 0 },
+      { day: "2026-11-15", questions: 4 },
+      { day: "2026-11-16", questions: 2 },
+    ],
+    setup: {
+      hasContent: true,
+      tried: true,
+      published: true,
+      installed: true,
+      visitorQuestion: true,
+    },
+    attention: { openGaps: 0, failingTests: 0, notIndexed: [] },
+    ...overrides,
+  };
+}
+
 function installFakeServer(options?: {
   allowedOrigins?: string[];
   overview?: AssistantOverview;
@@ -65,14 +119,7 @@ function installFakeServer(options?: {
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/overview` && method === "GET") {
-      return Response.json(
-        options?.overview ?? {
-          messages: 24,
-          answeredShare: 0.75,
-          topQuestions: [{ question: "pricing?", count: 5 }],
-          todayCostMicros: 15_000,
-        },
-      );
+      return Response.json(options?.overview ?? makeOverview());
     }
 
     if (path === `/api/admin/assistants/${assistant.id}/conversations` && method === "GET") {
@@ -144,9 +191,11 @@ function installFakeServer(options?: {
         ? Math.min(Math.max(1, Math.trunc(rawLimit)), 100)
         : 50;
       const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.trunc(rawOffset)) : 0;
+      const listed =
+        parsed.searchParams.get("status") === "open" ? gaps.filter((g) => !g.handled) : gaps;
       return Response.json({
-        gaps: gaps.slice(offset, offset + limit),
-        total: gaps.length,
+        gaps: listed.slice(offset, offset + limit),
+        total: listed.length,
         limit,
         offset,
       });
@@ -249,50 +298,60 @@ describe("admin phase 1 screens", () => {
     window.history.pushState(null, "", "/admin");
   });
 
-  it("renders Overview with each number and its plain explanation", async () => {
+  it("renders Overview's four period figures, with the change against the previous 7 days", async () => {
     installFakeServer({
-      overview: {
-        messages: 42,
-        answeredShare: 0.75,
+      overview: makeOverview({
         topQuestions: [{ question: "how much does it cost?", count: 7 }],
         todayCostMicros: 20_000,
-      },
+      }),
     });
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
-    expect(await screen.findByText("42")).toBeTruthy();
-    expect(screen.getByText("Total questions and replies across all conversations.")).toBeTruthy();
-    expect(screen.getByText("75%")).toBeTruthy();
     expect(
-      screen.getByText("Share of questions your assistant could answer from your content."),
+      await screen.findByText(
+        "Last 7 days, 10 Nov 2026 to 16 Nov 2026, compared with the 7 days before.",
+      ),
     ).toBeTruthy();
-    expect(screen.getByText("$0.02")).toBeTruthy();
-    expect(screen.getByText("Estimated cost so far today.")).toBeTruthy();
-    expect(screen.getByText("how much does it cost?")).toBeTruthy();
+    // The same four figures, with the same names, as Reports.
+    const asked = screen.getByRole("region", { name: "Questions asked" });
+    expect(asked.textContent).toContain("12");
+    expect(asked.textContent).toContain("3 more than the 7 days before");
+    const answered = screen.getByRole("region", { name: "Answered share" });
+    expect(answered.textContent).toContain("75%");
+    expect(answered.textContent).toContain("5 points lower than the 7 days before");
+    const notHelpful = screen.getByRole("region", { name: "Marked not helpful" });
+    expect(notHelpful.textContent).toContain("25%");
+    expect(notHelpful.textContent).toContain("Same as the 7 days before");
+    const cost = screen.getByRole("region", { name: "Cost" });
+    expect(cost.textContent).toContain("$0.02");
+    expect(cost.textContent).toContain("$0.01 in the 7 days before");
+    expect(screen.getByText("Today so far: $0.02. Daily spend cap: $2.00.")).toBeTruthy();
+    expect(screen.queryByText("Messages")).toBeNull();
+
+    const topLink = screen.getByRole("link", { name: "how much does it cost?" });
+    expect(topLink.getAttribute("href")).toBe(
+      "/admin/conversations?question=how+much+does+it+cost%3F&assistant=ast_1",
+    );
     expect(screen.getByText("7 times")).toBeTruthy();
   });
 
   it("renders configuration error and unknown-cost spend cap warning on Overview", async () => {
     installFakeServer({
-      overview: {
-        messages: 5,
-        answeredShare: 0.8,
-        topQuestions: [],
+      overview: makeOverview({
         todayCostMicros: 0,
         todayCostUnknown: true,
         dailyCostCapMicros: 2_000_000,
         configError: "OpenRouter is selected, but SOLV_LLM_MODEL is not set.",
-      },
+      }),
     });
     render(<App />);
 
-    expect(
-      await screen.findByText("OpenRouter is selected, but SOLV_LLM_MODEL is not set."),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(/Estimated cost so far today\. Daily spend cap: \$2\.00\./),
-    ).toBeTruthy();
+    const attention = await screen.findByRole("region", { name: "Needs attention" });
+    expect(attention.textContent).toContain(
+      "OpenRouter is selected, but SOLV_LLM_MODEL is not set.",
+    );
+    expect(screen.getByText("Today so far: $0.00. Daily spend cap: $2.00.")).toBeTruthy();
     expect(
       screen.getByText(
         "Cost is not being reported for this model, so the daily spend cap cannot protect this instance.",
@@ -302,24 +361,21 @@ describe("admin phase 1 screens", () => {
 
   it("formats cost and daily spend cap in credits when costUnit is credits", async () => {
     installFakeServer({
-      overview: {
-        messages: 10,
-        answeredShare: 0.9,
-        topQuestions: [],
+      overview: makeOverview({
         todayCostMicros: 20_000,
         dailyCostCapMicros: 2_000_000,
         costUnit: "credits",
-      },
+      }),
     });
     render(<App />);
 
     expect(await screen.findByText("0.02 credits")).toBeTruthy();
     expect(
-      screen.getByText("Estimated cost so far today. Daily spend cap: 2.00 credits."),
+      screen.getByText("Today so far: 0.02 credits. Daily spend cap: 2.00 credits."),
     ).toBeTruthy();
   });
 
-  it("opens Gaps, pre-fills Write the right answer, saves, and marks the gap as handled", async () => {
+  it("opens Gaps, writes an answer inline, saves, and removes the gap", async () => {
     const server = installFakeServer();
     render(<App />);
 
@@ -327,7 +383,7 @@ describe("admin phase 1 screens", () => {
     expect(await screen.findByText("Do you ship to Spain?")).toBeTruthy();
     expect(screen.getByText("Asked 3 times")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Write the right answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Write an answer" }));
 
     const questionInput = (await screen.findByLabelText("Question")) as HTMLInputElement;
     expect(questionInput.value).toBe("Do you ship to Spain?");
@@ -343,7 +399,13 @@ describe("admin phase 1 screens", () => {
       fromMessageId: "msg_gap_1",
     });
 
-    expect(await screen.findByText("Handled")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "Answer saved to your sources. The assistant can use it once indexed.",
+      ),
+    ).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "No unanswered questions" })).toBeTruthy();
+    expect(screen.queryByText("Do you ship to Spain?")).toBeNull();
   });
 
   it("renders Conversations, opens a conversation, and renders citations as links", async () => {
@@ -353,7 +415,9 @@ describe("admin phase 1 screens", () => {
     fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
     expect(await screen.findByText("How do I start?")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    // The whole row is the link; there is no separate "Open" button.
+    expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
+    fireEvent.click(screen.getByRole("link", { name: /How do I start\?/ }));
     expect(await screen.findByText("Read the quickstart guide.")).toBeTruthy();
 
     const link = screen.getByRole("link", { name: "Quickstart" }) as HTMLAnchorElement;
@@ -414,8 +478,9 @@ describe("admin phase 1 screens", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Write the right answer" }));
+    fireEvent.click(await findConversationRow());
+    fireEvent.click(await screen.findByRole("button", { name: "Write an answer for this" }));
+    expect(await screen.findByRole("heading", { name: "Gaps" })).toBeTruthy();
 
     const questionInput = (await screen.findByLabelText("Question")) as HTMLInputElement;
     expect(questionInput.value).toBe("Do you have an SLA?");
@@ -511,8 +576,9 @@ describe("admin phase 1 screens", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Write the right answer" }));
+    fireEvent.click(await findConversationRow());
+    fireEvent.click(await screen.findByRole("button", { name: "Write an answer for this" }));
+    expect(await screen.findByRole("heading", { name: "Gaps" })).toBeTruthy();
 
     const questionInput = (await screen.findByLabelText("Question")) as HTMLInputElement;
     expect(questionInput.value).toBe("Do you ship to Spain?");
@@ -579,7 +645,7 @@ describe("admin phase 1 screens", () => {
     fireEvent.click(await screen.findByRole("link", { name: "Gaps" }));
     expect(await screen.findByText("Do you ship to Spain?")).toBeTruthy();
 
-    const [writeA, writeB] = screen.getAllByRole("button", { name: "Write the right answer" });
+    const [writeA, writeB] = screen.getAllByRole("button", { name: "Write an answer" });
     expect(writeA).toBeDefined();
     expect(writeB).toBeDefined();
     if (!writeA || !writeB) return;
@@ -613,8 +679,8 @@ describe("admin phase 1 screens", () => {
       ),
     );
 
-    // Gap A is marked handled on reload, while B's editor and draft remain intact.
-    expect(await screen.findByText("Handled")).toBeTruthy();
+    // Gap A leaves the list on reload, while B's editor and draft remain intact.
+    await waitFor(() => expect(screen.queryByText("Do you ship to Spain?")).toBeNull());
     expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe(
       "Do you support SSO?",
     );
@@ -623,12 +689,21 @@ describe("admin phase 1 screens", () => {
     );
   });
 
-  it("preserves a newer conversation turn draft when an earlier turn save completes", async () => {
+  it("keeps a newer turn's in-place answer draft when an earlier turn's save completes", async () => {
     let resolveFirstSave!: (res: Response) => void;
-    const firstSavePromise = new Promise<Response>((resolve) => {
+    const firstSave = new Promise<Response>((resolve) => {
       resolveFirstSave = resolve;
     });
-
+    const saved = (n: number) =>
+      Response.json(
+        {
+          documentId: `doc_saved_${n}`,
+          sourceId: "src_entry_1",
+          url: `https://example.com/admin/sources#entry:${n}`,
+          counts: { written: 1, unchanged: 0, deleted: 0 },
+        },
+        { status: 201 },
+      );
     const server = installFakeServer({
       conversations: [
         {
@@ -699,66 +774,51 @@ describe("admin phase 1 screens", () => {
           ],
         },
       },
-      onAnswerPost: async (body) => {
-        if (body.fromMessageId === "msg_a_1") {
-          return firstSavePromise;
-        }
-        return Response.json(
-          {
-            documentId: "doc_saved_2",
-            sourceId: "src_entry_1",
-            url: "https://example.com/admin/sources#entry:2",
-            counts: { written: 1, unchanged: 0, deleted: 0 },
-          },
-          { status: 201 },
-        );
-      },
+      onAnswerPost: (body) => (body.fromMessageId === "msg_a_1" ? firstSave : saved(2)),
     });
-
-    render(<App />);
+    // With Gaps hidden, the answer is written in place under its turn.
+    render(<App options={{ hideScreens: ["gaps"] }} />);
     fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+    fireEvent.click(await findConversationRow());
 
     const [writeFirst, writeSecond] = await screen.findAllByRole("button", {
-      name: "Write the right answer",
+      name: "Write an answer for this",
     });
-    expect(writeFirst).toBeDefined();
-    expect(writeSecond).toBeDefined();
-    if (!writeFirst || !writeSecond) return;
+    if (!writeFirst || !writeSecond) throw new Error("Expected two unanswered turns");
 
     fireEvent.click(writeFirst);
-    fireEvent.change(await screen.findByLabelText("Answer"), {
-      target: { value: "Answer one." },
-    });
+    expect(((await screen.findByLabelText("Question")) as HTMLInputElement).value).toBe(
+      "Question one?",
+    );
+    fireEvent.change(screen.getByLabelText("Answer"), { target: { value: "Answer one." } });
     fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
     await waitFor(() => expect(server.answerPosts).toHaveLength(1));
 
-    // Switch to turn 2 while turn 1's save is in flight and type a draft.
+    // Turn 2's editor opens while turn 1's save is still running.
     fireEvent.click(writeSecond);
-    const questionInput = (await screen.findByLabelText("Question")) as HTMLInputElement;
-    expect(questionInput.value).toBe("Question two?");
-    fireEvent.change(screen.getByLabelText("Answer"), {
-      target: { value: "Draft answer two." },
-    });
-
-    resolveFirstSave(
-      Response.json(
-        {
-          documentId: "doc_saved_1",
-          sourceId: "src_entry_1",
-          url: "https://example.com/admin/sources#entry:1",
-          counts: { written: 1, unchanged: 0, deleted: 0 },
-        },
-        { status: 201 },
-      ),
-    );
-
     await waitFor(() =>
-      expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
-        "Draft answer two.",
-      ),
+      expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Question two?"),
+    );
+    fireEvent.change(screen.getByLabelText("Answer"), { target: { value: "Draft answer two." } });
+
+    resolveFirstSave(saved(1));
+    expect(await screen.findByText(/Answer saved to your sources/)).toBeTruthy();
+    // Turn 1's save leaves turn 2's editor open, with its draft.
+    expect(screen.getAllByLabelText("Answer")).toHaveLength(1);
+    expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+      "Draft answer two.",
     );
     expect((screen.getByLabelText("Question") as HTMLInputElement).value).toBe("Question two?");
+
+    // And it saves on its own turn.
+    fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
+    await waitFor(() => expect(server.answerPosts).toHaveLength(2));
+    expect(server.answerPosts[1]).toEqual({
+      question: "Question two?",
+      answer: "Draft answer two.",
+      fromMessageId: "msg_a_2",
+    });
+    await waitFor(() => expect(screen.queryByLabelText("Answer")).toBeNull());
   });
 
   it("renders Install with the empty-origins warning and copies the snippet", async () => {
@@ -820,8 +880,8 @@ describe("admin phase 1 screens", () => {
       times: i < 100 ? 2 : 1,
       lastAsked: 1_700_000_000_000 + i,
       exampleMessageId: `msg_gap_${i + 1}`,
-      handled: i < 100,
-      documentId: i < 100 ? `doc_${i + 1}` : null,
+      handled: false,
+      documentId: null,
     }));
 
     installFakeServer({ gaps: manyGaps });
@@ -933,7 +993,7 @@ describe("admin phase 1 screens", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+    fireEvent.click(await findConversationRow());
 
     const list = await screen.findByRole("list", { name: "What the assistant did" });
     expect(list.textContent).toContain("Tool: lookup_order");
@@ -945,7 +1005,7 @@ describe("admin phase 1 screens", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+    fireEvent.click(await findConversationRow());
     fireEvent.click(await screen.findByRole("button", { name: "Add to tests" }));
 
     const questionInput = screen.getByLabelText("Question") as HTMLInputElement;
@@ -1103,7 +1163,7 @@ describe("admin phase 1 screens", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("link", { name: "Conversations" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+    fireEvent.click(await findConversationRow());
     const [addFirst, addSecond] = await screen.findAllByRole("button", { name: "Add to tests" });
     if (!addFirst || !addSecond) throw new Error("Expected Add to tests buttons for both turns");
     fireEvent.click(addFirst);

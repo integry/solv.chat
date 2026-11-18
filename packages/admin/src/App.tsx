@@ -14,7 +14,9 @@ import {
   BUILD_SCREENS,
   type BuiltinScreenId,
   MONITOR_SCREENS,
+  screenAddress,
   useRoute,
+  withAssistant,
 } from "./routing.js";
 import { Behaviour } from "./screens/Behaviour.js";
 import { Conversations } from "./screens/Conversations.js";
@@ -22,6 +24,7 @@ import { Gaps } from "./screens/Gaps.js";
 import { Install } from "./screens/Install.js";
 import { Login } from "./screens/Login.js";
 import { Overview } from "./screens/Overview.js";
+import { OPEN_TRY_IT_EVENT } from "./screens/OverviewParts.js";
 import { Providers } from "./screens/Providers.js";
 import { Reports } from "./screens/Reports.js";
 import { Sources } from "./screens/Sources.js";
@@ -195,11 +198,14 @@ function AdminShell({
     [proceed],
   );
 
-  const { screen, navigate, shows, restore } = useRoute(
-    config.navItems,
-    config.defaultScreen,
-    guardLeave,
-  );
+  const {
+    screen,
+    assistant: addressAssistant,
+    navigate,
+    shows,
+    restore,
+    replaceAddress,
+  } = useRoute(config.navItems, config.defaultScreen, guardLeave);
   restoreRef.current = restore;
 
   /**
@@ -217,14 +223,62 @@ function AdminShell({
    */
   const moveTo = useCallback(
     (path: string) => {
-      if (shows(path)) stayPut();
-      else guardLeave(() => navigate(path));
+      if (!shows(path)) {
+        guardLeave(() => navigate(path));
+      } else if (
+        `${window.location.pathname}${window.location.search}` === path ||
+        !shows(window.location.pathname)
+      ) {
+        // Already there, or a Back or Forward is waiting: stay on this screen.
+        stayPut();
+      } else {
+        // Another address of the screen on show (an open conversation, say)
+        // leaves nothing behind, so it needs no check.
+        deferredLeaveRef.current = null;
+        navigate(path);
+      }
     },
     [shows, stayPut, guardLeave, navigate],
   );
   const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The address names the assistant on show, so a link, a reload and Back all
+  // show the one they were made under. Start from it; an id that is not in the
+  // list falls back to the first assistant below.
+  const [selectedId, setSelectedId] = useState<string | null>(() => addressAssistant);
+  // Back and Forward restore an address, and with it the assistant it names,
+  // once the leave check lets them go ahead. An address without one (the bare
+  // screen path) keeps the current selection.
+  // Followed during render, not in an effect: a screen that checks its
+  // address against the assistant on show must never see the two apart.
+  const [followedAssistant, setFollowedAssistant] = useState(addressAssistant);
+  if (followedAssistant !== addressAssistant) {
+    setFollowedAssistant(addressAssistant);
+    if (addressAssistant !== null) setSelectedId(addressAssistant);
+  }
+  // Choosing an assistant writes it into the address too (a new history entry,
+  // so Back undoes the switch), and `popstate` tells screens that follow the
+  // address: an open conversation of the previous assistant is left behind.
+  // A host screen's query is its own (it may use `id` for something else),
+  // so there only `assistant` changes.
+  // `replace` writes the entry on show instead, for a caller about to move on
+  // at once: Back from where it goes then skips this step.
+  const selectAssistant = useCallback(
+    (id: string, options: { replace?: boolean } = {}) => {
+      setSelectedId(id);
+      const go = options.replace ? replaceAddress : navigate;
+      if (shows(window.location.pathname)) {
+        const hostScreen = screen !== null && config.extraScreenIds.has(screen);
+        go(withAssistant(id, { keepQuery: hostScreen }));
+        return;
+      }
+      // A Back or Forward is waiting, so the address belongs to another
+      // screen: the switch keeps the screen on show, at its own address.
+      const path = config.navItems.find((item) => item.id === screen)?.path;
+      if (path) go(screenAddress(path, { assistant: id }));
+    },
+    [navigate, replaceAddress, shows, screen, config.navItems, config.extraScreenIds],
+  );
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
   // A queue, not one slot: two create forms can finish close together, and each key is
@@ -250,14 +304,17 @@ function AdminShell({
     moveTo(path);
   }
 
-  function handleCreated({ assistant, ingestKey }: CreatedAssistant) {
+  function handleCreated(
+    { assistant, ingestKey }: CreatedAssistant,
+    options: { replace?: boolean } = {},
+  ) {
     // Merge into the latest list: two create forms can have requests in flight at once.
     assistantsRes.setValue((prev) => {
       const current = prev?.assistants ?? [];
       if (current.some((a) => a.id === assistant.id)) return prev ?? { assistants: current };
       return { assistants: [...current, assistant] };
     });
-    setSelectedId(assistant.id);
+    selectAssistant(assistant.id, options);
     setDrawerOpen(false);
     if (ingestKey) {
       setCreatedKeys((prev) =>
@@ -269,9 +326,12 @@ function AdminShell({
   }
 
   function handleFirstRunCreated(created: CreatedAssistant) {
-    handleCreated(created);
     const sources = config.navItems.find((item) => item.id === "sources");
-    if (sources) navigate(sources.path);
+    // Going on to Sources, the switch to the new assistant takes the entry on
+    // show rather than adding one: Back from Sources goes where the owner was
+    // before, not to that screen again with the new assistant.
+    handleCreated(created, { replace: sources !== undefined });
+    if (sources) navigate(screenAddress(sources.path, { assistant: created.assistant.id }));
   }
 
   async function handleSignOut() {
@@ -297,6 +357,24 @@ function AdminShell({
       ? selectedId
       : (assistants[0]?.id ?? null);
   const selectedAssistant = assistants.find((a) => a.id === effectiveSelectedId) ?? null;
+  // An address naming an assistant that is not in the list shows the first
+  // one instead. Once the list has loaded, the address is corrected to name
+  // the one on show (in place, keeping the rest of the query), so screens
+  // that compare the two, and keep their state in the address, work as usual.
+  // An open conversation (`id`) belonged to the unknown one and is dropped.
+  const listLoaded = assistantsRes.value !== undefined;
+  const unknownAddressAssistant =
+    listLoaded &&
+    addressAssistant !== null &&
+    effectiveSelectedId !== null &&
+    !assistants.some((a) => a.id === addressAssistant);
+  const hostScreen = screen !== null && config.extraScreenIds.has(screen);
+  useEffect(() => {
+    if (!unknownAddressAssistant || effectiveSelectedId === null) return;
+    // A Back or Forward waiting for an answer: the address is another screen's.
+    if (!shows(window.location.pathname)) return;
+    replaceAddress(withAssistant(effectiveSelectedId, { keepQuery: hostScreen }));
+  }, [unknownAddressAssistant, effectiveSelectedId, hostScreen, shows, replaceAddress]);
   const selectedMutation = useAssistantMutation(effectiveSelectedId ?? "");
   const saving = selectedMutation.saving;
   unsavedRef.current = selectedMutation.unsaved;
@@ -334,8 +412,9 @@ function AdminShell({
     () => ({
       navigate: moveTo,
       pathFor: (id: string) => config.navItems.find((item) => item.id === id)?.path ?? null,
+      shows,
     }),
-    [config.navItems, moveTo],
+    [config.navItems, moveTo, shows],
   );
   const ExtraScreen =
     screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
@@ -347,6 +426,19 @@ function AdminShell({
   const hasTryIt = selectedAssistant !== null && assistantChrome;
   const tryItVisible = hasTryIt && tryIt.open;
   const keyNotice = createdKeys[0] ?? null;
+
+  // The Overview checklist's "Open Try it" asks for the pane with an event:
+  // the shell owns the pane, and screens are not handed its controls.
+  const setTryItOpen = tryIt.setOpen;
+  useEffect(() => {
+    const onOpenTryIt = () => {
+      if (!hasTryIt) return;
+      focusTryItRef.current = true;
+      setTryItOpen(true);
+    };
+    window.addEventListener(OPEN_TRY_IT_EVENT, onOpenTryIt);
+    return () => window.removeEventListener(OPEN_TRY_IT_EVENT, onOpenTryIt);
+  }, [hasTryIt, setTryItOpen]);
 
   useEffect(() => {
     if (!tryItVisible || !focusTryItRef.current) return;
@@ -365,7 +457,7 @@ function AdminShell({
           stayPut();
           return;
         }
-        guardLeave(() => setSelectedId(id));
+        guardLeave(() => selectAssistant(id));
       }}
       onCreated={handleCreated}
       createdKey={narrow ? null : keyNotice}
@@ -421,7 +513,12 @@ function AdminShell({
     </button>
   );
   const navigationList = (
-    <Navigation current={screen} onNavigate={handleNavigate} items={config.navItems} />
+    <Navigation
+      current={screen}
+      onNavigate={handleNavigate}
+      items={config.navItems}
+      assistantId={effectiveSelectedId}
+    />
   );
 
   const bodyClass = [

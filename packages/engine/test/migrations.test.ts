@@ -1,5 +1,6 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import { searchableText } from "../src/db/messages.js";
 
 const EXPECTED_TABLES = [
   "orgs",
@@ -183,6 +184,216 @@ describe("migrations", () => {
       { id: "msg_x", reply_to: null, question_key: "hello world again?" },
       { id: "msg_w", reply_to: "msg_x", question_key: null },
     ]);
+  });
+
+  it("folds ASCII rows written before 0019 exactly as the engine does, and only those", async () => {
+    const orgId = "org_00000000000000000000";
+    // Every ASCII whitespace character, other control characters and letters
+    // in both cases, in runs, from a fixed seed.
+    const alphabet = ["a", "B", "z", "Q", "?", "1", " ", "\t", "\n", "\v", "\f", "\r", "\x1c"];
+    let seed = 7;
+    const generated = Array.from({ length: 40 }, () => {
+      let text = "";
+      for (let i = 0; i < 30; i++) {
+        seed = (seed * 1103515245 + 12345) % 2 ** 31;
+        const char = alphabet[seed % alphabet.length] ?? "";
+        text += char.repeat(1 + (seed % 3));
+      }
+      return text;
+    });
+    const ascii = [
+      "  Do  YOU\tship?\r\n\nTo SPAIN?  ",
+      "\vVertical\fform feed",
+      "Unit\x1fseparator stays",
+      `x${" ".repeat(256)}y`,
+      ...generated,
+    ];
+    const forTheEngine = [
+      // More spaces in a row than eight passes collapse.
+      `x${" ".repeat(300)}y`,
+      "Où est l'École?",
+      "Curly ’quotes’ only",
+      "Do you\u00a0ship?",
+    ];
+    const contents = [...ascii, ...forTheEngine];
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'Site', 'pk_1', 1)",
+      ).bind(orgId),
+      env.DB.prepare(
+        "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES ('cnv_1', ?1, 'ast_1', 'vis', 1, '')",
+      ).bind(orgId),
+      ...contents.map((content, i) =>
+        env.DB.prepare(
+          "INSERT INTO messages (id, org_id, conversation_id, role, content, created_at) VALUES (?1, ?2, 'cnv_1', 'assistant', ?3, ?4)",
+        ).bind(`msg_${i}`, orgId, content, i),
+      ),
+    ]);
+
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0019_"));
+    // The backfill's own updates, not the trigger's body.
+    const updates = (migration?.queries ?? []).filter(
+      (q) =>
+        /\bUPDATE\s+messages\s+SET\s+search_text\b/i.test(q) && !/\bCREATE\s+TRIGGER\b/i.test(q),
+    );
+    // One statement: a large table is read once.
+    expect(updates.length).toBe(1);
+    for (const sql of updates) {
+      await env.DB.prepare(sql).run();
+    }
+
+    const rows = await env.DB.prepare(
+      "SELECT content, search_text FROM messages WHERE org_id = ?1 ORDER BY created_at",
+    )
+      .bind(orgId)
+      .all<{ content: string; search_text: string | null }>();
+    expect(rows.results).toEqual([
+      ...ascii.map((content) => ({ content, search_text: searchableText(content) })),
+      ...forTheEngine.map((content) => ({ content, search_text: null })),
+    ]);
+  });
+
+  it("drops search_text when content is rewritten without it, as an older Worker does", async () => {
+    const orgId = "org_00000000000000000000";
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'Site', 'pk_1', 1)",
+      ).bind(orgId),
+      env.DB.prepare(
+        "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES ('cnv_1', ?1, 'ast_1', 'vis', 1, '')",
+      ).bind(orgId),
+      ...["msg_old", "msg_new", "msg_same"].map((id, i) =>
+        env.DB.prepare(
+          "INSERT INTO messages (id, org_id, conversation_id, role, content, search_text, created_at) VALUES (?1, ?2, 'cnv_1', 'assistant', 'Paused', 'paused', ?3)",
+        ).bind(id, orgId, i),
+      ),
+    ]);
+
+    await env.DB.batch([
+      // An older Worker completes a paused reply: content only.
+      env.DB.prepare(
+        "UPDATE messages SET content = 'Paused, then École' WHERE org_id = ?1 AND id = 'msg_old'",
+      ).bind(orgId),
+      // The engine writes both together.
+      env.DB.prepare(
+        "UPDATE messages SET content = ?2, search_text = ?3 WHERE org_id = ?1 AND id = 'msg_new'",
+      ).bind(orgId, "Paused, then École", searchableText("Paused, then École")),
+      // A write that leaves content as it was changes nothing.
+      env.DB.prepare(
+        "UPDATE messages SET content = 'Paused' WHERE org_id = ?1 AND id = 'msg_same'",
+      ).bind(orgId),
+    ]);
+
+    const rows = await env.DB.prepare(
+      "SELECT id, search_text FROM messages WHERE org_id = ?1 ORDER BY created_at",
+    )
+      .bind(orgId)
+      .all<{ id: string; search_text: string | null }>();
+    expect(rows.results).toEqual([
+      { id: "msg_old", search_text: null },
+      { id: "msg_new", search_text: "paused, then école" },
+      { id: "msg_same", search_text: "paused" },
+    ]);
+  });
+
+  it("folds final sigma in text folded before 0020, and leaves other text alone", async () => {
+    const orgId = "org_00000000000000000000";
+    const stored = [
+      ["msg_greek", "Ο ΚΌΣΜΟΣ ΜΑΣ", "ο κόσμος μας"],
+      ["msg_ascii", "Do you ship?", "do you ship?"],
+      ["msg_pending", "Ο ΚΌΣΜΟΣ", null],
+    ] as const;
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'Site', 'pk_1', 1)",
+      ).bind(orgId),
+      env.DB.prepare(
+        "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES ('cnv_1', ?1, 'ast_1', 'vis', 1, '')",
+      ).bind(orgId),
+      ...stored.map(([id, content, searchText], i) =>
+        env.DB.prepare(
+          "INSERT INTO messages (id, org_id, conversation_id, role, content, search_text, created_at) VALUES (?1, ?2, 'cnv_1', 'user', ?3, ?4, ?5)",
+        ).bind(id, orgId, content, searchText, i),
+      ),
+    ]);
+
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0020_"));
+    expect(migration?.queries.length).toBe(1);
+    for (const sql of migration?.queries ?? []) await env.DB.prepare(sql).run();
+
+    const rows = await env.DB.prepare(
+      "SELECT id, content, search_text FROM messages WHERE org_id = ?1 ORDER BY created_at",
+    )
+      .bind(orgId)
+      .all<{ id: string; content: string; search_text: string | null }>();
+    expect(rows.results).toEqual([
+      { id: "msg_greek", content: "Ο ΚΌΣΜΟΣ ΜΑΣ", search_text: searchableText("Ο ΚΌΣΜΟΣ ΜΑΣ") },
+      { id: "msg_ascii", content: "Do you ship?", search_text: "do you ship?" },
+      { id: "msg_pending", content: "Ο ΚΌΣΜΟΣ", search_text: null },
+    ]);
+    expect(rows.results[0]?.search_text).toBe("ο κόσμοσ μασ");
+  });
+
+  it("keeps each conversation's newest message time, from 0021's backfill and triggers", async () => {
+    const orgId = "org_00000000000000000000";
+    const lastMessageAt = async () => {
+      const res = await env.DB.prepare(
+        "SELECT id, last_message_at FROM conversations WHERE org_id = ?1 ORDER BY id",
+      )
+        .bind(orgId)
+        .all<{ id: string; last_message_at: number | null }>();
+      return Object.fromEntries(res.results.map((r) => [r.id, r.last_message_at]));
+    };
+    const insertMessage = (id: string, conversation: string, at: number) =>
+      env.DB.prepare(
+        "INSERT INTO messages (id, org_id, conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, 'user', 'Hi', ?4)",
+      ).bind(id, orgId, conversation, at);
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'Site', 'pk_1', 1)",
+      ).bind(orgId),
+      // Written the way an older Worker writes them: no last_message_at.
+      ...["cnv_a", "cnv_b"].map((id) =>
+        env.DB.prepare(
+          "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES (?1, ?2, 'ast_1', 'vis', 100, '')",
+        ).bind(id, orgId),
+      ),
+    ]);
+    // A conversation starts at its start time.
+    expect(await lastMessageAt()).toEqual({ cnv_a: 100, cnv_b: 100 });
+
+    await env.DB.batch([
+      insertMessage("msg_1", "cnv_a", 300),
+      // Written later with an earlier time: the newest time stays.
+      insertMessage("msg_2", "cnv_a", 200),
+    ]);
+    expect(await lastMessageAt()).toEqual({ cnv_a: 300, cnv_b: 100 });
+
+    await env.DB.prepare("DELETE FROM messages WHERE org_id = ?1 AND id = 'msg_1'")
+      .bind(orgId)
+      .run();
+    expect(await lastMessageAt()).toEqual({ cnv_a: 200, cnv_b: 100 });
+    await env.DB.prepare("DELETE FROM messages WHERE org_id = ?1 AND id = 'msg_2'")
+      .bind(orgId)
+      .run();
+    expect(await lastMessageAt()).toEqual({ cnv_a: 100, cnv_b: 100 });
+
+    // The backfill, over rows from before the column existed.
+    await env.DB.batch([
+      insertMessage("msg_3", "cnv_b", 50),
+      insertMessage("msg_4", "cnv_b", 70),
+      env.DB.prepare("UPDATE conversations SET last_message_at = NULL WHERE org_id = ?1").bind(
+        orgId,
+      ),
+    ]);
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0021_"));
+    const backfill = (migration?.queries ?? []).filter(
+      (q) => /^\s*UPDATE\s+conversations\b/i.test(q) && !/\bCREATE\s+TRIGGER\b/i.test(q),
+    );
+    expect(backfill.length).toBe(1);
+    for (const sql of backfill) await env.DB.prepare(sql).run();
+    // The newest message, even one older than the start; the start without one.
+    expect(await lastMessageAt()).toEqual({ cnv_a: 100, cnv_b: 70 });
   });
 
   it("uses unique, sequential numeric prefixes for every migration", () => {

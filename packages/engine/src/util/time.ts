@@ -8,3 +8,6 @@
 export function utcDay(at: number): string {
   return new Date(at).toISOString().slice(0, 10);
 }
+
+/** One day in milliseconds. */
+export const DAY_MS = 86_400_000;

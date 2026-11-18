@@ -1,5 +1,7 @@
+import { isPlainObject, MAX_CHAT_MESSAGE_LENGTH } from "@solvchat/core";
+import { normalizeQuestionText } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
-import { NotFound } from "./errors.js";
+import { BadRequest, NotFound } from "./errors.js";
 
 export interface GapSummary {
   question: string;
@@ -19,6 +21,18 @@ export interface GapsPage {
 }
 
 /**
+ * Reads `?status=` from a gaps list request: `open` for the open groups only,
+ * left out for every group. Anything else is refused, as the conversation list
+ * refuses an unknown filter, so a typo does not silently show every group.
+ */
+export function readGapsOpenOnly(url: URL): boolean {
+  const status = url.searchParams.get("status");
+  if (status === null || status === "") return false;
+  if (status === "open") return true;
+  throw new BadRequest(["status: must be open"]);
+}
+
+/**
  * The unanswered questions. `answered = 0` is written by the chat pipeline when
  * nothing cleared the score floor, so this screen is a direct read of that
  * decision rather than a second heuristic that could disagree with it.
@@ -27,11 +41,15 @@ export interface GapsPage {
  * whitespace collapsed, stored with the question when it is written. Each
  * unanswered reply counts against the question it records in `reply_to`. Fuzzy grouping would need embeddings per gap and a
  * threshold to argue about; the specification asks only that gaps be listed.
+ *
+ * `openOnly` leaves out groups that already have a written answer, which is
+ * what the Gaps screen lists. Dismissed groups are always left out until the
+ * question is asked again.
  */
 export async function listGaps(
   tenant: Tenant,
   assistantId: string,
-  options: { limit?: number; offset?: number } = {},
+  options: { limit?: number; offset?: number; openOnly?: boolean } = {},
 ): Promise<GapsPage> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
@@ -39,11 +57,65 @@ export async function listGaps(
   const limit = Math.min(Math.max(1, Math.trunc(options.limit ?? 50)), 100);
   const offset = Math.max(0, Math.trunc(options.offset ?? 0));
 
-  const { groups, total } = await tenant.messages.gapGroups(assistantId, { limit, offset });
+  const { groups, total } = await tenant.messages.gapGroups(assistantId, {
+    limit,
+    offset,
+    openOnly: options.openOnly === true,
+  });
   return {
     gaps: groups.map((group) => ({ ...group, handled: group.documentId !== null })),
     total,
     limit,
     offset,
   };
+}
+
+/**
+ * Upper bound on a question key in a dismiss request: longer is not a key we
+ * stored. A key is a visitor's message (at most MAX_CHAT_MESSAGE_LENGTH),
+ * lowercased, and lowercasing lengthens a few characters ("İ" becomes two
+ * code units), so the bound leaves room for that rather than refusing a gap
+ * the list shows.
+ */
+export const MAX_QUESTION_KEY = MAX_CHAT_MESSAGE_LENGTH * 3;
+
+function readQuestionKey(body: unknown): string {
+  if (!isPlainObject(body) || typeof body.question !== "string") {
+    throw new BadRequest(["question: must be a string"]);
+  }
+  // Normalised again so a display-text question finds the same group.
+  const key = normalizeQuestionText(body.question);
+  if (key.length === 0) {
+    throw new BadRequest(["question: must not be empty"]);
+  }
+  if (key.length > MAX_QUESTION_KEY) {
+    throw new BadRequest([`question: must be at most ${MAX_QUESTION_KEY} characters`]);
+  }
+  return key;
+}
+
+/** "Dismiss": hides one gap group until a visitor asks the question again. */
+export async function dismissGap(
+  tenant: Tenant,
+  assistantId: string,
+  body: unknown,
+): Promise<{ question: string; dismissed: true }> {
+  const question = readQuestionKey(body);
+  const assistant = await tenant.assistants.get(assistantId);
+  if (assistant === null) throw new NotFound("assistant");
+  await tenant.messages.dismissGap(assistantId, question, Date.now());
+  return { question, dismissed: true };
+}
+
+/** "Undo" after "Dismiss": the group is listed again. */
+export async function restoreGap(
+  tenant: Tenant,
+  assistantId: string,
+  body: unknown,
+): Promise<{ question: string; dismissed: false }> {
+  const question = readQuestionKey(body);
+  const assistant = await tenant.assistants.get(assistantId);
+  if (assistant === null) throw new NotFound("assistant");
+  await tenant.messages.restoreGap(assistantId, question);
+  return { question, dismissed: false };
 }

@@ -138,8 +138,6 @@ function installFakeServer(options?: {
 
     if (path === "/api/admin/overview" || path.endsWith("/overview")) {
       return Response.json({
-        messages: 0,
-        answeredShare: 0,
         topQuestions: [],
         todayCostMicros: 0,
       });

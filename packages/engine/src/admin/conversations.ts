@@ -1,8 +1,15 @@
-import type { ConversationRow, ConversationSummaryRow } from "../db/conversations.js";
+import { MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
+import type {
+  ConversationFilter,
+  ConversationRow,
+  ConversationSummaryRow,
+} from "../db/conversations.js";
 import type { FeedbackValue } from "../db/feedback.js";
-import type { Citation, MessageRole } from "../db/messages.js";
+import { type Citation, type MessageRole, normalizeQuestionText } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
-import { NotFound } from "./errors.js";
+import { DAY_MS } from "../util/time.js";
+import { BadRequest, NotFound } from "./errors.js";
+import { MAX_QUESTION_KEY } from "./gaps.js";
 
 export interface ConversationFeedback {
   id: string;
@@ -56,6 +63,17 @@ export interface ConversationsPage {
   total: number;
   limit: number;
   offset: number;
+  /**
+   * True when a search was asked for but messages written before the search
+   * existed are still being prepared for it: nothing was searched, the list
+   * is empty, and the same request should be sent again.
+   */
+  searchPending: boolean;
+  /**
+   * With `searchPending`: how many of this assistant's messages are still to
+   * be prepared, so the admin can say how far along it is.
+   */
+  searchRemaining?: number;
 }
 
 export interface ConversationDetail {
@@ -63,23 +81,126 @@ export interface ConversationDetail {
   turns: ConversationTurn[];
 }
 
+const FILTER_FLAGS = {
+  unanswered: "unanswered",
+  not_helpful: "notHelpful",
+  used_tool: "usedTool",
+} as const;
+
+/** Date presets the Conversations screen offers. */
+export const CONVERSATION_DAY_OPTIONS = [1, 7, 30, 90] as const;
+
+// Shared with the admin, which bounds the search it sends to it.
+const MAX_SEARCH = MAX_CONVERSATION_SEARCH_LENGTH;
+
+/**
+ * Reads `?filter=unanswered,not_helpful,used_tool`, `?days=1|7|30|90`,
+ * `?q=text` and `?question=` (a grouped question, matched by its key, as
+ * Reports and Overview count it) from a list request. `?askedFrom=` and
+ * `?askedTo=` (inclusive UTC days, `YYYY-MM-DD`) narrow `question` to asks
+ * made in those days, the period a Reports count is for: a conversation
+ * started long before can hold a question asked in it, so `days` (when a
+ * conversation started) cannot stand in for it. Unknown values are refused
+ * rather than ignored, so a typo does not silently show every conversation.
+ */
+export function readConversationFilter(url: URL, now: number = Date.now()): ConversationFilter {
+  const filter: ConversationFilter = {};
+  const errors: string[] = [];
+  const rawFilter = url.searchParams.get("filter");
+  if (rawFilter !== null && rawFilter.trim() !== "") {
+    for (const part of rawFilter.split(",")) {
+      const name = part.trim();
+      // Own keys only: `constructor` or `__proto__` must be refused too.
+      if (!Object.hasOwn(FILTER_FLAGS, name)) {
+        errors.push(`filter: must be ${Object.keys(FILTER_FLAGS).join(", ")}`);
+        break;
+      }
+      filter[FILTER_FLAGS[name as keyof typeof FILTER_FLAGS]] = true;
+    }
+  }
+  const rawDays = url.searchParams.get("days");
+  if (rawDays !== null && rawDays !== "") {
+    const days = Number(rawDays);
+    if (!(CONVERSATION_DAY_OPTIONS as readonly number[]).includes(days)) {
+      errors.push(`days: must be ${CONVERSATION_DAY_OPTIONS.join(", ")}`);
+    } else {
+      filter.since = now - days * DAY_MS;
+    }
+  }
+  const search = (url.searchParams.get("q") ?? "").trim();
+  if (search.length > MAX_SEARCH) {
+    errors.push(`q: must be at most ${MAX_SEARCH} characters`);
+  } else if (search !== "") {
+    filter.search = search;
+  }
+  const rawQuestion = url.searchParams.get("question");
+  if (rawQuestion !== null && rawQuestion.trim() !== "") {
+    // Normalised again, as a dismissal is, so the display text finds its group.
+    const question = normalizeQuestionText(rawQuestion);
+    if (question.length > MAX_QUESTION_KEY) {
+      errors.push(`question: must be at most ${MAX_QUESTION_KEY} characters`);
+    } else {
+      filter.question = question;
+    }
+  }
+  const askedFrom = readUtcDay(url, "askedFrom", errors);
+  const askedTo = readUtcDay(url, "askedTo", errors);
+  if (askedFrom !== undefined || askedTo !== undefined) {
+    if (filter.question === undefined && !errors.some((e) => e.startsWith("question:"))) {
+      errors.push("askedFrom, askedTo: need a question");
+    }
+    if (askedFrom !== undefined && askedTo !== undefined && askedFrom > askedTo) {
+      errors.push("askedFrom: must not be after askedTo");
+    }
+    if (askedFrom !== undefined) filter.askedFrom = askedFrom;
+    // The whole of the last day, to its last millisecond, as Reports counts it.
+    if (askedTo !== undefined) filter.askedTo = askedTo + DAY_MS - 1;
+  }
+  if (errors.length > 0) throw new BadRequest(errors);
+  return filter;
+}
+
+const UTC_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A `YYYY-MM-DD` parameter as the millisecond its UTC day starts, or undefined when absent. */
+function readUtcDay(url: URL, name: string, errors: string[]): number | undefined {
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw === "") return undefined;
+  const start = UTC_DAY.test(raw) ? Date.parse(`${raw}T00:00:00Z`) : Number.NaN;
+  // A day that does not exist (2026-02-30) parses to another, so check it reads back.
+  if (Number.isNaN(start) || new Date(start).toISOString().slice(0, 10) !== raw) {
+    errors.push(`${name}: must be a day, YYYY-MM-DD`);
+    return undefined;
+  }
+  return start;
+}
+
 /** Lists conversations for an assistant, newest first and paged. */
 export async function listConversations(
   tenant: Tenant,
   assistantId: string,
-  options: { limit?: number; offset?: number } = {},
+  options: { limit?: number; offset?: number; filter?: ConversationFilter } = {},
 ): Promise<ConversationsPage> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
 
   const limit = Math.min(Math.max(1, Math.trunc(options.limit ?? 25)), 100);
   const offset = Math.max(0, Math.trunc(options.offset ?? 0));
-  const { conversations, total } = await tenant.conversations.listPaged(assistantId, {
+  const { conversations, total, searchPending, searchRemaining } =
+    await tenant.conversations.listPaged(assistantId, {
+      limit,
+      offset,
+      ...(options.filter ? { filter: options.filter } : {}),
+    });
+
+  return {
+    conversations,
+    total,
     limit,
     offset,
-  });
-
-  return { conversations, total, limit, offset };
+    searchPending,
+    ...(searchRemaining === undefined ? {} : { searchRemaining }),
+  };
 }
 
 /** Returns a single conversation with its turns, citations, feedback, and linked answers. */

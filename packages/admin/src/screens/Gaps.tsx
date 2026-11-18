@@ -1,11 +1,17 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ApiError, postJson } from "../api/client.js";
 import type { GapSummary, GapsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { dropQueryParams, readQueryParam, ScreenLink, useAdminNavigation } from "../routing.js";
+import { RelativeTime } from "../ui/DateText.js";
 import { EmptyState } from "../ui/EmptyState.js";
-import { formatDateTime } from "../ui/format.js";
+import { ErrorState } from "../ui/ErrorState.js";
 import { PageHeader } from "../ui/PageHeader.js";
-import { EntryEditor } from "./EntryEditor.js";
-import { TestEditor } from "./TestEditor.js";
+import { Skeleton } from "../ui/Skeleton.js";
+import { useToast } from "../ui/Toast.js";
+import { type EntryDraft, EntryEditor } from "./EntryEditor.js";
+import { IDLE_SAVE, type SaveState } from "./saveState.js";
+import { type TestDraft, TestEditor } from "./TestEditor.js";
 
 export interface GapsProps {
   assistantId: string;
@@ -13,34 +19,248 @@ export interface GapsProps {
 
 const PAGE_SIZE = 25;
 
-function formatDate(timestamp: number): string {
-  return formatDateTime(timestamp);
+/**
+ * The editor is open for one gap row, or for a question handed over from a
+ * conversation. The screen holds the typed text and the save in progress, not
+ * the editor: the list a row sits in can be replaced by an error, or the row
+ * can move to another page, and both must outlive the move. Holding the save
+ * too keeps the moved editor disabled until the save ends, so nothing typed
+ * in the meantime is lost when the save's completion clears the draft.
+ */
+interface AnswerSession {
+  /**
+   * New each time an editor is opened, and kept while the same editor moves
+   * between its row and the top of the list. A save started in an earlier
+   * session for the same gap must not touch a session opened after it.
+   */
+  sessionId: number;
+  fromMessageId: string;
+  /** Set when it belongs to a row in the list; null for a handed-over question. */
+  gapKey: string | null;
+  draft: EntryDraft;
+  save: SaveState;
+}
+
+interface TestSession {
+  sessionId: number;
+  gapKey: string;
+  draft: TestDraft;
+  save: SaveState;
+}
+
+/** "Write an answer for this" in a conversation lands here with `?answer=…&question=…`. */
+function readHandedOverAnswer(): AnswerSession | null {
+  const fromMessageId = readQueryParam("answer");
+  if (!fromMessageId) return null;
+  return {
+    sessionId: 0,
+    fromMessageId,
+    gapKey: null,
+    draft: { question: readQueryParam("question") ?? "", answer: "" },
+    save: IDLE_SAVE,
+  };
+}
+
+function gapTitle(gap: GapSummary): string {
+  return gap.displayQuestion || gap.question;
 }
 
 export function Gaps({ assistantId }: GapsProps) {
+  const toast = useToast();
+  const conversationsShown = useAdminNavigation().pathFor("conversations") !== null;
   const [offset, setOffset] = useState(0);
   const gapsRes = useResource<GapsPage>(
-    `/api/admin/assistants/${assistantId}/gaps?limit=${PAGE_SIZE}&offset=${offset}`,
+    `/api/admin/assistants/${assistantId}/gaps?status=open&limit=${PAGE_SIZE}&offset=${offset}`,
   );
-  const [editingGap, setEditingGap] = useState<GapSummary | null>(null);
-  const [addingTestGap, setAddingTestGap] = useState<{
-    sessionId: number;
-    gap: GapSummary;
-  } | null>(null);
+  const [answering, setAnswering] = useState<AnswerSession | null>(readHandedOverAnswer);
+  const [addingTest, setAddingTest] = useState<TestSession | null>(null);
   const nextTestSessionId = useRef(1);
+  // 0 is the handed-over question's session.
+  const nextAnswerSessionId = useRef(1);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [dismissed, setDismissed] = useState<GapSummary | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+
+  // The handed-over question is now in state; drop it from the address so a
+  // reload does not open the editor again. The assistant stays named, so the
+  // reload shows this assistant's gaps and not the first one's.
+  useEffect(() => {
+    dropQueryParams(["answer", "question"]);
+  }, []);
 
   const page = gapsRes.value;
   const gaps = page?.gaps ?? [];
   const hasPrevious = offset > 0;
   const hasNext = page ? offset + page.limit < page.total : false;
 
+  // Rows on screen right now. An open editor sits under its row when the row
+  // is here, and above the list when it is not (the list failed to load, or
+  // the gap moved to another page), so its draft stays in view either way.
+  const listedKeys = new Set(
+    gapsRes.status === "error" || !page ? [] : gaps.map((g) => g.question),
+  );
+  const answeringInList = answering?.gapKey != null && listedKeys.has(answering.gapKey);
+  const addingTestInList = addingTest !== null && listedKeys.has(addingTest.gapKey);
+
+  function startAnswer(gap: GapSummary) {
+    setAddingTest(null);
+    setStatusMessage(null);
+    // Pressing the button again on the gap already being answered keeps what
+    // has been typed; only a different gap starts a fresh draft.
+    setAnswering((current) =>
+      current?.gapKey === gap.question
+        ? current
+        : {
+            sessionId: nextAnswerSessionId.current++,
+            fromMessageId: gap.exampleMessageId,
+            gapKey: gap.question,
+            draft: { question: gapTitle(gap), answer: "" },
+            save: IDLE_SAVE,
+          },
+    );
+  }
+
+  function startTest(gap: GapSummary) {
+    setAnswering(null);
+    setStatusMessage(null);
+    // As with answers: pressing it again on the same gap keeps the draft.
+    setAddingTest((current) =>
+      current?.gapKey === gap.question
+        ? current
+        : {
+            sessionId: nextTestSessionId.current++,
+            gapKey: gap.question,
+            draft: { question: gapTitle(gap), kind: "contains", detail: "" },
+            save: IDLE_SAVE,
+          },
+    );
+  }
+
+  async function dismiss(gap: GapSummary) {
+    // The editors open for this gap when Dismiss is pressed are the ones it
+    // closes. An editor opened for the same gap while the request waits is a
+    // newer draft: it stays, above the list once its row is gone.
+    const answerSession = answering?.gapKey === gap.question ? answering.sessionId : null;
+    const testSession = addingTest?.gapKey === gap.question ? addingTest.sessionId : null;
+    setBusyKey(gap.question);
+    try {
+      await postJson(`/api/admin/assistants/${assistantId}/gaps/dismiss`, {
+        question: gap.question,
+      });
+      setDismissed(gap);
+      setStatusMessage(null);
+      // Read the editors as they are now: another gap's editor, or a newer one
+      // for this gap, may have opened while this waited.
+      setAnswering((current) =>
+        current !== null && current.sessionId === answerSession ? null : current,
+      );
+      setAddingTest((current) =>
+        current !== null && current.sessionId === testSession ? null : current,
+      );
+      gapsRes.reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not dismiss. Try again.");
+    } finally {
+      setBusyKey((current) => (current === gap.question ? null : current));
+    }
+  }
+
+  async function undoDismiss(gap: GapSummary) {
+    setBusyKey(gap.question);
+    try {
+      await postJson(`/api/admin/assistants/${assistantId}/gaps/restore`, {
+        question: gap.question,
+      });
+      // Another gap may have been dismissed while this waited; keep its Undo.
+      setDismissed((current) => (current === gap ? null : current));
+      gapsRes.reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not undo. Try again.");
+    } finally {
+      setBusyKey((current) => (current === gap.question ? null : current));
+    }
+  }
+
+  function editorFor(session: AnswerSession) {
+    // An editor's callbacks act only on the session it was opened for. The
+    // same gap can be closed and opened again while an earlier save waits, and
+    // that save's completion must leave the newer draft alone.
+    const sessionId = session.sessionId;
+    return (
+      <EntryEditor
+        key={sessionId}
+        assistantId={assistantId}
+        fromMessageId={session.fromMessageId}
+        draft={session.draft}
+        onDraftChange={(draft) =>
+          setAnswering((current) =>
+            current?.sessionId === sessionId ? { ...current, draft } : current,
+          )
+        }
+        saveState={session.save}
+        onSaveStateChange={(save) =>
+          setAnswering((current) =>
+            current?.sessionId === sessionId ? { ...current, save } : current,
+          )
+        }
+        onSaved={(_result, saved) => {
+          if (saved.assistantId !== assistantId) return;
+          setAnswering((current) => (current?.sessionId === sessionId ? null : current));
+          toast.success("Answer saved to your sources. The assistant can use it once indexed.");
+          gapsRes.reload();
+        }}
+        onCancel={() => setAnswering(null)}
+      />
+    );
+  }
+
+  function testEditorFor(session: TestSession) {
+    const sessionId = session.sessionId;
+    return (
+      <TestEditor
+        key={sessionId}
+        assistantId={assistantId}
+        draft={session.draft}
+        onDraftChange={(draft) =>
+          setAddingTest((current) =>
+            current?.sessionId === sessionId ? { ...current, draft } : current,
+          )
+        }
+        saveState={session.save}
+        onSaveStateChange={(save) =>
+          setAddingTest((current) =>
+            current?.sessionId === sessionId ? { ...current, save } : current,
+          )
+        }
+        onSaved={() => {
+          setAddingTest((current) => (current?.sessionId === sessionId ? null : current));
+          setStatusMessage("Added to tests.");
+        }}
+        onCancel={() => setAddingTest(null)}
+      />
+    );
+  }
+
   return (
-    <div className="screen">
+    <div className="screen screen-medium">
       <PageHeader
         title="Gaps"
-        description="Questions your assistant could not answer yet. Write an answer to add it to your sources."
+        description="Questions your assistant could not answer yet, most asked first. Write an answer to add it to your sources."
       />
+
+      {dismissed && (
+        <div className="notice notice-info undo-notice" role="status">
+          <span>Dismissed “{gapTitle(dismissed)}”. It comes back if a visitor asks it again.</span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            disabled={busyKey === dismissed.question}
+            onClick={() => void undoDismiss(dismissed)}
+          >
+            Undo
+          </button>
+        </div>
+      )}
 
       {statusMessage && (
         <p className="notice-text" role="status">
@@ -48,103 +268,94 @@ export function Gaps({ assistantId }: GapsProps) {
         </p>
       )}
 
-      {editingGap && (
-        <EntryEditor
-          assistantId={assistantId}
-          fromMessageId={editingGap.exampleMessageId}
-          initialQuestion={editingGap.displayQuestion || editingGap.question}
-          onSaved={(_result, session) => {
-            if (session.assistantId !== assistantId) return;
-            setEditingGap((current) =>
-              current?.exampleMessageId === session.fromMessageId ? null : current,
-            );
-            gapsRes.reload();
-          }}
-          onCancel={() => setEditingGap(null)}
-        />
-      )}
+      {answering && !answeringInList && editorFor(answering)}
+      {addingTest && !addingTestInList && testEditorFor(addingTest)}
 
-      {addingTestGap &&
-        (() => {
-          const sessionId = addingTestGap.sessionId;
-          return (
-            <TestEditor
-              key={sessionId}
-              assistantId={assistantId}
-              initialQuestion={addingTestGap.gap.displayQuestion || addingTestGap.gap.question}
-              onSaved={() => {
-                setAddingTestGap((current) => (current?.sessionId === sessionId ? null : current));
-                setStatusMessage("Added to tests.");
-              }}
-              onCancel={() => setAddingTestGap(null)}
-            />
-          );
-        })()}
-
-      {gapsRes.status === "loading" && !gapsRes.value ? (
-        <p className="muted">Loading gaps…</p>
-      ) : gapsRes.status === "error" ? (
-        <p className="error-text" role="alert">
-          {gapsRes.error}
-        </p>
+      {gapsRes.status === "error" ? (
+        <ErrorState title="Could not load gaps." detail={gapsRes.error} onRetry={gapsRes.reload} />
+      ) : !page ? (
+        <div className="source-card">
+          <Skeleton label="Loading gaps…" lines={5} />
+        </div>
       ) : gaps.length === 0 && !hasPrevious ? (
         <EmptyState
           icon="gaps"
-          title="No unanswered questions yet"
-          description="Questions your assistant could not answer show up here, ready for you to answer."
+          title="No unanswered questions"
+          description="When a visitor asks something your content does not cover, the question shows up here, grouped with others asked the same way. Writing an answer adds it to your sources, so the next visitor gets a real reply."
+          action={
+            // A button that goes nowhere is left out when the host hides Conversations.
+            conversationsShown ? (
+              <ScreenLink
+                to="conversations"
+                query={{ assistant: assistantId }}
+                className="btn btn-secondary"
+              >
+                Read conversations
+              </ScreenLink>
+            ) : undefined
+          }
         />
       ) : (
         <div className="stack">
           {gaps.length === 0 ? (
             <p className="muted">No unanswered questions on this page.</p>
           ) : (
-            <ul className="history-list">
-              {gaps.map((gap) => (
-                <li key={gap.exampleMessageId} className="source-card stack">
-                  <div className="source-header">
-                    <div>
-                      <div className="source-title">{gap.displayQuestion || gap.question}</div>
-                      <div className="source-meta">
-                        <span>{gap.times === 1 ? "Asked 1 time" : `Asked ${gap.times} times`}</span>
-                        <span>Last asked {formatDate(gap.lastAsked)}</span>
-                        {gap.handled && <span className="badge badge-published">Handled</span>}
+            <ul className="gap-list">
+              {gaps.map((gap) => {
+                const title = gapTitle(gap);
+                return (
+                  <li key={gap.exampleMessageId} className="source-card gap-item">
+                    <div className="gap-row">
+                      <div className="gap-text">
+                        <div className="source-title">{title}</div>
+                        <div className="source-meta">
+                          <span className="badge badge-warn">
+                            {gap.times === 1 ? "Asked 1 time" : `Asked ${gap.times} times`}
+                          </span>
+                          <span>
+                            Last asked <RelativeTime value={gap.lastAsked} />
+                          </span>
+                        </div>
+                      </div>
+                      <div className="actions gap-actions">
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          aria-expanded={answering?.gapKey === gap.question}
+                          onClick={() => startAnswer(gap)}
+                        >
+                          Write an answer
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => startTest(gap)}
+                        >
+                          Add to tests
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          aria-label={`Dismiss “${title}”`}
+                          disabled={busyKey === gap.question}
+                          onClick={() => void dismiss(gap)}
+                        >
+                          Dismiss
+                        </button>
                       </div>
                     </div>
-                    <div className="actions">
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={() => {
-                          setAddingTestGap(null);
-                          setStatusMessage(null);
-                          setEditingGap(gap);
-                        }}
-                      >
-                        Write the right answer
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={() => {
-                          setEditingGap(null);
-                          setStatusMessage(null);
-                          setAddingTestGap({
-                            sessionId: nextTestSessionId.current++,
-                            gap,
-                          });
-                        }}
-                      >
-                        Add to tests
-                      </button>
-                    </div>
-                  </div>
-                </li>
-              ))}
+
+                    {answering?.gapKey === gap.question && editorFor(answering)}
+
+                    {addingTest?.gapKey === gap.question && testEditorFor(addingTest)}
+                  </li>
+                );
+              })}
             </ul>
           )}
 
           {(hasPrevious || hasNext) && (
-            <div className="actions">
+            <nav className="actions pager" aria-label="Pages">
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
@@ -161,7 +372,7 @@ export function Gaps({ assistantId }: GapsProps) {
               >
                 Next
               </button>
-            </div>
+            </nav>
           )}
         </div>
       )}

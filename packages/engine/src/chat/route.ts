@@ -109,6 +109,21 @@ async function publicAssistant(
   return orgId === null ? null : assistantByPublicKey(db, orgId, publicKey);
 }
 
+/**
+ * Writes an Overview checklist milestone without letting it fail the request
+ * it rides on. Only the error's message is logged, never the request.
+ */
+async function recordMilestone(name: string, write: () => Promise<void>): Promise<void> {
+  try {
+    await write();
+  } catch (err) {
+    console.error("overview: milestone write failed", {
+      milestone: name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 function readAssistantKey(body: unknown): string | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const raw = (body as Record<string, unknown>).assistant;
@@ -143,6 +158,11 @@ interface StreamAnswerParams {
   pageActions: readonly PageAction[] | undefined;
   actionsEnabled: boolean;
   origin: string | null;
+  /**
+   * Runs once the answer is complete, before its `done` event is sent: an
+   * answer that fails (no provider key, say) never reaches it.
+   */
+  onAnswered?: () => Promise<void>;
 }
 
 interface StreamResumeParams {
@@ -318,7 +338,7 @@ function streamEventsResponse(
 function streamAnswerResponse(params: StreamAnswerParams): Response {
   return streamEventsResponse(params.origin, params.ctx, async function* () {
     const deps = await resolveAnswerDeps(params);
-    yield* answerMessage(deps, {
+    const events = answerMessage(deps, {
       orgId: params.orgId,
       assistantId: params.assistantId,
       visitorId: params.visitorId,
@@ -330,6 +350,10 @@ function streamAnswerResponse(params: StreamAnswerParams): Response {
       history: params.history,
       pageActions: params.preview ? undefined : params.pageActions,
     });
+    for await (const event of events) {
+      if (event.type === "done" && params.onAnswered) await params.onAnswered();
+      yield event;
+    }
   });
 }
 
@@ -397,6 +421,17 @@ export async function adminChatRoute(
     return eventStreamOf({ type: "error", message: "Resuming actions is not supported yet." });
   }
 
+  // The Overview checklist's "Try a question" step: previews store no
+  // conversation, so this is the only record that the owner tried one. It is
+  // written once the answer is complete, so a preview that fails (no provider
+  // key, say) leaves the step unticked. Written once (the lookup above read
+  // the column), and a failed write only leaves a step unticked: the preview
+  // answers anyway.
+  const onAnswered =
+    assistant.triedAt === null
+      ? () => recordMilestone("tried", () => tenant.assistants.markTried(assistant.id, Date.now()))
+      : undefined;
+
   return streamAnswerResponse({
     env,
     seams,
@@ -417,6 +452,7 @@ export async function adminChatRoute(
     pageActions: undefined,
     actionsEnabled: false,
     origin: null,
+    ...(onAnswered ? { onAnswered } : {}),
   });
 }
 
@@ -623,6 +659,15 @@ export async function publicConfigRoute(
   const published = await tenant.versions.published(assistant.id);
   if (published === null) {
     return Response.json({ error: "Not found." }, { status: 404 });
+  }
+
+  // The Overview checklist's "Install on your site" step. Written once: the
+  // lookup above already read the column, so later page loads skip the write.
+  // A failed write only leaves a step unticked: the widget still loads.
+  if (origin !== null && assistant.widgetSeenAt === null) {
+    await recordMilestone("widget_seen", () =>
+      tenant.assistants.markWidgetSeen(assistant.id, Date.now()),
+    );
   }
 
   return Response.json(

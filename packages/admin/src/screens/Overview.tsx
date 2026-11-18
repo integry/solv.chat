@@ -1,109 +1,180 @@
-import type { AssistantOverview } from "../api/types.js";
+import { useEffect } from "react";
+import type { AssistantOverview, PeriodFigures } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { ScreenLink, useAdminNavigation } from "../routing.js";
+import { ErrorState } from "../ui/ErrorState.js";
+import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
+import { questionConversationsQuery } from "./conversationLinks.js";
+import {
+  costChange,
+  countChange,
+  formatCost,
+  formatPercent,
+  formatTimes,
+  shareChange,
+} from "./figures.js";
+import {
+  GettingStarted,
+  NeedsAttention,
+  QuestionsChart,
+  StatCard,
+  TRY_IT_ANSWERED_EVENT,
+} from "./OverviewParts.js";
+import { StatsSkeleton } from "./StatsSkeleton.js";
 
 export interface OverviewProps {
   assistantId: string;
 }
 
-function formatCost(costMicros: number, unit: "usd" | "credits" = "usd"): string {
-  const amount = costMicros / 1_000_000;
-  if (unit === "credits") {
-    if (costMicros > 0 && amount < 0.01) {
-      return "< 0.01 credits";
-    }
-    return `${amount.toFixed(2)} credits`;
-  }
-  if (costMicros > 0 && amount < 0.01) {
-    return "< $0.01";
-  }
-  return `$${amount.toFixed(2)}`;
-}
-
-function formatPercent(share: number): string {
-  return `${Math.round(share * 100)}%`;
-}
+const EMPTY_FIGURES: PeriodFigures = {
+  from: "",
+  to: "",
+  questions: 0,
+  replies: 0,
+  answeredShare: 0,
+  thumbsDownShare: 0,
+  costMicros: 0,
+};
 
 export function Overview({ assistantId }: OverviewProps) {
   const overviewRes = useResource<AssistantOverview>(
     `/api/admin/assistants/${assistantId}/overview`,
   );
+  const overview = overviewRes.value;
+  const reportsShown = useAdminNavigation().pathFor("reports") !== null;
+
+  // A question answered in the Try it pane is a checklist step done. Reload
+  // while that step is still open, so it ticks without leaving the screen.
+  const triedPending = overview?.setup !== undefined && !overview.setup.tried;
+  const reloadOverview = overviewRes.reload;
+  useEffect(() => {
+    if (!triedPending) return;
+    const onAnswered = (event: Event) => {
+      if (event instanceof CustomEvent && event.detail === assistantId) reloadOverview();
+    };
+    window.addEventListener(TRY_IT_ANSWERED_EVENT, onAnswered);
+    return () => window.removeEventListener(TRY_IT_ANSWERED_EVENT, onAnswered);
+  }, [triedPending, assistantId, reloadOverview]);
+  const period = overview?.period;
+  const days = period?.days ?? 7;
+  const current = period ?? EMPTY_FIGURES;
+  const previous = period?.previous ?? EMPTY_FIGURES;
+  const unit = overview?.costUnit;
 
   return (
-    <div className="screen">
-      <PageHeader title="Overview" description="How your assistant is doing." />
+    <div className="screen screen-wide">
+      <PageHeader
+        title="Overview"
+        description={
+          period
+            ? `Last ${days} days, ${formatDate(period.from)} to ${formatDate(period.to)}, compared with the ${days} days before.`
+            : "How your assistant is doing."
+        }
+      />
 
-      {overviewRes.status === "loading" && !overviewRes.value ? (
-        <p className="muted">Loading overview…</p>
-      ) : overviewRes.status === "error" ? (
-        <p className="error-text" role="alert">
-          {overviewRes.error}
-        </p>
-      ) : overviewRes.value ? (
+      {overviewRes.status === "error" ? (
+        <ErrorState
+          title="Could not load the overview."
+          detail={overviewRes.error}
+          onRetry={overviewRes.reload}
+        />
+      ) : !overview ? (
+        <StatsSkeleton label="Loading overview…" />
+      ) : (
         <div className="stack">
-          {overviewRes.value.configError && (
-            <div className="warning-banner" role="alert">
-              {overviewRes.value.configError}
-            </div>
-          )}
-          <div className="overview-grid">
-            <section className="source-card stack" aria-label="Messages">
-              <div className="stat-label">Messages</div>
-              <div className="stat-value">{overviewRes.value.messages}</div>
-              <p className="muted">Total questions and replies across all conversations.</p>
-            </section>
+          <NeedsAttention assistantId={assistantId} overview={overview} />
+          {overview.setup && <GettingStarted assistantId={assistantId} setup={overview.setup} />}
 
-            <section className="source-card stack" aria-label="Answered share">
-              <div className="stat-label">Answered share</div>
-              <div className="stat-value">{formatPercent(overviewRes.value.answeredShare)}</div>
-              <p className="muted">
-                Share of questions your assistant could answer from your content.
-              </p>
-            </section>
-
-            <section className="source-card stack" aria-label="Today's cost">
-              <div className="stat-label">Today&apos;s cost</div>
-              <div className="stat-value">
-                {formatCost(overviewRes.value.todayCostMicros, overviewRes.value.costUnit)}
-              </div>
-              <p className="muted">
-                {overviewRes.value.dailyCostCapMicros !== undefined
-                  ? overviewRes.value.dailyCostCapMicros > 0
-                    ? `Estimated cost so far today. Daily spend cap: ${formatCost(overviewRes.value.dailyCostCapMicros, overviewRes.value.costUnit)}.`
-                    : "Estimated cost so far today. No daily spend cap."
-                  : "Estimated cost so far today."}
-              </p>
-              {overviewRes.value.todayCostUnknown && (
+          <div className="overview-grid overview-grid-4">
+            <StatCard
+              label="Questions asked"
+              value={String(current.questions)}
+              explanation="Questions visitors asked."
+              change={period ? countChange(current.questions, previous.questions, days) : undefined}
+            />
+            <StatCard
+              label="Answered share"
+              value={formatPercent(current.answeredShare)}
+              explanation="Share of answers your assistant could give from your content."
+              change={
+                period
+                  ? shareChange(current.answeredShare, previous.answeredShare, days)
+                  : undefined
+              }
+            />
+            <StatCard
+              label="Marked not helpful"
+              value={formatPercent(current.thumbsDownShare)}
+              explanation="Share of answers a visitor said did not help."
+              change={
+                period
+                  ? shareChange(current.thumbsDownShare, previous.thumbsDownShare, days)
+                  : undefined
+              }
+            />
+            <StatCard
+              label="Cost"
+              value={formatCost(current.costMicros, unit)}
+              explanation={
+                overview.dailyCostCapMicros !== undefined
+                  ? overview.dailyCostCapMicros > 0
+                    ? `Today so far: ${formatCost(overview.todayCostMicros, unit)}. Daily spend cap: ${formatCost(overview.dailyCostCapMicros, unit)}.`
+                    : `Today so far: ${formatCost(overview.todayCostMicros, unit)}. No daily spend cap.`
+                  : `Today so far: ${formatCost(overview.todayCostMicros, unit)}.`
+              }
+              change={
+                period ? costChange(current.costMicros, previous.costMicros, days, unit) : undefined
+              }
+            >
+              {overview.todayCostUnknown && (
                 <p className="error-text" role="alert">
                   Cost is not being reported for this model, so the daily spend cap cannot protect
                   this instance.
                 </p>
               )}
-            </section>
+            </StatCard>
           </div>
 
-          <section className="source-card stack" aria-label="Top questions">
-            <div>
-              <h2 className="section-heading">Top questions</h2>
-              <p className="muted">Questions visitors ask most often.</p>
-            </div>
-            {overviewRes.value.topQuestions.length === 0 ? (
-              <p className="muted">No questions asked yet.</p>
-            ) : (
-              <ul className="history-list">
-                {overviewRes.value.topQuestions.map((item) => (
-                  <li key={item.question} className="history-item">
-                    <span>{item.question}</span>
-                    <span className="badge">
-                      {item.count === 1 ? "1 time" : `${item.count} times`}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+          <div className="overview-columns">
+            {overview.daily && <QuestionsChart daily={overview.daily} />}
+
+            <section className="source-card stack" aria-labelledby="top-questions-heading">
+              <div>
+                <h2 id="top-questions-heading" className="section-heading">
+                  Most asked questions
+                </h2>
+                <p className="muted">
+                  Since the start, and how many times each was asked. Open one to read the
+                  conversations it was asked in.
+                </p>
+              </div>
+              {overview.topQuestions.length === 0 ? (
+                <p className="muted">No questions asked yet.</p>
+              ) : (
+                <ul className="history-list">
+                  {overview.topQuestions.map((item) => (
+                    <li key={item.question} className="history-item">
+                      <ScreenLink
+                        to="conversations"
+                        query={questionConversationsQuery(assistantId, item.question)}
+                      >
+                        {item.question}
+                      </ScreenLink>
+                      <span className="badge">{formatTimes(item.count)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {reportsShown && (
+                <ScreenLink to="reports" query={{ assistant: assistantId }} className="more-link">
+                  See Reports
+                </ScreenLink>
+              )}
+            </section>
+          </div>
         </div>
-      ) : null}
+      )}
     </div>
   );
 }

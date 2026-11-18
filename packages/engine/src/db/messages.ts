@@ -84,10 +84,45 @@ export interface TopQuestionRow {
   count: number;
 }
 
+/**
+ * Turns each run of whitespace into one space. Same result as
+ * `replace(/\s+/g, " ")`, without rewriting every single space between words.
+ */
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s{2,}|[^\S ]/g, " ");
+}
+
 /** Normalises a visitor question for grouping (trimmed, lowercased, collapsed whitespace). */
 export function normalizeQuestionText(text: string): string {
-  return text.trim().toLowerCase().replace(/\s+/g, " ");
+  return collapseWhitespace(text.trim().toLowerCase());
 }
+
+/**
+ * Folds message text for the Conversations search: Unicode lowercase in NFC,
+ * whitespace collapsed the way `normalizeQuestionText` collapses it, so a
+ * grouped question still finds the messages it was grouped from. The same
+ * function folds the stored text and the search, so both sides agree
+ * (SQLite's `lower()` only folds ASCII).
+ *
+ * Final sigma "ς" becomes "σ". Lowercasing picks between the two from the
+ * letters around a capital "Σ", so the same letter folds one way at the end
+ * of a search ("ΚΌΣ" gives "κός") and the other inside a stored word
+ * ("κόσμος"): with one form on both sides a prefix still matches. It is the
+ * only lowercase mapping that depends on context. Migration 0020 applies the
+ * same to text folded before this.
+ */
+export function searchableText(text: string): string {
+  return collapseWhitespace(
+    text.normalize("NFC").toLowerCase().normalize("NFC").replaceAll("ς", "σ"),
+  );
+}
+
+// Older rows `fillSearchText` folds per call: at most 2 D1 queries a round,
+// well inside the 50 a Workers Free invocation may make (a `db.batch()`
+// counts as one). Source (checked 2026-11-17):
+//   https://developers.cloudflare.com/d1/platform/limits/
+const SEARCH_FILL_BATCH = 200;
+const SEARCH_FILL_ROUNDS = 10;
 
 const COLUMNS =
   "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to";
@@ -97,7 +132,11 @@ const QUALIFIED_COLUMNS =
 
 /**
  * Unanswered replies joined to the question each one answers, through the
- * recorded `reply_to` link. `?1` org, `?2` assistant.
+ * recorded `reply_to` link. `?1` org, `?2` assistant. Each row carries the
+ * newest answer written from it, if any, and when, and whether it was asked
+ * before the owner dismissed its group (`dismissed`). A dismissed ask is kept
+ * here rather than left out: it is not counted, but an answer written from it
+ * (its conversation still offers "Write an answer") still answers the group.
  */
 const GAP_ROWS = `
   SELECT q.id AS question_id,
@@ -109,7 +148,17 @@ const GAP_ROWS = `
             FROM gap_answers ga
            WHERE ga.org_id = a.org_id AND ga.message_id IN (q.id, a.id)
            ORDER BY ga.created_at DESC
-           LIMIT 1) AS document_id
+           LIMIT 1) AS document_id,
+         (SELECT MAX(ga.created_at)
+            FROM gap_answers ga
+           WHERE ga.org_id = a.org_id AND ga.message_id IN (q.id, a.id)) AS answered_at,
+         EXISTS (
+           SELECT 1 FROM gap_dismissals gd
+            WHERE gd.org_id = a.org_id
+              AND gd.assistant_id = c.assistant_id
+              AND gd.question_key = q.question_key
+              AND gd.dismissed_at >= q.created_at
+         ) AS dismissed
     FROM messages a
     JOIN conversations c ON c.id = a.conversation_id AND c.org_id = a.org_id
     JOIN messages q ON q.org_id = a.org_id
@@ -122,6 +171,37 @@ const GAP_ROWS = `
      AND a.answered = 0
      AND q.question_key IS NOT NULL
      AND q.question_key <> ''`;
+
+/**
+ * One row per gap group, from `gap` (`GAP_ROWS`): its key, how often and when
+ * it was last asked, and the answer document. Only asks after the group's
+ * dismissal are counted and give its latest ask; a group with none is not
+ * listed. Answers are read from every ask, dismissed or not, as any of them
+ * may be where the owner wrote it. Like a dismissal, a written answer only
+ * covers the asks before it: a group asked again after its newest answer is
+ * open again, with no document, and counts as open everywhere.
+ */
+const GAP_GROUPS = `
+  SELECT question_key, question_content, asked_at, question_id, times,
+         CASE WHEN group_answered_at >= asked_at THEN group_document_id END AS group_document_id
+    FROM (
+      SELECT question_key, question_content, asked_at, question_id, dismissed,
+             ROW_NUMBER() OVER (
+               PARTITION BY question_key
+               ORDER BY dismissed ASC, asked_at DESC, question_rowid DESC
+             ) AS rn,
+             SUM(CASE WHEN dismissed THEN 0 ELSE 1 END) OVER (PARTITION BY question_key) AS times,
+             MAX(answered_at) OVER (PARTITION BY question_key) AS group_answered_at,
+             FIRST_VALUE(document_id) OVER (
+               PARTITION BY question_key
+               ORDER BY answered_at IS NULL, answered_at DESC, asked_at DESC, question_rowid DESC
+             ) AS group_document_id
+        FROM gap
+    )
+   WHERE rn = 1 AND NOT dismissed`;
+
+/** The gap groups CTEs: `gap` rows, then `gap_group` rows. `?1` org, `?2` assistant. */
+export const GAP_GROUP_CTES = `gap AS (${GAP_ROWS}), gap_group AS (${GAP_GROUPS})`;
 
 const map = (row: Row): MessageRow => ({
   id: row.id,
@@ -332,6 +412,7 @@ export function messagesFor(db: D1Database, orgId: string) {
                 citations = ?4,
                 tool_calls = ?5,
                 resume_context = ?6,
+                search_text = ?12,
                 tokens_in = tokens_in + ?7,
                 tokens_out = tokens_out + ?8,
                 cost_micros = cost_micros + ?11,
@@ -358,9 +439,81 @@ export function messagesFor(db: D1Database, orgId: string) {
           params.claimToken,
           params.revision,
           params.costMicros === undefined ? 0 : params.costMicros,
+          searchableText(params.content),
         )
         .run();
       return (res.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Folds `search_text` for rows written before it existed. Migration 0019
+     * folds plain ASCII text in SQL; the rest needs `searchableText`, which
+     * SQL cannot reproduce. With `assistantId`, only that assistant's
+     * messages are folded: its search needs no others, so it does not wait
+     * for other assistants' history. A row a writer filled in the meantime is
+     * left alone: every write of `content` also writes `search_text`, so a
+     * non-NULL value is never older than the text (an older Worker's rewrite
+     * of `content` alone is set back to NULL by migration 0019's trigger).
+     * Each write also needs `content` to be what was read: an older Worker
+     * can rewrite `content` alone between the read and the write, leaving
+     * `search_text` NULL, and the fold of the old text must not land then.
+     * Such a row stays NULL and is read again in the next round.
+     * Each call folds a bounded number of rows: true means none are left,
+     * false that some may be.
+     */
+    async fillSearchText(
+      options: { assistantId?: string; batch?: number; rounds?: number } = {},
+    ): Promise<boolean> {
+      const batch = options.batch ?? SEARCH_FILL_BATCH;
+      const rounds = options.rounds ?? SEARCH_FILL_ROUNDS;
+      const update = prepare(
+        db,
+        `UPDATE messages SET search_text = ?3
+          WHERE org_id = ?1 AND id = ?2 AND search_text IS NULL AND content = ?4`,
+      );
+      const assistantId = options.assistantId;
+      const read = () =>
+        assistantId === undefined
+          ? prepare(
+              db,
+              "SELECT id, content FROM messages WHERE org_id = ?1 AND search_text IS NULL LIMIT ?2",
+            ).bind(orgId, batch)
+          : prepare(
+              db,
+              `SELECT m.id, m.content
+                 FROM messages m
+                 JOIN conversations c ON c.org_id = m.org_id AND c.id = m.conversation_id
+                WHERE m.org_id = ?1 AND m.search_text IS NULL AND c.assistant_id = ?3
+                LIMIT ?2`,
+            ).bind(orgId, batch, assistantId);
+      for (let round = 0; round < rounds; round++) {
+        const pending = await read().all<{ id: string; content: string }>();
+        if (pending.results.length === 0) return true;
+        const written = await db.batch(
+          pending.results.map((row) =>
+            update.bind(orgId, row.id, searchableText(row.content), row.content),
+          ),
+        );
+        // A row not written may still be NULL (its text changed since the
+        // read), however short this round was: the next round reads again.
+        const skipped = written.some((res) => (res.meta.changes ?? 0) === 0);
+        if (pending.results.length < batch && !skipped) return true;
+      }
+      return false;
+    },
+
+    /** How many of an assistant's messages are still to be folded for search. */
+    async searchTextPending(assistantId: string): Promise<number> {
+      const row = await prepare(
+        db,
+        `SELECT COUNT(*) AS pending
+           FROM messages m
+           JOIN conversations c ON c.org_id = m.org_id AND c.id = m.conversation_id
+          WHERE m.org_id = ?1 AND m.search_text IS NULL AND c.assistant_id = ?2`,
+      )
+        .bind(orgId, assistantId)
+        .first<{ pending: number }>();
+      return row?.pending ?? 0;
     },
 
     async unanswered(assistantId: string, limit = 50): Promise<MessageRow[]> {
@@ -383,8 +536,8 @@ export function messagesFor(db: D1Database, orgId: string) {
       const questionKey = input.role === "user" ? normalizeQuestionText(input.content) : null;
       await prepareInsert(
         db,
-        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, question_key, resume_context)
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, question_key, resume_context, search_text)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
       )
         .bind(
           orgId,
@@ -402,6 +555,7 @@ export function messagesFor(db: D1Database, orgId: string) {
           replyTo,
           questionKey,
           input.resumeContext == null ? null : JSON.stringify(input.resumeContext),
+          searchableText(input.content),
         )
         .run();
 
@@ -447,34 +601,24 @@ export function messagesFor(db: D1Database, orgId: string) {
      */
     async gapGroups(
       assistantId: string,
-      page: { limit: number; offset: number },
+      page: { limit: number; offset: number; openOnly?: boolean },
     ): Promise<{ groups: GapGroupRow[]; total: number }> {
+      const openOnly = page.openOnly === true ? 1 : 0;
       const [rows, count] = await db.batch([
         prepare(
           db,
-          `WITH gap AS (${GAP_ROWS}),
-           ranked AS (
-             SELECT question_key, question_content, asked_at, question_id,
-                    ROW_NUMBER() OVER (
-                      PARTITION BY question_key ORDER BY asked_at DESC, question_rowid DESC
-                    ) AS rn,
-                    COUNT(*) OVER (PARTITION BY question_key) AS times,
-                    FIRST_VALUE(document_id) OVER (
-                      PARTITION BY question_key
-                      ORDER BY document_id IS NULL, asked_at DESC, question_rowid DESC
-                    ) AS group_document_id
-               FROM gap
-           )
+          `WITH ${GAP_GROUP_CTES}
            SELECT question_key, question_content, asked_at, question_id, times, group_document_id
-             FROM ranked
-            WHERE rn = 1
+             FROM gap_group
+            WHERE (?5 = 0 OR group_document_id IS NULL)
             ORDER BY times DESC, asked_at DESC, question_id DESC
             LIMIT ?3 OFFSET ?4`,
-        ).bind(orgId, assistantId, page.limit, page.offset),
+        ).bind(orgId, assistantId, page.limit, page.offset, openOnly),
         prepare(
           db,
-          `WITH gap AS (${GAP_ROWS}) SELECT COUNT(DISTINCT question_key) AS total FROM gap`,
-        ).bind(orgId, assistantId),
+          `WITH ${GAP_GROUP_CTES}
+           SELECT COUNT(*) AS total FROM gap_group WHERE (?3 = 0 OR group_document_id IS NULL)`,
+        ).bind(orgId, assistantId, openOnly),
       ]);
 
       const groups = (
@@ -498,13 +642,41 @@ export function messagesFor(db: D1Database, orgId: string) {
       return { groups, total };
     },
 
+    /**
+     * Hides a gap group until the question is asked again. `question` is the
+     * normalised key the group is listed under.
+     */
+    async dismissGap(assistantId: string, question: string, at: number): Promise<void> {
+      await prepareInsert(
+        db,
+        `INSERT INTO gap_dismissals (org_id, assistant_id, question_key, dismissed_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(org_id, assistant_id, question_key) DO UPDATE SET
+           dismissed_at = excluded.dismissed_at`,
+      )
+        .bind(orgId, assistantId, question, at)
+        .run();
+    },
+
+    /** Undoes `dismissGap`. True when there was a dismissal to remove. */
+    async restoreGap(assistantId: string, question: string): Promise<boolean> {
+      const res = await prepare(
+        db,
+        "DELETE FROM gap_dismissals WHERE org_id = ?1 AND assistant_id = ?2 AND question_key = ?3",
+      )
+        .bind(orgId, assistantId, question)
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
     async linkGapAnswer(messageId: string, documentId: string, createdAt: number): Promise<void> {
       await prepareInsert(
         db,
         `INSERT INTO gap_answers (org_id, message_id, document_id, created_at)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(org_id, message_id) DO UPDATE SET
-           document_id = excluded.document_id`,
+           document_id = excluded.document_id,
+           created_at = excluded.created_at`,
       )
         .bind(orgId, messageId, documentId, createdAt)
         .run();
@@ -528,19 +700,6 @@ export function messagesFor(db: D1Database, orgId: string) {
       return mapByMsg;
     },
 
-    async countFor(assistantId: string): Promise<number> {
-      const row = await prepare(
-        db,
-        `SELECT COUNT(*) AS total
-           FROM messages m
-           JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
-          WHERE m.org_id = ?1 AND c.assistant_id = ?2`,
-      )
-        .bind(orgId, assistantId)
-        .first<{ total: number }>();
-      return row?.total ?? 0;
-    },
-
     /**
      * Tool calls already stored in this conversation. `json_array_length` reads the
      * column the loop writes, so the cap counts exactly what was spent and needs
@@ -558,21 +717,6 @@ export function messagesFor(db: D1Database, orgId: string) {
         .bind(orgId, conversationId)
         .first<{ total: number }>();
       return row?.total ?? 0;
-    },
-
-    async answeredShareFor(assistantId: string): Promise<number> {
-      const row = await prepare(
-        db,
-        `SELECT COUNT(*) AS total,
-                COALESCE(SUM(CASE WHEN m.answered = 1 THEN 1 ELSE 0 END), 0) AS answered_count
-           FROM messages m
-           JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
-          WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'assistant'`,
-      )
-        .bind(orgId, assistantId)
-        .first<{ total: number; answered_count: number }>();
-      if (!row || row.total === 0) return 0;
-      return row.answered_count / row.total;
     },
 
     async topQuestionsFor(assistantId: string, limit = 5): Promise<TopQuestionRow[]> {
