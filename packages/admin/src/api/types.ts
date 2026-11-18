@@ -130,6 +130,59 @@ export interface ConversationTurn {
   replyTo: string | null;
 }
 
+/** Why retrieved content was not given to the model. */
+export type TraceDropReason = "below_floor" | "not_found";
+
+export interface AnswerTraceCandidate {
+  chunkId: string;
+  score: number;
+  used: boolean;
+  dropped?: TraceDropReason;
+  /** The content as it is now; null when it has changed or been removed since. */
+  content: {
+    documentId: string;
+    title: string;
+    url: string;
+    sourceKind: "push" | "sitemap" | "entry";
+    headingPath: string;
+    excerpt: string;
+  } | null;
+}
+
+export interface AnswerTracePart {
+  kind: "answer" | "resume";
+  stop: "complete" | "length" | "spend_cap" | "error" | "paused";
+  version: {
+    id: string;
+    state: "published" | "draft";
+    current: {
+      state: "draft" | "published" | "archived";
+      createdAt: number;
+      publishedAt: number | null;
+    } | null;
+  };
+  model: {
+    provider: "anthropic" | "openai" | "openrouter";
+    id: string;
+    keySource: "stored" | "environment" | "managed";
+  } | null;
+  retrieval: { floor: number; ms: number; candidates: AnswerTraceCandidate[] };
+  timing: { firstTokenMs: number | null; totalMs: number };
+  tools: { rounds: number; ms: number };
+}
+
+/** `GET /api/admin/conversations/:id/messages/:messageId/trace`. */
+export interface AnswerTrace {
+  messageId: string;
+  tokensIn: number;
+  tokensOut: number;
+  costMicros: number | null;
+  firstTokenMs: number | null;
+  totalMs: number | null;
+  /** Null when no details were recorded (answers from before traces existed). */
+  trace: { parts: AnswerTracePart[]; truncated: boolean } | null;
+}
+
 export interface ConversationDetail {
   conversation: {
     id: string;

@@ -363,6 +363,16 @@ describe("chat/pageActions", () => {
         },
       ],
     });
+
+    // The trace keeps one part per request: the pause, then the resume that
+    // finished it, each with its own round of tool calls. The action result
+    // is not copied into it.
+    const trace = await tenant.traces.get(done1.messageId);
+    expect(trace?.parts.map((p) => [p.kind, p.stop, p.tools.rounds])).toEqual([
+      ["answer", "paused", 1],
+      ["resume", "complete", 0],
+    ]);
+    expect(JSON.stringify(trace)).not.toContain("Ignore previous instructions");
   });
 
   it("refuses unknown, completed, foreign-org, wrong-visitor, and wrong-conversation resumes identically", async () => {

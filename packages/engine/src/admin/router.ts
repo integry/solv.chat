@@ -22,7 +22,12 @@ import {
   rotateIngestKey,
   updateAssistant,
 } from "./assistants.js";
-import { getConversation, listConversations, readConversationFilter } from "./conversations.js";
+import {
+  getAnswerTrace,
+  getConversation,
+  listConversations,
+  readConversationFilter,
+} from "./conversations.js";
 import { saveEntry } from "./entries.js";
 import { BadRequest, Conflict, NotFound, readJsonBody } from "./errors.js";
 import { dismissGap, listGaps, readGapsOpenOnly, restoreGap } from "./gaps.js";
@@ -471,10 +476,20 @@ async function conversationRoutes(
   deps: AdminRouteDeps,
 ): Promise<Response> {
   const conversationId = segments[1];
-  if (!conversationId || segments.length !== 2 || request.method !== "GET") {
-    throw new NotFound();
+  if (!conversationId || request.method !== "GET") throw new NotFound();
+  if (segments.length === 2) {
+    return Response.json(await getConversation(deps.tenant, conversationId));
   }
-  return Response.json(await getConversation(deps.tenant, conversationId));
+  // `conversations/:id/messages/:messageId/trace`: how one answer was made.
+  if (
+    segments.length === 5 &&
+    segments[2] === "messages" &&
+    segments[3] &&
+    segments[4] === "trace"
+  ) {
+    return Response.json(await getAnswerTrace(deps.tenant, conversationId, segments[3]));
+  }
+  throw new NotFound();
 }
 
 async function mcpServerRoutes(

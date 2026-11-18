@@ -4,6 +4,7 @@ import { ApiError, putJson } from "../api/client.js";
 import { FailedTestsError, publishAssistant } from "../api/publish.js";
 import type { TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { dropQueryParams, readQueryParam } from "../routing.js";
 import { PublishConfirmDialog } from "../shell/PublishConfirm.js";
 import { useAssistantMutation, useReportUnsavedEdits } from "../shell/useAssistantMutations.js";
 import { CharCount } from "../ui/CharCount.js";
@@ -234,7 +235,10 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const [questions, setQuestions] = useState<string[]>([]);
   const [initializedFor, setInitializedFor] = useState<string | null>(null);
 
-  const [showHistory, setShowHistory] = useState(false);
+  // "See History" on a conversation's answer details opens it with `history=open`.
+  const [showHistory, setShowHistory] = useState(() => readQueryParam("history") === "open");
+  // Read once: the address then says nothing the screen does not show.
+  useEffect(() => dropQueryParams(["history"]), []);
   const [confirmPublish, setConfirmPublish] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});

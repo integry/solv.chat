@@ -1,4 +1,5 @@
 import { MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
+import type { TraceDropReason, TracePart } from "../chat/trace.js";
 import type {
   ConversationFilter,
   ConversationRow,
@@ -257,4 +258,146 @@ export async function getConversation(
   });
 
   return { conversation, turns };
+}
+
+/** The most of a chunk's current text the trace view shows. */
+export const TRACE_EXCERPT_CHARS = 400;
+
+/** A retrieval candidate with the content it points at, read now. */
+export interface AnswerTraceCandidate {
+  chunkId: string;
+  score: number;
+  used: boolean;
+  dropped?: TraceDropReason;
+  /** Null when the chunk is gone: its content has changed or been removed since. */
+  content: {
+    documentId: string;
+    title: string;
+    url: string;
+    sourceKind: "push" | "sitemap" | "entry";
+    headingPath: string;
+    /** The chunk's current text, cut to `TRACE_EXCERPT_CHARS`. */
+    excerpt: string;
+  } | null;
+}
+
+export interface AnswerTracePartView {
+  kind: TracePart["kind"];
+  stop: TracePart["stop"];
+  version: {
+    id: string;
+    /** What it was when it answered. */
+    state: "published" | "draft";
+    /** What it is now; null when the version no longer exists. */
+    current: {
+      state: "draft" | "published" | "archived";
+      createdAt: number;
+      publishedAt: number | null;
+    } | null;
+  };
+  model: TracePart["model"];
+  retrieval: { floor: number; ms: number; candidates: AnswerTraceCandidate[] };
+  timing: TracePart["timing"];
+  tools: TracePart["tools"];
+}
+
+export interface AnswerTraceView {
+  messageId: string;
+  tokensIn: number;
+  tokensOut: number;
+  costMicros: number | null;
+  firstTokenMs: number | null;
+  totalMs: number | null;
+  /** Null for an answer written before traces existed, or whose trace could not be written. */
+  trace: { parts: AnswerTracePartView[]; truncated: boolean } | null;
+}
+
+/**
+ * How one assistant answer was made. The stored trace holds ids only; the
+ * content they name is read now, so the view shows what that content says
+ * today, and says so when it is gone. The message must be an assistant
+ * reply in this conversation (and, through the tenant, in this org).
+ */
+export async function getAnswerTrace(
+  tenant: Tenant,
+  conversationId: string,
+  messageId: string,
+): Promise<AnswerTraceView> {
+  const [conversation, message] = await Promise.all([
+    tenant.conversations.get(conversationId),
+    tenant.messages.get(messageId),
+  ]);
+  if (
+    conversation === null ||
+    message === null ||
+    message.conversationId !== conversation.id ||
+    message.role !== "assistant"
+  ) {
+    throw new NotFound("message");
+  }
+
+  const stored = await tenant.traces.get(message.id);
+  const base = {
+    messageId: message.id,
+    tokensIn: message.tokensIn,
+    tokensOut: message.tokensOut,
+    costMicros: message.costMicros,
+    firstTokenMs: message.firstTokenMs,
+    totalMs: message.totalMs,
+  };
+  if (stored === null) return { ...base, trace: null };
+
+  const chunkIds = [
+    ...new Set(stored.parts.flatMap((p) => p.retrieval.candidates.map((c) => c.chunkId))),
+  ];
+  const versionIds = [...new Set(stored.parts.map((p) => p.version.id))];
+  const [chunks, versions] = await Promise.all([
+    tenant.documents.chunksByIds(conversation.assistantId, chunkIds),
+    Promise.all(versionIds.map((id) => tenant.versions.byId(conversation.assistantId, id))),
+  ]);
+  const chunkById = new Map(chunks.map((c) => [c.id, c]));
+  const versionById = new Map(versions.flatMap((v) => (v === null ? [] : [[v.id, v] as const])));
+
+  const parts = stored.parts.map((part): AnswerTracePartView => {
+    const version = versionById.get(part.version.id);
+    return {
+      kind: part.kind,
+      stop: part.stop,
+      version: {
+        id: part.version.id,
+        state: part.version.state,
+        current: version
+          ? { state: version.state, createdAt: version.createdAt, publishedAt: version.publishedAt }
+          : null,
+      },
+      model: part.model,
+      retrieval: {
+        floor: part.retrieval.floor,
+        ms: part.retrieval.ms,
+        candidates: part.retrieval.candidates.map((candidate): AnswerTraceCandidate => {
+          const chunk = chunkById.get(candidate.chunkId);
+          return {
+            chunkId: candidate.chunkId,
+            score: candidate.score,
+            used: candidate.used,
+            ...(candidate.dropped ? { dropped: candidate.dropped } : {}),
+            content: chunk
+              ? {
+                  documentId: chunk.documentId,
+                  title: chunk.title,
+                  url: chunk.url,
+                  sourceKind: chunk.sourceKind,
+                  headingPath: chunk.headingPath,
+                  excerpt: chunk.text.slice(0, TRACE_EXCERPT_CHARS),
+                }
+              : null,
+          };
+        }),
+      },
+      timing: part.timing,
+      tools: part.tools,
+    };
+  });
+
+  return { ...base, trace: { parts, truncated: stored.truncated === true } };
 }
