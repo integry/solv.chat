@@ -77,7 +77,9 @@ export async function periodFigures(
  * Response time for one range. A number is given only when at least half the
  * range's answers were timed: answers written before timings existed have
  * none, and a median of the few timed ones beside many untimed ones would
- * describe a different period than the one the owner picked.
+ * describe a different period than the one the owner picked. Answers that
+ * used a page action are left out of all of it (see `replyTiming`), and
+ * counted on their own so the screen can say so.
  */
 export async function responseTimeFigures(
   tenant: Tenant,
@@ -87,7 +89,9 @@ export async function responseTimeFigures(
   const timing = await tenant.reports.replyTiming(assistantId, range);
   const status =
     timing.replies === 0
-      ? "no_answers"
+      ? timing.pageActionReplies > 0
+        ? "page_actions_only"
+        : "no_answers"
       : timing.timed === 0 || timing.timed * 2 < timing.replies
         ? "mostly_untimed"
         : "measured";
@@ -97,6 +101,7 @@ export async function responseTimeFigures(
     to: range.toDay,
     status,
     answers: timing.replies,
+    pageActionAnswers: timing.pageActionReplies,
     timed: timing.timed,
     firstTokenMedianMs: measured ? timing.firstTokenMedianMs : null,
     firstTokenP90Ms: measured ? timing.firstTokenP90Ms : null,

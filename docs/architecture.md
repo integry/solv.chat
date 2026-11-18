@@ -500,7 +500,15 @@ rollup. Only visitor answers count; "Try it" and test runs store no message.
 Replies without timings (written before migration 0022) are left out, and
 when they are more than half of the period's answers the figure has no number
 (`status: "mostly_untimed"`) and the screen says why; `no_answers` is a
-period with no answer at all. The open engine sends no email; scheduled
+period with no answer at all. Replies that used a page action are left out
+of every figure and the majority rule, and counted on their own
+(`pageActionAnswers`, which the screens state): such a reply is stored when it
+pauses with the first request's timings, which its continuations keep, so its
+total is not the time to the complete answer, and an action-only first
+request has no first token. It is known by a `kind: "action"` entry in its
+stored tool calls (kept after the call resolves) or a completed resume
+(`resume_revision > 0`). A period whose only answers used page actions has no
+number (`page_actions_only`). The open engine sends no email; scheduled
 digests belong to the cloud layer.
 
 ## Widget

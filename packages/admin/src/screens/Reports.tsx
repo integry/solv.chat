@@ -16,6 +16,7 @@ import {
   formatPercent,
   formatResponseTime,
   formatTimes,
+  pageActionNote,
   responseTimeNote,
 } from "./figures.js";
 import { StatCard } from "./OverviewParts.js";
@@ -88,6 +89,7 @@ function responseTimeCsv(time: ResponseTimePeriod) {
 
 function ResponseTime({ time }: { time: ResponseTimePeriod }) {
   const note = responseTimeNote(time.status);
+  const excluded = pageActionNote(time.status, time.pageActionAnswers);
   const explanations = {
     firstTokenMedianMs:
       "Typical time until the answer starts appearing. Half the answers started sooner.",
@@ -104,6 +106,7 @@ function ResponseTime({ time }: { time: ResponseTimePeriod }) {
           How long visitors waited for an answer on your site. Try it and tests are not counted.
         </p>
         {note && <p className="muted">{note}</p>}
+        {excluded && <p className="muted">{excluded}</p>}
       </div>
       <div className="overview-grid overview-grid-3">
         {RESPONSE_FIGURES.map(({ key, label }) => (

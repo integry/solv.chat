@@ -78,17 +78,33 @@ export function formatDuration(ms: number): string {
  */
 export function formatResponseTime(ms: number | null, status: ResponseTimeStatus): string {
   if (status === "no_answers") return "No answers";
-  if (status === "mostly_untimed" || ms === null) return "Not measured";
+  if (status === "page_actions_only" || status === "mostly_untimed" || ms === null) {
+    return "Not measured";
+  }
   return formatDuration(ms);
 }
 
 /** Why a response-time figure has no number, in words; `null` when it has one. */
 export function responseTimeNote(status: ResponseTimeStatus): string | null {
   if (status === "no_answers") return "No visitor got an answer in this period.";
+  if (status === "page_actions_only") {
+    return "Every answer in this period used a page action. Those are not counted, because their time stops at the page action.";
+  }
   if (status === "mostly_untimed") {
     return "Most answers in this period are from before answer times were recorded, so a number would mislead.";
   }
   return null;
+}
+
+/**
+ * Says that answers which used a page action are left out, when some were and
+ * the status note does not already say so; `null` otherwise.
+ */
+export function pageActionNote(status: ResponseTimeStatus, count: number): string | null {
+  if (count <= 0 || status === "page_actions_only" || status === "no_answers") return null;
+  return count === 1
+    ? "1 answer that used a page action is not counted, because its time stops at the page action."
+    : `${count} answers that used a page action are not counted, because their time stops at the page action.`;
 }
 
 /**

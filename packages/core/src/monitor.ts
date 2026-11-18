@@ -24,10 +24,12 @@ export interface OverviewPeriod extends PeriodFigures {
 
 /**
  * Why a response-time figure has no number: `no_answers` (no answer in the
- * range) or `mostly_untimed` (most answers in the range were written before
- * answers were timed, so a number from the few timed ones would mislead).
+ * range), `page_actions_only` (every answer in the range used a page action,
+ * and those are left out), or `mostly_untimed` (most answers in the range were
+ * written before answers were timed, so a number from the few timed ones would
+ * mislead).
  */
-export type ResponseTimeStatus = "measured" | "no_answers" | "mostly_untimed";
+export type ResponseTimeStatus = "measured" | "no_answers" | "page_actions_only" | "mostly_untimed";
 
 /**
  * How fast visitor answers came over one range. The three times are whole
@@ -39,8 +41,14 @@ export interface ResponseTimeFigures {
   /** Last UTC day of the range, `YYYY-MM-DD`. */
   to: string;
   status: ResponseTimeStatus;
-  /** Visitor answers in the range. */
+  /** Visitor answers in the range the figures are about: page-action answers are not among them. */
   answers: number;
+  /**
+   * Visitor answers in the range that used a page action, left out of every
+   * figure: their stored times cover only the request before the page action,
+   * not the rest of the answer written after it.
+   */
+  pageActionAnswers: number;
   /** Of those, answers that have timings. */
   timed: number;
   /** Median time until the answer starts appearing. */

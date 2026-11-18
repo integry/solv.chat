@@ -3,6 +3,7 @@ import {
   durationChange,
   formatDuration,
   formatResponseTime,
+  pageActionNote,
   responseTimeNote,
 } from "../src/screens/figures.js";
 
@@ -25,6 +26,25 @@ describe("response-time figures", () => {
     expect(formatResponseTime(null, "no_answers")).toBe("No answers");
     expect(responseTimeNote("measured")).toBeNull();
     expect(responseTimeNote("mostly_untimed")).toContain("before answer times were recorded");
+    expect(formatResponseTime(null, "page_actions_only")).toBe("Not measured");
+    expect(formatResponseTime(1_200, "page_actions_only")).toBe("Not measured");
+    // Not the old-answers sentence: these answers are new, only left out.
+    expect(responseTimeNote("page_actions_only")).toBe(
+      "Every answer in this period used a page action. Those are not counted, because their time stops at the page action.",
+    );
+  });
+
+  it("says when answers that used a page action are left out", () => {
+    expect(pageActionNote("measured", 0)).toBeNull();
+    expect(pageActionNote("measured", 1)).toBe(
+      "1 answer that used a page action is not counted, because its time stops at the page action.",
+    );
+    expect(pageActionNote("mostly_untimed", 3)).toBe(
+      "3 answers that used a page action are not counted, because their time stops at the page action.",
+    );
+    // The status sentence already says it, or there is nothing to leave out.
+    expect(pageActionNote("page_actions_only", 3)).toBeNull();
+    expect(pageActionNote("no_answers", 0)).toBeNull();
   });
 
   it("compares two waits as they are shown", () => {

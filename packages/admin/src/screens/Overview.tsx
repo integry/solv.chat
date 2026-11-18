@@ -14,6 +14,7 @@ import {
   formatPercent,
   formatResponseTime,
   formatTimes,
+  pageActionNote,
   responseTimeNote,
   shareChange,
 } from "./figures.js";
@@ -144,6 +145,7 @@ export function Overview({ assistantId }: OverviewProps) {
                 value={formatResponseTime(responseTime.firstTokenMedianMs, responseTime.status)}
                 explanation={
                   responseTimeNote(responseTime.status) ??
+                  pageActionNote(responseTime.status, responseTime.pageActionAnswers) ??
                   "Typical wait for answers on your site. Try it and tests are not counted."
                 }
                 change={durationChange(

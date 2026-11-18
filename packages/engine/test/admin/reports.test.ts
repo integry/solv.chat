@@ -118,6 +118,7 @@ describe("admin reports API", () => {
         to: body.to,
         status: "no_answers",
         answers: 0,
+        pageActionAnswers: 0,
         timed: 0,
         firstTokenMedianMs: null,
         firstTokenP90Ms: null,
@@ -127,6 +128,7 @@ describe("admin reports API", () => {
           to: expect.any(String),
           status: "no_answers",
           answers: 0,
+          pageActionAnswers: 0,
           timed: 0,
           firstTokenMedianMs: null,
           firstTokenP90Ms: null,
@@ -487,6 +489,7 @@ describe("admin reports API", () => {
         to: "2026-11-15",
         status: "measured",
         answers: 10,
+        pageActionAnswers: 0,
         timed: 10,
         // Even count: the mean of the 5th and 6th (500 and 600).
         firstTokenMedianMs: 550,
@@ -548,6 +551,7 @@ describe("admin reports API", () => {
         to: "2026-11-15",
         status: "mostly_untimed",
         answers: 5,
+        pageActionAnswers: 0,
         timed: 2,
         firstTokenMedianMs: null,
         firstTokenP90Ms: null,
@@ -647,6 +651,103 @@ describe("admin reports API", () => {
       expect(await responseTimeFigures(tenantFor(ORG_B), astB, range7)).toMatchObject({
         answers: 1,
         firstTokenMedianMs: 90_000,
+      });
+    });
+
+    /**
+     * A reply that used a page action, as `answer.ts` stores it: written when
+     * it paused, with the first request's timings, which a resume keeps.
+     * `resumed` is a reply whose continuation has completed (the call is no
+     * longer pending and `resume_revision` has moved on).
+     */
+    function pageActionReply(
+      conversationId: string,
+      createdAt: number,
+      firstTokenMs: number | null,
+      totalMs: number,
+      resumed: boolean,
+    ): D1PreparedStatement {
+      const call = {
+        callId: `call_${createdAt}`,
+        name: "navigate",
+        kind: "action",
+        ok: resumed,
+        ...(resumed ? {} : { pending: true }),
+        ms: 0,
+        input: { path: "/billing" },
+        resultBytes: 0,
+        resultPreview: "",
+      };
+      return env.DB.prepare(
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, answered, created_at, first_token_ms, total_ms, resume_context, resume_revision)
+         VALUES (?1, ?2, ?3, 'assistant', 'Opening that page.', '[]', ?4, 1, ?5, ?6, ?7, ?8, ?9)`,
+      ).bind(
+        newId("msg"),
+        ORG_A,
+        conversationId,
+        JSON.stringify([call]),
+        createdAt,
+        firstTokenMs,
+        totalMs,
+        resumed ? null : "{}",
+        resumed ? 1 : 0,
+      );
+    }
+
+    it("leaves out answers that used a page action, paused or completed, and counts them apart", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const conv = await seedConversation(ORG_A, ast);
+      await env.DB.batch([
+        // Ordinary answers: the figures are theirs alone.
+        reply(ORG_A, conv, FIXED_NOW, 200, 2000),
+        reply(ORG_A, conv, FIXED_NOW - 1, 400, 4000),
+        // Action only before the pause (no first token), still waiting and completed.
+        pageActionReply(conv, FIXED_NOW - 2, null, 30, false),
+        pageActionReply(conv, FIXED_NOW - 3, null, 40, true),
+        // Text before the pause, still waiting and completed. Their short
+        // totals would pull "Full answer" down if counted.
+        pageActionReply(conv, FIXED_NOW - 4, 10, 50, false),
+        pageActionReply(conv, FIXED_NOW - 5, 20, 60, true),
+      ]);
+      expect(await responseTimeFigures(tenantFor(ORG_A), ast, range7)).toEqual({
+        from: "2026-11-09",
+        to: "2026-11-15",
+        status: "measured",
+        answers: 2,
+        pageActionAnswers: 4,
+        timed: 2,
+        firstTokenMedianMs: 300,
+        firstTokenP90Ms: 380,
+        totalMedianMs: 3000,
+      });
+
+      // A legacy answer is still untimed; page-action answers are not.
+      await reply(ORG_A, conv, FIXED_NOW - 6, null).run();
+      expect(await responseTimeFigures(tenantFor(ORG_A), ast, range7)).toMatchObject({
+        status: "measured",
+        answers: 3,
+        pageActionAnswers: 4,
+        timed: 2,
+      });
+    });
+
+    it("says only page actions, not old answers, when every answer used one", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const conv = await seedConversation(ORG_A, ast);
+      await env.DB.batch([
+        pageActionReply(conv, FIXED_NOW, null, 30, false),
+        pageActionReply(conv, FIXED_NOW - 1, null, 40, true),
+      ]);
+      expect(await responseTimeFigures(tenantFor(ORG_A), ast, range7)).toEqual({
+        from: "2026-11-09",
+        to: "2026-11-15",
+        status: "page_actions_only",
+        answers: 0,
+        pageActionAnswers: 2,
+        timed: 0,
+        firstTokenMedianMs: null,
+        firstTokenP90Ms: null,
+        totalMedianMs: null,
       });
     });
 

@@ -342,6 +342,7 @@ describe("admin phase 1 screens", () => {
       to: "2026-11-16",
       status: "measured" as const,
       answers: 12,
+      pageActionAnswers: 0,
       timed: 12,
       firstTokenMedianMs: 1_900,
       firstTokenP90Ms: 4_000,
@@ -366,12 +367,39 @@ describe("admin phase 1 screens", () => {
     expect(figure.textContent).toContain("Try it and tests are not counted.");
   });
 
+  it("says on Overview that answers which used a page action are left out", async () => {
+    const week = {
+      from: "2026-11-10",
+      to: "2026-11-16",
+      status: "measured" as const,
+      answers: 12,
+      pageActionAnswers: 1,
+      timed: 12,
+      firstTokenMedianMs: 1_900,
+      firstTokenP90Ms: 4_000,
+      totalMedianMs: 7_000,
+    };
+    installFakeServer({
+      overview: makeOverview({ responseTime: { ...week, days: 7, previous: week } }),
+    });
+    render(<App />);
+
+    const figure = await screen.findByRole("region", {
+      name: "Time until the answer starts appearing",
+    });
+    expect(figure.textContent).toContain("1.9 s");
+    expect(figure.textContent).toContain(
+      "1 answer that used a page action is not counted, because its time stops at the page action.",
+    );
+  });
+
   it("says Overview's response time is not measured when most answers have no timing", async () => {
     const week = {
       from: "2026-11-10",
       to: "2026-11-16",
       status: "mostly_untimed" as const,
       answers: 12,
+      pageActionAnswers: 0,
       timed: 2,
       firstTokenMedianMs: null,
       firstTokenP90Ms: null,
