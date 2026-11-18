@@ -298,6 +298,75 @@ describe("scheduled sitemap sync", () => {
     });
   });
 
+  it("queues indexing again for an unchanged page whose indexing failed, by lastmod and by a 304", async () => {
+    const h = harness({
+      sitemap: { dated: "2026-11-01", etagged: null },
+      pages: { dated: "Dated.", etagged: "Etagged." },
+    });
+    const sourceId = await seedSource(await seedAssistant());
+    // First run: both pages written and queued for indexing, which then
+    // fails for good (retries exhausted), so neither is indexed.
+    await startSourceSync(h.deps(), ORG, sourceId);
+    await h.drain();
+    const tenant = forScheduledSync(env.DB, ORG);
+    const docs = await tenant.documents.listForSync(sourceId);
+    for (const doc of docs) {
+      await tenant.documents.markIndexError(doc.id, doc.contentHash, "embedding_failed");
+    }
+    h.ingestMessages.length = 0;
+    h.pageFetches.length = 0;
+
+    // The owner fixes the embedding service; the pages have not changed.
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await startSourceSync(h.deps(), ORG, sourceId);
+    await h.drain();
+
+    // `dated` is no longer skipped by its lastmod: both are asked with their
+    // ETag, both answer 304, and both are queued for indexing again.
+    expect(h.pageFetches.map((f) => f.url).sort()).toEqual([page("dated"), page("etagged")]);
+    expect(h.pageFetches.every((f) => f.validators?.etag)).toBe(true);
+    expect(
+      h.ingestMessages.map((m) => ({ documentId: m.documentId, contentHash: m.contentHash })),
+    ).toEqual(
+      expect.arrayContaining(
+        docs.map((doc) => ({ documentId: doc.id, contentHash: doc.contentHash })),
+      ),
+    );
+    expect(h.ingestMessages).toHaveLength(2);
+    expect((await state(sourceId))?.counts).toMatchObject({ unchanged: 2, failed: 0 });
+
+    // Once indexed, unchanged pages are skipped again and nothing is queued.
+    await env.DB.prepare("UPDATE documents SET indexed_hash = content_hash WHERE source_id = ?1")
+      .bind(sourceId)
+      .run();
+    h.ingestMessages.length = 0;
+    h.pageFetches.length = 0;
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await syncOnce(h, sourceId);
+    expect(h.pageFetches.map((f) => f.url)).toEqual([page("etagged")]);
+    expect(h.ingestMessages).toEqual([]);
+  });
+
+  it("keeps a listed page whose entry holds a commented-out location, and never reads the comment", async () => {
+    const h = harness({ sitemap: { a: null, b: null }, pages: { a: "A.", b: "B.", old: "Old." } });
+    const sourceId = await seedSource(await seedAssistant());
+    await syncOnce(h, sourceId);
+    expect(await docUrls(sourceId)).toEqual([page("a"), page("b")]);
+    h.pageFetches.length = 0;
+
+    h.site.sitemapBody = `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url><!-- previous: <loc>${page("old")}</loc> --><loc>${page("a")}</loc></url>
+      <url><loc>${page("b")}</loc></url>
+      <!-- <url><loc>${page("gone")}</loc></url> -->
+    </urlset>`;
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await syncOnce(h, sourceId);
+
+    expect(await docUrls(sourceId)).toEqual([page("a"), page("b")]);
+    expect(h.pageFetches.map((f) => f.url).sort()).toEqual([page("a"), page("b")]);
+    expect((await state(sourceId))?.counts).toMatchObject({ removed: 0, added: 0, failed: 0 });
+  });
+
   it("updates a changed page and re-queues it for indexing", async () => {
     const h = harness({ sitemap: { a: "2026-11-01" }, pages: { a: "Old text." } });
     const sourceId = await seedSource(await seedAssistant());
@@ -913,6 +982,41 @@ describe("extractSitemapEntries", () => {
         10,
       ),
     ).toMatchObject({ isIndex: true });
+  });
+});
+
+describe("extractSitemapEntries comments and markup", () => {
+  it("ignores locations, entries and roots inside comments, processing instructions and CDATA", () => {
+    const xml = `<?xml version="1.0"?>
+      <!-- <sitemapindex> -->
+      <urlset>
+        <url><!-- <loc>https://a.example.com/old</loc> --><loc>https://a.example.com/a</loc>
+          <!-- <lastmod>2020-01-01</lastmod> --><lastmod>2026-11-01</lastmod></url>
+        <!-- <url><loc>https://a.example.com/commented</loc></url> -->
+        <url><?pi <loc>https://a.example.com/pi</loc> ?><loc>https://a.example.com/b</loc></url>
+        <url><loc><![CDATA[https://a.example.com/c]]></loc><x><![CDATA[<loc>https://a.example.com/cdata</loc>]]></x></url>
+        <url><loc>https://a.example.com/<!-- split -->d</loc></url>
+      </urlset>`;
+    expect(extractSitemapEntries(xml, 10)).toEqual({
+      entries: [
+        { url: "https://a.example.com/a", lastmod: "2026-11-01" },
+        { url: "https://a.example.com/b", lastmod: null },
+        { url: "https://a.example.com/c", lastmod: null },
+        { url: "https://a.example.com/d", lastmod: null },
+      ],
+      truncated: false,
+      isIndex: false,
+      wellFormed: true,
+    });
+  });
+
+  it("reads bare <loc> children of the urlset", () => {
+    expect(
+      extractSitemapEntries(
+        "<urlset><loc>https://a.example.com/x</loc><!-- <loc>https://a.example.com/y</loc> --></urlset>",
+        10,
+      ).entries,
+    ).toEqual([{ url: "https://a.example.com/x", lastmod: null }]);
   });
 });
 

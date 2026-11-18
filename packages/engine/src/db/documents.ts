@@ -95,10 +95,23 @@ export interface DocumentSyncRow {
   externalId: string;
   url: string;
   bodyKey: string | null;
+  contentHash: string;
+  /** The content last indexed; a value other than `contentHash` means indexing is still owed. */
+  indexedHash: string | null;
   etag: string | null;
   lastModified: string | null;
   sitemapLastmod: string | null;
   syncCheckedAt: number | null;
+}
+
+/** What a sync page needs before its conditional request: validators, and whether indexing is owed. */
+export interface DocumentSyncValidators {
+  id: string;
+  bodyKey: string | null;
+  contentHash: string;
+  indexedHash: string | null;
+  etag: string | null;
+  lastModified: string | null;
 }
 
 /** Validators recorded when a sync checks a page, for the next run's conditional request. */
@@ -327,7 +340,8 @@ export function documentsFor(db: D1Database, orgId: string) {
     async listForSync(sourceId: string): Promise<DocumentSyncRow[]> {
       const res = await prepare(
         db,
-        `SELECT id, external_id, url, body_key, etag, last_modified, sitemap_lastmod, sync_checked_at
+        `SELECT id, external_id, url, body_key, content_hash, indexed_hash,
+                etag, last_modified, sitemap_lastmod, sync_checked_at
            FROM documents WHERE org_id = ?1 AND source_id = ?2`,
       )
         .bind(orgId, sourceId)
@@ -336,6 +350,8 @@ export function documentsFor(db: D1Database, orgId: string) {
           external_id: string;
           url: string;
           body_key: string | null;
+          content_hash: string;
+          indexed_hash: string | null;
           etag: string | null;
           last_modified: string | null;
           sitemap_lastmod: string | null;
@@ -346,6 +362,8 @@ export function documentsFor(db: D1Database, orgId: string) {
         externalId: row.external_id,
         url: row.url,
         bodyKey: row.body_key,
+        contentHash: row.content_hash,
+        indexedHash: row.indexed_hash,
         etag: row.etag,
         lastModified: row.last_modified,
         sitemapLastmod: row.sitemap_lastmod,
@@ -353,19 +371,35 @@ export function documentsFor(db: D1Database, orgId: string) {
       }));
     },
 
-    /** The validators a sync stored for one document, or null when there is no such document. */
+    /** The validators a sync stored for one document and its indexing state, or null when there is no such document. */
     async syncValidators(
       sourceId: string,
       externalId: string,
-    ): Promise<{ id: string; etag: string | null; lastModified: string | null } | null> {
+    ): Promise<DocumentSyncValidators | null> {
       const row = await prepare(
         db,
-        `SELECT id, etag, last_modified FROM documents
+        `SELECT id, body_key, content_hash, indexed_hash, etag, last_modified FROM documents
           WHERE org_id = ?1 AND source_id = ?2 AND external_id = ?3`,
       )
         .bind(orgId, sourceId, externalId)
-        .first<{ id: string; etag: string | null; last_modified: string | null }>();
-      return row ? { id: row.id, etag: row.etag, lastModified: row.last_modified } : null;
+        .first<{
+          id: string;
+          body_key: string | null;
+          content_hash: string;
+          indexed_hash: string | null;
+          etag: string | null;
+          last_modified: string | null;
+        }>();
+      return row
+        ? {
+            id: row.id,
+            bodyKey: row.body_key,
+            contentHash: row.content_hash,
+            indexedHash: row.indexed_hash,
+            etag: row.etag,
+            lastModified: row.last_modified,
+          }
+        : null;
     },
 
     /**

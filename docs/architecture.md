@@ -187,6 +187,8 @@ A sitemap source can stay in step with its sitemap. Its `sync` setting is
    `AuthProvider.resolveOrg` (`queued_ingest`); an org it refuses is not read.
 3. Reads the sitemap (the preview's guards and its 2 MiB cap; up to 50,000
    `<url>` entries with their `<lastmod>`; a sitemap index is not followed).
+   Entries are read from the same reading of the XML that step 4 checks, so a
+   commented-out `<url>` or `<loc>` is not a listed page.
 4. Guards against a broken sitemap: if it cannot be read (`sitemap_unavailable`),
    is not one complete, well-formed XML document with a `<urlset>` root
    (`sitemap_invalid`: cut short, broken XML, bare `<loc>` lists; the admin's
@@ -198,7 +200,8 @@ A sitemap source can stay in step with its sitemap. Its `sync` setting is
 5. Removes the source's documents whose URL is no longer listed (that source
    only; vectors and R2 bodies are cleaned up as for a prune).
 6. Skips pages whose sitemap `<lastmod>` equals the one stored at the last
-   check, without fetching them. The rest are queued in the order a run last
+   check, without fetching them, once their current content is indexed; a
+   document whose indexing failed is checked again. The rest are queued in the order a run last
    queued them (`source_sync_attempts`; never queued first, new pages before
    documents among those), whether or not they could be fetched then, so pages
    that keep failing do not keep the others waiting. Up to the per-run page
@@ -208,8 +211,9 @@ A sitemap source can stay in step with its sitemap. Its `sync` setting is
    `Limits.checkSync` and for every source by `createApp`'s `sync` option.
 7. Each page is one message on the ingest queue (`kind: "sync_page"`). The
    consumer fetches it through the `PageFetcher` seam with the stored ETag and
-   Last-Modified as `If-None-Match` / `If-Modified-Since`; a 304 is unchanged,
-   and a fetched page is written through the same path as a push, so an
+   Last-Modified as `If-None-Match` / `If-Modified-Since`; a 304 is unchanged
+   (and queues the chunk-and-embed message again if its content is not yet
+   indexed), and a fetched page is written through the same path as a push, so an
    unchanged `content_hash` is a no-op and never re-embedded. A changed page
    queues the usual chunk-and-embed message. One page per message keeps a
    consumer batch of four within Workers Free's 50 external subrequests (each

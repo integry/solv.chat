@@ -214,7 +214,13 @@ function planRun(
     };
     if (doc === undefined) {
       added.push(candidate);
-    } else if (entry.lastmod !== null && doc.sitemapLastmod === entry.lastmod) {
+    } else if (
+      entry.lastmod !== null &&
+      doc.sitemapLastmod === entry.lastmod &&
+      doc.indexedHash === doc.contentHash
+    ) {
+      // Skipped only once its content is indexed: a document whose indexing
+      // failed is checked again, so the page's handler can queue it anew.
       unchanged++;
     } else {
       checks.push(candidate);
@@ -485,6 +491,16 @@ export async function processSyncPage(
     let markdown: string;
     if (fetched.kind === "not_modified") {
       if (prev === null) return complete("failed");
+      // Unchanged content still owed its indexing (an earlier attempt failed
+      // and its retries ran out) is queued again, as `pushDocuments` does for
+      // an unchanged push; the consumer ignores it once indexed.
+      if (prev.indexedHash !== prev.contentHash && prev.bodyKey !== null) {
+        await deps.queue.send({
+          orgId: deps.orgId,
+          documentId: prev.id,
+          contentHash: prev.contentHash,
+        });
+      }
       await tenant.documents.recordSyncCheck(
         source.id,
         externalId,
