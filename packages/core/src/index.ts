@@ -80,3 +80,10 @@ export {
   type WidgetPosition,
 } from "./schemas/versionConfig.js";
 export { parseSseBlock, type ReadSseOptions, readSseBlocks, type SseBlock } from "./sse.js";
+export type {
+  SourceSyncRun,
+  SourceSyncStatus,
+  SyncCounts,
+  SyncErrorCode,
+  SyncOutcome,
+} from "./sync.js";

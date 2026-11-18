@@ -222,6 +222,14 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           checkConfigError: (resolved) =>
             checkLlmConfigError(env.DB, env, seams.keys, principal.orgId, resolved),
           resolveRunDeps: () => resolveRunDeps(principal.orgId, tenant),
+          syncStart: {
+            docs: env.DOCS,
+            queue: env.INGEST_QUEUE as unknown as SyncQueue,
+            retriever: vectorizeRetriever(env.VECTORS),
+            limits: seams.limits,
+            fetchImpl: options?.fetch,
+            caps: options?.sync,
+          },
         });
       }
       if (
