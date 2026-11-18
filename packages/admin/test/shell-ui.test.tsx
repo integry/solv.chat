@@ -229,6 +229,16 @@ function OrgSwitch(_: HeaderSlotProps) {
   );
 }
 
+/** Presses Publish now in the "What will change" dialog once it has loaded. */
+async function confirmPublish() {
+  const dialog = await screen.findByRole("dialog", { name: "Publish your draft?" });
+  const button = within(dialog).getByRole("button", { name: "Publish now" }) as HTMLButtonElement;
+  await waitFor(() => expect(button.disabled).toBe(false));
+  await act(async () => {
+    fireEvent.click(button);
+  });
+}
+
 describe("grouped navigation", () => {
   it("groups built-in screens under headings with icons, then host sections", async () => {
     oneAssistant(LIVE);
@@ -461,6 +471,7 @@ describe("publish status", () => {
     render(<App />);
     await findAssistantButton();
     fireEvent.click(await within(header()).findByRole("button", { name: "Publish draft" }));
+    await confirmPublish();
 
     const dialog = await screen.findByRole("dialog", { name: "Not published" });
     expect(within(dialog).getByText("What is the refund policy?")).toBeTruthy();
@@ -537,9 +548,8 @@ describe("header Publish with unsaved edits on the screen", () => {
     // Saving lets the header publish again, and it publishes what was saved.
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(publish.disabled).toBe(false));
-    await act(async () => {
-      fireEvent.click(publish);
-    });
+    fireEvent.click(publish);
+    await confirmPublish();
     await within(header()).findByText("Live");
     const published = server.states.get("ast_1")?.published;
     const value =
@@ -557,6 +567,7 @@ describe("header Publish with unsaved edits on the screen", () => {
     const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
     await waitFor(() => expect(greeting.value).toBe("Hello there"));
     fireEvent.click(await within(header()).findByRole("button", { name: "Publish draft" }));
+    await confirmPublish();
     const dialog = await screen.findByRole("dialog", { name: "Not published" });
     const anyway = within(dialog).getByRole("button", {
       name: "Publish anyway",
@@ -606,6 +617,7 @@ describe("header Publish with the screen's History open", () => {
 
       await within(header()).findByText("Not published yet");
       fireEvent.click(within(header()).getByRole("button", { name: "Publish draft" }));
+      await confirmPublish();
       await waitFor(() =>
         expect(within(header()).getByRole("button", { name: "Publishing…" })).toBeTruthy(),
       );
@@ -660,6 +672,7 @@ describe("dialogs opened from the narrow-screen drawer", () => {
 
     // The failed-tests dialog from the drawer's Publish behaves the same.
     fireEvent.click(within(drawer).getByRole("button", { name: "Publish draft" }));
+    await confirmPublish();
     const failed = await screen.findByRole("dialog", { name: "Not published" });
     const fix = within(failed).getByRole("button", { name: "Go back and fix it" });
     await waitFor(() => expect((fix as HTMLButtonElement).disabled).toBe(false));

@@ -10,6 +10,7 @@ import { ApiError, patchJson, putJson } from "../api/client.js";
 import { FailedTestsError, publishAssistant } from "../api/publish.js";
 import type { Assistant, TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { PublishConfirmDialog } from "../shell/PublishConfirm.js";
 import { useAssistantMutation, useReportUnsavedEdits } from "../shell/useAssistantMutations.js";
 import { CharCount } from "../ui/CharCount.js";
 import { contrastRatio, MIN_TEXT_CONTRAST } from "../ui/color.js";
@@ -113,6 +114,7 @@ export function Widget({ assistantId }: WidgetProps) {
   const [initOriginsKey, setInitOriginsKey] = useState<string | null>(null);
 
   const [showHistory, setShowHistory] = useState(false);
+  const [confirmPublish, setConfirmPublish] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -531,7 +533,7 @@ export function Widget({ assistantId }: WidgetProps) {
               className="btn btn-secondary"
               disabled={busy || unsaved}
               aria-describedby={unsaved ? "widget-publish-hint" : undefined}
-              onClick={() => void handlePublish(false)}
+              onClick={() => setConfirmPublish(true)}
             >
               {publishing ? "Publishing…" : "Publish"}
             </button>
@@ -764,6 +766,16 @@ export function Widget({ assistantId }: WidgetProps) {
           <WidgetPreview config={previewConfig} />
         </aside>
       </div>
+
+      <PublishConfirmDialog
+        assistantId={assistantId}
+        open={confirmPublish}
+        onCancel={() => setConfirmPublish(false)}
+        onConfirm={() => {
+          setConfirmPublish(false);
+          void handlePublish(false);
+        }}
+      />
 
       {showHistory && <History assistantId={assistantId} refreshKey={historyTick} />}
     </div>

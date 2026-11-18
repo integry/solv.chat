@@ -3,11 +3,34 @@ import type { Tenant } from "../db/tenant.js";
 import { expectedVersionConfig, type VersionRow } from "../db/versions.js";
 import { BadRequest, Conflict, NotFound } from "./errors.js";
 
-/** Lists version history for an assistant, newest first. */
+/**
+ * Lists version history for an assistant, newest first by when each version
+ * was published (the draft: when it was created). Ordering by publication
+ * keeps the published versions in the bounded list one unbroken run, so each
+ * History row can be compared with the one published right before it. The
+ * draft keeps its original created_at while restores publish newer rows, so it
+ * can fall outside the bounded list; so can the live version, in principle.
+ * They are added at the end, in the same order: they are older than every row
+ * the bounded list kept. Publish, Restore and the draft row compare against
+ * them, so the list must never hide them.
+ */
 export async function listVersions(tenant: Tenant, assistantId: string): Promise<VersionRow[]> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
-  return tenant.versions.history(assistantId);
+  const [history, draft, published] = await Promise.all([
+    tenant.versions.history(assistantId),
+    tenant.versions.draft(assistantId),
+    tenant.versions.published(assistantId),
+  ]);
+  const missing = [draft, published]
+    .filter((v): v is VersionRow => v !== null && !history.some((h) => h.id === v.id))
+    .sort((a, b) => historyTime(b) - historyTime(a) || (a.state === "draft" ? -1 : 1));
+  return missing.length === 0 ? history : [...history, ...missing];
+}
+
+/** The time History orders a version by; matches `versions.history`. */
+function historyTime(version: VersionRow): number {
+  return version.publishedAt ?? version.createdAt;
 }
 
 /** Reads the assistant's current draft version. */

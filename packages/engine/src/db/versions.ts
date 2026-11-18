@@ -110,9 +110,13 @@ export function versionsFor(db: D1Database, orgId: string) {
         assistantId,
       ),
 
+    // Newest event first: a version that was published sorts by when it was
+    // published, the draft by when it was created. Publishing keeps a draft's
+    // created_at, so ordering by created_at could leave a gap in the run of
+    // publications, and History would compare a version with the wrong one.
     history: (assistantId: string) =>
       many(
-        `SELECT ${COLUMNS} FROM assistant_versions WHERE org_id = ?1 AND assistant_id = ?2 ORDER BY created_at DESC, rowid DESC LIMIT 100`,
+        `SELECT ${COLUMNS} FROM assistant_versions WHERE org_id = ?1 AND assistant_id = ?2 ORDER BY COALESCE(published_at, created_at) DESC, rowid DESC LIMIT 100`,
         assistantId,
       ),
 

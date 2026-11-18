@@ -9,7 +9,7 @@ import {
   parseChatRequest,
   parseVersionConfig,
 } from "@solvchat/core";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
 import type { Assistant, TestResult, VersionRow } from "../src/api/types.js";
@@ -108,6 +108,20 @@ function createDeferred<T = void>() {
   return { promise, resolve, reject };
 }
 
+/** Presses Publish now in the "What will change" dialog once it has loaded. */
+async function confirmPublish() {
+  const dialog = await screen.findByRole("dialog", { name: "Publish your draft?" });
+  const button = within(dialog).getByRole("button", { name: "Publish now" }) as HTMLButtonElement;
+  await waitFor(() => expect(button.disabled).toBe(false));
+  fireEvent.click(button);
+}
+
+/** Presses Restore version in the rollback dialog. */
+async function confirmRestore() {
+  const dialog = await screen.findByRole("dialog", { name: "Restore this version?" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Restore version" }));
+}
+
 function installFakeServer(options: FakeServerOptions = {}) {
   let signedIn = options.signedIn ?? true;
   const assistants: Assistant[] = options.assistants
@@ -119,7 +133,10 @@ function installFakeServer(options: FakeServerOptions = {}) {
 
   for (const a of assistants) {
     const draft = makeVersion(`ver_draft_${a.id}`, a.id, "draft");
-    const published = makeVersion(`ver_pub_${a.id}`, a.id, "published");
+    // Differs from the draft, so Publish has something to show and send.
+    const published = makeVersion(`ver_pub_${a.id}`, a.id, "published", {
+      greeting: "Hello from the live version.",
+    });
     const archived = makeVersion(`ver_arch_${a.id}`, a.id, "archived", {
       greeting: "Old archived greeting",
     });
@@ -328,7 +345,11 @@ function installFakeServer(options: FakeServerOptions = {}) {
 
     const versionsMatch = /^\/api\/admin\/assistants\/([^/]+)\/versions$/.exec(path);
     if (versionsMatch?.[1] && method === "GET") {
-      return Response.json({ versions: versions.get(versionsMatch[1]) ?? [] });
+      // Like the engine, the list holds the current draft.
+      const id = versionsMatch[1];
+      const draft = drafts.get(id);
+      const rows = (versions.get(id) ?? []).filter((v) => v.state !== "draft");
+      return Response.json({ versions: draft ? [draft, ...rows] : rows });
     }
 
     const overviewMatch = /^\/api\/admin\/assistants\/([^/]+)\/overview$/.exec(path);
@@ -511,6 +532,7 @@ describe("admin app", () => {
     expect(screen.queryByText("Unsaved changes")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    await confirmPublish();
     expect(await screen.findByText(/^Published \(/)).toBeTruthy();
     expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/publish"))).toBe(true);
 
@@ -519,6 +541,7 @@ describe("admin app", () => {
 
     const restoreButtons = await screen.findAllByRole("button", { name: "Restore" });
     fireEvent.click(restoreButtons[0] as HTMLElement);
+    await confirmRestore();
 
     expect(await screen.findByText("Restored earlier version.")).toBeTruthy();
     expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/rollback"))).toBe(
@@ -797,6 +820,7 @@ describe("admin app", () => {
 
     const publishDeferred = server.holdNextPublish();
     fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    await confirmPublish();
 
     fireEvent.change(greeting, { target: { value: "Another unsaved edit" } });
     const saveBtn = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
@@ -829,6 +853,7 @@ describe("admin app", () => {
 
     const widgetPublishDeferred = server.holdNextPublish();
     fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    await confirmPublish();
 
     fireEvent.change(widgetTitle, { target: { value: "Unsaved Widget" } });
     const widgetSaveBtn = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
@@ -868,6 +893,7 @@ describe("admin app", () => {
     expect(await screen.findByText("Draft saved.")).toBeTruthy();
     expect(publishBtn.disabled).toBe(false);
     fireEvent.click(publishBtn);
+    await confirmPublish();
     expect(await screen.findByText(/^Published \(/)).toBeTruthy();
     await waitFor(() => {
       expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/publish"))).toBe(
@@ -943,6 +969,7 @@ describe("admin app", () => {
     expect((widgetRestore[0] as HTMLButtonElement).disabled).toBe(false);
 
     fireEvent.click(onWidgetPublish);
+    await confirmPublish();
     expect(await screen.findByText(/^Published \(/)).toBeTruthy();
     expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/publish"))).toBe(true);
   });
@@ -1026,6 +1053,7 @@ describe("admin app", () => {
     fireEvent.click(screen.getByRole("button", { name: "History" }));
     const restoreButtons = await screen.findAllByRole("button", { name: "Restore" });
     fireEvent.click(restoreButtons[0] as HTMLElement);
+    await confirmRestore();
 
     expect(await screen.findByText("Restored earlier version.")).toBeTruthy();
     expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/rollback"))).toBe(
@@ -1053,6 +1081,7 @@ describe("admin app", () => {
     fireEvent.click(screen.getByRole("button", { name: "History" }));
     const restoreButtons = await screen.findAllByRole("button", { name: "Restore" });
     fireEvent.click(restoreButtons[0] as HTMLElement);
+    await confirmRestore();
 
     expect(await screen.findByText("Restored earlier version.")).toBeTruthy();
     expect(server.calls.some((c) => c.method === "POST" && c.path.endsWith("/rollback"))).toBe(
@@ -1416,6 +1445,7 @@ describe("admin app", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    await confirmPublish();
     expect(await screen.findByText(/^Published \(/)).toBeTruthy();
     expect(server.publishes).toEqual([{ force: false }]);
   });
@@ -1434,6 +1464,7 @@ describe("admin app", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    await confirmPublish();
 
     expect(
       await screen.findByText("Some tests did not pass, so nothing was published."),
@@ -1461,6 +1492,7 @@ describe("admin app", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    await confirmPublish();
     expect(
       await screen.findByText("Some tests did not pass, so nothing was published."),
     ).toBeTruthy();
@@ -1476,6 +1508,7 @@ describe("admin app", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    await confirmPublish();
     expect(await screen.findByText(/^Published \(/)).toBeTruthy();
     expect(server.calls.some((call) => call.path.endsWith("/test-runs"))).toBe(false);
   });
