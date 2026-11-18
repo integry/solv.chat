@@ -179,6 +179,27 @@ describe("Topics", () => {
     expect(within(section).queryAllByRole("link")).toEqual([]);
   });
 
+  it("still offers Manage topics when the period is empty", async () => {
+    installFakeServer({
+      report: makeReport({
+        questions: 0,
+        replies: 0,
+        costMicros: 0,
+        topQuestions: [],
+        topGaps: [],
+        topics: { reviewAnswers: true, rows: [] },
+      }),
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+    await screen.findByRole("heading", { name: "Nothing yet for this period" });
+    expect(screen.queryByRole("region", { name: "Topics" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Manage topics" }));
+    const dialog = await screen.findByRole("dialog", { name: "Manage topics" });
+    expect(await within(dialog).findByText("Opening hours")).toBeTruthy();
+    expect(within(dialog).getByText("Refunds")).toBeTruthy();
+  });
+
   it("puts the topics and each unanswered question's topic in the CSV, guarded like the rest", async () => {
     installFakeServer();
     const blobs: Blob[] = [];

@@ -354,7 +354,9 @@ are about.
   request says new topics are not allowed, and the reviewer must pick the
   closest topic or "Other"; a new name proposed anyway is stored as "Other".
   The cap is checked inside the insert statement, so two reviews at 39 topics
-  cannot make 41.
+  cannot make 41. Renaming "Other" to another name would make it an ordinary
+  topic, so it is refused (409) while there are already 40; that check is in
+  the rename statement too.
 - **Concurrency.** `name_key` is unique per assistant; a new topic is
   inserted with `ON CONFLICT DO NOTHING` and read back by key, so two reviews
   proposing the same new topic at once end with one topic.
@@ -374,7 +376,8 @@ are about.
 - **Isolation.** Topics are per assistant and per org: every statement is
   bound to the org and names the assistant, and a question can only be tagged
   with a topic of its own conversation's assistant.
-- **Managing.** Reports → "Manage topics" (a small dialog): rename a topic,
+- **Managing.** Reports → "Manage topics" (a small dialog, offered also when
+  the period has nothing to report): rename a topic,
   merge one into another (all its questions move to it, in one transaction),
   or delete one (its questions become untagged).
 

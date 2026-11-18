@@ -1,4 +1,10 @@
-import { checkTopicName, isId, isPlainObject, type TopicItem } from "@solvchat/core";
+import {
+  checkTopicName,
+  isId,
+  isPlainObject,
+  MAX_TOPICS_PER_ASSISTANT,
+  type TopicItem,
+} from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { BadRequest, Conflict, NotFound } from "./errors.js";
 
@@ -58,6 +64,11 @@ export async function renameTopic(
   if (result === "not_found") throw new NotFound("topic");
   if (result === "exists") {
     throw new Conflict("Another topic already has this name. Merge the two instead.");
+  }
+  if (result === "full") {
+    throw new Conflict(
+      `"Other" cannot be renamed while there are ${MAX_TOPICS_PER_ASSISTANT} topics. Merge or delete one first.`,
+    );
   }
   return { topic: await topicOrThrow(tenant, assistantId, topicId) };
 }

@@ -17,7 +17,7 @@ interface Row {
 const map = (row: Row): TopicItem => ({ id: row.id, name: row.name, createdAt: row.created_at });
 
 /** What a rename came to. */
-export type RenameResult = "renamed" | "not_found" | "exists";
+export type RenameResult = "renamed" | "not_found" | "exists" | "full";
 
 /**
  * Tenant-scoped data access for `topics` and the `topic_id` on visitor
@@ -145,7 +145,11 @@ export function topicsFor(db: D1Database, orgId: string) {
     /**
      * Renames a topic. `exists` when another topic of the assistant already
      * has that name (merge it instead); a change of case or spacing only is a
-     * rename of the same topic.
+     * rename of the same topic. `full` when the topic is "Other" and the new
+     * name would make it an ordinary topic while the assistant already has
+     * `MAX_TOPICS_PER_ASSISTANT`: "Other" is outside the cap, so renaming it
+     * would otherwise grow the list past it. The count is checked in the same
+     * statement as the write, like the insert's.
      */
     async rename(assistantId: string, id: string, name: string): Promise<RenameResult> {
       const key = topicKey(name);
@@ -155,11 +159,23 @@ export function topicsFor(db: D1Database, orgId: string) {
         const res = await prepare(
           db,
           `UPDATE topics SET name = ?4, name_key = ?5
-            WHERE org_id = ?1 AND assistant_id = ?2 AND id = ?3`,
+            WHERE org_id = ?1 AND assistant_id = ?2 AND id = ?3
+              AND (name_key <> ?6 OR ?5 = ?6
+                   OR (SELECT COUNT(*) FROM topics
+                        WHERE org_id = ?1 AND assistant_id = ?2 AND name_key <> ?6) < ?7)`,
         )
-          .bind(orgId, assistantId, id, name, key)
+          .bind(orgId, assistantId, id, name, key, OTHER_TOPIC_KEY, MAX_TOPICS_PER_ASSISTANT)
           .run();
-        return (res.meta.changes ?? 0) > 0 ? "renamed" : "not_found";
+        if ((res.meta.changes ?? 0) > 0) return "renamed";
+        // Nothing changed: either the topic is gone, or it is "Other" and the
+        // list is full.
+        const current = await prepare(
+          db,
+          `SELECT name_key FROM topics WHERE org_id = ?1 AND assistant_id = ?2 AND id = ?3`,
+        )
+          .bind(orgId, assistantId, id)
+          .first<{ name_key: string }>();
+        return current?.name_key === OTHER_TOPIC_KEY ? "full" : "not_found";
       } catch (err) {
         // Another topic took the name between the check and the write.
         if (err instanceof Error && /UNIQUE/i.test(err.message)) return "exists";

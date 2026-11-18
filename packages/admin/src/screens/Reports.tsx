@@ -365,6 +365,14 @@ export function Reports({ assistantId }: ReportsProps) {
           icon="reports"
           title="Nothing yet for this period"
           description="Once visitors ask questions, their answers show up here."
+          action={
+            // Topics outlast a quiet period: they can still be managed.
+            report.topics ? (
+              <button type="button" className="btn btn-secondary" onClick={() => setManaging(true)}>
+                Manage topics
+              </button>
+            ) : undefined
+          }
         />
       ) : (
         <div className="stack">

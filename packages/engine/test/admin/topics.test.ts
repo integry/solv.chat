@@ -160,6 +160,55 @@ describe("topics", () => {
       expect((await topics.resolve(ast, "Yet another")).name).toBe("Other");
     });
 
+    it("does not let renaming Other grow the list past 40 topics", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const topics = tenantFor(ORG_A).topics;
+      for (let i = 0; i < MAX_TOPICS_PER_ASSISTANT; i++) await topics.resolve(ast, `Topic ${i}`);
+      const other = await topics.resolve(ast, "One too many");
+      expect(other.name).toBe("Other");
+
+      // Full: "Other" cannot become an ordinary topic.
+      expect(await topics.rename(ast, other.id, "Fresh name")).toBe("full");
+      expect((await topics.get(ast, other.id))?.name).toBe("Other");
+      // A change of case only keeps it "Other", and ordinary topics still rename.
+      expect(await topics.rename(ast, other.id, "OTHER")).toBe("renamed");
+      const first = (await topics.list(ast)).find((t) => t.name === "Topic 0");
+      expect(await topics.rename(ast, first?.id ?? "", "Topic zero")).toBe("renamed");
+      // The next unmatched proposal still lands in the same "Other".
+      expect((await topics.resolve(ast, "Another new one")).id).toBe(other.id);
+      let list = await topics.list(ast);
+      expect(list).toHaveLength(MAX_TOPICS_PER_ASSISTANT + 1);
+
+      // With room for one, the rename goes through, and the next unmatched
+      // proposal gets a new "Other" without passing the cap.
+      await topics.remove(ast, first?.id ?? "");
+      expect(await topics.rename(ast, other.id, "Fresh name")).toBe("renamed");
+      const next = await topics.resolve(ast, "Yet another new one");
+      expect(next.name).toBe("Other");
+      expect(next.id).not.toBe(other.id);
+      expect(await topics.rename(ast, next.id, "Second fresh")).toBe("full");
+      list = await topics.list(ast);
+      expect(list.filter((t) => t.name !== "Other")).toHaveLength(MAX_TOPICS_PER_ASSISTANT);
+      expect(list).toHaveLength(MAX_TOPICS_PER_ASSISTANT + 1);
+    });
+
+    it("keeps the cap when renaming Other races a new proposal", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const topics = tenantFor(ORG_A).topics;
+      for (let i = 0; i < MAX_TOPICS_PER_ASSISTANT - 1; i++)
+        await topics.resolve(ast, `Topic ${i}`);
+      const other = await topics.resolve(ast, "Other");
+      // One place left: the rename and a new proposal compete for it.
+      const [renamed, proposed] = await Promise.all([
+        topics.rename(ast, other.id, "Fresh name"),
+        topics.resolve(ast, "Brand new"),
+      ]);
+      expect(["renamed", "full"]).toContain(renamed);
+      expect(proposed.name === "Other" || renamed === "full").toBe(true);
+      const list = await topics.list(ast);
+      expect(list.filter((t) => t.name !== "Other")).toHaveLength(MAX_TOPICS_PER_ASSISTANT);
+    });
+
     it("keeps topic names per assistant and per org", async () => {
       const astA = await seedAssistant(ORG_A);
       const astA2 = await seedAssistant(ORG_A);
@@ -252,6 +301,20 @@ describe("topics", () => {
       // A change of case is a rename of the same topic.
       expect((await call(app, "PATCH", path, { name: "HOURS" })).status).toBe(200);
       expect((await tenantFor(ORG_A).topics.get(ast, times.id))?.name).toBe("When open");
+    });
+
+    it("refuses to rename Other while the list is full", async () => {
+      const { ast, app } = await setup();
+      const topics = tenantFor(ORG_A).topics;
+      for (let i = 2; i < MAX_TOPICS_PER_ASSISTANT; i++) await topics.resolve(ast, `Topic ${i}`);
+      const other = await topics.resolve(ast, "One too many");
+      expect(other.name).toBe("Other");
+      const res = await call(app, "PATCH", `/api/admin/assistants/${ast}/topics/${other.id}`, {
+        name: "Fresh name",
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toMatch(/Merge or delete one/);
+      expect((await topics.get(ast, other.id))?.name).toBe("Other");
     });
 
     it("merges one topic into another: all its questions move and it is gone", async () => {
