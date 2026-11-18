@@ -474,6 +474,72 @@ describe("Docusaurus rules", () => {
     expect(cleanDocusaurusMarkdown("A `` lone <Tabs>z</Tabs>")).toBe("A `` lone z\n");
   });
 
+  it("keeps a code span that runs over several lines unchanged", () => {
+    const withImport =
+      "Use `first\nimport example from 'pkg'\nlast` here.\n\nFollowing paragraph.\n";
+    expect(cleanDocusaurusMarkdown(withImport)).toBe(withImport);
+    const withAdmonition = "Write ``a\n:::note[Title]\nb\n:::\nc`` to <Tabs>x</Tabs> it.\n";
+    expect(cleanDocusaurusMarkdown(withAdmonition)).toBe(
+      "Write ``a\n:::note[Title]\nb\n:::\nc`` to x it.\n",
+    );
+    // A span in an admonition title and one holding a component tag.
+    expect(cleanDocusaurusMarkdown(":::tip[Use `x`]\nText `<Tabs>\n</Tabs>` <B>y</B>\n:::\n")).toBe(
+      "**Use `x`:** Text `<Tabs>\n</Tabs>` y\n",
+    );
+    // Lines inside a span are not Docusaurus signals.
+    expect(hasDocusaurusSyntax("See `\n:::tip\nimport X from '@theme/X';\n` here.\n")).toBe(false);
+  });
+
+  it("never pairs backticks across blocks", () => {
+    // A blank line, a fence or a heading ends a paragraph, and with it any
+    // open code span: the lone backticks are literal and the cleanup applies.
+    expect(
+      cleanDocusaurusMarkdown("A ` <Tabs>w</Tabs>\n\n:::note\nB ` <Tabs>z</Tabs>\n:::\n"),
+    ).toBe("A ` w\n\n**Note:** B ` z\n");
+    expect(cleanDocusaurusMarkdown("# Use `\nimport x from 'y'\n\nC ` <Tabs>z</Tabs>\n")).toBe(
+      "# Use `\n\nC ` z\n",
+    );
+    expect(cleanDocusaurusMarkdown("A `\n```\ncode\n```\n<Tabs>z</Tabs> `\n")).toBe(
+      "A `\n```\ncode\n```\nz `\n",
+    );
+  });
+
+  it("drops an export whose declaration has blank lines inside", () => {
+    const input =
+      "export const metadata = {\n\n  internalLabel: 'Implementation detail',\n};\n\n# Guide\n\nPublic documentation.\n";
+    expect(cleanDocusaurusMarkdown(input)).toBe("# Guide\n\nPublic documentation.\n");
+  });
+
+  it("ends an ESM block only at a blank line where its code is complete", () => {
+    const input = [
+      "import {",
+      "",
+      "  A, // a comment with { and `",
+      "",
+      "} from './parts';",
+      "export const text = `line",
+      "",
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: this is JavaScript source text.
+      "${'}'} more`;",
+      "export const label = '{';",
+      "/* a comment",
+      "",
+      "*/",
+      "export const total =",
+      "",
+      "  1 + [",
+      "",
+      "  2,",
+      "",
+      "  ].length;",
+      "",
+      "# Kept",
+      "",
+      "Body.",
+    ].join("\n");
+    expect(cleanDocusaurusMarkdown(input)).toBe("# Kept\n\nBody.\n");
+  });
+
   it("puts the description after a leading heading, or first", () => {
     expect(withDescription("# T\n\nBody\n", "About it.")).toBe("# T\n\nAbout it.\n\nBody\n");
     expect(withDescription("Body\n", "About it.")).toBe("About it.\n\nBody\n");

@@ -60,7 +60,7 @@ export function hasDocusaurusFrontMatter(block: string | null): boolean {
 
 /** True when a body uses Docusaurus syntax: an admonition or a Docusaurus import. */
 export function hasDocusaurusSyntax(body: string): boolean {
-  return markLines(body).some(
+  return protectCodeSpans(markLines(body)).lines.some(
     (line) =>
       !line.code && (ADMONITION_OPEN_RE.test(line.text) || DOCUSAURUS_IMPORT_RE.test(line.text)),
   );
@@ -266,22 +266,98 @@ function convertAdmonitions(lines: Line[]): Line[] {
   return out;
 }
 
-/** Drops MDX `import`/`export` blocks; in MDX one runs until a blank line. */
+/**
+ * Drops MDX `import`/`export` blocks. In MDX a block runs until a blank line
+ * where its JavaScript is complete, so a blank line inside an unfinished
+ * declaration (an open bracket, template literal or comment, or a trailing
+ * `=` or `,`) does not end it.
+ */
 function dropEsm(lines: Line[]): Line[] {
   const out: Line[] = [];
-  let inEsm = false;
+  let esm: EsmScanner | null = null;
   for (const line of lines) {
-    if (inEsm) {
-      if (line.code || line.text.trim() !== "") continue;
-      inEsm = false;
+    if (esm !== null) {
+      if (line.text.trim() !== "" || !esm.complete()) {
+        esm.feed(line.text);
+        continue;
+      }
+      esm = null;
     }
     if (!line.code && ESM_START_RE.test(line.text)) {
-      inEsm = true;
+      esm = new EsmScanner();
+      esm.feed(line.text);
       continue;
     }
     out.push(line);
   }
   return out;
+}
+
+// Tokens after which a JavaScript statement cannot end.
+const DANGLING_RE = /(?:[=,.:?&|]|=>)$/;
+
+/**
+ * Follows just enough JavaScript, line by line, to tell whether an ESM block
+ * is complete: brackets, strings, template literals (with `${...}`) and
+ * comments. Regular expression literals are not recognised.
+ */
+class EsmScanner {
+  // Open brackets, `` ` `` for template text and `${` for a template expression.
+  private readonly stack: string[] = [];
+  private blockComment = false;
+  private tail = "";
+
+  feed(text: string): void {
+    let quote: string | null = null;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i] as string;
+      const next = text[i + 1];
+      if (this.blockComment) {
+        if (ch === "*" && next === "/") {
+          this.blockComment = false;
+          i++;
+        }
+        continue;
+      }
+      const top = this.stack[this.stack.length - 1];
+      if (top === "`") {
+        if (ch === "\\") i++;
+        else if (ch === "`") {
+          this.stack.pop();
+          this.tail = ch;
+        } else if (ch === "$" && next === "{") {
+          this.stack.push("${");
+          i++;
+        }
+        continue;
+      }
+      if (quote !== null) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === "/" && next === "/") break;
+      if (ch === "/" && next === "*") {
+        this.blockComment = true;
+        i++;
+        continue;
+      }
+      if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === "`" || ch === "(" || ch === "[" || ch === "{") this.stack.push(ch);
+      else if (ch === ")" || ch === "]" || ch === "}") this.close(ch);
+      if (!/\s/.test(ch)) this.tail = `${this.tail}${ch}`.slice(-2);
+    }
+  }
+
+  private close(ch: string): void {
+    const top = this.stack[this.stack.length - 1];
+    const opener = { ")": "(", "]": "[", "}": "{" }[ch];
+    if (top === opener || (ch === "}" && top === "${")) this.stack.pop();
+  }
+
+  complete(): boolean {
+    return this.stack.length === 0 && !this.blockComment && !DANGLING_RE.test(this.tail);
+  }
 }
 
 /**
@@ -314,26 +390,14 @@ const COMPONENT_TAG_RE = /^<\/?(?:[A-Z][\w$]*(?:\.[\w$]+)*(?=[\s/>])|>)/;
 /**
  * Removes JSX component tags from a run of non-code lines, keeping what is
  * between an opening and a closing tag. Self-closing components have no text
- * and disappear. Lower-case HTML tags and inline code spans are left alone.
+ * and disappear. Lower-case HTML tags are left alone; inline code spans are
+ * already hidden by `protectCodeSpans`.
  */
 function stripComponents(text: string): string {
   let out = "";
   let i = 0;
   while (i < text.length) {
     const ch = text[i] as string;
-    if (ch === "`") {
-      let run = 1;
-      while (text[i + run] === "`") run++;
-      const close = closingBacktickRun(text, i + run, run);
-      if (close !== -1) {
-        out += text.slice(i, close + run);
-        i = close + run;
-        continue;
-      }
-      out += "`".repeat(run);
-      i += run;
-      continue;
-    }
     if (ch === "<" && COMPONENT_TAG_RE.test(text.slice(i, i + 200))) {
       const end = tagEnd(text, i);
       if (end !== -1) {
@@ -361,6 +425,69 @@ function closingBacktickRun(text: string, from: number, length: number): number 
     i = text.indexOf("`", i + run);
   }
   return -1;
+}
+
+// An ATX heading is one line: a code span cannot run into or out of it.
+const ATX_HEADING_RE = /^ {0,3}#{1,6}(?:[ \t]|\r?$)/;
+
+/**
+ * Hides every inline code span, including one that runs over several lines
+ * of a paragraph, behind a placeholder, so no cleanup pass reads its content
+ * as an admonition, an `import`/`export` or a component. A span opens on a
+ * run of backticks and closes on the next run of the same length in the same
+ * block (a span never crosses a blank line, a fence or a heading); a run with
+ * no closer is literal. `restore` puts the spans back.
+ */
+function protectCodeSpans(lines: Line[]): { lines: Line[]; restore: (text: string) => string } {
+  const all = lines.map((line) => line.text).join("\n");
+  let mark = 0xe000;
+  while (all.includes(String.fromCharCode(mark))) mark++;
+  const sentinel = String.fromCharCode(mark);
+  const spans: string[] = [];
+
+  const out: Line[] = [];
+  let block: string[] = [];
+  const flush = () => {
+    if (block.length === 0) return;
+    const text = block.join("\n");
+    let hidden = "";
+    let i = 0;
+    while (i < text.length) {
+      const open = text.indexOf("`", i);
+      if (open === -1) break;
+      let run = 1;
+      while (text[open + run] === "`") run++;
+      const close = closingBacktickRun(text, open + run, run);
+      if (close === -1) {
+        hidden += text.slice(i, open + run);
+        i = open + run;
+        continue;
+      }
+      hidden += `${text.slice(i, open)}${sentinel}${spans.length}${sentinel}`;
+      spans.push(text.slice(open, close + run));
+      i = close + run;
+    }
+    hidden += text.slice(i);
+    for (const part of hidden.split("\n")) out.push({ text: part, code: false });
+    block = [];
+  };
+  for (const line of lines) {
+    if (line.code || line.text.trim() === "") {
+      flush();
+      out.push(line);
+      continue;
+    }
+    if (ATX_HEADING_RE.test(line.text)) flush();
+    block.push(line.text);
+    if (ATX_HEADING_RE.test(line.text)) flush();
+  }
+  flush();
+
+  const placeholder = new RegExp(`${sentinel}(\\d+)${sentinel}`, "g");
+  return {
+    lines: out,
+    restore: (text) => text.replace(placeholder, (_, index: string) => spans[Number(index)] ?? ""),
+  };
 }
 
 function stripComponentLines(lines: Line[]): Line[] {
@@ -411,11 +538,11 @@ function tidyBlankLines(lines: Line[]): string {
  * Cleans a Docusaurus/MDX body into plain Markdown: admonitions become
  * labelled paragraphs, `import`/`export` lines go, JSX components are replaced
  * by their text content (or dropped when they have none), and fenced code
- * blocks are kept byte for byte.
+ * blocks and inline code spans are kept byte for byte.
  */
 export function cleanDocusaurusMarkdown(body: string): string {
-  const lines = stripComponentLines(dropEsm(convertAdmonitions(markLines(body))));
-  return tidyBlankLines(lines);
+  const { lines, restore } = protectCodeSpans(markLines(body));
+  return restore(tidyBlankLines(stripComponentLines(dropEsm(convertAdmonitions(lines)))));
 }
 
 /**
