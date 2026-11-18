@@ -151,6 +151,9 @@ describe("ingest source labels", () => {
   it("refuses a bad source label over the ingest API without writing anything", async () => {
     const app = createTestApp();
     const { id: assistantId, key } = await createAssistantWithKey();
+    // A fake queue: a message on the real one is consumed after this test's
+    // isolated storage is gone, and breaks the storage of later tests.
+    const ingestQueue = queue();
     const call = (method: "PUT" | "DELETE", body: unknown) =>
       app.fetch(
         new Request(`https://example.com/v1/ingest/${assistantId}/documents`, {
@@ -158,7 +161,7 @@ describe("ingest source labels", () => {
           headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
           body: JSON.stringify(body),
         }),
-        env,
+        { ...env, INGEST_QUEUE: ingestQueue as unknown as Queue },
         ctx,
       );
 
@@ -185,6 +188,7 @@ describe("ingest source labels", () => {
 
     const ok = await call("PUT", { source: " docs ", documents: [doc("a")] });
     expect(ok.status).toBe(200);
+    expect(ingestQueue.sent).toHaveLength(1);
     const tenant = forIngestScope(env.DB, { orgId: TEST_ORG_ID, assistantId });
     // Only the valid push created a source, under the trimmed label.
     expect((await tenant.sources.list(assistantId)).map((s) => s.label)).toEqual(["docs"]);
