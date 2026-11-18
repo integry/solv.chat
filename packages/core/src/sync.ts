@@ -18,7 +18,11 @@ export type SyncOutcome = "running" | "succeeded" | "partial" | "failed";
  *   (cut short, broken XML, or another kind of document), so its list of
  *   pages cannot be trusted to say which pages left it.
  * - `sitemap_empty`: the sitemap listed no usable page.
- * - `too_many_removals`: the run would have removed more than the allowed share.
+ * - `sitemap_index`: the address is a sitemap index, which lists other
+ *   sitemaps rather than pages; the owner should use one of those.
+ * - `too_many_removals`: the run would have removed more than the allowed
+ *   share. Listed pages were still added and updated; only the removals
+ *   (`SyncCounts.withheld`) were held back.
  * - `limit_refused`: the Limits seam refused the run (a suspended org, a plan).
  * - `pages_failed`: the run finished, but some pages could not be fetched or written.
  * - `interrupted`: the run's lease ran out before every page was handled.
@@ -27,6 +31,7 @@ export type SyncErrorCode =
   | "sitemap_unavailable"
   | "sitemap_invalid"
   | "sitemap_empty"
+  | "sitemap_index"
   | "too_many_removals"
   | "limit_refused"
   | "pages_failed"
@@ -40,6 +45,11 @@ export interface SyncCounts {
   failed: number;
   /** Pages left for a later run by a cap. */
   deferred: number;
+  /**
+   * Documents the sitemap no longer lists that the removal guard kept
+   * (`too_many_removals`); a run with the guard lifted would remove them.
+   */
+  withheld: number;
 }
 
 /** One sync run as the admin API reports it. */

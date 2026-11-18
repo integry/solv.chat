@@ -58,8 +58,10 @@ export {
 export { isPlainObject } from "./schemas/shared.js";
 export {
   DEFAULT_SYNC_MAX_REMOVE_PERCENT,
+  DEFAULT_SYNC_RECHECK_DAYS,
   type EntryInput,
   formatEntryMarkdown,
+  MAX_SYNC_RECHECK_DAYS,
   parseEntryInput,
   parseSourceInput,
   type SitemapSourceSettings,

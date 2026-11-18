@@ -16,6 +16,16 @@ export const SCHEDULE_OPTIONS: ReadonlyArray<{ value: SyncSchedule; label: strin
   { value: "weekly", label: "Every week" },
 ];
 
+/**
+ * How many documents "Sync anyway" would remove: those the last run kept
+ * because it would have removed too many. Zero when there is nothing to offer.
+ */
+export function withheldRemovals(sync: SourceSyncStatus | undefined): number {
+  const last = sync?.last;
+  if (last?.outcome !== "failed" || last.error !== "too_many_removals") return 0;
+  return last.counts.withheld;
+}
+
 /** True while a sync of the source is going. */
 export function isSyncing(source: SourceSummary): boolean {
   return source.sync?.last?.outcome === "running";
@@ -40,11 +50,13 @@ export function syncErrorText(
     case "sitemap_invalid":
       return "The sitemap is incomplete or not valid, so nothing was changed.";
     case "sitemap_empty":
-      return "The sitemap lists no pages, so nothing was changed. A sitemap that only lists other sitemaps is not read.";
+      return "The sitemap lists no pages, so nothing was changed.";
+    case "sitemap_index":
+      return "This is a sitemap index; use one of the sitemaps it lists.";
     case "too_many_removals":
       return source
-        ? `It would have removed more than ${maxRemovePercent(source)}% of this source's pages, so nothing was changed. Check that the sitemap is complete.`
-        : "It would have removed too many of this source's pages, so nothing was changed. Check that the sitemap is complete.";
+        ? `It would have removed more than ${maxRemovePercent(source)}% of this source's pages, so none were removed. Pages the sitemap lists were still added and updated. Check that the sitemap is complete, or choose Sync anyway.`
+        : "It would have removed too many of this source's pages, so none were removed. Pages the sitemap lists were still added and updated. Check that the sitemap is complete, or choose Sync anyway.";
     case "limit_refused":
       return "Syncing is not available on this account right now.";
     case "pages_failed":
@@ -65,6 +77,7 @@ export function syncCountsText(counts: SyncCounts): string {
   if (counts.removed > 0) parts.push(`${counts.removed} removed`);
   if (counts.failed > 0) parts.push(`${counts.failed} could not be fetched`);
   if (counts.deferred > 0) parts.push(`${counts.deferred} left for the next sync`);
+  if (counts.withheld > 0) parts.push(`${counts.withheld} kept, not removed`);
   return parts.length > 0 ? parts.join(", ") : "nothing changed";
 }
 
@@ -101,10 +114,19 @@ function LastRun({ source, sync }: { source: SourceSummary; sync: SourceSyncStat
   }
   const at = last.finishedAt ?? last.startedAt;
   if (last.outcome === "failed") {
+    const withheld = withheldRemovals(sync);
     return (
       <>
         <span className="source-sync-line source-sync-failed">
-          Last sync failed <RelativeTime value={at} />.
+          {withheld > 0 ? (
+            <>
+              Last sync failed <RelativeTime value={at} />: {syncCountsText(last.counts)}.
+            </>
+          ) : (
+            <>
+              Last sync failed <RelativeTime value={at} />.
+            </>
+          )}
         </span>
         <span className="source-sync-line source-sync-failed">
           {syncErrorText(last.error, source)}
@@ -149,6 +171,11 @@ export interface SyncCellProps {
   busy: boolean;
   onScheduleChange: (schedule: SyncSchedule) => void;
   onSyncNow: () => void;
+  /**
+   * Offered after a sync kept pages because it would have removed too many:
+   * one sync with that limit lifted. Left out, the button is not shown.
+   */
+  onSyncAnyway?: (() => void) | undefined;
   now?: number;
 }
 
@@ -160,10 +187,12 @@ export function SyncCell({
   busy,
   onScheduleChange,
   onSyncNow,
+  onSyncAnyway,
   now = Date.now(),
 }: SyncCellProps) {
   const selectId = useId();
   const running = sync.last?.outcome === "running";
+  const withheld = withheldRemovals(sync);
   return (
     <div className="source-sync">
       <div className="source-sync-controls">
@@ -192,6 +221,17 @@ export function SyncCell({
         >
           {running ? "Syncing…" : "Sync now"}
         </button>
+        {onSyncAnyway && withheld > 0 && (
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            aria-label={`Sync ${name} anyway`}
+            disabled={busy || running}
+            onClick={onSyncAnyway}
+          >
+            Sync anyway
+          </button>
+        )}
       </div>
       <LastRun source={source} sync={sync} />
       <NextRun sync={sync} now={now} />

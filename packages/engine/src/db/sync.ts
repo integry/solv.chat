@@ -40,6 +40,7 @@ interface SyncRow {
   removed: number;
   failed: number;
   deferred: number;
+  withheld: number;
   error: string | null;
   live_added: number | null;
   live_updated: number | null;
@@ -59,6 +60,7 @@ const ERROR_CODES: ReadonlySet<string> = new Set<SyncErrorCode>([
   "sitemap_unavailable",
   "sitemap_invalid",
   "sitemap_empty",
+  "sitemap_index",
   "too_many_removals",
   "limit_refused",
   "pages_failed",
@@ -97,7 +99,7 @@ const pageCount = (state: SyncPageState): string =>
 // The run's own row, with its pages added up while it is going. `?1` is the
 // org; callers add their WHERE and GROUP BY.
 const SYNC_STATE_SELECT = `SELECT y.source_id, y.run_id, y.lease_until, y.started_at, y.finished_at,
-                y.outcome, y.added, y.updated, y.unchanged, y.removed, y.failed, y.deferred, y.error,
+                y.outcome, y.added, y.updated, y.unchanged, y.removed, y.failed, y.deferred, y.withheld, y.error,
                 SUM(CASE WHEN p.state = 'added' THEN 1 ELSE 0 END) AS live_added,
                 SUM(CASE WHEN p.state = 'updated' THEN 1 ELSE 0 END) AS live_updated,
                 SUM(CASE WHEN p.state = 'unchanged' THEN 1 ELSE 0 END) AS live_unchanged,
@@ -122,6 +124,7 @@ function toSyncState(row: SyncRow, now: number): SourceSyncState {
     removed: Number(row.removed),
     failed: Number(row.failed) + live(row.live_failed),
     deferred: Number(row.deferred),
+    withheld: Number(row.withheld ?? 0),
   };
   const interrupted = running && (row.lease_until === null || row.lease_until <= now);
   const outcome = OUTCOMES.has(row.outcome) ? (row.outcome as SyncOutcome) : "failed";
@@ -200,7 +203,7 @@ export function syncFor(db: D1Database, orgId: string) {
            finished_at = NULL,
            outcome = 'running',
            added = 0, updated = 0, unchanged = 0, removed = 0, failed = 0, deferred = 0,
-           error = NULL
+           withheld = 0, error = NULL
          WHERE source_syncs.lease_until IS NULL OR source_syncs.lease_until <= excluded.started_at
          RETURNING run_id`,
       )
@@ -222,14 +225,14 @@ export function syncFor(db: D1Database, orgId: string) {
       runId: string,
       now: number,
       result: { outcome: Exclude<SyncOutcome, "running">; error: SyncErrorCode | null } & Partial<
-        Pick<SyncCounts, "unchanged" | "removed" | "deferred">
+        Pick<SyncCounts, "unchanged" | "removed" | "deferred" | "withheld">
       >,
     ): Promise<void> {
       await prepare(
         db,
         `UPDATE source_syncs
             SET finished_at = ?4, lease_until = NULL, outcome = ?5, error = ?6,
-                unchanged = ?7, removed = ?8, deferred = ?9
+                unchanged = ?7, removed = ?8, deferred = ?9, withheld = ?10
           WHERE org_id = ?1 AND source_id = ?2 AND run_id = ?3 AND finished_at IS NULL`,
       )
         .bind(
@@ -242,6 +245,7 @@ export function syncFor(db: D1Database, orgId: string) {
           result.unchanged ?? 0,
           result.removed ?? 0,
           result.deferred ?? 0,
+          result.withheld ?? 0,
         )
         .run();
     },
@@ -290,21 +294,32 @@ export function syncFor(db: D1Database, orgId: string) {
      * handed to the queue, all `pending`, and stamps each page as queued at
      * `attemptedAt` so the next capped run starts with other pages. Call
      * before sending the messages, so a message never arrives for a page
-     * that is not recorded.
+     * that is not recorded. A `withheld` count above zero means the wipe
+     * guard kept documents: the run then ends as `failed` with
+     * `too_many_removals` whatever its pages do.
      */
     async plan(
       sourceId: string,
       runId: string,
-      known: Pick<SyncCounts, "unchanged" | "removed" | "deferred">,
+      known: Pick<SyncCounts, "unchanged" | "removed" | "deferred"> &
+        Partial<Pick<SyncCounts, "withheld">>,
       pages: SyncPage[],
       attemptedAt: number,
     ): Promise<void> {
       const statements: D1PreparedStatement[] = [
         prepare(
           db,
-          `UPDATE source_syncs SET unchanged = ?4, removed = ?5, deferred = ?6
+          `UPDATE source_syncs SET unchanged = ?4, removed = ?5, deferred = ?6, withheld = ?7
             WHERE org_id = ?1 AND source_id = ?2 AND run_id = ?3 AND finished_at IS NULL`,
-        ).bind(orgId, sourceId, runId, known.unchanged, known.removed, known.deferred),
+        ).bind(
+          orgId,
+          sourceId,
+          runId,
+          known.unchanged,
+          known.removed,
+          known.deferred,
+          known.withheld ?? 0,
+        ),
       ];
       for (let i = 0; i < pages.length; i += PAGES_PER_INSERT) {
         statements.push(
@@ -361,7 +376,8 @@ export function syncFor(db: D1Database, orgId: string) {
     /**
      * Moves one page out of `pending` and, when it was the last, finishes the
      * run in the same D1 batch: the counts are added up once, from the pages,
-     * so a retried message cannot count a page twice. Returns true when this
+     * so a retried message cannot count a page twice. A run whose removals
+     * were withheld ends `failed` with `too_many_removals`. Returns true when this
      * call finished the run.
      *
      * Both statements require the run to still hold the source at `now`: a
@@ -390,8 +406,12 @@ export function syncFor(db: D1Database, orgId: string) {
                   updated = updated + ${pageCount("updated")},
                   unchanged = unchanged + ${pageCount("unchanged")},
                   failed = failed + ${pageCount("failed")},
-                  outcome = CASE WHEN ${pageCount("failed")} > 0 THEN 'partial' ELSE 'succeeded' END,
-                  error = CASE WHEN ${pageCount("failed")} > 0 THEN 'pages_failed' ELSE NULL END
+                  outcome = CASE WHEN withheld > 0 THEN 'failed'
+                                 WHEN ${pageCount("failed")} > 0 THEN 'partial'
+                                 ELSE 'succeeded' END,
+                  error = CASE WHEN withheld > 0 THEN 'too_many_removals'
+                               WHEN ${pageCount("failed")} > 0 THEN 'pages_failed'
+                               ELSE NULL END
             WHERE org_id = ?1 AND source_id = ?2 AND run_id = ?3 AND finished_at IS NULL
               AND lease_until > ?4
               AND NOT EXISTS (SELECT 1 FROM source_sync_pages

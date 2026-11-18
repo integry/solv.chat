@@ -3,8 +3,15 @@
 // Limitation: each hop is pre-checked via DNS-over-HTTPS before calling global
 // `fetch`, which resolves the hostname again independently. A host that changes
 // its DNS answer between the check and the fetch (DNS rebinding) is not caught.
-// That is an accepted limitation on Workers for an action only the signed-in
-// owner can trigger.
+// That is an accepted limitation on Workers, which offers no fetch pinned to
+// the checked address. It is not limited to an action the signed-in owner
+// starts: a scheduled sitemap sync repeats these fetches unattended on every
+// run, and MCP tool calls run when a visitor asks. See docs/architecture.md.
+//
+// The DNS-over-HTTPS check runs only when the fetch is the global one or a
+// `HostResolver` is given. A host that passes its own `fetch` (createApp's
+// `fetch` option) without a resolver, or its own `PageFetcher`, is
+// responsible for refusing private, loopback and link-local addresses itself.
 
 import { BadRequest } from "../admin/errors.js";
 

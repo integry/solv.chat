@@ -21,7 +21,15 @@ const ASSISTANT: Assistant = {
   createdAt: NOW - 100 * HOUR,
 };
 
-const ZERO = { added: 0, updated: 0, unchanged: 0, removed: 0, failed: 0, deferred: 0 };
+const ZERO = {
+  added: 0,
+  updated: 0,
+  unchanged: 0,
+  removed: 0,
+  failed: 0,
+  deferred: 0,
+  withheld: 0,
+};
 
 function source(overrides: Partial<SourceSummary> = {}): SourceSummary {
   return {
@@ -328,9 +336,57 @@ describe("Sources screen: sitemap sync", () => {
     const sync = cell(sourceRow("Help site"), "Sync");
     expect(sync.textContent).toContain("Last sync failed 2 hours ago.");
     expect(sync.textContent).toContain(
-      "It would have removed more than 20% of this source's pages, so nothing was changed.",
+      "It would have removed more than 20% of this source's pages, so none were removed.",
     );
     expect(sync.textContent).toContain("Next sync: soon.");
+    // Nothing was withheld (an older run), so there is nothing to sync anyway.
+    expect(within(sync).queryByRole("button", { name: "Sync Help site anyway" })).toBeNull();
+  });
+
+  it("offers Sync anyway after a sync kept pages, asks with the number removed, and lifts the limit once", async () => {
+    const withheld: SourceSyncStatus = {
+      schedule: "daily",
+      nextSyncAt: NOW + 20 * HOUR,
+      last: {
+        startedAt: NOW - HOUR,
+        finishedAt: NOW - HOUR,
+        outcome: "failed",
+        counts: { ...ZERO, added: 1, unchanged: 2, withheld: 3 },
+        error: "too_many_removals",
+        progress: null,
+      },
+    };
+    const { calls } = installServer({ sources: [source({ sync: withheld })] });
+    await openSources();
+    const sync = cell(sourceRow("Help site"), "Sync");
+    expect(sync.textContent).toContain(
+      "Last sync failed 1 hour ago: 1 added, 2 unchanged, 3 kept, not removed.",
+    );
+    expect(sync.textContent).toContain("Pages the sitemap lists were still added and updated.");
+
+    // Cancelling sends nothing.
+    fireEvent.click(within(sync).getByRole("button", { name: "Sync Help site anyway" }));
+    let dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("Sync Help site and remove 3 documents?");
+    expect(dialog.textContent).toContain("The sitemap no longer lists 3 documents of this source.");
+    await expectNoSeriousA11yViolations(dialog);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+
+    fireEvent.click(within(sync).getByRole("button", { name: "Sync Help site anyway" }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Sync anyway" }));
+    await screen.findByText("Syncing Help site…");
+    expect(calls.filter((c) => c.method === "POST")).toEqual([
+      { method: "POST", path: "/api/admin/sources/src_site/sync", body: { allowRemovals: 3 } },
+    ]);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    // Plain Sync now still sends no body, so the usual limit holds.
+    fireEvent.click(within(sync).getByRole("button", { name: "Sync Help site now" }));
+    await waitFor(() => expect(calls.filter((c) => c.method === "POST")).toHaveLength(2));
+    expect(calls.filter((c) => c.method === "POST")[1]?.body).toBeUndefined();
   });
 
   it("says why a Sync now failed straight away, and why it was refused", async () => {
@@ -527,6 +583,7 @@ describe("sync wording", () => {
       "sitemap_unavailable",
       "sitemap_invalid",
       "sitemap_empty",
+      "sitemap_index",
       "too_many_removals",
       "limit_refused",
       "pages_failed",
@@ -538,5 +595,8 @@ describe("sync wording", () => {
       expect(text.toLowerCase()).not.toContain("crawl");
     }
     expect(syncErrorText("too_many_removals")).not.toMatch(/\d/);
+    expect(syncErrorText("sitemap_index")).toBe(
+      "This is a sitemap index; use one of the sitemaps it lists.",
+    );
   });
 });

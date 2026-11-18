@@ -66,7 +66,7 @@ jobs:
           prune: "true"
 ```
 
-Replace `https://docs.example.com` with your site's URL. `base-url` is where the docs folder is served (Docusaurus serves it under `/docs` by default); `exclude: "**/_*"` leaves out Docusaurus partials. The `files` paths are relative to the repository root, which is where the action runs, so their document IDs stay the same on every push. With `source: docs` and `prune: "true"`, a page deleted from the folder is deleted from the assistant too, and nothing pushed under another name is touched.
+Replace `https://docs.example.com` with your site's URL. `base-url` is where the docs folder is served (Docusaurus serves it under `/docs` by default); `exclude: "**/_*"` leaves out `_` files in any folder; in a Docusaurus folder `solv push` already leaves out files and folders starting with `_`, and pages with `draft: true` or `unlisted: true`. The `files` paths are relative to the repository root, which is where the action runs, so their document IDs stay the same on every push. With `source: docs` and `prune: "true"`, a page deleted from the folder is deleted from the assistant too, and nothing pushed under another name is touched.
 
 ## All inputs
 

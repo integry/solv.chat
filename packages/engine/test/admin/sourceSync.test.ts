@@ -236,6 +236,71 @@ describe("admin source sync API", () => {
     expect(sources.find((s) => s.id === sourceId)?.sync).toEqual(status);
   });
 
+  it("offers Sync anyway after removals were withheld, and lifts the guard for that run only", async () => {
+    const h = harness(ORG_A);
+    const assistantId = await createAssistant(h);
+    const sourceId = await createSource(h, assistantId, "sitemap");
+    await syncNow(h, sourceId);
+    await h.drain();
+
+    // Both pages move to new URLs: the old ones are kept, the new ones added.
+    h.site.paths = ["a/", "b/"];
+    await syncNow(h, sourceId);
+    await h.drain();
+    let sync = (await listed(h, assistantId)).find((s) => s.id === sourceId)?.sync;
+    expect(sync?.last).toMatchObject({
+      outcome: "failed",
+      error: "too_many_removals",
+      counts: { added: 2, removed: 0, withheld: 2 },
+    });
+
+    for (const bad of [{ allowRemovals: -1 }, { allowRemovals: 1.5 }, { allowRemovals: "2" }, []]) {
+      const res = await h.call("POST", `/api/admin/sources/${sourceId}/sync`, bad);
+      expect(res.status).toBe(400);
+    }
+
+    const anyway = await h.call("POST", `/api/admin/sources/${sourceId}/sync`, {
+      allowRemovals: 2,
+    });
+    expect(anyway.status).toBe(202);
+    await h.drain();
+    sync = (await listed(h, assistantId)).find((s) => s.id === sourceId)?.sync;
+    expect(sync?.last).toMatchObject({
+      outcome: "succeeded",
+      error: null,
+      counts: { removed: 2, withheld: 0 },
+    });
+    const docs = await h.call("GET", `/api/admin/sources/${sourceId}/documents`);
+    const { documents } = (await docs.json()) as { documents: Array<{ url: string }> };
+    expect(documents.map((d) => d.url).sort()).toEqual([page("a/"), page("b/")]);
+  });
+
+  it("answers a sitemap index in the preview with its own code, not its sitemaps as pages", async () => {
+    const h = harness(ORG_A);
+    const assistantId = await createAssistant(h);
+    const index = `<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><sitemap><loc>${page("docs.xml")}</loc></sitemap></sitemapindex>`;
+    const indexApp = createApp(fakeSeams(), {
+      fetch: async () => new Response(index, { headers: { "content-type": "application/xml" } }),
+    });
+    const ctx = createExecutionContext();
+    const preview = await indexApp.fetch(
+      new Request(`https://example.com/api/admin/assistants/${assistantId}/sitemap-preview`, {
+        method: "POST",
+        headers: { Origin: "https://example.com", "Content-Type": "application/json" },
+        body: JSON.stringify({ url: SITEMAP }),
+      }),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(preview.status).toBe(400);
+    expect(await preview.json()).toEqual({
+      error: "That is not valid.",
+      code: "sitemap_index",
+      fields: ["url: This is a sitemap index; use one of the sitemaps it lists."],
+    });
+  });
+
   it("runs Sync now on a source whose schedule is off", async () => {
     const h = harness(ORG_A);
     const assistantId = await createAssistant(h);

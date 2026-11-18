@@ -367,6 +367,74 @@ describe("scheduled sitemap sync", () => {
     expect((await state(sourceId))?.counts).toMatchObject({ removed: 0, added: 0, failed: 0 });
   });
 
+  it("heals a bad page served with a 200 once its lastmod is older than the recheck age", async () => {
+    const h = harness({
+      sitemap: { a: "2026-11-01", b: "2026-11-01" },
+      pages: { a: "A.", b: "B." },
+    });
+    const sourceId = await seedSource(await seedAssistant());
+    await syncOnce(h, sourceId);
+
+    // The site is down for maintenance, answering 200, while the sitemap's
+    // lastmod moved: the documents are overwritten with the maintenance page.
+    h.site.sitemap = { a: "2026-11-10", b: "2026-11-10" };
+    h.site.pages = { a: "Down for maintenance", b: "Down for maintenance" };
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await syncOnce(h, sourceId);
+    expect((await state(sourceId))?.counts).toMatchObject({ updated: 2 });
+
+    // The site recovers, the sitemap keeps the same lastmod: trusted for now.
+    h.site.pages = { a: "A, back.", b: "B, back." };
+    h.pageFetches.length = 0;
+    h.advance(6 * SYNC_INTERVAL_MS.daily);
+    await syncOnce(h, sourceId);
+    expect(h.pageFetches).toEqual([]);
+    expect((await state(sourceId))?.counts).toMatchObject({ unchanged: 2, updated: 0 });
+
+    // Seven days after the last check, each page is fetched again with its
+    // validators and the real content comes back.
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await syncOnce(h, sourceId);
+    expect(h.pageFetches.map((f) => f.url).sort()).toEqual([page("a"), page("b")]);
+    expect(h.pageFetches.every((f) => f.validators?.etag)).toBe(true);
+    expect((await state(sourceId))?.counts).toMatchObject({ updated: 2 });
+    const docs = await forScheduledSync(env.DB, ORG).documents.listBySource(sourceId);
+    const bodies = await Promise.all(
+      docs.map(async (d) => (await env.DOCS.get(d.bodyKey ?? ""))?.text()),
+    );
+    expect(bodies.sort()).toEqual(["A, back.", "B, back."]);
+
+    // Checked again, the lastmod is trusted again; an unchanged page past
+    // the age costs only a 304.
+    h.pageFetches.length = 0;
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await syncOnce(h, sourceId);
+    expect(h.pageFetches).toEqual([]);
+    h.advance(SYNC_INTERVAL_MS.weekly);
+    h.ingestMessages.length = 0;
+    await syncOnce(h, sourceId);
+    expect(h.pageFetches).toHaveLength(2);
+    expect(h.ingestMessages).toEqual([]);
+    expect((await state(sourceId))?.counts).toMatchObject({ unchanged: 2, updated: 0 });
+  });
+
+  it("uses the source's own recheckDays", async () => {
+    const h = harness({ sitemap: { a: "2026-11-01" }, pages: { a: "A." } });
+    const sourceId = await seedSource(await seedAssistant(), {
+      url: SITEMAP,
+      sync: "daily",
+      recheckDays: 2,
+    });
+    await syncOnce(h, sourceId);
+    h.pageFetches.length = 0;
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await syncOnce(h, sourceId);
+    expect(h.pageFetches).toEqual([]);
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await syncOnce(h, sourceId);
+    expect(h.pageFetches.map((f) => f.url)).toEqual([page("a")]);
+  });
+
   it("updates a changed page and re-queues it for indexing", async () => {
     const h = harness({ sitemap: { a: "2026-11-01" }, pages: { a: "Old text." } });
     const sourceId = await seedSource(await seedAssistant());
@@ -453,9 +521,10 @@ describe("scheduled sitemap sync", () => {
       expect(await state(sourceId)).toMatchObject({
         outcome: "failed",
         error: "too_many_removals",
-        counts: { removed: 0, added: 0 },
+        counts: { removed: 0, added: 0, unchanged: 1, withheld: 3 },
       });
-      expect(h.pageFetches).toEqual([]);
+      // The page still listed is checked as usual; only the removals wait.
+      expect(h.pageFetches.map((f) => f.url)).toEqual([page("a")]);
 
       h.site.sitemap = { a: null, b: null };
       h.advance(SYNC_INTERVAL_MS.daily);
@@ -495,6 +564,120 @@ describe("scheduled sitemap sync", () => {
       await syncOnce(h, sourceId);
       expect(await docUrls(sourceId)).toEqual([page("a"), page("b")]);
       expect(await state(sourceId)).toMatchObject({ outcome: "succeeded", counts: { removed: 2 } });
+    });
+
+    it("still adds and updates listed pages when it withholds the removals", async () => {
+      // A whole-site URL change: every page moves to a trailing-slash URL.
+      const { h, sourceId } = await seeded(fourPages());
+      h.site.sitemap = { "a/": null, "b/": null, "c/": null, "d/": null, e: null };
+      h.site.pages = { "a/": "A.", "b/": "B.", "c/": "C.", "d/": "D.", e: "E." };
+      await syncOnce(h, sourceId);
+
+      expect(await docUrls(sourceId)).toEqual(
+        [page("a"), page("b"), page("c"), page("d"), page("a/")]
+          .concat([page("b/"), page("c/"), page("d/"), page("e")])
+          .sort(),
+      );
+      expect(await state(sourceId)).toMatchObject({
+        outcome: "failed",
+        error: "too_many_removals",
+        counts: { added: 5, removed: 0, withheld: 4, failed: 0 },
+      });
+
+      // With the new pages in, the old ones are now under half the source:
+      // the next run removes them without the owner having to step in.
+      h.advance(SYNC_INTERVAL_MS.daily);
+      await syncOnce(h, sourceId);
+      expect(await docUrls(sourceId)).toEqual(
+        [page("a/"), page("b/"), page("c/"), page("d/"), page("e")].sort(),
+      );
+      expect(await state(sourceId)).toMatchObject({
+        outcome: "succeeded",
+        counts: { added: 0, removed: 4, withheld: 0 },
+      });
+    });
+
+    it("withholds the removal of the only page of a one-page source, and reports it", async () => {
+      const { h, sourceId } = await seeded({ sitemap: { a: null }, pages: { a: "A.", b: "B." } });
+      h.site.sitemap = { b: null };
+      await syncOnce(h, sourceId);
+      expect(await docUrls(sourceId)).toEqual([page("a"), page("b")]);
+      expect(await state(sourceId)).toMatchObject({
+        outcome: "failed",
+        error: "too_many_removals",
+        counts: { added: 1, withheld: 1 },
+      });
+    });
+
+    it("records a refused run with nothing to fetch as failed with the removals withheld", async () => {
+      const { h, sourceId } = await seeded({
+        sitemap: { a: "2026-11-01", b: null, c: null },
+        pages: { a: "A.", b: "B.", c: "C." },
+      });
+      h.site.sitemap = { a: "2026-11-01" };
+      const started = await syncOnce(h, sourceId);
+      expect(started.status).toBe("finished");
+      expect(h.pageFetches).toEqual([]);
+      expect(await state(sourceId)).toMatchObject({
+        outcome: "failed",
+        error: "too_many_removals",
+        counts: { unchanged: 1, withheld: 2, removed: 0 },
+      });
+    });
+
+    it("lifts the guard for one run with allowRemovals, up to the number allowed", async () => {
+      const { h, sourceId } = await seeded(fourPages());
+      h.site.sitemap = { a: null };
+      await syncOnce(h, sourceId);
+      expect((await state(sourceId))?.counts.withheld).toBe(3);
+
+      // Fewer allowed than would go: refused as before, with the new number.
+      h.advance(60_000);
+      await startSourceSync(h.deps(), ORG, sourceId, { allowRemovals: 2 });
+      await h.drain();
+      expect(await docUrls(sourceId)).toHaveLength(4);
+      expect(await state(sourceId)).toMatchObject({
+        error: "too_many_removals",
+        counts: { withheld: 3 },
+      });
+
+      h.advance(60_000);
+      await startSourceSync(h.deps(), ORG, sourceId, { allowRemovals: 3 });
+      await h.drain();
+      expect(await docUrls(sourceId)).toEqual([page("a")]);
+      expect(await state(sourceId)).toMatchObject({
+        outcome: "succeeded",
+        error: null,
+        counts: { removed: 3, withheld: 0 },
+      });
+
+      // The next run has the usual guard again.
+      h.site.sitemap = { b: null };
+      h.site.pages.b = "B.";
+      h.advance(SYNC_INTERVAL_MS.daily);
+      await syncOnce(h, sourceId);
+      expect(await docUrls(sourceId)).toEqual([page("a"), page("b")]);
+      expect(await state(sourceId)).toMatchObject({
+        error: "too_many_removals",
+        counts: { added: 1, withheld: 1 },
+      });
+    });
+
+    it("keeps the other guards when allowRemovals is given", async () => {
+      const { h, sourceId } = await seeded(fourPages());
+      h.site.sitemap = {};
+      await startSourceSync(h.deps(), ORG, sourceId, { allowRemovals: 4 });
+      expect(await docUrls(sourceId)).toHaveLength(4);
+      expect(await state(sourceId)).toMatchObject({ error: "sitemap_empty" });
+    });
+
+    it("reports a sitemap index as sitemap_index and changes nothing", async () => {
+      const { h, sourceId } = await seeded(fourPages());
+      h.site.sitemapBody = `<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><sitemap><loc>${page("docs-sitemap.xml")}</loc></sitemap></sitemapindex>`;
+      await syncOnce(h, sourceId);
+      expect(await docUrls(sourceId)).toHaveLength(4);
+      expect(await state(sourceId)).toMatchObject({ outcome: "failed", error: "sitemap_index" });
+      expect(h.pageFetches).toEqual([]);
     });
 
     it("uses the source's own maxRemovePercent", async () => {

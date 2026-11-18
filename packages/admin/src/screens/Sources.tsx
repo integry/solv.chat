@@ -19,7 +19,14 @@ import { StatusBadge, type StatusTone } from "../ui/StatusBadge.js";
 import { useToast } from "../ui/Toast.js";
 import { cliPushCommand } from "./cliCommand.js";
 import { EntryEditor } from "./EntryEditor.js";
-import { isSyncing, SyncCell, SyncingStatus, syncCountsText, syncErrorText } from "./SourceSync.js";
+import {
+  isSyncing,
+  SyncCell,
+  SyncingStatus,
+  syncCountsText,
+  syncErrorText,
+  withheldRemovals,
+} from "./SourceSync.js";
 
 export interface SourcesProps {
   assistantId: string;
@@ -563,6 +570,7 @@ export function Sources({ assistantId }: SourcesProps) {
   // user has since opened for another source.
   function closeConfirmSyncFor(sourceId: string) {
     setConfirmSync((current) => (current?.source.id === sourceId ? null : current));
+    setConfirmAnyway((current) => (current?.source.id === sourceId ? null : current));
   }
   function releaseSyncBusy(sourceId: string) {
     const next = new Set(syncBusyRef.current);
@@ -574,6 +582,12 @@ export function Sources({ assistantId }: SourcesProps) {
   const [confirmSync, setConfirmSync] = useState<{
     source: SourceSummary;
     action: "now" | Exclude<SyncSchedule, "off">;
+  } | null>(null);
+  // "Sync anyway" after a sync kept pages it would have removed: asked first,
+  // with the number that goes.
+  const [confirmAnyway, setConfirmAnyway] = useState<{
+    source: SourceSummary;
+    removals: number;
   } | null>(null);
   const [reimport, setReimport] = useState<{
     sourceId: string;
@@ -808,12 +822,13 @@ export function Sources({ assistantId }: SourcesProps) {
     }
   }
 
-  async function startSync(source: SourceSummary) {
+  async function startSync(source: SourceSummary, allowRemovals?: number) {
     if (!claimSyncBusy(source.id)) return;
     setActionError(null);
     try {
       const res = await postJson<{ sync: SourceSyncStatus }>(
         `/api/admin/sources/${source.id}/sync`,
+        allowRemovals !== undefined ? { allowRemovals } : undefined,
       );
       const last = res.sync.last;
       if (last?.outcome === "failed") {
@@ -941,6 +956,10 @@ export function Sources({ assistantId }: SourcesProps) {
                   busy={syncBusyIds.has(source.id)}
                   onScheduleChange={(schedule) => handleScheduleChange(source, schedule)}
                   onSyncNow={() => handleSyncNow(source)}
+                  onSyncAnyway={() => {
+                    const removals = withheldRemovals(source.sync);
+                    if (removals > 0) setConfirmAnyway({ source, removals });
+                  }}
                 />
               ) : null,
           },
@@ -1282,6 +1301,28 @@ export function Sources({ assistantId }: SourcesProps) {
           if (!confirmSync) return;
           if (confirmSync.action === "now") void startSync(confirmSync.source);
           else void saveSchedule(confirmSync.source, confirmSync.action);
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmAnyway !== null}
+        title={
+          confirmAnyway
+            ? `Sync ${sourceName(confirmAnyway.source)} and remove ${formatCount(confirmAnyway.removals)}?`
+            : "Sync anyway?"
+        }
+        description={
+          confirmAnyway
+            ? `The sitemap no longer lists ${formatCount(confirmAnyway.removals)} of this source. This sync removes ${confirmAnyway.removals === 1 ? "it" : "them"} from your assistant's answers. This cannot be undone. Later syncs keep the usual limit.`
+            : ""
+        }
+        confirmLabel="Sync anyway"
+        busyLabel="Starting…"
+        tone="danger"
+        busy={confirmAnyway !== null && syncBusyIds.has(confirmAnyway.source.id)}
+        onCancel={() => setConfirmAnyway(null)}
+        onConfirm={() => {
+          if (confirmAnyway) void startSync(confirmAnyway.source, confirmAnyway.removals);
         }}
       />
 

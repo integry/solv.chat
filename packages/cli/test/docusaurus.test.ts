@@ -47,7 +47,7 @@ describe("solv push on a Docusaurus docs folder", () => {
     const { documents, logs, sent } = await run({
       dir: join(site, "docs"),
       baseUrl: "https://acme.dev/docs",
-      exclude: ["**/_*", "drafts/**"],
+      // `_` partials, the draft and the unlisted page are left out unasked.
       files: [
         { path: readme, url: "https://acme.dev/" },
         { path: changelog, url: "https://acme.dev/changelog" },
@@ -56,7 +56,10 @@ describe("solv push on a Docusaurus docs folder", () => {
       prune: true,
     });
 
-    expect(logs[0]).toBe("Docusaurus content found: using its URLs, titles and cleanup");
+    expect(logs.slice(0, 2)).toEqual([
+      "Docusaurus content found: using its URLs, titles and cleanup",
+      "Left out 4 files with no page on the site: names starting with _, drafts and unlisted pages",
+    ]);
     expect(documents).toEqual([
       {
         // A file named like its folder is the folder's page; prefixes go.
@@ -147,6 +150,15 @@ describe("solv push on a Docusaurus docs folder", () => {
         markdown: "# Guides\n\nPick a guide.\n",
       },
       {
+        // Placeholders and generics in prose are not components; more
+        // admonition types are converted. `draft: false` is pushed.
+        externalId: "guides/tokens",
+        title: "Tokens",
+        url: "https://acme.dev/docs/guides/tokens",
+        markdown:
+          "Set <YOUR_TOKEN> and <OWNER>/<REPO>, then call `get()` for a List<Int>.\n\n**Caution:** Rotate it often.\n",
+      },
+      {
         // `slug: /` is the docs root; description leads the body.
         externalId: "intro",
         title: "Welcome to Acme",
@@ -190,6 +202,7 @@ describe("solv push on a Docusaurus docs folder", () => {
       "01-getting-started/03-configure",
       "guides/2024-01-release",
       "guides/deploy",
+      "guides/tokens",
       "intro",
     ]);
   });
@@ -237,11 +250,13 @@ describe("solv push on a Docusaurus docs folder", () => {
     expect(sent).toEqual([]);
     expect(logs).toEqual([
       "Docusaurus content found: using its URLs, titles and cleanup",
-      "3 documents would be pushed",
+      "Left out 1 file with no page on the site: names starting with _, drafts and unlisted pages",
+      "4 documents would be pushed",
       "  guides/2024-01-release -> https://acme.dev/docs/guides/2024-01-release",
       "  guides/deploy -> https://acme.dev/docs/guides/ship-it",
       "  guides/index -> https://acme.dev/docs/guides/",
-      'Would prune documents of source "docs" not in the 3-document pushed set',
+      "  guides/tokens -> https://acme.dev/docs/guides/tokens",
+      'Would prune documents of source "docs" not in the 4-document pushed set',
     ]);
   });
 });
@@ -350,6 +365,22 @@ describe("Docusaurus rules", () => {
       "```",
       ":::",
       "",
+      ":::caution",
+      "Mind the gap.",
+      ":::",
+      "",
+      ":::important[Read this]",
+      "Important.",
+      ":::",
+      "",
+      ":::success",
+      "It worked.",
+      ":::",
+      "",
+      ":::secondary",
+      "Aside.",
+      ":::",
+      "",
       ":::",
       "A stray closing line stays.",
     ].join("\n");
@@ -368,6 +399,14 @@ describe("Docusaurus rules", () => {
         "```sh",
         "rm -rf /",
         "```",
+        "",
+        "**Caution:** Mind the gap.",
+        "",
+        "**Read this:** Important.",
+        "",
+        "**Success:** It worked.",
+        "",
+        "**Secondary:** Aside.",
         "",
         ":::",
         "A stray closing line stays.",
@@ -421,6 +460,73 @@ describe("Docusaurus rules", () => {
       ].join("\n"),
     );
     expect(out).toContain(code);
+  });
+
+  it("strips only components with a closing tag or self-closing, never prose in angle brackets", () => {
+    const input = [
+      "Set <YOUR_TOKEN> and <OWNER>/<REPO>.",
+      "",
+      "A List<Int> or Map<String, List<Int>> stays; so does a lone </Stray> tag.",
+      "",
+      "<Tabs>",
+      '  <TabItem value="a">',
+      "",
+      "```sh",
+      "npm i <PACKAGE>",
+      "```",
+      "",
+      "  </TabItem>",
+      "</Tabs>",
+      "",
+      "<Note>Use <VALUE> here.</Note> <Spacer />",
+      "",
+      "<Outer><Inner>text</Outer>",
+    ].join("\n");
+    expect(cleanDocusaurusMarkdown(input)).toBe(
+      [
+        "Set <YOUR_TOKEN> and <OWNER>/<REPO>.",
+        "",
+        "A List<Int> or Map<String, List<Int>> stays; so does a lone </Stray> tag.",
+        "",
+        "```sh",
+        "npm i <PACKAGE>",
+        "```",
+        "",
+        "Use <VALUE> here.",
+        "",
+        // An opening tag with no closing one before its parent closes is kept.
+        "<Inner>text",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("leaves out _ files and folders, drafts and unlisted pages only in Docusaurus mode", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "solv-docusaurus-hidden-"));
+    try {
+      await mkdir(join(dir, "_includes"));
+      await writeFile(join(dir, "_includes", "part.md"), "Part.\n");
+      await writeFile(join(dir, "_note.md"), "Note.\n");
+      await writeFile(join(dir, "draft.md"), "---\ndraft: true\n---\n\nDraft.\n");
+      await writeFile(join(dir, "hidden.md"), "---\nunlisted: True # for now\n---\n\nHidden.\n");
+      await writeFile(join(dir, "page.md"), "---\ndraft: false\nunlisted: false\n---\n\nPage.\n");
+
+      // A plain folder: every file goes, as before.
+      const plain = await run({ dir, baseUrl: "https://acme.dev/docs" });
+      expect(plain.documents.map((d) => d.externalId).sort()).toEqual([
+        "_includes/part",
+        "_note",
+        "draft",
+        "hidden",
+        "page",
+      ]);
+
+      await writeFile(join(dir, "intro.mdx"), "Intro.\n");
+      const docusaurus = await run({ dir, baseUrl: "https://acme.dev/docs" });
+      expect(docusaurus.documents.map((d) => d.externalId).sort()).toEqual(["intro", "page"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("keeps fenced code inside blockquotes byte for byte", () => {

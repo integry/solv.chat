@@ -1,4 +1,9 @@
-import { DEFAULT_SYNC_MAX_REMOVE_PERCENT, type SyncSchedule } from "@solvchat/core";
+import {
+  DEFAULT_SYNC_MAX_REMOVE_PERCENT,
+  DEFAULT_SYNC_RECHECK_DAYS,
+  MAX_SYNC_RECHECK_DAYS,
+  type SyncSchedule,
+} from "@solvchat/core";
 import { BadRequest } from "../admin/errors.js";
 import {
   extractSitemapEntries,
@@ -160,6 +165,30 @@ function maxRemovePercentOf(settings: Record<string, unknown>): number {
     : DEFAULT_SYNC_MAX_REMOVE_PERCENT;
 }
 
+/** How long an unchanged `<lastmod>` is trusted before the page is checked again, in ms. */
+function recheckMsOf(settings: Record<string, unknown>): number {
+  const value = settings.recheckDays;
+  const days =
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= MAX_SYNC_RECHECK_DAYS
+      ? value
+      : DEFAULT_SYNC_RECHECK_DAYS;
+  return days * DAY_MS;
+}
+
+/** Options for one run, given by the admin's "Sync anyway". */
+export interface SyncRunOptions {
+  /**
+   * Lifts the removal-share guard for this run only, as long as it would
+   * remove at most this many documents (the number the owner was shown). A
+   * run that would remove more is refused as usual and reports the new
+   * number. The other guards (unreadable, invalid or empty sitemap) stay.
+   */
+  allowRemovals?: number | undefined;
+}
+
 async function sendPageMessages(queue: SyncQueue, messages: SyncPageMessage[]): Promise<void> {
   let batch: Array<{ body: SyncPageMessage }> = [];
   let bytes = 0;
@@ -190,7 +219,10 @@ interface Plan {
 /**
  * Decides what one run does, from the sitemap, the source's documents and
  * when each page was last queued: what to remove, what to skip on an
- * unchanged `<lastmod>`, and which pages to fetch, within the caps. Pages are
+ * unchanged `<lastmod>`, and which pages to fetch, within the caps. An
+ * unchanged `<lastmod>` is trusted only while the page was checked less than
+ * `recheckMs` ago: a page served wrongly once (a maintenance page with a 200)
+ * would otherwise be pinned by a date that never changes. Pages are
  * taken queued-longest-ago first (never queued first, new pages before
  * documents among those), so a page that failed last time goes behind the
  * ones that waited. Pages left out are counted as deferred.
@@ -199,7 +231,13 @@ function planRun(
   entries: SitemapEntry[],
   documents: DocumentSyncRow[],
   attempts: ReadonlyMap<string, number>,
-  options: { removeAllowed: boolean; maxPages: number; maxDocuments: number },
+  options: {
+    removeAllowed: boolean;
+    maxPages: number;
+    maxDocuments: number;
+    now: number;
+    recheckMs: number;
+  },
 ): Plan {
   const listed = new Set(entries.map((entry) => entry.url));
   const byUrl = new Map(documents.map((doc) => [doc.url, doc]));
@@ -220,10 +258,14 @@ function planRun(
     } else if (
       entry.lastmod !== null &&
       doc.sitemapLastmod === entry.lastmod &&
-      doc.indexedHash === doc.contentHash
+      doc.indexedHash === doc.contentHash &&
+      doc.syncCheckedAt !== null &&
+      options.now - doc.syncCheckedAt < options.recheckMs
     ) {
       // Skipped only once its content is indexed: a document whose indexing
       // failed is checked again, so the page's handler can queue it anew.
+      // A check older than `recheckMs` is due again; it is a conditional
+      // request, so an unchanged page costs a 304.
       unchanged++;
     } else {
       checks.push(candidate);
@@ -254,16 +296,22 @@ function planRun(
  * trips), and queues one message per page to fetch.
  *
  * The guard: a sitemap that cannot be read, is not a complete, well-formed
- * `<urlset>`, lists no page, or would remove more than the source's
- * `maxRemovePercent` (default 50%) of its documents removes nothing, fetches
- * nothing, and records the run as failed.
+ * `<urlset>` (a sitemap index is reported as `sitemap_index`), or lists no
+ * page removes nothing, fetches nothing, and records the run as failed. One
+ * that would remove more than the source's `maxRemovePercent` (default 50%)
+ * of its documents still adds and updates the pages it lists but removes
+ * nothing; the run is recorded as failed with `too_many_removals` and the
+ * number it kept (`withheld`), so the owner can choose "Sync anyway"
+ * (`options.allowRemovals`). Without that, a small source losing one page,
+ * or a whole site moving to new URLs, would be refused on every run.
  */
 export async function startSourceSync(
   deps: SyncSchedulerDeps,
   orgId: string,
   sourceId: string,
+  options?: SyncRunOptions,
 ): Promise<SyncStartResult> {
-  return startSourceSyncFor(deps, forScheduledSync(deps.db, orgId), orgId, sourceId);
+  return startSourceSyncFor(deps, forScheduledSync(deps.db, orgId), orgId, sourceId, options);
 }
 
 /**
@@ -275,6 +323,7 @@ export async function startSourceSyncFor(
   tenant: Tenant,
   orgId: string,
   sourceId: string,
+  options?: SyncRunOptions,
 ): Promise<SyncStartResult> {
   const now = deps.now ?? Date.now;
   const source = await tenant.sources.get(sourceId);
@@ -290,7 +339,7 @@ export async function startSourceSyncFor(
       | "sitemap_unavailable"
       | "sitemap_invalid"
       | "sitemap_empty"
-      | "too_many_removals"
+      | "sitemap_index"
       | "limit_refused",
   ): Promise<SyncStartResult> => {
     await tenant.sync.finish(source.id, runId, now(), { outcome: "failed", error });
@@ -322,7 +371,8 @@ export async function startSourceSyncFor(
     xml,
     MAX_SYNC_SITEMAP_URLS,
   );
-  if (isIndex) return fail("sitemap_empty");
+  // An index lists other sitemaps, not pages; following it is not done.
+  if (isIndex) return fail("sitemap_index");
   // A body that ended early or is broken XML may have lost its last entries;
   // reading it would remove their documents. The preview stays lenient.
   if (!wellFormed) return fail("sitemap_invalid");
@@ -330,15 +380,27 @@ export async function startSourceSyncFor(
 
   const documents = await tenant.documents.listForSync(source.id);
   const attempts = await tenant.sync.attempts(source.id);
-  const plan = planRun(entries, documents, attempts, {
+  const planOptions = {
     // A sitemap read only in part says nothing about the pages after the cut.
     removeAllowed: !truncated,
     maxPages,
     maxDocuments,
-  });
+    now: startedAt,
+    recheckMs: recheckMsOf(source.settings),
+  };
+  let plan = planRun(entries, documents, attempts, planOptions);
   const maxRemovePercent = maxRemovePercentOf(source.settings);
-  if (plan.removed.length * 100 > maxRemovePercent * documents.length) {
-    return fail("too_many_removals");
+  const allowRemovals = positive(options?.allowRemovals);
+  let withheld = 0;
+  if (
+    plan.removed.length * 100 > maxRemovePercent * documents.length &&
+    !(allowRemovals !== undefined && plan.removed.length <= allowRemovals)
+  ) {
+    // Too many would go: keep them all, but still add and update what the
+    // sitemap lists, so a source whose ratio is tripped (one page of one
+    // removed, a site moved to new URLs) does not stop syncing for good.
+    withheld = plan.removed.length;
+    plan = planRun(entries, documents, attempts, { ...planOptions, removeAllowed: false });
   }
 
   const removed =
@@ -357,12 +419,13 @@ export async function startSourceSyncFor(
       [...attempts.keys()].filter((url) => !listed.has(url)),
     );
   }
-  const known = { unchanged: plan.unchanged, removed, deferred: plan.deferred };
+  const known = { unchanged: plan.unchanged, removed, deferred: plan.deferred, withheld };
 
   if (plan.pages.length === 0) {
     await tenant.sync.finish(source.id, runId, now(), {
-      outcome: "succeeded",
-      error: null,
+      ...(withheld > 0
+        ? { outcome: "failed", error: "too_many_removals" }
+        : { outcome: "succeeded", error: null }),
       ...known,
     });
     return { status: "finished", runId };

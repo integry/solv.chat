@@ -309,12 +309,28 @@ export interface SitemapFetchOptions {
   resolveHost?: HostResolver | undefined;
 }
 
+/** What the admin shows for a sitemap index, in the preview and as `sitemap_index`. */
+export const SITEMAP_INDEX_MESSAGE = "This is a sitemap index; use one of the sitemaps it lists.";
+
+/**
+ * Thrown by the preview for a sitemap index: its `<loc>` values are other
+ * sitemaps, not pages, so listing them as pages would import sitemap files.
+ * A 400 with code `sitemap_index`, the same code a sync records.
+ */
+export class SitemapIndexError extends BadRequest {
+  constructor() {
+    super([`url: ${SITEMAP_INDEX_MESSAGE}`], "sitemap_index");
+  }
+}
+
 export async function previewSitemap(
   url: string,
   fetchImpl: typeof fetch = fetch,
   options?: SitemapFetchOptions,
 ): Promise<string[]> {
   const xml = await fetchSitemapXml(url, fetchImpl, options);
+  // Following an index to its sitemaps is not done; the owner picks one.
+  if (extractSitemapEntries(xml, 1).isIndex) throw new SitemapIndexError();
   // A deliberately small extractor rather than an XML parser dependency: we
   // need <loc> values, and anything else in the document is not our business.
   return extractLocs(xml);

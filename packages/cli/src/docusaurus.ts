@@ -13,6 +13,9 @@
  * - Front matter keys: https://github.com/facebook/docusaurus/blob/main/packages/docusaurus-plugin-content-docs/src/frontMatter.ts
  * - Admonitions: https://docusaurus.io/docs/markdown-features/admonitions
  *   and https://github.com/facebook/docusaurus/blob/main/packages/docusaurus-mdx-loader/src/remark/admonitions/index.ts
+ * - Files left out (`_` prefixes, `draft`, `unlisted`): the `exclude` option in
+ *   https://docusaurus.io/docs/api/plugins/@docusaurus/plugin-content-docs
+ *   and https://docusaurus.io/docs/api/plugins/@docusaurus/plugin-content-docs#markdown-front-matter
  */
 
 import { posix } from "node:path";
@@ -41,8 +44,22 @@ const DOCUSAURUS_KEYS = [
 ];
 const DOCUSAURUS_KEY_RE = new RegExp(`^(?:${DOCUSAURUS_KEYS.join("|")})[ \\t]*:`, "m");
 
-/** Docusaurus's default admonition keywords. */
-const ADMONITION_TYPES = ["note", "tip", "info", "warning", "danger"];
+/**
+ * Docusaurus's default admonition keywords: the five documented ones, and
+ * `secondary`, `important`, `success` and `caution`, which the admonitions
+ * plugin's default list also holds (`caution` is the older name of `warning`).
+ */
+const ADMONITION_TYPES = [
+  "note",
+  "tip",
+  "info",
+  "warning",
+  "danger",
+  "caution",
+  "important",
+  "success",
+  "secondary",
+];
 const ADMONITION_OPEN_RE = new RegExp(
   `^([ \\t]*)(:{3,})(${ADMONITION_TYPES.join("|")})(?:\\[(.*)\\])?(?:[ \\t]+(.*?))?[ \\t]*\\r?$`,
 );
@@ -116,6 +133,27 @@ function isCategoryIndex(fileName: string, dirName: string): boolean {
   const name = fileName.toLowerCase();
   const parent = dirName === "." ? "." : (dirName.split("/").pop() ?? "");
   return name === "index" || name === "readme" || name === parent.toLowerCase();
+}
+
+/**
+ * True for a path Docusaurus never builds into a page: a file or folder whose
+ * name starts with `_` (partials and other files meant to be imported, left
+ * out by the docs plugin's default `exclude`). `relPath` uses `/` separators.
+ */
+export function isDocusaurusPartialPath(relPath: string): boolean {
+  return relPath.split("/").some((segment) => segment.startsWith("_"));
+}
+
+// `draft: true` or `unlisted: true` as a top-level key, in any YAML 1.2 spelling of true.
+const HIDDEN_DOC_RE = /^(?:draft|unlisted)[ \t]*:[ \t]*(?:true|True|TRUE)[ \t]*(?:#.*)?\r?$/m;
+
+/**
+ * True when front matter says the doc has no public page to point an answer
+ * at: `draft: true` (left out of production builds) or `unlisted: true`
+ * (left out of the sidebar, sitemap and search, reachable only by its link).
+ */
+export function isDocusaurusHiddenDoc(block: string | null): boolean {
+  return block !== null && HIDDEN_DOC_RE.test(block);
 }
 
 /** The doc's title fallback: its `id`, or the file name without a number prefix. */
@@ -385,30 +423,82 @@ function tagEnd(text: string, start: number): number {
 }
 
 // A component tag: `<Tabs`, `</TabItem`, `<Foo.Bar`, or a fragment `<>`/`</>`.
-const COMPONENT_TAG_RE = /^<\/?(?:[A-Z][\w$]*(?:\.[\w$]+)*(?=[\s/>])|>)/;
+const COMPONENT_TAG_RE = /^<(\/)?(?:([A-Z][\w$]*(?:\.[\w$]+)*)(?=[\s/>])|>)/;
 
-/**
- * Removes JSX component tags from a run of non-code lines, keeping what is
- * between an opening and a closing tag. Self-closing components have no text
- * and disappear. Lower-case HTML tags are left alone; inline code spans are
- * already hidden by `protectCodeSpans`.
- */
-function stripComponents(text: string): string {
-  let out = "";
+interface ComponentTag {
+  start: number;
+  end: number;
+  /** "" for a fragment. */
+  name: string;
+  kind: "open" | "close" | "self";
+}
+
+/** The component tags in a run of non-code lines, in order. */
+function scanComponentTags(text: string): ComponentTag[] {
+  const tags: ComponentTag[] = [];
   let i = 0;
   while (i < text.length) {
-    const ch = text[i] as string;
-    if (ch === "<" && COMPONENT_TAG_RE.test(text.slice(i, i + 200))) {
-      const end = tagEnd(text, i);
-      if (end !== -1) {
-        i = end;
-        continue;
-      }
+    const lt = text.indexOf("<", i);
+    if (lt === -1) break;
+    const match = COMPONENT_TAG_RE.exec(text.slice(lt, lt + 200));
+    const end = match ? tagEnd(text, lt) : -1;
+    if (match === null || end === -1) {
+      i = lt + 1;
+      continue;
     }
-    out += ch;
-    i++;
+    const closing = match[1] === "/";
+    const selfClosing = !closing && /\/\s*>$/.test(text.slice(lt, end));
+    tags.push({
+      start: lt,
+      end,
+      name: match[2] ?? "",
+      kind: closing ? "close" : selfClosing ? "self" : "open",
+    });
+    i = end;
   }
-  return out;
+  return tags;
+}
+
+/**
+ * Which tags are components to strip. Only a tag that is self-closing, or an
+ * opening tag with a matching closing tag after it (and that closing tag),
+ * is one: capitalised angle-bracket text in prose, such as `<YOUR_TOKEN>`,
+ * `<OWNER>/<REPO>` or `List<Int>`, has no closing tag and is kept. Each
+ * closing tag pairs with the nearest unclosed opening tag of the same name;
+ * opening tags skipped over that way have no closing tag.
+ */
+function componentTagsToStrip(tags: readonly ComponentTag[]): Set<ComponentTag> {
+  const strip = new Set<ComponentTag>();
+  const open: ComponentTag[] = [];
+  for (const tag of tags) {
+    if (tag.kind === "self") strip.add(tag);
+    else if (tag.kind === "open") open.push(tag);
+    else {
+      let k = open.length - 1;
+      while (k >= 0 && open[k]?.name !== tag.name) k--;
+      if (k < 0) continue;
+      strip.add(open[k] as ComponentTag);
+      strip.add(tag);
+      open.length = k;
+    }
+  }
+  return strip;
+}
+
+/** `text` without the tags of `tags` that are in `strip`. */
+function removeTags(
+  text: string,
+  tags: readonly ComponentTag[],
+  strip: ReadonlySet<ComponentTag>,
+): string {
+  let out = "";
+  let from = 0;
+  for (const tag of tags) {
+    if (!strip.has(tag)) continue;
+    out += text.slice(from, tag.start);
+    from = tag.end;
+  }
+  return out + text.slice(from);
 }
 
 /**
@@ -490,30 +580,49 @@ function protectCodeSpans(lines: Line[]): { lines: Line[]; restore: (text: strin
   };
 }
 
+/**
+ * Removes JSX component tags from the non-code lines, keeping what is
+ * between an opening and a closing tag (see `componentTagsToStrip`). A tag
+ * never spans a code block, but a component may hold one (`<TabItem>`, a
+ * fence, `</TabItem>`), so tags are paired across the whole document.
+ * Self-closing components have no text and disappear. Lower-case HTML tags
+ * are left alone; inline code spans are already hidden by `protectCodeSpans`.
+ */
 function stripComponentLines(lines: Line[]): Line[] {
-  const out: Line[] = [];
+  // Runs of non-code lines, each joined so a tag may span its lines.
+  const parts: Array<Line | { run: string[]; tags: ComponentTag[] }> = [];
   let run: string[] = [];
   const flush = () => {
     if (run.length === 0) return;
-    const before = run;
-    const after = stripComponents(before.join("\n")).split("\n");
+    parts.push({ run, tags: scanComponentTags(run.join("\n")) });
+    run = [];
+  };
+  for (const line of lines) {
+    if (line.code) {
+      flush();
+      parts.push(line);
+    } else {
+      run.push(line.text);
+    }
+  }
+  flush();
+
+  const strip = componentTagsToStrip(parts.flatMap((part) => ("run" in part ? part.tags : [])));
+  const out: Line[] = [];
+  for (const part of parts) {
+    if (!("run" in part)) {
+      out.push(part);
+      continue;
+    }
+    const before = part.run;
+    const after = removeTags(before.join("\n"), part.tags, strip).split("\n");
     for (const [index, text] of after.entries()) {
       // A line that only held tags becomes blank rather than stray spaces.
       const blanked = text.trim() === "" ? "" : text;
       const changed = blanked !== before[index];
       out.push({ text: changed ? blanked.replace(/[ \t]+(\r?)$/, "$1") : blanked, code: false });
     }
-    run = [];
-  };
-  for (const line of lines) {
-    if (line.code) {
-      flush();
-      out.push(line);
-    } else {
-      run.push(line.text);
-    }
   }
-  flush();
   return out;
 }
 

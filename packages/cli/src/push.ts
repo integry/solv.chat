@@ -7,6 +7,8 @@ import {
   docusaurusSlug,
   hasDocusaurusFrontMatter,
   hasDocusaurusSyntax,
+  isDocusaurusHiddenDoc,
+  isDocusaurusPartialPath,
   withDescription,
 } from "./docusaurus.js";
 import { selectPaths } from "./glob.js";
@@ -164,6 +166,8 @@ function plainDocument(entry: SourceFile, externalId: string, url: string): Push
 interface Loaded {
   documents: PushDocument[];
   docusaurus: boolean;
+  /** Docusaurus files left out: `_` partials, drafts and unlisted pages. */
+  hidden: number;
 }
 
 async function loadFromDir(
@@ -185,10 +189,17 @@ async function loadFromDir(
   // without front matter still needs its number prefixes stripped like the
   // rest, and choosing fewer files must not change any file's URL.
   const docusaurus = allEntries.some(looksLikeDocusaurus);
+  // Docusaurus builds no page for a `_` file or folder, a draft or an
+  // unlisted doc, so an answer could not link to one. `--file` pushes one anyway.
+  const visible = docusaurus
+    ? entries.filter(
+        (entry) => !isDocusaurusPartialPath(entry.rel) && !isDocusaurusHiddenDoc(entry.block),
+      )
+    : entries;
   const documents: PushDocument[] = [];
   const seen = new Map<string, string>();
 
-  for (const entry of entries) {
+  for (const entry of visible) {
     const externalId = externalIdFor(root, entry.file);
     const normalizedId = externalId.trim();
     const existing = seen.get(normalizedId);
@@ -208,7 +219,7 @@ async function loadFromDir(
     );
   }
 
-  return { documents, docusaurus };
+  return { documents, docusaurus, hidden: entries.length - visible.length };
 }
 
 /**
@@ -296,6 +307,7 @@ async function loadFromJson(file: string, baseUrl?: string): Promise<PushDocumen
 export async function push(options: PushOptions, deps: CliDeps): Promise<void> {
   let documents: PushDocument[];
   let docusaurus = false;
+  let hidden = 0;
   if (options.json !== undefined) {
     documents = await loadFromJson(options.json, options.baseUrl);
   } else if (options.dir !== undefined || (options.files?.length ?? 0) > 0) {
@@ -312,6 +324,7 @@ export async function push(options: PushOptions, deps: CliDeps): Promise<void> {
       );
       documents = loaded.documents;
       docusaurus = loaded.docusaurus;
+      hidden = loaded.hidden;
     }
     documents.push(...(await loadExtraFiles(options.files ?? [])));
     assertUniqueIds(documents);
@@ -322,6 +335,11 @@ export async function push(options: PushOptions, deps: CliDeps): Promise<void> {
   const target = options.source !== undefined ? { source: options.source } : {};
   if (docusaurus) {
     deps.log("Docusaurus content found: using its URLs, titles and cleanup");
+    if (hidden > 0) {
+      deps.log(
+        `Left out ${hidden === 1 ? "1 file" : `${hidden} files`} with no page on the site: names starting with _, drafts and unlisted pages`,
+      );
+    }
   }
 
   if (options.dryRun) {

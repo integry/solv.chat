@@ -22,6 +22,17 @@ export const SYNC_SCHEDULES: readonly SyncSchedule[] = ["off", "daily", "weekly"
  */
 export const DEFAULT_SYNC_MAX_REMOVE_PERCENT = 50;
 
+/**
+ * How many days a sync trusts an unchanged sitemap `<lastmod>`, unless the
+ * owner sets another. A page last checked longer ago than this is fetched
+ * again (with its stored ETag / Last-Modified, so an unchanged page costs a
+ * 304), so a bad page served once with a 200 cannot stay pinned by a date
+ * that never changes. Ours; the sitemap protocol gives no number.
+ */
+export const DEFAULT_SYNC_RECHECK_DAYS = 7;
+/** The largest `recheckDays` an owner may set. */
+export const MAX_SYNC_RECHECK_DAYS = 365;
+
 // A type, not an interface, so it stays assignable to `Record<string, unknown>`.
 export type SitemapSourceSettings = {
   url: string;
@@ -29,6 +40,8 @@ export type SitemapSourceSettings = {
   sync?: SyncSchedule;
   /** 1 to 100; left out means `DEFAULT_SYNC_MAX_REMOVE_PERCENT`. */
   maxRemovePercent?: number;
+  /** 1 to `MAX_SYNC_RECHECK_DAYS`; left out means `DEFAULT_SYNC_RECHECK_DAYS`. */
+  recheckDays?: number;
 };
 
 export interface EntryInput {
@@ -106,10 +119,24 @@ export function parseSourceInput(value: unknown): Result<SourceInput> {
     ) {
       errors.add("settings.maxRemovePercent", "must be a whole number from 1 to 100");
     }
+    const recheckDays = value.settings.recheckDays;
+    if (
+      recheckDays !== undefined &&
+      (typeof recheckDays !== "number" ||
+        !Number.isInteger(recheckDays) ||
+        recheckDays < 1 ||
+        recheckDays > MAX_SYNC_RECHECK_DAYS)
+    ) {
+      errors.add(
+        "settings.recheckDays",
+        `must be a whole number from 1 to ${MAX_SYNC_RECHECK_DAYS}`,
+      );
+    }
     if (errors.failed || label === null || url === null) return fail(...errors.list);
     const settings: SitemapSourceSettings = { url: url.href };
     if (sync !== undefined) settings.sync = sync as SyncSchedule;
     if (maxRemovePercent !== undefined) settings.maxRemovePercent = maxRemovePercent as number;
+    if (recheckDays !== undefined) settings.recheckDays = recheckDays as number;
     return ok({ kind: "sitemap", label, settings });
   }
 

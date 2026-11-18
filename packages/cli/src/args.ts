@@ -25,7 +25,9 @@ Run 'solv <command> --help' for command-specific options.`;
 export const PUSH_HELP = `Usage: solv push [dir] [options]
 
 Pushes .md, .markdown and .mdx files. Docusaurus folders are found from their
-front matter and syntax, and get Docusaurus URLs, titles and cleanup.
+front matter and syntax, and get Docusaurus URLs, titles and cleanup. In them,
+files and folders whose names start with _ and pages marked draft: true or
+unlisted: true are left out, as Docusaurus gives them no page.
 
 Options:
   --endpoint <url>      Worker base URL (required)

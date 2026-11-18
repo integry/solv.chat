@@ -51,7 +51,7 @@ import {
 } from "./providers.js";
 import { parseReportDays, reportFor } from "./reports.js";
 import { importSitemapUrls, previewSitemap } from "./sitemap.js";
-import { getSourceSync, syncSourceNow } from "./sourceSync.js";
+import { getSourceSync, readSyncNowBody, syncSourceNow } from "./sourceSync.js";
 import {
   createSource,
   deleteSource,
@@ -440,7 +440,15 @@ async function sourceRoutes(
     if (sub === "sync" && method === "POST") {
       if (!deps.syncStart) throw new NotFound();
       return Response.json(
-        { sync: await syncSourceNow(deps.syncStart, tenant, deps.orgId, sourceId) },
+        {
+          sync: await syncSourceNow(
+            deps.syncStart,
+            tenant,
+            deps.orgId,
+            sourceId,
+            await readSyncNowBody(request),
+          ),
+        },
         { status: 202 },
       );
     }
@@ -635,7 +643,14 @@ export async function adminRoutes(
     // leak an internal message into an owner's screen.
     if (error instanceof NotFound) return Response.json({ error: "Not found." }, { status: 404 });
     if (error instanceof BadRequest) {
-      return Response.json({ error: "That is not valid.", fields: error.errors }, { status: 400 });
+      return Response.json(
+        {
+          error: "That is not valid.",
+          fields: error.errors,
+          ...(error.code !== undefined ? { code: error.code } : {}),
+        },
+        { status: 400 },
+      );
     }
     if (error instanceof TooLarge) {
       return Response.json({ error: error.message }, { status: 413 });

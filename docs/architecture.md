@@ -59,8 +59,8 @@ from the auth seam and pass it down.
   republishes an archived version.
 - `sources` — id, assistant_id, kind (`push` | `sitemap` | `entry`), label, settings.
   A sitemap source's settings are `url` (the sitemap), `sync` (`off` | `daily` |
-  `weekly`; left out means `off`) and `maxRemovePercent` (1–100, default 50); see
-  "Scheduled sitemap sync".
+  `weekly`; left out means `off`), `maxRemovePercent` (1–100, default 50) and
+  `recheckDays` (1–365, default 7); see "Scheduled sitemap sync".
 - `documents` — id, source_id, external_id, url, title, content_hash, updated_at,
   indexed_hash (the content last made searchable), index_error and
   index_error_hash (a short code saying why the content with that hash could
@@ -71,8 +71,8 @@ from the auth seam and pass it down.
 - `source_syncs` — org_id, source_id, run_id, lease_until (set while a run
   holds the source), started_at, finished_at, outcome (`running` |
   `succeeded` | `partial` | `failed`), counts (added, updated, unchanged,
-  removed, failed, deferred) and error (a short code). One row per source: the
-  current or latest run.
+  removed, failed, deferred, withheld: removals the wipe guard kept) and error
+  (a short code). One row per source: the current or latest run.
 - `source_sync_pages` — org_id, run_id, source_id, url, lastmod, state
   (`pending` | `added` | `updated` | `unchanged` | `failed`): the pages one run
   queued. Deleted when the source's next run starts.
@@ -169,8 +169,25 @@ refusing private, loopback, or link-local addresses. A page with no text is
 written as its title alone; a response that is not a page or text (a PDF, an
 image) is skipped and counted in the import's `skipped`. Because Workers
 `fetch` resolves the hostname separately from that pre-check, a host that
-changes its DNS answer between the check and the fetch is not caught; that is
-an accepted limitation for an action only the signed-in owner can trigger.
+changes its DNS answer between the check and the fetch (DNS rebinding) is not
+caught. This is not limited to an action the signed-in owner starts: a
+scheduled sync repeats the sitemap and page fetches unattended on every run,
+against whatever the owner's URLs resolve to at that moment. It stays an
+accepted limitation because the URLs are the owner's own (a sitemap they
+added and the pages it lists), every hop is checked again on every run, and a
+response is only capped, converted and stored as a document. Closing the gap
+would need a fetch that connects to the checked address, which Workers
+`fetch` does not offer.
+
+A host that passes its own `fetch` (`createApp`'s `fetch` option) or its own
+`PageFetcher` seam is responsible for the address checks. With a host `fetch`
+the engine still refuses non-https URLs and literal private addresses, checks
+each redirect hop's URL and caps size and time, but it skips the
+DNS-over-HTTPS lookup, because it cannot know how that `fetch` resolves
+names: refusing hostnames that resolve to private, loopback or link-local
+addresses is then the host's job. A host `PageFetcher` replaces the open
+build's fetcher for pages entirely, so every check for pages (https only,
+each redirect hop, the address check, size cap and timeout) is the host's.
 
 ### Scheduled sitemap sync
 
@@ -191,22 +208,40 @@ A sitemap source can stay in step with its sitemap. Its `sync` setting is
    (`limit_refused`) and fetches nothing. The org itself was first passed to
    `AuthProvider.resolveOrg` (`queued_ingest`); an org it refuses is not read.
 3. Reads the sitemap (the preview's guards and its 2 MiB cap; up to 50,000
-   `<url>` entries with their `<lastmod>`; a sitemap index is not followed).
+   `<url>` entries with their `<lastmod>`). A sitemap index is not followed:
+   the run fails with `sitemap_index` ("This is a sitemap index; use one of
+   the sitemaps it lists."), and the admin's preview answers 400 with
+   `code: "sitemap_index"` rather than listing the child sitemaps as pages.
    Entries are read from the same reading of the XML that step 4 checks, so a
    commented-out `<url>` or `<loc>` is not a listed page.
 4. Guards against a broken sitemap: if it cannot be read (`sitemap_unavailable`),
    is not one complete, well-formed XML document with a `<urlset>` root
    (`sitemap_invalid`: cut short, broken XML, bare `<loc>` lists; the admin's
-   preview still reads those), lists no page (`sitemap_empty`), or would
-   remove more than
-   `maxRemovePercent` of the source's documents (`too_many_removals`), the run
+   preview still reads those), or lists no page (`sitemap_empty`), the run
    removes nothing, fetches nothing, and is recorded as failed. A sitemap with
    more than 50,000 entries removes nothing in that run.
+   If the run would remove more than `maxRemovePercent` of the source's
+   documents, it removes none of them but goes on to add and update the
+   listed pages (steps 6 to 8); it records how many it kept (`withheld`) and
+   ends as `failed` with `too_many_removals` whatever its pages did. A refusal
+   that fetched nothing would leave a source stuck for good: a small source
+   losing one page of one, or a site whose every URL changed (a trailing
+   slash, a new host), would trip the guard on every run and never gain the
+   pages that would bring the share down. The admin's "Sync anyway" sends
+   `POST /api/admin/sources/:id/sync` with `{"allowRemovals": n}`, the
+   number it showed the owner: that run alone lifts the guard as long as it
+   would remove at most `n` documents, and is refused as usual (with the new
+   number) otherwise. The other guards stay.
 5. Removes the source's documents whose URL is no longer listed (that source
    only; vectors and R2 bodies are cleaned up as for a prune).
 6. Skips pages whose sitemap `<lastmod>` equals the one stored at the last
-   check, without fetching them, once their current content is indexed; a
-   document whose indexing failed is checked again. The rest are queued in the order a run last
+   check, without fetching them, once their current content is indexed and
+   while that check (`documents.sync_checked_at`) is less than `recheckDays`
+   old (7 days by default); a document whose indexing failed, or whose last
+   check is older, is checked again with a conditional request. Without the
+   age a page that answered 200 with the wrong content once (a maintenance
+   page while the `<lastmod>` moved) would be pinned by a date that never
+   changes again. The rest are queued in the order a run last
    queued them (`source_sync_attempts`; never queued first, new pages before
    documents among those), whether or not they could be fetched then, so pages
    that keep failing do not keep the others waiting. Up to the per-run page
@@ -297,8 +332,12 @@ The Monitor screens read:
   scheduled one (lease, `Limits.checkSync`, guards, caps; the org is the
   signed-in principal's), reads the sitemap in the request and answers `202`
   with the object; a run already holding the source answers `409`; a source
-  that is not a sitemap answers `400`. The schedule is changed with `PATCH
-  /api/admin/sources/:id` and `{ "settings": { "sync": … } }`.
+  that is not a sitemap answers `400`. Its body is optional: none (or `{}`)
+  for Sync now, `{ "allowRemovals": n }` for "Sync anyway" after a
+  `too_many_removals` run (the run's `counts.withheld` is the `n` the admin
+  shows). The schedule is changed with `PATCH /api/admin/sources/:id` and
+  `{ "settings": { "sync": … } }`; `maxRemovePercent` and `recheckDays` the
+  same way.
 - Gaps: `status=open` leaves out groups with a written answer newer than the
   group's latest ask (asked again after it, a group is open again, as after a
   dismissal). Overview's open gaps and Reports' "Most often unanswered" leave
@@ -718,7 +757,9 @@ The cloud layer replaces these and nothing else:
   an empty document. An implementation throws when it refuses or cannot fetch
   a page, and must keep the open build's protections on every request and
   redirect hop: https only, no private, loopback or link-local address, a size
-  cap and a timeout. The type uses no Cloudflare types, so a host can implement
+  cap and a timeout. The engine does not wrap a host's fetcher in its own
+  checks, so those are the host's responsibility, on scheduled syncs as much
+  as on an owner's import. The type uses no Cloudflare types, so a host can implement
   it over a REST API (a headless browser, say). The open build's
   `plainPageFetcher` uses Workers `fetch` and the HTML-to-Markdown extraction
   the sitemap import has always used (10 s, 1 MiB, 3 redirects). The field is
