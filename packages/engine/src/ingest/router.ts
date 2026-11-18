@@ -74,8 +74,9 @@ export async function ingestRoutes(
     }
 
     if (resource === "mcp-servers") {
-      // Only the "Send conversation context" setting: an ingest key can
-      // neither add a server nor read or change its address or credential.
+      // Only the "Send conversation context" setting, and only turning it
+      // off: an ingest key can neither add a server, read its full address or
+      // credential, nor start sharing visitor ids with a server.
       if (request.method === "GET") {
         return Response.json(await listMcpServerSettings(tenant, scope.assistantId));
       }

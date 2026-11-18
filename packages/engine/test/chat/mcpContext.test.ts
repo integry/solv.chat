@@ -68,12 +68,13 @@ function parseSse(text: string) {
     });
 }
 
+/** The hashed form: `h_` and the first 32 hex characters of the SHA-256. */
 async function sha256Prefix(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return [...new Uint8Array(digest)]
+  return `h_${[...new Uint8Array(digest)]
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("")
-    .slice(0, 32);
+    .slice(0, 32)}`;
 }
 
 function contextOf(call: FakeMcpServer["calls"][number]) {
@@ -251,6 +252,26 @@ describe("conversation context headers to MCP servers", () => {
     await ask(appWith(server), visitorId);
     const call = server.calls.find((c) => c.method === "tools/call");
     expect(call?.headers.get("Solv-Visitor-Id")).toBe(await sha256Prefix(visitorId));
+  });
+
+  it("does not let a visitor send another visitor's hashed value as their own id", async () => {
+    await seedServer({ send: true });
+    const victimServer = fakeMcpServer({ tools: [LOOKUP] });
+    await ask(appWith(victimServer), "visitor 1/é");
+    const victimValue = victimServer.calls
+      .find((c) => c.method === "tools/call")
+      ?.headers.get("Solv-Visitor-Id");
+    expect(victimValue).toMatch(/^h_[0-9a-f]{32}$/);
+
+    for (const forged of [victimValue ?? "", (victimValue ?? "").slice(2)]) {
+      const server = fakeMcpServer({ tools: [LOOKUP] });
+      await ask(appWith(server), forged);
+      const sent = server.calls
+        .find((c) => c.method === "tools/call")
+        ?.headers.get("Solv-Visitor-Id");
+      expect(sent).toBeTruthy();
+      expect(sent).not.toBe(victimValue);
+    }
   });
 
   it("sends none of them when the setting is off, and off is the default", async () => {
@@ -484,8 +505,19 @@ describe("conversation context headers to MCP servers", () => {
     expect(JSON.parse(keepOff.text).changed).toBe(0);
   });
 
-  it("reads and sets the setting with the ingest key, as solv apply does", async () => {
+  it("reads the setting with the ingest key, showing only each server's origin", async () => {
     await seedServer();
+    await tenant.mcp.createServer({
+      id: "mcp_srv_token_url",
+      assistantId: "ast_a",
+      label: "Tokened",
+      url: "https://tools.example/v1/mcp?token=url_secret_abc",
+      authKind: "none",
+      headerName: null,
+      secretCiphertext: null,
+      enabled: true,
+      createdAt: 1001,
+    });
     const app = appWith(fakeMcpServer());
     const auth = { Authorization: `Bearer ${INGEST_KEY}` };
 
@@ -495,31 +527,118 @@ describe("conversation context headers to MCP servers", () => {
     });
     expect(JSON.parse(before.text)).toEqual({
       servers: [
-        { id: SERVER_ID, label: "Orders", url: SERVER_URL, sendConversationContext: false },
+        {
+          id: SERVER_ID,
+          label: "Orders",
+          origin: "https://mcp.example",
+          sendConversationContext: false,
+        },
+        {
+          id: "mcp_srv_token_url",
+          label: "Tokened",
+          origin: "https://tools.example",
+          sendConversationContext: false,
+        },
       ],
     });
-    // Never the credential or its header.
-    expect(before.text).not.toContain("Authorization");
+    // Never the credential, its header, or the path and query of an address.
+    for (const hidden of ["Authorization", CREDENTIAL, "/rpc", "/v1/mcp", "url_secret_abc"]) {
+      expect(before.text).not.toContain(hidden);
+    }
 
+    // Nor does a PUT, or a refusal, echo them back.
     const put = await send(app, "/v1/ingest/ast_a/mcp-servers", {
+      method: "PUT",
+      headers: auth,
+      body: {
+        servers: [
+          {
+            url: "https://tools.example/v1/mcp?token=url_secret_abc",
+            sendConversationContext: false,
+          },
+          {
+            url: "https://tools.example/other?token=url_secret_xyz",
+            sendConversationContext: false,
+          },
+        ],
+      },
+    });
+    expect(put.status).toBe(400);
+    expect(put.text).toContain("mcpServers[1].url");
+    expect(put.text).toContain("https://tools.example");
+    expect(put.text).not.toContain("url_secret");
+  });
+
+  it("lets the ingest key turn the setting off but never on", async () => {
+    await seedServer();
+    const server = fakeMcpServer({ tools: [LOOKUP] });
+    const app = appWith(server);
+    const auth = { Authorization: `Bearer ${INGEST_KEY}` };
+
+    const turnOn = await send(app, "/v1/ingest/ast_a/mcp-servers", {
       method: "PUT",
       headers: auth,
       body: { servers: [{ url: SERVER_URL, sendConversationContext: true }] },
     });
-    expect(put.status).toBe(200);
-    expect(JSON.parse(put.text).changed).toBe(1);
+    expect(turnOn.status).toBe(400);
+    expect(turnOn.text).toContain(
+      'mcpServers[0]: turn on \\"Send conversation context\\" for Orders (https://mcp.example) on the Tools screen in the admin.',
+    );
+    expect((await tenant.mcp.getServer(SERVER_ID))?.sendConversationContext).toBe(false);
 
-    const after = await send(app, "/v1/ingest/ast_a/mcp-servers", { method: "GET", headers: auth });
-    expect(JSON.parse(after.text).servers[0].sendConversationContext).toBe(true);
+    // The signed-in admin turns it on.
+    const adminOn = await admin(app, "PATCH", `/api/admin/mcp-servers/${SERVER_ID}`, {
+      sendConversationContext: true,
+    });
+    expect(adminOn.status).toBe(200);
+
+    // Asking for on where it already is on is fine and changes nothing.
+    const keepOn = await send(app, "/v1/ingest/ast_a/mcp-servers", {
+      method: "PUT",
+      headers: auth,
+      body: { servers: [{ url: SERVER_URL, sendConversationContext: true }] },
+    });
+    expect(keepOn.status).toBe(200);
+    expect(JSON.parse(keepOn.text).changed).toBe(0);
+
+    // A dry run reports what would change and changes nothing.
+    const dry = await send(app, "/v1/ingest/ast_a/mcp-servers", {
+      method: "PUT",
+      headers: auth,
+      body: { servers: [{ url: SERVER_URL, sendConversationContext: false }], dryRun: true },
+    });
+    expect(dry.status).toBe(200);
+    expect(JSON.parse(dry.text)).toMatchObject({ changed: 1, dryRun: true });
+    expect((await tenant.mcp.getServer(SERVER_ID))?.sendConversationContext).toBe(true);
+
+    const badDry = await send(app, "/v1/ingest/ast_a/mcp-servers", {
+      method: "PUT",
+      headers: auth,
+      body: { servers: [], dryRun: "yes" },
+    });
+    expect(badDry.status).toBe(400);
+
+    // Turning it off works.
+    const off = await send(app, "/v1/ingest/ast_a/mcp-servers", {
+      method: "PUT",
+      headers: auth,
+      body: { servers: [{ url: SERVER_URL, sendConversationContext: false }] },
+    });
+    expect(off.status).toBe(200);
+    expect(JSON.parse(off.text)).toMatchObject({ changed: 1, dryRun: false });
+    expect((await tenant.mcp.getServer(SERVER_ID))?.sendConversationContext).toBe(false);
 
     // An address with no server is refused and nothing changes.
+    await admin(app, "PATCH", `/api/admin/mcp-servers/${SERVER_ID}`, {
+      sendConversationContext: true,
+    });
     const unknown = await send(app, "/v1/ingest/ast_a/mcp-servers", {
       method: "PUT",
       headers: auth,
       body: {
         servers: [
           { url: SERVER_URL, sendConversationContext: false },
-          { url: "https://other.example/mcp", sendConversationContext: true },
+          { url: "https://other.example/mcp", sendConversationContext: false },
         ],
       },
     });
@@ -533,5 +652,7 @@ describe("conversation context headers to MCP servers", () => {
     });
     expect(noKey.status).toBe(401);
     expect((await tenant.mcp.getServer(SERVER_ID))?.sendConversationContext).toBe(true);
+    // Nothing above reached the tool server.
+    expect(server.calls).toEqual([]);
   });
 });

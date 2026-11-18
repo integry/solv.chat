@@ -791,12 +791,16 @@ describe("Tools screen", () => {
         name: "Send conversation context",
       });
       expect((toggle as HTMLInputElement).checked).toBe(false);
-      // One sentence: what is sent and why an owner would turn it on.
+      // What is sent, why an owner would turn it on, and what it lets the
+      // receiving server do with it.
       expect(toggle.getAttribute("aria-describedby")).toBeTruthy();
       const hint = container.querySelector(`#${toggle.getAttribute("aria-describedby")}`);
       expect(hint?.textContent).toMatch(/conversation, visitor and assistant ids/);
       expect(hint?.textContent).toMatch(/never messages/);
       expect(hint?.textContent).toMatch(/tell visitors apart/);
+      expect(hint?.textContent?.replace(/\s+/g, " ")).toContain(
+        "These ids let that server link one visitor's conversations, so turn this on only for a server you run or trust.",
+      );
     }
 
     const first = cards[0] as HTMLElement;

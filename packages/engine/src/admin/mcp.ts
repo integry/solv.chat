@@ -642,12 +642,24 @@ export async function setMcpToolAllowed(
   throw new Conflict("The draft changed while you were saving. Please try again.");
 }
 
-/** One server as `solv apply` sees it: no credential, no header name. */
+/**
+ * One server as `solv apply` sees it through the ingest key: no credential, no
+ * header name, and only the origin of its address. The path or query of an
+ * owner's URL may carry a token, and the ingest key is a CI credential.
+ */
 export interface McpServerContextSetting {
   id: string;
   label: string;
-  url: string;
+  origin: string;
   sendConversationContext: boolean;
+}
+
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
 }
 
 /** The "Send conversation context" setting of every server on an assistant. */
@@ -662,30 +674,39 @@ export async function listMcpServerSettings(
     servers: rows.map((row) => ({
       id: row.id,
       label: row.label,
-      url: row.url,
+      origin: originOf(row.url),
       sendConversationContext: row.sendConversationContext,
     })),
   };
 }
 
 /**
- * Sets "Send conversation context" from `solv.config.json`'s `mcpServers`.
+ * Sets "Send conversation context" from `solv.config.json`'s `mcpServers`,
+ * through the ingest key.
  *
  * Servers are matched by address on this assistant. The file cannot add a
  * server (its credential has no place in a repository), so an address with no
- * server is refused, and nothing changes unless every entry is valid. Servers
- * the file does not list keep their setting.
+ * server is refused. The ingest key can turn the setting off but not on:
+ * sharing visitor ids with a server needs a signed-in admin, so asking for on
+ * where a server is off is refused and names that server. Nothing changes
+ * unless every entry is valid, and with `dryRun: true` nothing changes at all
+ * (`changed` is then what would change). Servers the file does not list keep
+ * their setting. Messages name a server by its origin only.
  */
 export async function applyMcpServerSettings(
   tenant: Tenant,
   assistantId: string,
   body: unknown,
-): Promise<{ servers: McpServerContextSetting[]; changed: number }> {
+): Promise<{ servers: McpServerContextSetting[]; changed: number; dryRun: boolean }> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
   if (!isPlainObject(body) || !Array.isArray(body.servers)) {
     throw new BadRequest(["servers: must be an array"]);
   }
+  if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
+    throw new BadRequest(["dryRun: must be true or false"]);
+  }
+  const dryRun = body.dryRun === true;
   const rows = await tenant.mcp.listServers(assistantId);
   const errors: string[] = [];
   const wanted = new Map<string, boolean>();
@@ -703,32 +724,39 @@ export async function applyMcpServerSettings(
       errors.push(`${at}.url: must be an https URL that is not a private or loopback address`);
       return;
     }
+    const origin = originOf(url);
     if (typeof entry.sendConversationContext !== "boolean") {
       errors.push(`${at}.sendConversationContext: must be true or false`);
       return;
     }
-    if (!rows.some((row) => row.url === url)) {
+    const matches = rows.filter((row) => row.url === url);
+    if (matches.length === 0) {
       errors.push(
-        `${at}.url: this assistant has no tool server at ${url}. Add it on the Tools screen first.`,
+        `${at}.url: this assistant has no tool server at that address on ${origin}. Add it on the Tools screen first.`,
       );
       return;
     }
-    // Same rule as the Tools screen: a server whose key travels in one of the
-    // context headers cannot have the setting turned on until it is renamed.
-    if (
-      entry.sendConversationContext &&
-      rows.some(
-        (row) => row.url === url && authHeaderClashesWithContext(row.authKind, row.headerName),
-      )
-    ) {
-      errors.push(
-        `${at}.url: the tool server at ${url} sends its key in one of ${CONVERSATION_CONTEXT_HEADER_NAMES.join(", ")}, which solv.chat sends itself when "Send conversation context" is on. Choose another header name on the Tools screen first.`,
-      );
-      return;
+    if (entry.sendConversationContext) {
+      // Same rule as the Tools screen: a server whose key travels in one of
+      // the context headers cannot have the setting on until it is renamed.
+      if (matches.some((row) => authHeaderClashesWithContext(row.authKind, row.headerName))) {
+        errors.push(
+          `${at}.url: the tool server at ${origin} sends its key in one of ${CONVERSATION_CONTEXT_HEADER_NAMES.join(", ")}, which solv.chat sends itself when "Send conversation context" is on. Choose another header name on the Tools screen first.`,
+        );
+        return;
+      }
+      for (const row of matches) {
+        if (!row.sendConversationContext) {
+          errors.push(
+            `${at}: turn on "Send conversation context" for ${row.label} (${origin}) on the Tools screen in the admin. The ingest key can turn it off but not on.`,
+          );
+        }
+      }
+      if (matches.some((row) => !row.sendConversationContext)) return;
     }
     const previous = wanted.get(url);
     if (previous !== undefined && previous !== entry.sendConversationContext) {
-      errors.push(`${at}.url: ${url} is listed twice with different settings`);
+      errors.push(`${at}.url: an address on ${origin} is listed twice with different settings`);
       return;
     }
     wanted.set(url, entry.sendConversationContext);
@@ -739,9 +767,14 @@ export async function applyMcpServerSettings(
   for (const row of rows) {
     const next = wanted.get(row.url);
     if (next === undefined || next === row.sendConversationContext) continue;
+    // Only ever off here: on was refused above unless it already was.
+    if (dryRun) {
+      changed += 1;
+      continue;
+    }
     // Several servers may share an address; the setting is about where the
     // ids go, so each of them follows the file.
     if (await tenant.mcp.updateServer(row.id, { sendConversationContext: next })) changed += 1;
   }
-  return { ...(await listMcpServerSettings(tenant, assistantId)), changed };
+  return { ...(await listMcpServerSettings(tenant, assistantId)), changed, dryRun };
 }

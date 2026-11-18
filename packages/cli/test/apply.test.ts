@@ -301,19 +301,13 @@ describe("solv apply", () => {
     expect(logs.join("\n")).toContain(expected);
   });
 
-  it("sets Send conversation context from mcpServers and keeps the key out of the config PUT", async () => {
-    const configPath = join(root, "solv.config.json");
-    await writeFile(
-      configPath,
-      JSON.stringify({
-        behaviour: { greeting: "Welcome" },
-        mcpServers: [{ url: "https://tools.example.com/mcp", sendConversationContext: true }],
-      }),
-      "utf8",
-    );
-
-    // A stand-in for the engine: stores the setting so GET after PUT reads it back.
-    const stored = new Map([["https://tools.example.com/mcp", false]]);
+  /**
+   * A stand-in for the engine's ingest routes, with the same rules for
+   * `mcp-servers`: an address must exist, the ingest key can turn the setting
+   * off but not on, a dry run changes nothing, and servers are shown by origin.
+   */
+  function fakeEngine(initial: Array<[string, boolean]>) {
+    const stored = new Map(initial);
     const calls: Array<{ url: string; method: string; body?: unknown }> = [];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
@@ -321,64 +315,177 @@ describe("solv apply", () => {
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
       calls.push({ url, method, ...(body === undefined ? {} : { body }) });
       if (url.endsWith("/mcp-servers")) {
-        let changed = 0;
-        if (method === "PUT") {
-          for (const s of (
-            body as { servers: Array<{ url: string; sendConversationContext: boolean }> }
-          ).servers) {
-            if (stored.get(s.url) !== s.sendConversationContext) changed += 1;
-            stored.set(s.url, s.sendConversationContext);
+        const request = body as {
+          servers: Array<{ url: string; sendConversationContext: boolean }>;
+          dryRun?: boolean;
+        };
+        const errors: string[] = [];
+        request.servers.forEach((s, i) => {
+          if (!stored.has(s.url)) errors.push(`mcpServers[${i}].url: no tool server`);
+          else if (s.sendConversationContext && !stored.get(s.url)) {
+            errors.push(
+              `mcpServers[${i}]: turn on "Send conversation context" for Orders (${new URL(s.url).origin}) on the Tools screen in the admin. The ingest key can turn it off but not on.`,
+            );
           }
+        });
+        if (errors.length > 0) return Response.json({ errors }, { status: 400 });
+        let changed = 0;
+        for (const s of request.servers) {
+          if (stored.get(s.url) !== s.sendConversationContext) changed += 1;
+          if (!request.dryRun) stored.set(s.url, s.sendConversationContext);
         }
         return Response.json({
           servers: [...stored].map(([u, on]) => ({
             label: "Orders",
-            url: u,
+            origin: new URL(u).origin,
             sendConversationContext: on,
           })),
           changed,
+          dryRun: request.dryRun === true,
         });
       }
-      return Response.json({ config: defaultVersionConfig() });
+      if (method === "GET") return Response.json({ config: defaultVersionConfig() });
+      return Response.json({});
     };
+    return { stored, calls, fetchImpl };
+  }
+
+  const options = (file: string) => ({
+    file,
+    endpoint: "https://chat.example.com",
+    assistant: "ast_123",
+    ingestKey: "ik_secret_key",
+  });
+
+  it("checks mcpServers first, then sets the setting and keeps it out of the config PUT", async () => {
+    const configPath = join(root, "solv.config.json");
+    const serverUrl = "https://tools.example.com/mcp?token=url_secret";
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        behaviour: { greeting: "Welcome" },
+        mcpServers: [{ url: serverUrl, sendConversationContext: false }],
+      }),
+      "utf8",
+    );
+    const engine = fakeEngine([[serverUrl, true]]);
 
     const logs: string[] = [];
-    await apply(
-      {
-        file: configPath,
-        endpoint: "https://chat.example.com",
-        assistant: "ast_123",
-        ingestKey: "ik_secret_key",
-      },
-      { fetchImpl, log: (line) => logs.push(line) },
-    );
-
-    const configPut = calls.find((c) => c.method === "PUT" && c.url.endsWith("/config"));
-    expect(configPut?.body).toEqual({ behaviour: { greeting: "Welcome" } });
-    const serversPut = calls.find((c) => c.url.endsWith("/mcp-servers"));
-    expect(serversPut?.url).toBe("https://chat.example.com/v1/ingest/ast_123/mcp-servers");
-    expect(serversPut?.method).toBe("PUT");
-    expect(serversPut?.body).toEqual({
-      servers: [{ url: "https://tools.example.com/mcp", sendConversationContext: true }],
+    await apply(options(configPath), {
+      fetchImpl: engine.fetchImpl,
+      log: (line) => logs.push(line),
     });
-    expect(stored.get("https://tools.example.com/mcp")).toBe(true);
+
+    // The dry run comes before any write.
+    expect(engine.calls.map((c) => `${c.method} ${c.url.split("/").at(-1)}`)).toEqual([
+      "GET config",
+      "PUT mcp-servers",
+      "PUT config",
+      "PUT mcp-servers",
+    ]);
+    expect(engine.calls[1]?.body).toEqual({
+      servers: [{ url: serverUrl, sendConversationContext: false }],
+      dryRun: true,
+    });
+    expect(engine.calls[2]?.body).toEqual({ behaviour: { greeting: "Welcome" } });
+    expect(engine.calls[3]?.body).toEqual({
+      servers: [{ url: serverUrl, sendConversationContext: false }],
+    });
+    expect(engine.stored.get(serverUrl)).toBe(false);
     expect(logs).toContain(
-      "Tool server Orders (https://tools.example.com/mcp): send conversation context on.",
+      "Tool server Orders (https://tools.example.com): send conversation context off.",
     );
     expect(logs).toContain("Tool servers: 1 changed.");
+    expect(logs.join("\n")).not.toContain("url_secret");
 
     // Applying the same file again changes nothing.
     logs.length = 0;
-    await apply(
-      {
-        file: configPath,
-        endpoint: "https://chat.example.com",
-        assistant: "ast_123",
-        ingestKey: "ik_secret_key",
-      },
-      { fetchImpl, log: (line) => logs.push(line) },
+    await apply(options(configPath), {
+      fetchImpl: engine.fetchImpl,
+      log: (line) => logs.push(line),
+    });
+    expect(logs).toContain("Tool servers: 0 changed.");
+  });
+
+  it("asks for on where a server is already on without failing", async () => {
+    const configPath = join(root, "solv.config.json");
+    const serverUrl = "https://tools.example.com/mcp";
+    await writeFile(
+      configPath,
+      JSON.stringify({ mcpServers: [{ url: serverUrl, sendConversationContext: true }] }),
+      "utf8",
+    );
+    const engine = fakeEngine([[serverUrl, true]]);
+    const logs: string[] = [];
+    await apply(options(configPath), {
+      fetchImpl: engine.fetchImpl,
+      log: (line) => logs.push(line),
+    });
+    expect(logs).toContain(
+      "Tool server Orders (https://tools.example.com): send conversation context on.",
     );
     expect(logs).toContain("Tool servers: 0 changed.");
+  });
+
+  it("writes nothing and names the server when on is asked for where it is off", async () => {
+    const configPath = join(root, "solv.config.json");
+    const offUrl = "https://tools.example.com/mcp";
+    const onUrl = "https://other.example.com/mcp";
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        behaviour: { greeting: "Welcome" },
+        tests: [{ question: "What is Acme?", expectation: { kind: "declines" } }],
+        mcpServers: [
+          { url: onUrl, sendConversationContext: false },
+          { url: offUrl, sendConversationContext: true },
+        ],
+      }),
+      "utf8",
+    );
+    const engine = fakeEngine([
+      [offUrl, false],
+      [onUrl, true],
+    ]);
+    const logs: string[] = [];
+    await expect(
+      apply(options(configPath), {
+        fetchImpl: engine.fetchImpl,
+        log: (line) => logs.push(line),
+      }),
+    ).rejects.toThrow(/mcpServers\[1\]: turn on "Send conversation context" for Orders/);
+
+    // Only the read and the dry run: no config, tests or server write.
+    expect(engine.calls.map((c) => `${c.method} ${c.url.split("/").at(-1)}`)).toEqual([
+      "GET config",
+      "PUT mcp-servers",
+    ]);
+    expect(engine.calls[1]?.body).toMatchObject({ dryRun: true });
+    expect(engine.stored.get(onUrl)).toBe(true);
+    expect(engine.stored.get(offUrl)).toBe(false);
+    expect(logs).toContain(
+      'mcpServers[1]: turn on "Send conversation context" for Orders (https://tools.example.com) on the Tools screen in the admin. The ingest key can turn it off but not on.',
+    );
+    expect(logs).toContain("Nothing was changed: not the draft, the tests or any tool server.");
+  });
+
+  it("writes nothing when an mcpServers address has no server", async () => {
+    const configPath = join(root, "solv.config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        behaviour: { greeting: "Welcome" },
+        mcpServers: [{ url: "https://missing.example.com/mcp", sendConversationContext: false }],
+      }),
+      "utf8",
+    );
+    const engine = fakeEngine([]);
+    await expect(
+      apply(options(configPath), { fetchImpl: engine.fetchImpl, log: () => {} }),
+    ).rejects.toThrow(/mcpServers\[0\]\.url/);
+    expect(
+      engine.calls.filter((c) => c.method === "PUT" && !c.url.endsWith("/mcp-servers")),
+    ).toEqual([]);
   });
 
   it("refuses an invalid mcpServers entry before sending anything", async () => {

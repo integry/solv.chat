@@ -452,8 +452,9 @@ function ContextSwitch({
       </label>
       <p id={hintId} className="field-hint">
         Adds this chat's conversation, visitor and assistant ids to each request (never messages,
-        addresses or pages), so a server you run or trust can tell visitors apart, for example to
-        limit each one.
+        addresses or pages), so the server can tell visitors apart, for example to limit each one.
+        These ids let that server link one visitor's conversations, so turn this on only for a
+        server you run or trust.
       </p>
       {error && (
         <p className="error-text" role="alert">

@@ -772,7 +772,7 @@ describe("mcp client", () => {
         const headers = headersOf(call);
         expect(headers.get("Solv-Assistant-Id")).toBe("ast_1");
         expect(headers.get("Solv-Conversation-Id")).toBe("cnv_1");
-        expect(headers.get("Solv-Visitor-Id")).toMatch(/^[0-9a-f]{32}$/);
+        expect(headers.get("Solv-Visitor-Id")).toMatch(/^h_[0-9a-f]{32}$/);
         expect(headers.get("Authorization")).toBe(SECRET);
       }
     });

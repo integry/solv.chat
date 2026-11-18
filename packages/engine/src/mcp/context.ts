@@ -37,21 +37,27 @@ export interface McpConversationContext {
 }
 
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
-/** Hex characters kept from the SHA-256 of an id that does not fit `SAFE_ID`. */
+/** Hex characters kept from the SHA-256 of an id that is not sent as it is. */
 export const CONTEXT_HASH_CHARS = 32;
+/**
+ * Marks a hashed value. A raw id that starts with it (in any case) is hashed
+ * too, so no raw id can ever produce the same value as a hashed one.
+ */
+export const CONTEXT_HASH_PREFIX = "h_";
 
 /**
  * The value sent for one id: the id itself when it is 1 to 128 characters of
- * `[A-Za-z0-9_-]`, otherwise the first 32 hex characters of its SHA-256, so a
- * visitor-chosen id can never carry anything else into a header, and the same
- * id always gives the same value.
+ * `[A-Za-z0-9_-]` and does not start with `h_`, otherwise `h_` followed by the
+ * first 32 hex characters of its SHA-256. A visitor-chosen id can never carry
+ * anything else into a header, the same id always gives the same value, and a
+ * visitor cannot send another visitor's hashed value as their own raw id.
  */
 export async function contextHeaderValue(id: string): Promise<string> {
-  if (SAFE_ID.test(id)) return id;
+  if (SAFE_ID.test(id) && !id.toLowerCase().startsWith(CONTEXT_HASH_PREFIX)) return id;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(id));
   let hex = "";
   for (const byte of new Uint8Array(digest)) hex += byte.toString(16).padStart(2, "0");
-  return hex.slice(0, CONTEXT_HASH_CHARS);
+  return CONTEXT_HASH_PREFIX + hex.slice(0, CONTEXT_HASH_CHARS);
 }
 
 /** The headers for one context. An empty id is left out rather than sent empty. */

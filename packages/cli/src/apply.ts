@@ -5,7 +5,13 @@ import {
   type TestInput,
   type VersionConfig,
 } from "@solvchat/core";
-import { assertValidHeaderValue, CliError, normalizeEndpoint, requestJson } from "./http.js";
+import {
+  assertValidHeaderValue,
+  CliError,
+  formatApiError,
+  normalizeEndpoint,
+  requestJson,
+} from "./http.js";
 import type { CliDeps } from "./push.js";
 import { parseDeclaredTests } from "./test.js";
 
@@ -27,8 +33,47 @@ export interface DeclaredMcpServer {
 }
 
 interface McpServersResponse {
-  servers?: Array<{ label: string; url: string; sendConversationContext: boolean }>;
+  /** Through the ingest key a server is shown by its origin, never its full address. */
+  servers?: Array<{ label: string; origin: string; sendConversationContext: boolean }>;
   changed?: number;
+}
+
+/**
+ * Asks the engine whether `mcpServers` would be accepted, without changing
+ * anything. Run before any write, so a refused entry leaves the draft, the
+ * tests and every server as they were. Each refusal is printed on its own
+ * line: the ingest key can turn "Send conversation context" off but not on,
+ * so an entry asking for on where a server is off names the server to turn
+ * on in the admin.
+ */
+async function checkMcpServers(
+  deps: CliDeps,
+  url: string,
+  authHeaders: Record<string, string>,
+  servers: DeclaredMcpServer[],
+): Promise<McpServersResponse> {
+  const response = await deps.fetchImpl(url, {
+    method: "PUT",
+    headers: { ...authHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({ servers, dryRun: true }),
+  });
+  if (response.ok) return (await response.json()) as McpServersResponse;
+  let errors: string[] = [];
+  if (response.status === 400) {
+    try {
+      const body = (await response.clone().json()) as { errors?: unknown };
+      if (Array.isArray(body.errors)) {
+        errors = body.errors.filter((e): e is string => typeof e === "string");
+      }
+    } catch {
+      // Fall back to the generic message below.
+    }
+  }
+  const message =
+    errors.length > 0 ? errors.join("; ") : await formatApiError(response, "SOLV_INGEST_KEY");
+  for (const error of errors) deps.log(error);
+  deps.log("Nothing was changed: not the draft, the tests or any tool server.");
+  throw new CliError(message);
 }
 
 /**
@@ -111,7 +156,9 @@ export function diffConfig(before: VersionConfig | undefined, after: VersionConf
 
 /**
  * Parses `solv.config.json` with `@solvchat/core`, prints a diff against the
- * current draft, and writes the new draft through the ingest API.
+ * current draft, and writes the new draft through the ingest API. `mcpServers`
+ * is checked with the engine before anything is written, so a refused entry
+ * leaves everything as it was.
  */
 export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void> {
   const rawText = await readFile(options.file, "utf8");
@@ -175,6 +222,11 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
     throw new CliError(merged.errors.join("; "));
   }
 
+  const mcpServersUrl = `${assistantBase}/mcp-servers`;
+  if (declaredMcpServers !== null) {
+    await checkMcpServers(deps, mcpServersUrl, authHeaders, declaredMcpServers);
+  }
+
   deps.log(diffConfig(currentConfig, merged.value));
 
   await requestJson<ConfigResponse>(
@@ -216,9 +268,11 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
   if (declaredMcpServers !== null) {
     // Takes effect at once, like the switch on the Tools screen: this setting
     // belongs to the server, not to the draft, so Publish does not gate it.
+    // Checked above, so only a change made in the admin since then can make
+    // this refuse.
     const result = await requestJson<McpServersResponse>(
       deps.fetchImpl,
-      `${assistantBase}/mcp-servers`,
+      mcpServersUrl,
       {
         method: "PUT",
         headers: {
@@ -231,7 +285,7 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
     );
     for (const server of result.servers ?? []) {
       deps.log(
-        `Tool server ${server.label} (${server.url}): send conversation context ${server.sendConversationContext ? "on" : "off"}.`,
+        `Tool server ${server.label} (${server.origin}): send conversation context ${server.sendConversationContext ? "on" : "off"}.`,
       );
     }
     deps.log(`Tool servers: ${result.changed ?? 0} changed.`);
