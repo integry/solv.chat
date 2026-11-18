@@ -441,6 +441,30 @@ describe("Docusaurus rules", () => {
     );
   });
 
+  it("keeps fenced code inside list items byte for byte", () => {
+    const bullet = ["- ```jsx", "  <Tabs>example</Tabs>", "  ```"].join("\n");
+    const ordered = ["1. ~~~", "   <Tabs>", "", "   </Tabs>", "   ~~~"].join("\n");
+    const quoted = ["> - ```", ">   <Tabs>q</Tabs>", ">   ```"].join("\n");
+    const input = [bullet, "", ordered, "", quoted, "", "After <Tabs>list</Tabs>"].join("\n");
+    expect(cleanDocusaurusMarkdown(input)).toBe(
+      [bullet, "", ordered, "", quoted, "", "After list", ""].join("\n"),
+    );
+    // Admonitions inside a list fence are code, not signals.
+    expect(hasDocusaurusSyntax("- ```md\n  :::tip\n  ```\n")).toBe(false);
+  });
+
+  it("ends a list fence where its list item ends", () => {
+    const input = ["- ```", "  <Tabs>code</Tabs>", "", "Text <Tabs>after</Tabs>"].join("\n");
+    expect(cleanDocusaurusMarkdown(input)).toBe(
+      ["- ```", "  <Tabs>code</Tabs>", "", "Text after", ""].join("\n"),
+    );
+    // A new list item's fence is an opening fence, not the old one's close.
+    const next = ["- ```", "  <A>1</A>", "- ```", "  <B>2</B>", "  ```", "<C>3</C>"].join("\n");
+    expect(cleanDocusaurusMarkdown(next)).toBe(
+      ["- ```", "  <A>1</A>", "- ```", "  <B>2</B>", "  ```", "3", ""].join("\n"),
+    );
+  });
+
   it("closes a code span only on a backtick run of the same length", () => {
     const span = "`a `` <Tabs> b`";
     expect(cleanDocusaurusMarkdown(`Use ${span} and <Tabs>x</Tabs>.`)).toBe(`Use ${span} and x.\n`);

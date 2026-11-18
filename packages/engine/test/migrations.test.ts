@@ -423,9 +423,15 @@ describe("migrations", () => {
         source("src_d", "ast_1", "push", "Blog", 100),
         source("src_e", "ast_2", "push", "Docs", 500),
         source("src_f", "ast_1", "sitemap", "Docs", 50),
+        // Labels that already read like the replacements for src_b and src_h.
+        source("src_h", "ast_2", "push", "Docs", 600),
+        source("src_i", "ast_2", "push", "Docs (src_h)", 50),
+        source("src_j", "ast_2", "push", "Docs (src_h) (src_i)", 40),
+        source("src_k", "ast_1", "push", "Docs (src_b)", 50),
         doc("doc_a", "src_a"),
         doc("doc_b", "src_b"),
         doc("doc_c", "src_c"),
+        doc("doc_k", "src_k"),
       ]);
     } finally {
       for (const sql of queries) await env.DB.prepare(sql).run();
@@ -445,6 +451,11 @@ describe("migrations", () => {
       // Another assistant and another kind are not duplicates.
       src_e: "Docs",
       src_f: "Docs",
+      // A label equal to a replacement is renamed too, and so on down the chain.
+      src_h: "Docs (src_h)",
+      src_i: "Docs (src_h) (src_i)",
+      src_j: "Docs (src_h) (src_i) (src_j)",
+      src_k: "Docs (src_b) (src_k)",
     });
     const docs = await env.DB.prepare(
       "SELECT id, source_id FROM documents WHERE org_id = ?1 ORDER BY id",
@@ -455,6 +466,7 @@ describe("migrations", () => {
       { id: "doc_a", source_id: "src_a" },
       { id: "doc_b", source_id: "src_b" },
       { id: "doc_c", source_id: "src_c" },
+      { id: "doc_k", source_id: "src_k" },
     ]);
     // The index is in place afterwards.
     await expect(source("src_g", "ast_1", "push", "Docs", 900).run()).rejects.toThrow();

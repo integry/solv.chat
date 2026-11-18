@@ -128,28 +128,41 @@ interface Line {
   code: boolean;
 }
 
+// A line's containers (blockquote markers and list-item markers such as `- `
+// or `1. `), then a fence delimiter and its info string.
+const FENCE_RE = /^((?:[ \t]*>|[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+)*)[ \t]*(`{3,}|~{3,})(.*)$/;
+const LIST_MARKER_RE = /(?:^|[ \t>])(?:[-*+]|\d{1,9}[.)])[ \t]+$/;
+
 /**
  * Marks every line inside a fenced code block (fences included), so the
  * cleanup never changes a byte of code. Fences inside blockquotes (`> ~~~`)
- * count too; such a fence ends at its closing line or where the quote ends.
- * An unclosed fence runs to the end, as in CommonMark.
+ * and list items (`- ~~~`) count too; such a fence ends at its closing line,
+ * where the quote ends, or at a line indented less than the list item's
+ * content. An unclosed fence runs to the end, as in CommonMark.
  */
 function markLines(body: string): Line[] {
   const out: Line[] = [];
-  let fence: { char: string; length: number; quotes: number } | null = null;
+  let fence: { char: string; length: number; quotes: number; indent: number } | null = null;
   for (const text of body.split("\n")) {
-    const match = /^((?:[ \t]*>)*)[ \t]*(`{3,}|~{3,})(.*)$/.exec(text.replace(/\r$/, ""));
-    if (fence !== null && quoteDepth(text) < fence.quotes) {
-      // The blockquote holding the fence ended, and the fence with it.
+    const match = FENCE_RE.exec(text.replace(/\r$/, ""));
+    const containers = match?.[1] ?? "";
+    if (
+      fence !== null &&
+      (quoteDepth(text) < fence.quotes ||
+        (text.trim() !== "" && indentAfterQuotes(text, fence.quotes) < fence.indent))
+    ) {
+      // The blockquote or list item holding the fence ended, and the fence with it.
       fence = null;
     }
     if (fence === null) {
       const delimiter = match?.[2];
       if (delimiter && !(delimiter[0] === "`" && (match?.[3] ?? "").includes("`"))) {
+        const quotes = quoteDepth(containers);
         fence = {
           char: delimiter[0] as string,
           length: delimiter.length,
-          quotes: quoteDepth(match?.[1] ?? ""),
+          quotes,
+          indent: LIST_MARKER_RE.test(containers) ? indentAfterQuotes(containers, quotes, true) : 0,
         };
         out.push({ text, code: true });
         continue;
@@ -163,13 +176,29 @@ function markLines(body: string): Line[] {
       delimiter &&
       delimiter[0] === fence.char &&
       delimiter.length >= fence.length &&
-      quoteDepth(match?.[1] ?? "") === fence.quotes &&
+      quoteDepth(containers) === fence.quotes &&
+      !LIST_MARKER_RE.test(containers) &&
       (match?.[3] ?? "").trim() === ""
     ) {
       fence = null;
     }
   }
   return out;
+}
+
+/**
+ * The width, in columns (tabs to the next multiple of 4), of a line's leading
+ * whitespace after its first `quotes` blockquote markers, each with the one
+ * space that belongs to it. With `whole`, the width of all of `text` instead
+ * (used for a fence line's containers, whose list markers count as indent).
+ */
+function indentAfterQuotes(text: string, quotes: number, whole = false): number {
+  let rest = text.replace(/\r$/, "");
+  for (let i = 0; i < quotes; i++) rest = rest.replace(/^[ \t]*> ?/, "");
+  const span = whole ? rest : (/^[ \t]*/.exec(rest)?.[0] ?? "");
+  let column = 0;
+  for (const ch of span) column = ch === "\t" ? column + 4 - (column % 4) : column + 1;
+  return column;
 }
 
 /** How many blockquote markers (`>`) start a line. */

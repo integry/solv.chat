@@ -6,11 +6,15 @@
 --
 -- Earlier schemas allowed several non-default push sources with one label.
 -- Before the index, the oldest of each such group keeps its label and every
--- later one gets its own id appended ("Docs (src_...)"), which no other row
--- can share. Rows are renamed, never merged or removed, so source ids and the
+-- later one gets its own id appended ("Docs (src_...)"). An existing label can
+-- already read like such a replacement ("Docs (src_b)"), so a row whose label
+-- equals a replacement is renamed the same way, and so on until nothing
+-- collides. Replacements cannot collide with each other (ids are unique and
+-- contain no " ("), and every row that keeps its label has one nothing else
+-- has. Rows are renamed, never merged or removed, so source ids and the
 -- documents that belong to them are unchanged.
-UPDATE sources
-  SET label = label || ' (' || id || ')'
+WITH RECURSIVE renamed(id) AS (
+  SELECT id FROM sources
   WHERE kind = 'push' AND is_default = 0
     AND EXISTS (
       SELECT 1 FROM sources AS older
@@ -20,7 +24,20 @@ UPDATE sources
         AND older.label = sources.label
         AND (older.created_at < sources.created_at
           OR (older.created_at = sources.created_at AND older.id < sources.id))
-    );
+    )
+  UNION
+  SELECT taken.id
+  FROM renamed
+  JOIN sources AS moved ON moved.id = renamed.id
+  JOIN sources AS taken
+    ON taken.org_id = moved.org_id
+    AND taken.assistant_id = moved.assistant_id
+    AND taken.kind = 'push' AND taken.is_default = 0
+    AND taken.label = moved.label || ' (' || moved.id || ')'
+)
+UPDATE sources
+  SET label = label || ' (' || id || ')'
+  WHERE id IN (SELECT id FROM renamed);
 
 CREATE UNIQUE INDEX sources_push_label
   ON sources(org_id, assistant_id, label)
