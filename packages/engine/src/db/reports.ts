@@ -18,6 +18,40 @@ export interface QuestionCount {
   count: number;
 }
 
+/**
+ * Response-time aggregates for one range, straight from SQL. Percentiles are
+ * whole milliseconds, NULL (here `null`) when no reply in the range was timed.
+ */
+export interface ReplyTimingRow {
+  /** Assistant replies in the range, timed or not, not counting page-action replies. */
+  replies: number;
+  /** Replies in the range that used a page action, counted in nothing else here. */
+  pageActionReplies: number;
+  /** Of those, replies with a time to first token (written after migration 0022). */
+  timed: number;
+  firstTokenMedianMs: number | null;
+  firstTokenP90Ms: number | null;
+  totalMedianMs: number | null;
+}
+
+/**
+ * A percentile of the `v` column of a ranked CTE (`i` the 0-based rank, `n`
+ * the row count), computed in SQL by linear interpolation between the two
+ * closest ranks: the same definition as a spreadsheet's PERCENTILE.INC (and
+ * the median of an even count is the mean of the middle two). The position
+ * `(n - 1) * p / 100` is split into its whole and hundredths parts in integer
+ * arithmetic, so 0.9 is never a binary fraction. `percent` is a literal from
+ * this module, never input.
+ */
+function percentileOf(ranked: string, percent: 50 | 90): string {
+  const at = (rank: string) => `MAX(CASE WHEN i = ${rank} THEN v END)`;
+  return `(SELECT CAST(ROUND(${at("lo")}
+              + (COALESCE(${at("lo + 1")}, ${at("lo")}) - ${at("lo")}) * MAX(frac) / 100.0) AS INTEGER)
+             FROM (SELECT v, i, ((n - 1) * ${percent}) / 100 AS lo,
+                          ((n - 1) * ${percent}) % 100 AS frac
+                     FROM ${ranked}))`;
+}
+
 export interface SourceCitationCount {
   url: string;
   title: string;
@@ -115,6 +149,79 @@ export function reportsFor(db: D1Database, orgId: string) {
         .bind(orgId, assistantId, range.fromMs, range.toMs)
         .all<{ day: string; questions: number }>();
       return res.results.map((row) => ({ day: row.day, questions: row.questions }));
+    },
+
+    /**
+     * How fast replies came, for the Response time figures: median and 90th
+     * percentile of the time to first token, and the median total time.
+     *
+     * One statement, bounded like every other report query: the replies are
+     * found through `messages_role_created (org_id, role, created_at)` and
+     * the conversation's primary key (for the assistant), and only that
+     * range's rows are sorted, so the cost follows the period's traffic, not
+     * the assistant's history. Only stored replies are read, and only visitor
+     * answers are stored: "Try it" previews and test runs write no message.
+     * Replies written before the timings existed have NULL timings; they are
+     * counted in `replies` but not in `timed` or any percentile.
+     *
+     * A reply that used a page action is left out of all of it and counted
+     * on its own: it was stored when it paused for the action, with that
+     * first request's times, and a continuation keeps them, so its total is
+     * not the time to the complete answer, and an action-only first request
+     * has no first token at all (which would read as a reply from before
+     * timings). Such a reply is known by a `kind: "action"` entry in its
+     * stored tool calls, kept once the call is resolved, or by a resume
+     * having completed on it (`resume_revision`, raised only by a resume).
+     */
+    async replyTiming(assistantId: string, range: ReportRange): Promise<ReplyTimingRow> {
+      const row = await prepare(
+        db,
+        `WITH replies AS MATERIALIZED (
+           SELECT m.first_token_ms AS first_ms, m.total_ms AS total_ms,
+                  -- A ladder, not OR: the tenancy guard refuses an OR beside the org filter.
+                  CASE WHEN m.resume_revision > 0 THEN 1
+                       WHEN m.tool_calls IS NULL THEN 0
+                       WHEN json_valid(m.tool_calls) = 0 THEN 0
+                       WHEN EXISTS (SELECT 1 FROM json_each(m.tool_calls)
+                                     WHERE json_extract(value, '$.kind') = 'action') THEN 1
+                       ELSE 0 END AS page_action
+             FROM messages m
+             JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+            WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'assistant'
+              AND m.created_at >= ?3 AND m.created_at <= ?4
+         ),
+         first_ranked AS MATERIALIZED (
+           SELECT first_ms AS v, ROW_NUMBER() OVER (ORDER BY first_ms) - 1 AS i, COUNT(*) OVER () AS n
+             FROM replies WHERE page_action = 0 AND first_ms IS NOT NULL
+         ),
+         total_ranked AS MATERIALIZED (
+           SELECT total_ms AS v, ROW_NUMBER() OVER (ORDER BY total_ms) - 1 AS i, COUNT(*) OVER () AS n
+             FROM replies WHERE page_action = 0 AND total_ms IS NOT NULL
+         )
+         SELECT (SELECT COUNT(*) FROM replies WHERE page_action = 0) AS replies,
+                (SELECT COUNT(*) FROM replies WHERE page_action = 1) AS page_action_replies,
+                (SELECT COUNT(*) FROM first_ranked) AS timed,
+                ${percentileOf("first_ranked", 50)} AS first_p50,
+                ${percentileOf("first_ranked", 90)} AS first_p90,
+                ${percentileOf("total_ranked", 50)} AS total_p50`,
+      )
+        .bind(orgId, assistantId, range.fromMs, range.toMs)
+        .first<{
+          replies: number;
+          page_action_replies: number;
+          timed: number;
+          first_p50: number | null;
+          first_p90: number | null;
+          total_p50: number | null;
+        }>();
+      return {
+        replies: row?.replies ?? 0,
+        pageActionReplies: row?.page_action_replies ?? 0,
+        timed: row?.timed ?? 0,
+        firstTokenMedianMs: row?.first_p50 ?? null,
+        firstTokenP90Ms: row?.first_p90 ?? null,
+        totalMedianMs: row?.total_p50 ?? null,
+      };
     },
 
     /** Cost over the range's days, from what the UsageSink recorded. */

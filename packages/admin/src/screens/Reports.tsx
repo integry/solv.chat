@@ -1,5 +1,5 @@
 import { type ReactNode, useState } from "react";
-import type { AssistantReport, TopQuestion } from "../api/types.js";
+import type { AssistantReport, ResponseTimePeriod, TopQuestion } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { buildCsv } from "../csv.js";
 import { ScreenLink, useAdminNavigation } from "../routing.js";
@@ -10,7 +10,16 @@ import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { questionConversationsQuery } from "./conversationLinks.js";
-import { formatCost, formatPercent, formatTimes } from "./figures.js";
+import {
+  durationChange,
+  formatCost,
+  formatPercent,
+  formatResponseTime,
+  formatTimes,
+  pageActionNote,
+  responseTimeNote,
+} from "./figures.js";
+import { StatCard } from "./OverviewParts.js";
 import { StatsSkeleton } from "./StatsSkeleton.js";
 
 export interface ReportsProps {
@@ -35,6 +44,7 @@ function csvFor(report: AssistantReport): string {
         ["Cost", formatUsd(report.costMicros)],
       ],
     },
+    ...(report.responseTime ? [responseTimeCsv(report.responseTime)] : []),
     {
       title: "Most asked questions",
       header: ["Question", "Times"],
@@ -56,6 +66,61 @@ function csvFor(report: AssistantReport): string {
       rows: report.uncitedSources.map((item) => [item.title, item.url]),
     },
   ]);
+}
+
+/** The three response-time figures, in the order and words the screen uses. */
+const RESPONSE_FIGURES = [
+  { key: "firstTokenMedianMs", label: "Answer starts appearing" },
+  { key: "firstTokenP90Ms", label: "Slowest 1 in 10 start after" },
+  { key: "totalMedianMs", label: "Full answer" },
+] as const;
+
+function responseTimeCsv(time: ResponseTimePeriod) {
+  return {
+    title: "Response time",
+    header: ["Figure", "This period", `The ${time.days} days before`],
+    rows: RESPONSE_FIGURES.map(({ key, label }) => [
+      label,
+      formatResponseTime(time[key], time.status),
+      formatResponseTime(time.previous[key], time.previous.status),
+    ]),
+  };
+}
+
+function ResponseTime({ time }: { time: ResponseTimePeriod }) {
+  const note = responseTimeNote(time.status);
+  const excluded = pageActionNote(time.status, time.pageActionAnswers);
+  const explanations = {
+    firstTokenMedianMs:
+      "Typical time until the answer starts appearing. Half the answers started sooner.",
+    firstTokenP90Ms: "9 in 10 answers started appearing within this time.",
+    totalMedianMs: "Typical time until the whole answer was written.",
+  };
+  return (
+    <section className="stack" aria-labelledby="response-time-heading">
+      <div>
+        <h2 id="response-time-heading" className="section-heading">
+          Response time
+        </h2>
+        <p className="muted">
+          How long visitors waited for an answer on your site. Try it and tests are not counted.
+        </p>
+        {note && <p className="muted">{note}</p>}
+        {excluded && <p className="muted">{excluded}</p>}
+      </div>
+      <div className="overview-grid overview-grid-3">
+        {RESPONSE_FIGURES.map(({ key, label }) => (
+          <StatCard
+            key={key}
+            label={label}
+            value={formatResponseTime(time[key], time.status)}
+            explanation={explanations[key]}
+            change={durationChange(time[key], time.previous[key], time.days)}
+          />
+        ))}
+      </div>
+    </section>
+  );
 }
 
 function NoneInPeriod() {
@@ -81,7 +146,7 @@ function ReportList({
         <h2 className="section-heading">{heading}</h2>
         <p className="muted">{explanation}</p>
       </div>
-      {empty ? <NoneInPeriod /> : <ul className="history-list">{children}</ul>}
+      {empty ? <NoneInPeriod /> : <ul className="row-list">{children}</ul>}
       {footer}
     </section>
   );
@@ -101,7 +166,7 @@ function QuestionTable({
   return (
     <ReportList heading={heading} explanation={explanation} empty={rows.length === 0}>
       {rows.map((item) => (
-        <li key={item.question} className="history-item">
+        <li key={item.question} className="row-item">
           <ScreenLink {...linkTo(item.question)}>{item.question}</ScreenLink>
           <span className="badge">{formatTimes(item.count)}</span>
         </li>
@@ -188,7 +253,7 @@ export function Reports({ assistantId }: ReportsProps) {
       />
       {report && !empty && (
         <p id="report-csv-hint" className="muted report-csv-hint">
-          The CSV holds the four figures and the four lists below, for {formatDate(report.from)} to{" "}
+          The CSV holds the figures and the four lists below, for {formatDate(report.from)} to{" "}
           {formatDate(report.to)}.
         </p>
       )}
@@ -232,6 +297,8 @@ export function Reports({ assistantId }: ReportsProps) {
             </section>
           </div>
 
+          {report.responseTime && <ResponseTime time={report.responseTime} />}
+
           <div className="report-columns">
             <QuestionTable
               heading="Most asked questions"
@@ -262,7 +329,7 @@ export function Reports({ assistantId }: ReportsProps) {
               empty={report.topSources.length === 0}
             >
               {report.topSources.map((item) => (
-                <li key={item.url} className="history-item">
+                <li key={item.url} className="row-item">
                   <PageLink url={item.url} title={item.title} />
                   <span className="badge">{formatTimes(item.count)}</span>
                 </li>
@@ -282,7 +349,7 @@ export function Reports({ assistantId }: ReportsProps) {
               }
             >
               {report.uncitedSources.map((item) => (
-                <li key={item.url} className="history-item">
+                <li key={item.url} className="row-item">
                   <PageLink url={item.url} title={item.title} />
                 </li>
               ))}

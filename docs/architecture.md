@@ -176,7 +176,8 @@ numbers, install snippet.
 The Monitor screens read:
 
 - Overview: the four Reports figures for the last 7 UTC days and the 7 before,
-  questions per day, the getting-started checklist (content added, a question
+  the median time until the answer starts appearing for the same two periods
+  (see "Reports"), questions per day, the getting-started checklist (content added, a question
   tried in "Try it" or a test run, published, widget loaded on an allowed
   origin or a visitor question received, first visitor question) and what needs
   attention (open gaps, failed tests in the latest run, the configuration
@@ -565,9 +566,33 @@ phrase, does not contain a phrase, or declines (uses the fallback).
 
 The Reports screen answers "is it working?" over a date range the owner picks
 (7, 30 or 90 days): questions asked, share answered, share with a thumbs down,
-cost, the most asked questions, the most frequent unanswered questions, and the
-sources cited most and never. Everything is computed from stored rows; the
-table can be downloaded as CSV. The open engine sends no email; scheduled
+cost, response time, the most asked questions, the most frequent unanswered
+questions, and the sources cited most and never. Everything is computed from
+stored rows; the table can be downloaded as CSV.
+
+Response time is three figures over the period, each against the period of
+the same length before it: the median and 90th percentile of the time until
+the answer starts appearing (`first_token_ms`), and the median time until it
+is complete (`total_ms`). Percentiles interpolate linearly between the two
+nearest ranks (a spreadsheet's PERCENTILE.INC; an even count's median is the
+mean of the middle two) and are rounded to whole milliseconds. They are
+computed in SQL by one statement per period (`replyTiming` in
+`db/reports.ts`), over the period's assistant replies found through the
+`(org_id, role, created_at)` index and the conversation's key, so the cost
+follows the period's traffic, not the assistant's history; there is no
+rollup. Only visitor answers count; "Try it" and test runs store no message.
+Replies without timings (written before migration 0022) are left out, and
+when they are more than half of the period's answers the figure has no number
+(`status: "mostly_untimed"`) and the screen says why; `no_answers` is a
+period with no answer at all. Replies that used a page action are left out
+of every figure and the majority rule, and counted on their own
+(`pageActionAnswers`, which the screens state): such a reply is stored when it
+pauses with the first request's timings, which its continuations keep, so its
+total is not the time to the complete answer, and an action-only first
+request has no first token. It is known by a `kind: "action"` entry in its
+stored tool calls (kept after the call resolves) or a completed resume
+(`resume_revision > 0`). A period whose only answers used page actions has no
+number (`page_actions_only`). The open engine sends no email; scheduled
 digests belong to the cloud layer.
 
 ## Widget
