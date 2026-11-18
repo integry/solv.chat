@@ -258,11 +258,14 @@ function AdminShell({
   // Choosing an assistant writes it into the address too (a new history entry,
   // so Back undoes the switch), and `popstate` tells screens that follow the
   // address: an open conversation of the previous assistant is left behind.
+  // A host screen's query is its own (it may use `id` for something else),
+  // so there only `assistant` changes.
   const selectAssistant = useCallback(
     (id: string) => {
       setSelectedId(id);
       if (shows(window.location.pathname)) {
-        navigate(withAssistant(id));
+        const hostScreen = screen !== null && config.extraScreenIds.has(screen);
+        navigate(withAssistant(id, { keepQuery: hostScreen }));
         return;
       }
       // A Back or Forward is waiting, so the address belongs to another
@@ -270,7 +273,7 @@ function AdminShell({
       const path = config.navItems.find((item) => item.id === screen)?.path;
       if (path) navigate(assistantPath(path, id));
     },
-    [navigate, shows, screen, config.navItems],
+    [navigate, shows, screen, config.navItems, config.extraScreenIds],
   );
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
@@ -381,8 +384,9 @@ function AdminShell({
     () => ({
       navigate: moveTo,
       pathFor: (id: string) => config.navItems.find((item) => item.id === id)?.path ?? null,
+      shows,
     }),
-    [config.navItems, moveTo],
+    [config.navItems, moveTo, shows],
   );
   const ExtraScreen =
     screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;

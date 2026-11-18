@@ -783,6 +783,52 @@ describe("chat/answer", () => {
     }
   });
 
+  it("owner preview ticks Try a question only once an answer completes", async () => {
+    let fail = true;
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream() {
+        if (fail) throw new ProviderError("no key", false, 401);
+        yield { kind: "text", text: "Draft answer" };
+        yield { kind: "usage", tokensIn: 5, tokensOut: 2 };
+      },
+    };
+    const previewApp = createApp(fakeSeams(), { chat: { embedder, retriever, provider } });
+    const preview = async () => {
+      const ctx = createExecutionContext();
+      const res = await previewApp.fetch(
+        new Request("https://engine.example/api/admin/chat", {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: "https://engine.example" },
+          body: JSON.stringify({
+            protocol: 1,
+            assistant: "pk_ans_1",
+            visitorId: "vis_admin",
+            message: "How do I reset my password?",
+            target: "draft",
+          }),
+        }),
+        env,
+        ctx,
+      );
+      const events = parseSseBody(await res.text());
+      await waitOnExecutionContext(ctx);
+      return events;
+    };
+
+    // The provider fails: no answer, so the step stays unticked.
+    const failed = await preview();
+    expect(failed.some((e) => e.type === "error")).toBe(true);
+    expect(failed.some((e) => e.type === "done")).toBe(false);
+    expect((await tenant.assistants.milestones("ast_1"))?.triedAt).toBeNull();
+
+    // A preview that answers ticks it.
+    fail = false;
+    expect((await preview()).some((e) => e.type === "done")).toBe(true);
+    expect((await tenant.assistants.milestones("ast_1"))?.triedAt).toEqual(expect.any(Number));
+  });
+
   it("meters a failed stream's model usage only when reported, and always the question's embedding", async () => {
     const usageWithTokens = vi.fn(async () => {});
     const failingWithUsage: LlmProvider = {

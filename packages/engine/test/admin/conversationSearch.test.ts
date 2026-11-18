@@ -318,7 +318,13 @@ describe("conversation search", () => {
       }
 
       // The first answer says the search is not ready instead of "no match".
-      expect(answers[0]).toMatchObject({ searchPending: true, conversations: [], total: 0 });
+      // It says how many are left: one request folds 10 rounds of 200.
+      expect(answers[0]).toMatchObject({
+        searchPending: true,
+        searchRemaining: 101,
+        conversations: [],
+        total: 0,
+      });
       // Asking again finishes the folding, and the only complete answer finds it.
       const last = answers.at(-1);
       expect(answers.length).toBe(2);
@@ -333,6 +339,41 @@ describe("conversation search", () => {
         `/api/admin/assistants/${ast}/conversations`,
       );
       expect(unsearched).toMatchObject({ searchPending: false, total: 2 });
+      expect(unsearched).not.toHaveProperty("searchRemaining");
+    });
+
+    it("of other assistants do not hold up an assistant's search, and are left for theirs", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const busy = await seedAssistant(ORG_A);
+      const now = Date.now();
+      // Another assistant's long history, more than one request folds.
+      const filler = await seedConversation(ORG_A, busy, now - 5000);
+      await env.DB.prepare(
+        `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2100)
+         INSERT INTO messages (id, org_id, conversation_id, role, content, citations, answered, created_at)
+         SELECT 'msg_busy_' || i, ?1, ?2, 'assistant', 'Réponse numéro ' || i, '[]', 1, ?3 + i FROM n`,
+      )
+        .bind(ORG_A, filler, now - 5000)
+        .run();
+      const school = await seedConversation(ORG_A, ast, now - 1000);
+      const question = await legacyMessage(ORG_A, school, "user", "Où est l'ÉCOLE?", now - 1000);
+
+      const body = await getJson<ConversationsBody & { searchPending: boolean }>(
+        ORG_A,
+        `/api/admin/assistants/${ast}/conversations?q=${encodeURIComponent("école")}`,
+      );
+      // Answered at once, from this assistant's one message.
+      expect(body).toMatchObject({ searchPending: false, total: 1 });
+      expect(body.conversations.map((c) => c.id)).toEqual([school]);
+      expect(await storedSearchText(question)).toBe(searchableText("Où est l'ÉCOLE?"));
+      expect(await pendingCount(ORG_A)).toBe(2100);
+
+      // The other assistant's own search folds its history.
+      const other = await getJson<ConversationsBody & { searchPending: boolean }>(
+        ORG_A,
+        `/api/admin/assistants/${busy}/conversations?q=${encodeURIComponent("numéro")}`,
+      );
+      expect(other).toMatchObject({ searchPending: true, searchRemaining: 100 });
     });
 
     it("are left alone by a list that does not search", async () => {
@@ -444,6 +485,41 @@ describe("conversation search", () => {
       expect(await pendingCount(ORG_A)).toBe(0);
       expect(await search(ORG_A, ast, "école")).toEqual([conversation]);
       expect(await search(ORG_A, ast, "one moment")).toEqual([]);
+    });
+
+    it("fold a row whose text never compares equal to what was read, instead of staying pending", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const now = Date.now();
+      const conversation = await seedConversation(ORG_A, ast, now - 1000);
+      const stuck = await legacyMessage(ORG_A, conversation, "user", "Où est l'ÉCOLE?", now - 1000);
+      // Every comparison of this row's text with the text read fails, as if
+      // the round trip through a binding changed it. Its text never changes.
+      const unequal = {
+        prepare(sql: string) {
+          const statement = env.DB.prepare(sql);
+          if (!sql.includes("content = ?4")) return statement;
+          return {
+            bind: (...args: unknown[]) => statement.bind(...args.slice(0, 3), `${args[3]}\u0001`),
+          };
+        },
+        batch: (statements: D1PreparedStatement[]) => env.DB.batch(statements),
+      } as unknown as D1Database;
+
+      // Skipped once, then folded when read again with the same text.
+      expect(await messagesFor(unequal, ORG_A).fillSearchText({ rounds: 2 })).toBe(true);
+      expect(await storedSearchText(stuck)).toBe(searchableText("Où est l'ÉCOLE?"));
+      expect(await pendingCount(ORG_A)).toBe(0);
+      expect(await search(ORG_A, ast, "école")).toEqual([conversation]);
+    });
+
+    it("fold text with an embedded NUL character", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const now = Date.now();
+      const conversation = await seedConversation(ORG_A, ast, now - 1000);
+      const id = await legacyMessage(ORG_A, conversation, "user", "ÉCOLE\u0000fees", now - 1000);
+
+      expect(await messagesFor(env.DB, ORG_A).fillSearchText()).toBe(true);
+      expect(await storedSearchText(id)).toBe(searchableText("ÉCOLE\u0000fees"));
     });
 
     it("report rows still pending when the last round skipped a rewritten one", async () => {

@@ -77,6 +77,8 @@ export interface ConversationsPage {
    * search: the list is empty and the same request should be sent again.
    */
   searchPending?: boolean;
+  /** While `searchPending`: how many messages are still to be prepared. */
+  searchRemaining?: number;
 }
 
 export interface ConversationFeedback {

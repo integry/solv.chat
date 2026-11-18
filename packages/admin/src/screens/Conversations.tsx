@@ -9,6 +9,7 @@ import {
   replaceQueryParam,
   ScreenLink,
   screenAddress,
+  useAdminNavigation,
 } from "../routing.js";
 import { RelativeTime } from "../ui/DateText.js";
 import { EmptyState } from "../ui/EmptyState.js";
@@ -101,13 +102,33 @@ function useConversationsAddress(assistantId: string): {
   return { openId: otherAssistant ? null : address.id, address };
 }
 
-/** Whether `address` is this assistant's list, rather than a conversation or another screen. */
-function isListAddress(address: ConversationsAddress, assistantId: string): boolean {
+/**
+ * Whether `address` is this assistant's list, rather than a conversation or
+ * another screen. `shows` is the shell's: every path the router takes to this
+ * screen counts (`/admin/conversations/`, or `/admin` when it is the default),
+ * not only `LIST_PATH`.
+ */
+function isListAddress(
+  address: ConversationsAddress,
+  assistantId: string,
+  shows: (path: string) => boolean,
+): boolean {
   return (
-    address.path === LIST_PATH &&
+    shows(address.path) &&
     address.id === null &&
     (address.assistant === null || address.assistant === assistantId)
   );
+}
+
+/** What "Getting search ready" says, with how many messages are left when the engine says. */
+function searchReadyDescription(remaining: number | undefined): string {
+  const left =
+    remaining === undefined || remaining <= 0
+      ? ""
+      : remaining === 1
+        ? " 1 message left."
+        : ` ${remaining.toLocaleString()} messages left.`;
+  return `Older messages are being prepared for search. This happens once, and the results show here when it is done.${left}`;
 }
 
 function ConversationRow({ conv }: { conv: ConversationSummary }) {
@@ -145,6 +166,7 @@ function ListSkeleton() {
 
 export function Conversations({ assistantId }: ConversationsProps) {
   const { openId, address } = useConversationsAddress(assistantId);
+  const { shows } = useAdminNavigation();
   const [offset, setOffset] = useState(0);
   const [searchInput, setSearchInput] = useState(() => toConversationSearch(address.q ?? ""));
   // What is sent: the box, cut to the length the list accepts. A pasted
@@ -159,7 +181,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
   const [followedAddress, setFollowedAddress] = useState(address);
   if (followedAddress !== address) {
     setFollowedAddress(address);
-    if (isListAddress(address, assistantId)) {
+    if (isListAddress(address, assistantId, shows)) {
       const arrived = toConversationSearch(address.q ?? "");
       if (arrived !== search) {
         setSearchInput(arrived);
@@ -187,13 +209,14 @@ export function Conversations({ assistantId }: ConversationsProps) {
   // The search is kept in the address, so a reload, a copied link and an
   // assistant switch (which keeps the query) show the search on screen, and a
   // cleared search stays cleared. Only while the list is what the address
-  // shows: a Back waiting for an answer has moved it to another place.
+  // shows, at any path the router takes here: a Back waiting for an answer
+  // has moved it to another place.
   useEffect(() => {
-    if (openId !== null || window.location.pathname !== LIST_PATH) return;
+    if (openId !== null || !shows(window.location.pathname)) return;
     const named = readQueryParam("assistant");
     if (named !== null && named !== assistantId) return;
     replaceQueryParam("q", search === "" ? null : search);
-  }, [search, openId, assistantId]);
+  }, [search, openId, assistantId, shows]);
 
   const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
   if (flags.size > 0) params.set("filter", [...flags].join(","));
@@ -220,6 +243,9 @@ export function Conversations({ assistantId }: ConversationsProps) {
   if (openId !== null) {
     return (
       <Conversation
+        // A move straight to another conversation starts afresh, rather than
+        // showing the last one's transcript and actions under the new id.
+        key={openId}
         assistantId={assistantId}
         conversationId={openId}
         onBack={() => {
@@ -337,7 +363,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
           <EmptyState
             icon="conversations"
             title="Getting search ready"
-            description="Older messages are being prepared for search. This happens once, and the results show here when it is done."
+            description={searchReadyDescription(page.searchRemaining)}
           />
         </div>
       ) : page.conversations.length === 0 && !hasPrevious ? (

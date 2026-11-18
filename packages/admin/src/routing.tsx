@@ -180,14 +180,15 @@ export function assistantPath(path: string, assistantId: string): string {
 }
 
 /**
- * The current address with `assistantId` as its assistant. An open
- * conversation (`id`) belongs to the assistant it was opened under, so it is
- * dropped; the rest of the query (a search, say) stays.
+ * The current address with `assistantId` as its assistant. On a built-in
+ * screen an open conversation (`id`) belongs to the assistant it was opened
+ * under, so it is dropped; the rest of the query (a search, say) stays. With
+ * `keepQuery` (a host screen, whose query is its own) only `assistant` changes.
  */
-export function withAssistant(assistantId: string): string {
+export function withAssistant(assistantId: string, options: { keepQuery?: boolean } = {}): string {
   const params = new URLSearchParams(window.location.search);
   params.set("assistant", assistantId);
-  params.delete("id");
+  if (options.keepQuery !== true) params.delete("id");
   return `${window.location.pathname}?${params.toString()}`;
 }
 
@@ -370,6 +371,13 @@ export interface AdminNavigation {
   navigate: (path: string) => void;
   /** The path of a visible screen, or null when it is hidden or unknown. */
   pathFor: (id: string) => string | null;
+  /**
+   * Whether the router takes `path` to the screen on show, aliases included
+   * (`/admin/conversations/`, or `/admin` for the default screen). False
+   * while a Back or Forward that waits for an answer has moved the address
+   * to another screen.
+   */
+  shows: (path: string) => boolean;
 }
 
 export const AdminNavigationContext = createContext<AdminNavigation | null>(null);
@@ -378,6 +386,8 @@ const FALLBACK_NAVIGATION: AdminNavigation = {
   // Outside the shell (a screen on its own) there is no leave check to run.
   navigate: navigateTo,
   pathFor: (id) => NAV_ITEMS.find((item) => item.id === id)?.path ?? null,
+  // A screen on its own is what any address shows.
+  shows: () => true,
 };
 
 export function useAdminNavigation(): AdminNavigation {

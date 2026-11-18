@@ -402,18 +402,26 @@ export function messagesFor(db: D1Database, orgId: string) {
     /**
      * Folds `search_text` for rows written before it existed. Migration 0019
      * folds plain ASCII text in SQL; the rest needs `searchableText`, which
-     * SQL cannot reproduce. A row a writer filled in the meantime is left
-     * alone: every write of `content` also writes `search_text`, so a
+     * SQL cannot reproduce. With `assistantId`, only that assistant's
+     * messages are folded: its search needs no others, so it does not wait
+     * for other assistants' history. A row a writer filled in the meantime is
+     * left alone: every write of `content` also writes `search_text`, so a
      * non-NULL value is never older than the text (an older Worker's rewrite
      * of `content` alone is set back to NULL by migration 0019's trigger).
      * Each write also needs `content` to be what was read: an older Worker
      * can rewrite `content` alone between the read and the write, leaving
      * `search_text` NULL, and the fold of the old text must not land then.
-     * Such a row stays NULL and is read again in the next round.
+     * Such a row stays NULL and is read again in the next round. A row read
+     * again with the same text it was skipped with has not changed: its text
+     * does not compare equal to itself once read and bound again, so waiting
+     * would leave it NULL for good and every search pending. It is folded
+     * without the comparison.
      * Each call folds a bounded number of rows: true means none are left,
      * false that some may be.
      */
-    async fillSearchText(options: { batch?: number; rounds?: number } = {}): Promise<boolean> {
+    async fillSearchText(
+      options: { assistantId?: string; batch?: number; rounds?: number } = {},
+    ): Promise<boolean> {
       const batch = options.batch ?? SEARCH_FILL_BATCH;
       const rounds = options.rounds ?? SEARCH_FILL_ROUNDS;
       const update = prepare(
@@ -421,25 +429,64 @@ export function messagesFor(db: D1Database, orgId: string) {
         `UPDATE messages SET search_text = ?3
           WHERE org_id = ?1 AND id = ?2 AND search_text IS NULL AND content = ?4`,
       );
+      const updateUnchecked = prepare(
+        db,
+        `UPDATE messages SET search_text = ?3
+          WHERE org_id = ?1 AND id = ?2 AND search_text IS NULL`,
+      );
+      const assistantId = options.assistantId;
+      const read = () =>
+        assistantId === undefined
+          ? prepare(
+              db,
+              "SELECT id, content FROM messages WHERE org_id = ?1 AND search_text IS NULL LIMIT ?2",
+            ).bind(orgId, batch)
+          : prepare(
+              db,
+              `SELECT m.id, m.content
+                 FROM messages m
+                 JOIN conversations c ON c.org_id = m.org_id AND c.id = m.conversation_id
+                WHERE m.org_id = ?1 AND m.search_text IS NULL AND c.assistant_id = ?3
+                LIMIT ?2`,
+            ).bind(orgId, batch, assistantId);
+      // The text each skipped row had when it was read.
+      const skippedWith = new Map<string, string>();
       for (let round = 0; round < rounds; round++) {
-        const pending = await prepare(
-          db,
-          "SELECT id, content FROM messages WHERE org_id = ?1 AND search_text IS NULL LIMIT ?2",
-        )
-          .bind(orgId, batch)
-          .all<{ id: string; content: string }>();
+        const pending = await read().all<{ id: string; content: string }>();
         if (pending.results.length === 0) return true;
         const written = await db.batch(
           pending.results.map((row) =>
-            update.bind(orgId, row.id, searchableText(row.content), row.content),
+            skippedWith.get(row.id) === row.content
+              ? updateUnchecked.bind(orgId, row.id, searchableText(row.content))
+              : update.bind(orgId, row.id, searchableText(row.content), row.content),
           ),
         );
         // A row not written may still be NULL (its text changed since the
         // read), however short this round was: the next round reads again.
-        const skipped = written.some((res) => (res.meta.changes ?? 0) === 0);
+        let skipped = false;
+        written.forEach((res, i) => {
+          const row = pending.results[i];
+          if (row === undefined || (res.meta.changes ?? 0) > 0) return;
+          skipped = true;
+          skippedWith.set(row.id, row.content);
+        });
         if (pending.results.length < batch && !skipped) return true;
       }
       return false;
+    },
+
+    /** How many of an assistant's messages are still to be folded for search. */
+    async searchTextPending(assistantId: string): Promise<number> {
+      const row = await prepare(
+        db,
+        `SELECT COUNT(*) AS pending
+           FROM messages m
+           JOIN conversations c ON c.org_id = m.org_id AND c.id = m.conversation_id
+          WHERE m.org_id = ?1 AND m.search_text IS NULL AND c.assistant_id = ?2`,
+      )
+        .bind(orgId, assistantId)
+        .first<{ pending: number }>();
+      return row?.pending ?? 0;
     },
 
     async unanswered(assistantId: string, limit = 50): Promise<MessageRow[]> {

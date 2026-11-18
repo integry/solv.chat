@@ -72,8 +72,9 @@ from the auth seam and pass it down.
   search_text (content in Unicode lowercase, NFC, whitespace runs collapsed like
   the question key, for the Conversations search. For rows written before it
   existed, the migration fills it for ASCII text and the engine folds the rest
-  before it runs a search, a bounded share per request; until none are left a
-  search answers `searchPending: true` with no results instead of searching).
+  of the searched assistant's messages before it runs a search, a bounded
+  share per request; until none are left a search answers `searchPending: true`
+  with no results instead of searching).
 - `feedback` — message_id, value (`up` | `down`), note.
 - `mcp_servers` — id, assistant_id, label, url, auth_kind (`none` | `static_header`),
   secret_ciphertext, enabled.
@@ -169,7 +170,8 @@ The Monitor screens read:
 - Conversations: `filter=unanswered,not_helpful,used_tool`, `days=1|7|30|90`
   and `q=` (case-insensitive text in any message); unknown values are refused.
   `searchPending: true` means older messages are still being prepared for
-  search: nothing was searched, and the admin asks again until it is false.
+  search: nothing was searched, `searchRemaining` says how many of the
+  assistant's messages are left, and the admin asks again until it is false.
 - Gaps: `status=open` leaves out groups with a written answer;
   `POST …/gaps/dismiss` and `POST …/gaps/restore` take `{ question }`.
 

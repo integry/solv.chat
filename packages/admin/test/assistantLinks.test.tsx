@@ -75,6 +75,15 @@ function installServer() {
   return { paths };
 }
 
+/** The assistant a host screen was last handed, in order. */
+const invoicesSeen: Array<string | null> = [];
+
+/** A host screen whose own query uses `id`. */
+function Invoices({ assistantId }: { assistantId: string | null }) {
+  invoicesSeen.push(assistantId);
+  return <h1>Invoices</h1>;
+}
+
 /**
  * The browser's Back: the previous address comes back and `popstate` says so.
  * happy-dom restores the address but fires no event, so it is sent here.
@@ -345,6 +354,37 @@ describe("links to an assistant's own screens", () => {
     expect(selectedAssistantId()).toBe(SECOND.id);
     expect(await screen.findByRole("region", { name: "Most asked questions" })).toBeTruthy();
     expect(paths.filter((p) => p.startsWith(`/api/admin/assistants/${FIRST.id}/`))).toEqual([]);
+  });
+
+  it("keeps a host screen's own query when the assistant is switched there", async () => {
+    installServer();
+    invoicesSeen.length = 0;
+    const seen = invoicesSeen;
+    window.history.pushState(null, "", "/admin/invoices?id=inv_7&tab=paid");
+    render(
+      <App
+        options={{
+          extraNavItems: [{ id: "invoices", label: "Invoices", path: "/admin/invoices" }],
+          extraScreens: { invoices: Invoices },
+        }}
+      />,
+    );
+    expect(await screen.findByRole("heading", { name: "Invoices" })).toBeTruthy();
+    await findAssistantButton();
+    pickAssistant(SECOND.id);
+    await waitFor(() => expect(seen.at(-1)).toBe(SECOND.id));
+    // Only the assistant changes: the host's `id` is not taken for a conversation.
+    const params = new URLSearchParams(window.location.search);
+    expect(window.location.pathname).toBe("/admin/invoices");
+    expect(params.get("id")).toBe("inv_7");
+    expect(params.get("tab")).toBe("paid");
+    expect(params.get("assistant")).toBe(SECOND.id);
+
+    // Back returns to the host's address as it was. It names no assistant,
+    // so the selection stays, as on a built-in screen.
+    goBack();
+    await waitFor(() => expect(window.location.search).toBe("?id=inv_7&tab=paid"));
+    expect(selectedAssistantId()).toBe(SECOND.id);
   });
 
   it("leaves Providers, which is for the whole organisation, without an assistant", async () => {

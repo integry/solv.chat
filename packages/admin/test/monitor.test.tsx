@@ -199,6 +199,8 @@ interface ServerOptions {
   holdTestSave?: (release: () => void) => void;
   /** Called when the Try it pane asks a question. */
   onChat?: () => void;
+  /** Holds each request for conversation cnv_3 until the test resolves it. */
+  holdThirdConversation?: (release: () => void) => void;
 }
 
 function installServer(options: ServerOptions = {}) {
@@ -243,6 +245,21 @@ function installServer(options: ServerOptions = {}) {
     }
     if (url.pathname === "/api/admin/conversations/cnv_1") {
       return Response.json(DETAIL);
+    }
+    if (url.pathname === "/api/admin/conversations/cnv_3") {
+      const hold = options.holdThirdConversation;
+      if (hold) await new Promise<void>((release) => hold(release));
+      return Response.json({
+        conversation: { ...DETAIL.conversation, id: "cnv_3" },
+        turns: [
+          {
+            ...DETAIL.turns[0],
+            id: "msg_q3",
+            content: "Can I pay by invoice?",
+            feedback: [],
+          },
+        ],
+      });
     }
     if (url.pathname === "/api/admin/conversations/cnv_2") {
       return Response.json({
@@ -832,6 +849,7 @@ describe("Monitor screens", () => {
               limit: 25,
               offset: 0,
               searchPending: true,
+              searchRemaining: 1234,
             });
           }
           return [conversation()];
@@ -847,6 +865,8 @@ describe("Monitor screens", () => {
       expect(
         within(status as HTMLElement).getByRole("heading", { name: "Getting search ready" }),
       ).toBe(heading);
+      // How far along it is, as the engine counts it.
+      expect(within(status as HTMLElement).getByText(/1,234 messages left\./)).toBeTruthy();
       expect(screen.queryByText("Loading conversations…")).toBeNull();
       expect(screen.queryByRole("heading", { name: "No conversations match" })).toBeNull();
       expect(screen.queryByText(/^Showing /)).toBeNull();
@@ -917,6 +937,82 @@ describe("Monitor screens", () => {
       expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe(
         "returns",
       );
+    });
+
+    it.each([
+      { route: "a trailing slash", path: "/admin/conversations/", options: undefined },
+      {
+        route: "the default screen's address",
+        path: "/admin",
+        options: { defaultScreen: "conversations" },
+      },
+    ])(
+      "keeps the search in the address at $route, so a cleared search stays cleared",
+      async ({ path, options }) => {
+        installServer({
+          conversations: (search) => [
+            conversation({ firstQuestion: search.get("q") === "shipping" ? "Shipping?" : "Any?" }),
+          ],
+        });
+        const q = () => new URLSearchParams(window.location.search).get("q");
+        const searchBox = () => screen.getByLabelText("Search conversations") as HTMLInputElement;
+        await open(`${path}?q=shipping&assistant=${ASSISTANT.id}`, options);
+        expect(await screen.findByRole("link", { name: /Shipping\?/ })).toBeTruthy();
+        expect(searchBox().value).toBe("shipping");
+
+        fireEvent.change(searchBox(), { target: { value: "" } });
+        expect(await screen.findByRole("link", { name: /Any\?/ }, { timeout: 2000 })).toBeTruthy();
+        // Still the address it was opened at, without the cleared search.
+        expect(window.location.pathname).toBe(path);
+        expect(q()).toBeNull();
+
+        // A reload does not bring the cleared search back.
+        cleanup();
+        await open(`${window.location.pathname}${window.location.search}`, options);
+        expect(await screen.findByRole("link", { name: /Any\?/ })).toBeTruthy();
+        expect(searchBox().value).toBe("");
+
+        // A typed search is written there too.
+        fireEvent.change(searchBox(), { target: { value: "returns" } });
+        await waitFor(() => expect(q()).toBe("returns"), { timeout: 2000 });
+        expect(window.location.pathname).toBe(path);
+
+        // Back and Forward to an entry at that address bring its search back.
+        act(() => {
+          window.history.pushState(null, "", `${path}?q=shipping&assistant=${ASSISTANT.id}`);
+          window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+        });
+        expect(await screen.findByRole("link", { name: /Shipping\?/ })).toBeTruthy();
+        expect(searchBox().value).toBe("shipping");
+      },
+    );
+
+    it("does not show the last conversation while moving straight to another", async () => {
+      let release: () => void = () => {};
+      installServer({
+        holdThirdConversation: (r) => {
+          release = r;
+        },
+      });
+      await open(`/admin/conversations?id=cnv_1&assistant=${ASSISTANT.id}`);
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+
+      // A history jump from one open conversation to another.
+      act(() => {
+        window.history.pushState(
+          null,
+          "",
+          `/admin/conversations?id=cnv_3&assistant=${ASSISTANT.id}`,
+        );
+        window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+      });
+      // While the new one loads, neither the old transcript nor its actions show.
+      await waitFor(() => expect(screen.queryByText("I could not find that.")).toBeNull());
+      expect(screen.queryByText("Do you ship to Spain?")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Write an answer for this" })).toBeNull();
+
+      act(() => release());
+      expect(await screen.findByText("Can I pay by invoice?")).toBeTruthy();
     });
 
     it("brings back the search an earlier list entry had on Back and Forward", async () => {

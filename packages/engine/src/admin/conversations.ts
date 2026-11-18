@@ -67,6 +67,11 @@ export interface ConversationsPage {
    * is empty, and the same request should be sent again.
    */
   searchPending: boolean;
+  /**
+   * With `searchPending`: how many of this assistant's messages are still to
+   * be prepared, so the admin can say how far along it is.
+   */
+  searchRemaining?: number;
 }
 
 export interface ConversationDetail {
@@ -98,12 +103,13 @@ export function readConversationFilter(url: URL, now: number = Date.now()): Conv
   const rawFilter = url.searchParams.get("filter");
   if (rawFilter !== null && rawFilter.trim() !== "") {
     for (const part of rawFilter.split(",")) {
-      const key = FILTER_FLAGS[part.trim() as keyof typeof FILTER_FLAGS];
-      if (key === undefined) {
+      const name = part.trim();
+      // Own keys only: `constructor` or `__proto__` must be refused too.
+      if (!Object.hasOwn(FILTER_FLAGS, name)) {
         errors.push(`filter: must be ${Object.keys(FILTER_FLAGS).join(", ")}`);
         break;
       }
-      filter[key] = true;
+      filter[FILTER_FLAGS[name as keyof typeof FILTER_FLAGS]] = true;
     }
   }
   const rawDays = url.searchParams.get("days");
@@ -136,12 +142,21 @@ export async function listConversations(
 
   const limit = Math.min(Math.max(1, Math.trunc(options.limit ?? 25)), 100);
   const offset = Math.max(0, Math.trunc(options.offset ?? 0));
-  const { conversations, total, searchPending } = await tenant.conversations.listPaged(
-    assistantId,
-    { limit, offset, ...(options.filter ? { filter: options.filter } : {}) },
-  );
+  const { conversations, total, searchPending, searchRemaining } =
+    await tenant.conversations.listPaged(assistantId, {
+      limit,
+      offset,
+      ...(options.filter ? { filter: options.filter } : {}),
+    });
 
-  return { conversations, total, limit, offset, searchPending };
+  return {
+    conversations,
+    total,
+    limit,
+    offset,
+    searchPending,
+    ...(searchRemaining === undefined ? {} : { searchRemaining }),
+  };
 }
 
 /** Returns a single conversation with its turns, citations, feedback, and linked answers. */

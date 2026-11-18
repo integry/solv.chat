@@ -112,7 +112,8 @@ export function conversationsFor(db: D1Database, orgId: string) {
      * time each row shows; a conversation with none yet goes by when it
      * started), so a long-running one moves up as it continues. A search reads
      * `search_text`, so rows written before it existed are folded first, a
-     * bounded share per call. While some are left the search is not run (a
+     * bounded share per call (this assistant's messages only, as the search
+     * reads no others). While some are left the search is not run (a
      * row still to fold could match, so any answer could leave it out):
      * the result is empty with `searchPending`, and asking again folds more.
      */
@@ -123,11 +124,17 @@ export function conversationsFor(db: D1Database, orgId: string) {
       conversations: ConversationSummaryRow[];
       total: number;
       searchPending: boolean;
+      /** While `searchPending`: this assistant's messages still to prepare. */
+      searchRemaining?: number;
     }> {
       const filter = options.filter ?? {};
       const search = (filter.search ?? "").trim();
-      if (search !== "" && !(await messagesFor(db, orgId).fillSearchText())) {
-        return { conversations: [], total: 0, searchPending: true };
+      if (search !== "") {
+        const messages = messagesFor(db, orgId);
+        if (!(await messages.fillSearchText({ assistantId }))) {
+          const searchRemaining = await messages.searchTextPending(assistantId);
+          return { conversations: [], total: 0, searchPending: true, searchRemaining };
+        }
       }
       // Each condition is switched on by its own parameter, so one statement
       // serves every combination and nothing is spliced into the SQL.

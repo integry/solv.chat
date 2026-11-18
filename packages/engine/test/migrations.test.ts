@@ -236,7 +236,8 @@ describe("migrations", () => {
       (q) =>
         /\bUPDATE\s+messages\s+SET\s+search_text\b/i.test(q) && !/\bCREATE\s+TRIGGER\b/i.test(q),
     );
-    expect(updates.length).toBe(10);
+    // One statement: a large table is read once.
+    expect(updates.length).toBe(1);
     for (const sql of updates) {
       await env.DB.prepare(sql).run();
     }

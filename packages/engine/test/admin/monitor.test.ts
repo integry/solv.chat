@@ -786,7 +786,16 @@ describe("admin Monitor screen APIs", () => {
     it("refuses unknown filters and dates instead of showing everything", async () => {
       const ast = await seedAssistant(ORG_A);
       const app = appForOrg(ORG_A);
-      for (const query of ["?filter=spam", "?days=5", `?q=${"x".repeat(201)}`]) {
+      // Names an object has by inheritance are not filters either.
+      for (const query of [
+        "?filter=spam",
+        "?filter=constructor",
+        "?filter=toString",
+        "?filter=__proto__",
+        "?filter=unanswered,hasOwnProperty",
+        "?days=5",
+        `?q=${"x".repeat(201)}`,
+      ]) {
         const res = await call(app, "GET", `/api/admin/assistants/${ast}/conversations${query}`);
         expect({ query, status: res.status }).toEqual({ query, status: 400 });
       }
