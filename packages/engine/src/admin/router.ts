@@ -1,10 +1,11 @@
 import { isPlainObject } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
+import { plainPageFetcher } from "../ingest/pageFetcher.js";
 import { McpError } from "../mcp/types.js";
 import type { EffectiveProviderSettings } from "../providers/config.js";
 import type { Retriever } from "../providers/retrieval.js";
-import type { KeyProvider, LlmProviderName } from "../seams/types.js";
+import type { KeyProvider, LlmProviderName, PageFetcher } from "../seams/types.js";
 import { writeTheRightAnswer } from "./answers.js";
 import {
   createTest,
@@ -74,6 +75,8 @@ export interface AdminRouteDeps {
   retriever: Pick<Retriever, "remove">;
   publicBaseUrl: string;
   fetchImpl?: typeof fetch | undefined;
+  /** The page-fetcher seam. `createApp` always passes one; absent, the import uses `plainPageFetcher` over `fetchImpl`. */
+  pages?: PageFetcher | undefined;
   costUnit?: "usd" | "credits" | undefined;
   resolveSettings?: (() => Promise<EffectiveProviderSettings>) | undefined;
   checkConfigError?: ((resolved?: EffectiveProviderSettings) => Promise<string | null>) | undefined;
@@ -297,7 +300,7 @@ async function assistantRoutes(
           ...(typeof body.sourceId === "string" ? { sourceId: body.sourceId } : {}),
           urls: Array.isArray(body.urls) ? (body.urls as string[]) : [],
         },
-        deps.fetchImpl,
+        deps.pages ?? plainPageFetcher({ fetch: deps.fetchImpl }),
       );
       return Response.json(result, { status: 201 });
     }

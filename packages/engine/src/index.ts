@@ -31,6 +31,14 @@ export {
 } from "./chat/toolLoop.js";
 export { type Chunk, chunkMarkdown, MAX_CHARS, OVERLAP_CHARS } from "./ingest/chunk.js";
 export { type IngestConsumerDeps, runIngestBatch } from "./ingest/consumer.js";
+export { extractHtml, htmlToTitleAndMarkdown } from "./ingest/htmlToMarkdown.js";
+export {
+  MAX_PAGE_BYTES,
+  MAX_PAGE_REDIRECTS,
+  PAGE_FETCH_TIMEOUT_MS,
+  type PlainPageFetcherOptions,
+  plainPageFetcher,
+} from "./ingest/pageFetcher.js";
 export { type ResolvedChunk, resolveChunks } from "./ingest/resolve.js";
 export {
   callTool,
@@ -102,6 +110,12 @@ export {
   type LimitDecision,
   type Limits,
   type LlmProviderName,
+  type PageContent,
+  type PageFetcher,
+  type PageFetchResult,
+  type PageNoContent,
+  type PageNotModified,
+  type PageValidators,
   type Principal,
   type ScopeClaim,
   type Seams,
@@ -115,3 +129,4 @@ export {
   SecretBoxError,
   sealSecret,
 } from "./security/secretBox.js";
+export type { HostResolver } from "./security/urlGuard.js";

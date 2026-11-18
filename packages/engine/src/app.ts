@@ -10,6 +10,7 @@ import {
 } from "./chat/route.js";
 import { forPrincipal, type Tenant } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
+import { plainPageFetcher } from "./ingest/pageFetcher.js";
 import { type IngestResource, ingestRoutes } from "./ingest/router.js";
 import {
   checkLlmConfigError,
@@ -72,6 +73,8 @@ export function createApp(seams: Seams, options?: AppOptions): App {
     options?.fetch && !options.chat?.fetch
       ? { ...options.chat, fetch: options.fetch }
       : options?.chat;
+  // The fifth seam is optional so hosts written before it keep working.
+  const pages = seams.pages ?? plainPageFetcher({ fetch: options?.fetch });
 
   return {
     async fetch(request, env, ctx) {
@@ -160,6 +163,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           retriever: vectorizeRetriever(env.VECTORS),
           publicBaseUrl: url.origin,
           fetchImpl: options?.fetch,
+          pages,
           // Used only to seal and open stored MCP credentials and provider keys.
           secretKey: env.SOLV_SECRET_KEY ?? "",
           keys: seams.keys,

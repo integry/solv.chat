@@ -136,12 +136,15 @@ the Queue retries (every code but `too_long`), so a retry that succeeds turns
 the row Ready. There is no crawler in v1: content is pushed (CLI, GitHub
 Action), imported once from a sitemap, or written by hand as an entry.
 
-Sitemap import validates every URL and redirect hop as `https:` and checks
-the hostname via DNS-over-HTTPS before fetching, refusing private, loopback, or
-link-local addresses. Because Workers `fetch` resolves the hostname separately
-from that pre-check, a host that changes its DNS answer between the check and
-the fetch is not caught; that is an accepted limitation for an action only the
-signed-in owner can trigger.
+Sitemap import fetches each chosen page through the `PageFetcher` seam (see
+"Extension seams"). The open build's fetcher validates every URL and redirect
+hop as `https:` and checks the hostname via DNS-over-HTTPS before fetching,
+refusing private, loopback, or link-local addresses. A page with no text is
+written as its title alone; a response that is not a page or text (a PDF, an
+image) is skipped and counted in the import's `skipped`. Because Workers
+`fetch` resolves the hostname separately from that pre-check, a host that
+changes its DNS answer between the check and the fetch is not caught; that is
+an accepted limitation for an action only the signed-in owner can trigger.
 
 D1 is the only source of truth for live chunks; readers resolve retrieved vector
 ids through D1, so leftover vectors and R2 objects can accumulate after failures.
@@ -575,21 +578,49 @@ The cloud layer replaces these and nothing else:
 - `UsageSink` — receives usage events. The open build writes `usage_daily`.
 - `Limits` — answers "may this org do this?". The open build enforces only the
   per-assistant spend cap and rate limits.
+- `PageFetcher` — turns one https URL into
+  `{ finalUrl, status, markdown, title, etag, lastModified, notModified }`.
+  `fetchPage(url, { etag, lastModified })` sends those validators as
+  `If-None-Match` / `If-Modified-Since`; a 304 comes back as
+  `kind: "not_modified"`. A response that is not HTML, Markdown or plain text,
+  or a page whose extraction leaves no text, comes back as
+  `kind: "no_content"` (`reason: "not_html" | "empty"`) and is never indexed as
+  an empty document. An implementation throws when it refuses or cannot fetch
+  a page, and must keep the open build's protections on every request and
+  redirect hop: https only, no private, loopback or link-local address, a size
+  cap and a timeout. The type uses no Cloudflare types, so a host can implement
+  it over a REST API (a headless browser, say). The open build's
+  `plainPageFetcher` uses Workers `fetch` and the HTML-to-Markdown extraction
+  the sitemap import has always used (10 s, 1 MiB, 3 redirects). The field is
+  optional: when a host passes none, `createApp` applies `plainPageFetcher`, so
+  `createApp` itself imports it from `src/ingest/` rather than `seams/open/`.
 
 `packages/engine` exports `createApp(seams)` and the open seam implementations
 (`passwordAuth`, `PasswordAuthEnv`, `SINGLE_ORG_ID`, `secretKeys`, `SecretKeyEnv`,
-`usageDaily`, `basicLimits`, `CapMicrosResolver`, `DEFAULT_DAILY_CAP_MICROS`),
+`usageDaily`, `basicLimits`, `CapMicrosResolver`, `DEFAULT_DAILY_CAP_MICROS`,
+`plainPageFetcher`, `PlainPageFetcherOptions`) and the `PageFetcher` types
+(`PageFetcher`, `PageFetchResult`, `PageContent`, `PageNotModified`,
+`PageNoContent`, `PageValidators`),
 along with `./migrations/*` and `./package.json` so an embedder can apply
 migrations from the installed package:
 
 ```ts
-import { basicLimits, createApp, passwordAuth, secretKeys, usageDaily } from "@solvchat/engine";
+import {
+  basicLimits,
+  createApp,
+  passwordAuth,
+  plainPageFetcher,
+  secretKeys,
+  usageDaily,
+} from "@solvchat/engine";
 
 const app = createApp({
   auth: passwordAuth(env, env.DB),
   keys: secretKeys(env, env.DB),
   usage: usageDaily(env.DB),
   limits: basicLimits(env.DB),
+  // Optional; this is what createApp applies when it is left out.
+  pages: plainPageFetcher(),
 });
 ```
 
