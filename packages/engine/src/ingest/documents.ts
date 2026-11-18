@@ -105,12 +105,45 @@ async function tryDeleteObject(
   }
 }
 
+// The same bounds the admin uses for a source's label.
+const MAX_SOURCE_LABEL_LENGTH = 80;
+// The default push source's stored label; the admin shows it as "Your site".
+const DEFAULT_PUSH_LABEL = "Push";
+
+/**
+ * Reads the optional `source` label of a push or prune. A label names its own
+ * push source, so two pushers with different labels never prune each other's
+ * documents; without one, the default push source is used, as before.
+ */
+function readSourceLabel(rawBody: Record<string, unknown>): string | undefined {
+  const raw = rawBody.source;
+  if (raw === undefined || raw === null) return undefined;
+  if (rawBody.sourceId !== undefined && rawBody.sourceId !== null) {
+    throw new BadRequest(["source: give sourceId or source, not both"]);
+  }
+  const label = typeof raw === "string" ? raw.trim() : "";
+  if (label.length === 0 || label.length > MAX_SOURCE_LABEL_LENGTH) {
+    throw new BadRequest([`source: must be 1 to ${MAX_SOURCE_LABEL_LENGTH} characters`]);
+  }
+  if (label.toLowerCase() === DEFAULT_PUSH_LABEL.toLowerCase()) {
+    throw new BadRequest([
+      `source: "${label}" is the default source's name; leave source out to use it`,
+    ]);
+  }
+  return label;
+}
+
 async function findExistingSource(
   tenant: Tenant,
   assistantId: string,
-  sourceId: unknown,
+  rawBody: Record<string, unknown>,
   options: SourceOptions,
 ): Promise<SourceRow | null> {
+  const sourceId = rawBody.sourceId;
+  const label = readSourceLabel(rawBody);
+  if (label !== undefined) {
+    return tenant.sources.getPushByLabel(assistantId, label);
+  }
   if (sourceId !== undefined && sourceId !== null) {
     if (typeof sourceId !== "string" || sourceId.trim() === "") {
       throw new BadRequest(["sourceId: must be a non-empty string"]);
@@ -131,11 +164,20 @@ async function findExistingSource(
 async function resolveOrCreatePushSource(
   tenant: Tenant,
   assistantId: string,
-  sourceId: unknown,
+  rawBody: Record<string, unknown>,
   options: SourceOptions,
 ): Promise<SourceRow> {
-  if (sourceId !== undefined && sourceId !== null) {
-    const existing = await findExistingSource(tenant, assistantId, sourceId, options);
+  const label = readSourceLabel(rawBody);
+  if (label !== undefined) {
+    return tenant.sources.getOrCreatePushByLabel({
+      id: newId("src"),
+      assistantId,
+      label,
+      createdAt: Date.now(),
+    });
+  }
+  if (rawBody.sourceId !== undefined && rawBody.sourceId !== null) {
+    const existing = await findExistingSource(tenant, assistantId, rawBody, options);
     if (existing !== null) return existing;
     throw new NotFound();
   }
@@ -208,12 +250,7 @@ export async function pushDocuments(
     return parsed.value;
   });
 
-  const source = await resolveOrCreatePushSource(
-    deps.tenant,
-    scope.assistantId,
-    rawBody.sourceId,
-    options,
-  );
+  const source = await resolveOrCreatePushSource(deps.tenant, scope.assistantId, rawBody, options);
   const existing = await deps.tenant.documents.existingFor(
     source.id,
     documents.map((doc) => doc.externalId),
@@ -348,7 +385,9 @@ export async function removeSourceDocuments(
 }
 
 /**
- * Deletes documents by `externalIds` or prunes everything not in `keep`.
+ * Deletes documents by `externalIds` or prunes everything not in `keep`,
+ * always within one source: `sourceId`, the push source named by `source`, or
+ * the default push source. Documents of other sources are never touched.
  * Deletes the D1 row first (cascading chunks), then performs best-effort
  * cleanup of vectors and R2 objects.
  */
@@ -380,12 +419,7 @@ export async function deleteDocuments(
     externalIds = [...new Set(rawIds)];
   }
 
-  const source = await findExistingSource(
-    deps.tenant,
-    scope.assistantId,
-    rawBody.sourceId,
-    options,
-  );
+  const source = await findExistingSource(deps.tenant, scope.assistantId, rawBody, options);
   if (source === null) {
     return { written: 0, unchanged: 0, deleted: 0 };
   }

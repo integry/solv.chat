@@ -139,6 +139,11 @@ that fails one gets a plain error event and costs nothing.
   documents (external id, url, title, Markdown). Unchanged `content_hash` is a no-op.
 - `DELETE /v1/ingest/:assistantId/documents` — by external id, or everything not in
   the pushed set (`prune`).
+- Both work on one push source: `sourceId`, the push source named by `source` (a
+  label, 1 to 80 characters, created on first push; one per label per assistant),
+  or the assistant's default push source when neither is given. A prune never
+  touches another source, so two pushers with different `source` labels cannot
+  delete each other's documents.
 - `GET /v1/ingest/:assistantId/config` — bearer ingest key. Returns the current
   draft config.
 - `PUT /v1/ingest/:assistantId/config` — bearer ingest key. Validates and updates
