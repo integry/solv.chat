@@ -410,6 +410,7 @@ async function resolveAnswerDeps(params: {
             runAnswerReview(
               {
                 messages: params.tenant.messages,
+                topics: params.tenant.topics,
                 reviewer,
                 limits: seams.limits,
                 usage: seams.usage,

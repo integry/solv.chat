@@ -62,6 +62,7 @@ import {
   listSources,
   updateSource,
 } from "./sources.js";
+import { deleteTopic, listTopics, mergeTopic, renameTopic } from "./topics.js";
 import {
   configRevision,
   getDraft,
@@ -345,6 +346,9 @@ async function assistantRoutes(
         await reportFor(tenant, assistantId, parseReportDays(url.searchParams.get("days"))),
       );
     }
+    if (action === "topics" && method === "GET") {
+      return Response.json(await listTopics(tenant, assistantId));
+    }
     if (action === "install" && method === "GET") {
       return Response.json(await getInstallInfo(tenant, assistantId, deps.publicBaseUrl));
     }
@@ -374,6 +378,25 @@ async function assistantRoutes(
         assistantId,
       );
       return Response.json(run, { status: 201 });
+    }
+    throw new NotFound();
+  }
+
+  // `topics/:topicId` (rename, delete) and `topics/:topicId/merge`.
+  if (segments[2] === "topics" && segments[3]) {
+    const topicId = segments[3];
+    if (segments.length === 4 && method === "PATCH") {
+      return Response.json(
+        await renameTopic(tenant, assistantId, topicId, await readJsonBody(request)),
+      );
+    }
+    if (segments.length === 4 && method === "DELETE") {
+      return Response.json(await deleteTopic(tenant, assistantId, topicId));
+    }
+    if (segments.length === 5 && segments[4] === "merge" && method === "POST") {
+      return Response.json(
+        await mergeTopic(tenant, assistantId, topicId, await readJsonBody(request)),
+      );
     }
     throw new NotFound();
   }

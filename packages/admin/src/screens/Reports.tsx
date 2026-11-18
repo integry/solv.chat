@@ -1,5 +1,5 @@
 import { type ReactNode, useState } from "react";
-import type { AssistantReport, ResponseTimePeriod, TopQuestion } from "../api/types.js";
+import type { AssistantReport, ResponseTimePeriod, TopGap, TopicsReport } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { buildCsv } from "../csv.js";
 import { ScreenLink, useAdminNavigation } from "../routing.js";
@@ -21,6 +21,7 @@ import {
 } from "./figures.js";
 import { StatCard } from "./OverviewParts.js";
 import { StatsSkeleton } from "./StatsSkeleton.js";
+import { TopicsDialog } from "./TopicsDialog.js";
 
 export interface ReportsProps {
   assistantId: string;
@@ -50,10 +51,23 @@ function csvFor(report: AssistantReport): string {
       header: ["Question", "Times"],
       rows: report.topQuestions.map((item) => [item.question, item.count]),
     },
+    ...(report.topics
+      ? [
+          {
+            title: "Topics",
+            header: ["Topic", "Questions", "Could not answer"],
+            rows: report.topics.rows.map((item) => [
+              item.name,
+              item.questions,
+              formatPercent(item.unansweredShare),
+            ]),
+          },
+        ]
+      : []),
     {
       title: "Most often unanswered",
-      header: ["Question", "Times"],
-      rows: report.topGaps.map((item) => [item.question, item.count]),
+      header: ["Question", "Topic", "Times"],
+      rows: report.topGaps.map((item) => [item.question, item.topic?.name ?? "", item.count]),
     },
     {
       title: "Pages used most",
@@ -160,18 +174,97 @@ function QuestionTable({
 }: {
   heading: string;
   explanation: string;
-  rows: readonly TopQuestion[];
+  rows: readonly TopGap[];
   linkTo: (question: string) => { to: string; query: Record<string, string> };
 }) {
   return (
     <ReportList heading={heading} explanation={explanation} empty={rows.length === 0}>
       {rows.map((item) => (
         <li key={item.question} className="row-item">
-          <ScreenLink {...linkTo(item.question)}>{item.question}</ScreenLink>
+          <span className="report-question">
+            <ScreenLink {...linkTo(item.question)}>{item.question}</ScreenLink>
+            {item.topic && (
+              <span className="badge badge-tone-info topic-label">
+                <span className="sr-only">Topic: </span>
+                {item.topic.name}
+              </span>
+            )}
+          </span>
           <span className="badge">{formatTimes(item.count)}</span>
         </li>
       ))}
     </ReportList>
+  );
+}
+
+/** "1 question", "12 questions". */
+function formatQuestions(count: number): string {
+  return count === 1 ? "1 question" : `${count} questions`;
+}
+
+/** Reports' Topics list: each topic's questions in the period, most asked first. */
+function TopicsList({
+  topics,
+  assistantId,
+  period,
+  onManage,
+}: {
+  topics: TopicsReport;
+  assistantId: string;
+  period: { from: string; to: string };
+  onManage: () => void;
+}) {
+  const empty = topics.rows.length === 0;
+  return (
+    <section className="source-card stack" aria-label="Topics">
+      <div className="report-list-heading">
+        <div>
+          <h2 className="section-heading">Topics</h2>
+          <p className="muted">
+            What visitors ask about, and the share your assistant could not answer. Open one to read
+            its conversations.
+          </p>
+        </div>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={onManage}>
+          Manage topics
+        </button>
+      </div>
+      {!topics.reviewAnswers && (
+        <p className="muted">
+          Review answers is off in Settings, so new questions get no topic. Turn it on to see topics
+          here.
+        </p>
+      )}
+      {empty ? (
+        topics.reviewAnswers ? (
+          <NoneInPeriod />
+        ) : null
+      ) : (
+        <ul className="row-list">
+          {topics.rows.map((item) => (
+            <li key={item.id} className="row-item topic-row">
+              <ScreenLink
+                to="conversations"
+                query={{
+                  topic: item.id,
+                  askedFrom: period.from,
+                  askedTo: period.to,
+                  assistant: assistantId,
+                }}
+              >
+                {item.name}
+              </ScreenLink>
+              <span className="topic-figures">
+                <span className="badge">{formatQuestions(item.questions)}</span>
+                <span className={item.unanswered > 0 ? "badge badge-tone-warning" : "badge"}>
+                  {formatPercent(item.unansweredShare)} not answered
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -191,6 +284,7 @@ const RANGE_OPTIONS = RANGES.map((value) => ({ value, label: `${value} days` }))
 
 export function Reports({ assistantId }: ReportsProps) {
   const [days, setDays] = useState<(typeof RANGES)[number]>(30);
+  const [managing, setManaging] = useState(false);
   const gapsShown = useAdminNavigation().pathFor("gaps") !== null;
   const reportRes = useResource<AssistantReport>(
     `/api/admin/assistants/${assistantId}/report?days=${days}`,
@@ -253,7 +347,7 @@ export function Reports({ assistantId }: ReportsProps) {
       />
       {report && !empty && (
         <p id="report-csv-hint" className="muted report-csv-hint">
-          The CSV holds the figures and the four lists below, for {formatDate(report.from)} to{" "}
+          The CSV holds the figures and the lists below, for {formatDate(report.from)} to{" "}
           {formatDate(report.to)}.
         </p>
       )}
@@ -301,6 +395,15 @@ export function Reports({ assistantId }: ReportsProps) {
           </div>
 
           {report.responseTime && <ResponseTime time={report.responseTime} />}
+
+          {report.topics && (
+            <TopicsList
+              topics={report.topics}
+              assistantId={assistantId}
+              period={{ from: report.from, to: report.to }}
+              onManage={() => setManaging(true)}
+            />
+          )}
 
           <div className="report-columns">
             <QuestionTable
@@ -360,6 +463,12 @@ export function Reports({ assistantId }: ReportsProps) {
           </div>
         </div>
       )}
+      <TopicsDialog
+        assistantId={assistantId}
+        open={managing}
+        onClose={() => setManaging(false)}
+        onChanged={reportRes.reload}
+      />
     </div>
   );
 }

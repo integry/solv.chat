@@ -640,7 +640,7 @@ describe("Monitor screens", () => {
       const csv = screen.getByRole("button", { name: "Download CSV" });
       const hint = document.getElementById(csv.getAttribute("aria-describedby") ?? "");
       expect(hint?.textContent).toBe(
-        "The CSV holds the figures and the four lists below, for 18 Oct 2026 to 16 Nov 2026.",
+        "The CSV holds the figures and the lists below, for 18 Oct 2026 to 16 Nov 2026.",
       );
       expect(screen.getByRole("link", { name: "Old page" }).getAttribute("href")).toBe(
         "https://docs.example.com/old",

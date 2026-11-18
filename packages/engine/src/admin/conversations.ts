@@ -1,4 +1,4 @@
-import { type AnswerOutcome, MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
+import { type AnswerOutcome, isId, MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
 import type { TraceDropReason, TracePart } from "../chat/trace.js";
 import type {
   ConversationFilter,
@@ -101,9 +101,10 @@ const MAX_SEARCH = MAX_CONVERSATION_SEARCH_LENGTH;
 
 /**
  * Reads `?filter=unanswered,not_helpful,used_tool,could_not_answer,asked_for_person,off_topic`, `?days=1|7|30|90`,
- * `?q=text` and `?question=` (a grouped question, matched by its key, as
- * Reports and Overview count it) from a list request. `?askedFrom=` and
- * `?askedTo=` (inclusive UTC days, `YYYY-MM-DD`) narrow `question` to asks
+ * `?q=text`, `?question=` (a grouped question, matched by its key, as
+ * Reports and Overview count it) and `?topic=` (a topic id) from a list
+ * request. `?askedFrom=` and `?askedTo=` (inclusive UTC days, `YYYY-MM-DD`)
+ * narrow `question` or `topic` to asks
  * made in those days, the period a Reports count is for: a conversation
  * started long before can hold a question asked in it, so `days` (when a
  * conversation started) cannot stand in for it. Unknown values are refused
@@ -149,11 +150,24 @@ export function readConversationFilter(url: URL, now: number = Date.now()): Conv
       filter.question = question;
     }
   }
+  const rawTopic = url.searchParams.get("topic");
+  if (rawTopic !== null && rawTopic !== "") {
+    // An id, not a name: names change on rename, and a link must keep working.
+    if (isId(rawTopic, "top")) {
+      filter.topic = rawTopic;
+    } else {
+      errors.push("topic: must be a topic id");
+    }
+  }
   const askedFrom = readUtcDay(url, "askedFrom", errors);
   const askedTo = readUtcDay(url, "askedTo", errors);
   if (askedFrom !== undefined || askedTo !== undefined) {
-    if (filter.question === undefined && !errors.some((e) => e.startsWith("question:"))) {
-      errors.push("askedFrom, askedTo: need a question");
+    if (
+      filter.question === undefined &&
+      filter.topic === undefined &&
+      !errors.some((e) => e.startsWith("question:") || e.startsWith("topic:"))
+    ) {
+      errors.push("askedFrom, askedTo: need a question or a topic");
     }
     if (askedFrom !== undefined && askedTo !== undefined && askedFrom > askedTo) {
       errors.push("askedFrom: must not be after askedTo");

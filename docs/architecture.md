@@ -85,6 +85,11 @@ from the auth seam and pass it down.
   `declined` | `off_topic` | `wants_human`, or NULL when not reviewed) and
   outcome_confidence (0-1, NULL when the reviewer cannot give one; nothing
   reads it yet). See "Answer review".
+  For visitor questions, topic_id (the question's topic, or NULL: not
+  reviewed, or its topic was deleted). See "Topics".
+- `topics` — org_id, assistant_id, id, name, name_key (the name in NFKC
+  lowercase with whitespace collapsed; unique per assistant), created_at.
+  Deleted with the assistant.
 - `message_traces` — org_id, message_id, detail JSON, created_at, updated_at;
   one row per assistant reply to a visitor, keyed (org_id, message_id) and
   deleted with its message. See "Answer traces".
@@ -189,9 +194,11 @@ The Monitor screens read:
   `wants_human` and `off_topic`, retrieval misses included), `days=1|7|30|90`,
   `q=` (case-insensitive text in any message) and `question=` (a grouped
   question: conversations where a visitor asked it, matched by its key; what
-  question links in Overview and Reports open), with `askedFrom=` and
-  `askedTo=` (inclusive UTC days, `YYYY-MM-DD`; only with `question=`) keeping
-  the asks made in those days, the period a Reports count is for. `days=` is
+  question links in Overview and Reports open) and `topic=` (a topic id:
+  conversations where a visitor asked a question with that topic; what the
+  Reports Topics list opens), with `askedFrom=` and `askedTo=` (inclusive UTC
+  days, `YYYY-MM-DD`; only with `question=` or `topic=`) keeping the asks made
+  in those days, the period a Reports count is for. `days=` is
   when a conversation started, a separate filter; unknown values are refused.
   The admin keeps all of them in the screen's address.
   `searchPending: true` means older messages are still being prepared for
@@ -214,6 +221,11 @@ The Monitor screens read:
   an answer written from one still answers its group). Left out,
   `status` lists every group; any other value is refused;
   `POST …/gaps/dismiss` and `POST …/gaps/restore` take `{ question }`.
+- Topics: `GET …/assistants/:id/topics` lists the assistant's topics with
+  `reviewAnswers` (the switch); `PATCH …/topics/:topicId` takes `{ name }`
+  (checked like a proposed name; 409 when another topic has it);
+  `POST …/topics/:topicId/merge` takes `{ into }` (a topic id); `DELETE
+  …/topics/:topicId`. A topic of another assistant or org is 404.
 
 ## Answering a message
 
@@ -266,7 +278,8 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   never counts as answered. Cost, cap, timeout and retry are as for any
   review. `answered` stays 0 whatever the outcome.
 - **The reviewer.** One small interface, `AnswerReviewer` in
-  `chat/review.ts`: question and reply in, `{ outcome, confidence }` out
+  `chat/review.ts`: question, reply and the assistant's topic names in,
+  `{ outcome, confidence, topic }` out (`topic` is described under "Topics")
   (`confidence` 0-1, or null when the backend cannot give one; stored as
   `outcome_confidence`). Callers (the answer path, Gaps, the reports) depend on
   the interface only. Its one implementation is a call to the fast tier of the
@@ -278,15 +291,18 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
 - **Untrusted input.** The reviewer's system prompt is a fixed frame
   (`REVIEW_FRAME`). The question and the reply travel in the user turn as data,
   each between start and end lines carrying a random tag per call, so text
-  inside them cannot close its block. The output is parsed strictly: the whole
-  reply, less surrounding whitespace, must be one of the five labels; anything
-  else is stored as NULL.
+  inside them cannot close its block; so does the assistant's topic list,
+  whose names came from a model that read visitor text. The output is parsed
+  strictly as two fields: the whole reply, less surrounding whitespace, must
+  be exactly the two lines `outcome: <label>` and `topic: <name>`, the label
+  one of the five; anything else is stored as NULL, with no topic.
 - **Cost.** The call's tokens and cost are recorded through `UsageSink` like
   any model use (`messages: 0`), so they count toward `usage_daily` and the
   daily spend cap. Before each attempt the review asks `Limits` with
   `{ kind: "review" }` and is skipped when the cap is reached (the open
-  `basicLimits` applies only the spend cap to it, no rate limit). At most 16
-  output tokens; the reply is cut to its first 6000 characters.
+  `basicLimits` applies only the spend cap to it, no rate limit). At most 64
+  output tokens (the label and a topic of at most 40 characters in any
+  script); the reply is cut to its first 6000 characters.
 - **Metering.** The usage counter a host bills on (`messages`) does not change.
   When an outcome is stored, the seam also receives an event that counts
   nothing (`messages`, tokens and cost all 0) and carries
@@ -317,6 +333,50 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   a retrieval miss is still stored as `declined` (with its outcome event), so
   Gaps, the answered share and the filters read as they did before review
   existed.
+
+## Topics
+
+Top questions are grouped by their exact lowercased text, so "when are you
+open" and "opening hours?" are separate rows. Topics group them by what they
+are about.
+
+- **Who names them.** The answer review, in the same call (one call, not
+  two): it is given the assistant's current topic names and must pick one or
+  propose a new short label (2-4 words, at most 40 characters, in the language
+  of the question). The topic is stored on the visitor's question (the `user`
+  message), not the reply: it describes what was asked, the Topics list
+  counts questions, and the Conversations filter finds where it was asked. A
+  retrieval miss's question gets one too (its topic stands even when its label
+  is replaced by `declined`). A question is tagged once; nothing re-tags it.
+  There is no manual tagging of a message.
+- **The cap.** At most 40 topics per assistant (`MAX_TOPICS_PER_ASSISTANT`),
+  not counting "Other", which is always available. When the list is full the
+  request says new topics are not allowed, and the reviewer must pick the
+  closest topic or "Other"; a new name proposed anyway is stored as "Other".
+  The cap is checked inside the insert statement, so two reviews at 39 topics
+  cannot make 41.
+- **Concurrency.** `name_key` is unique per assistant; a new topic is
+  inserted with `ON CONFLICT DO NOTHING` and read back by key, so two reviews
+  proposing the same new topic at once end with one topic.
+- **Untrusted names.** A proposed name is data from a model that read
+  untrusted text (`checkTopicName` in `@solvchat/core`): tags, markup
+  characters, control and format characters are removed; the rest is
+  NFKC-normalised and trimmed, must be 1-40 characters and at most 4 words of
+  letters, marks, digits, spaces and `- ' & / ,`, and must start with a letter
+  or digit (never a spreadsheet formula). Anything that looks like a web or
+  email address, a street address or postcode, or holds a number longer than
+  6 digits (separators ignored) is refused, so a topic never captures personal
+  data. A refused name becomes "Other". An owner's rename passes the same
+  checks and is refused with the reason. Names are rendered as text
+  everywhere, and the CSV guards them like every other field.
+- **Switch.** With "Review answers" off no topic is assigned (no call is
+  made), and the Topics list says why it is empty.
+- **Isolation.** Topics are per assistant and per org: every statement is
+  bound to the org and names the assistant, and a question can only be tagged
+  with a topic of its own conversation's assistant.
+- **Managing.** Reports → "Manage topics" (a small dialog): rename a topic,
+  merge one into another (all its questions move to it, in one transaction),
+  or delete one (its questions become untagged).
 
 ## Answer traces
 
@@ -376,11 +436,13 @@ were recorded for this answer."
 - A trace adds no visitor or owner text to what is stored: ids, scores,
   timings, a model id and a key source. It is read only by the signed-in
   owner of the org (`/api/admin/*`, org from the auth seam).
-- The answer review sends the visitor's question and the assistant's reply,
-  and nothing else (no conversation history, sources, page or visitor id), to
+- The answer review sends the visitor's question, the assistant's reply and
+  the assistant's topic names, and nothing else (no conversation history,
+  sources, page or visitor id), to
   the same provider that produced the answer, with the same key: the fast
   tier of the organisation's configured answering provider. It stores only
-  the label (and a confidence when one is given), never the reviewer's text.
+  the label (and a confidence when one is given) and a checked topic name
+  (see "Topics"), never the rest of the reviewer's text.
 - There is no export of conversations today. Whatever export or deletion path
   is added for messages must cover `message_traces` with them.
 
@@ -588,9 +650,16 @@ phrase, does not contain a phrase, or declines (uses the fallback).
 
 The Reports screen answers "is it working?" over a date range the owner picks
 (7, 30 or 90 days): questions asked, share answered, share with a thumbs down,
-cost, response time, the most asked questions, the most frequent unanswered
-questions, and the sources cited most and never. Everything is computed from
-stored rows; the table can be downloaded as CSV.
+cost, response time, the topics, the most asked questions, the most frequent
+unanswered questions, and the sources cited most and never. Everything is
+computed from stored rows; the table can be downloaded as CSV.
+
+The Topics list is the period's visitor questions grouped by topic, most
+asked first: each topic, its questions, and the share that could not be
+answered (the reply reviewed as `declined`, or unreviewed with no content
+found, as Gaps counts one). Each opens Conversations filtered to the topic
+for the period. "Most often unanswered" shows each question's topic (that of
+its latest tagged ask in the period) as a label. Both are in the CSV.
 
 Response time is three figures over the period, each against the period of
 the same length before it: the median and 90th percentile of the time until

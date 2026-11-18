@@ -111,3 +111,31 @@ export type AnswerOutcome = (typeof ANSWER_OUTCOMES)[number];
 export function isAnswerOutcome(value: unknown): value is AnswerOutcome {
   return typeof value === "string" && (ANSWER_OUTCOMES as readonly string[]).includes(value);
 }
+
+/** One of an assistant's topics, as the topic list and the Conversations filter read it. */
+export interface TopicItem {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+
+/** One row of Reports' Topics list: a topic's questions in the period. */
+export interface TopicReportRow {
+  id: string;
+  name: string;
+  /** Visitor questions in the period with this topic. */
+  questions: number;
+  /** Of those, questions whose reply could not answer them (as Gaps counts one). */
+  unanswered: number;
+  /** `unanswered / questions`, 0 to 1. */
+  unansweredShare: number;
+}
+
+/**
+ * Reports' Topics list. `reviewAnswers` is the "Review answers" switch: off,
+ * no topic is assigned, and the screen says why the list is empty.
+ */
+export interface TopicsReport {
+  reviewAnswers: boolean;
+  rows: TopicReportRow[];
+}

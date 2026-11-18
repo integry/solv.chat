@@ -207,7 +207,7 @@ describe("answer outcome in the admin", () => {
     await seedTurn({ orgId: ORG_A, assistantId: ast, question: "c", answered: false });
     const report = await reportFor(tenantFor(ORG_A), ast, 30, FIXED_NOW);
     expect(report.answeredShare).toBeCloseTo(2 / 3);
-    expect(report.topGaps).toEqual([{ question: "c", count: 1 }]);
+    expect(report.topGaps).toEqual([{ question: "c", count: 1, topic: null }]);
   });
 
   it("lists declined replies in Gaps beside retrieval misses, labelled by which they were", async () => {
@@ -301,8 +301,8 @@ describe("answer outcome in the admin", () => {
 
     const report = await reportFor(tenantFor(ORG_A), ast, 30, FIXED_NOW);
     expect(report.topGaps).toEqual([
-      { question: "do you ship to spain?", count: 3 },
-      { question: "what is the refund window?", count: 1 },
+      { question: "do you ship to spain?", count: 3, topic: null },
+      { question: "what is the refund window?", count: 1, topic: null },
     ]);
     const overview = await overviewFor(tenantFor(ORG_A), ast, { at: FIXED_NOW });
     expect(overview.attention.openGaps).toBe(2);

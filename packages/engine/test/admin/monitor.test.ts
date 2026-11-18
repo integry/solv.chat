@@ -1162,7 +1162,7 @@ describe("admin Monitor screen APIs", () => {
         gaps: [{ question: "do you ship?", times: 2, handled: false }],
       });
       expect(await openGaps()).toBe(1);
-      expect(await unanswered()).toEqual([{ question: "do you ship?", count: 2 }]);
+      expect(await unanswered()).toEqual([{ question: "do you ship?", count: 2, topic: null }]);
       expect((await all()).gaps).toMatchObject([{ question: "do you ship?", handled: false }]);
 
       // A new answer, even one written from the first ask again, covers both.
@@ -1209,7 +1209,7 @@ describe("admin Monitor screen APIs", () => {
         ).topGaps;
       expect(await open()).toMatchObject({ total: 1, gaps: [{ times: 1, handled: false }] });
       expect(await openGaps()).toBe(1);
-      expect(await unanswered()).toEqual([{ question: "do you ship?", count: 1 }]);
+      expect(await unanswered()).toEqual([{ question: "do you ship?", count: 1, topic: null }]);
 
       // The owner writes the answer from the first conversation, after the
       // second ask: it answers the group everywhere gaps show.
@@ -1284,14 +1284,14 @@ describe("admin Monitor screen APIs", () => {
           )
         ).topGaps;
       expect(await unanswered()).toEqual([
-        { question: "do you ship?", count: 2 },
-        { question: "other?", count: 1 },
+        { question: "do you ship?", count: 2, topic: null },
+        { question: "other?", count: 1, topic: null },
       ]);
 
       await call(app, "POST", `/api/admin/assistants/${ast}/gaps/dismiss`, {
         question: "do you ship?",
       });
-      expect(await unanswered()).toEqual([{ question: "other?", count: 1 }]);
+      expect(await unanswered()).toEqual([{ question: "other?", count: 1, topic: null }]);
 
       // Asked again after the dismissal: back, counting only the new ask.
       await seedTurn({
@@ -1302,8 +1302,8 @@ describe("admin Monitor screen APIs", () => {
         createdAt: Date.now() + 5,
       });
       expect(await unanswered()).toEqual([
-        { question: "do you ship?", count: 1 },
-        { question: "other?", count: 1 },
+        { question: "do you ship?", count: 1, topic: null },
+        { question: "other?", count: 1, topic: null },
       ]);
       const gaps = await getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps?status=open`);
       expect(gaps.gaps.map((g) => [g.question, g.times])).toEqual([
