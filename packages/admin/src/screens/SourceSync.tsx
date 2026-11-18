@@ -55,8 +55,8 @@ export function syncErrorText(
       return "This is a sitemap index; use one of the sitemaps it lists.";
     case "too_many_removals":
       return source
-        ? `It would have removed more than ${maxRemovePercent(source)}% of this source's pages, so none were removed. Pages the sitemap lists were still added and updated. Check that the sitemap is complete, or choose Sync anyway.`
-        : "It would have removed too many of this source's pages, so none were removed. Pages the sitemap lists were still added and updated. Check that the sitemap is complete, or choose Sync anyway.";
+        ? `It would have removed more than ${maxRemovePercent(source)}% of this source's pages, so nothing was changed. Check that the sitemap is complete, or choose Sync anyway.`
+        : "It would have removed too many of this source's pages, so nothing was changed. Check that the sitemap is complete, or choose Sync anyway.";
     case "limit_refused":
       return "Syncing is not available on this account right now.";
     case "pages_failed":

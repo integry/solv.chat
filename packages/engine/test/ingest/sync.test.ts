@@ -521,10 +521,10 @@ describe("scheduled sitemap sync", () => {
       expect(await state(sourceId)).toMatchObject({
         outcome: "failed",
         error: "too_many_removals",
-        counts: { removed: 0, added: 0, unchanged: 1, withheld: 3 },
+        counts: { removed: 0, added: 0, updated: 0, unchanged: 0, withheld: 3 },
       });
-      // The page still listed is checked as usual; only the removals wait.
-      expect(h.pageFetches.map((f) => f.url)).toEqual([page("a")]);
+      // A refused run fetches nothing, not even the page still listed.
+      expect(h.pageFetches).toEqual([]);
 
       h.site.sitemap = { a: null, b: null };
       h.advance(SYNC_INTERVAL_MS.daily);
@@ -566,62 +566,118 @@ describe("scheduled sitemap sync", () => {
       expect(await state(sourceId)).toMatchObject({ outcome: "succeeded", counts: { removed: 2 } });
     });
 
-    it("still adds and updates listed pages when it withholds the removals", async () => {
-      // A whole-site URL change: every page moves to a trailing-slash URL.
+    it.each([3, 10])(
+      "a wrong sitemap of the same size (%i pages) adds nothing and removes nothing, run after run",
+      async (size) => {
+        // A sitemap swapped for one of another host or section: every real
+        // document is "not listed", and as many unrelated pages are listed.
+        const real = Array.from({ length: size }, (_, i) => `real-${i}`);
+        const wrong = Array.from({ length: size }, (_, i) => `staging-${i}`);
+        const { h, sourceId } = await seeded({
+          sitemap: Object.fromEntries(real.map((p) => [p, null])),
+          pages: Object.fromEntries(
+            [...real, ...wrong].map((p) => [p, `Text of ${p}.`] as [string, string]),
+          ),
+        });
+        h.ingestMessages.length = 0;
+        h.site.sitemap = Object.fromEntries(wrong.map((p) => [p, null]));
+
+        for (let run = 1; run <= 3; run++) {
+          await syncOnce(h, sourceId);
+          expect(await docUrls(sourceId), `run ${run}`).toEqual(real.map(page).sort());
+          expect(await state(sourceId), `run ${run}`).toMatchObject({
+            outcome: "failed",
+            error: "too_many_removals",
+            counts: { added: 0, updated: 0, removed: 0, withheld: size },
+          });
+          h.advance(SYNC_INTERVAL_MS.daily);
+        }
+        expect(h.pageFetches).toEqual([]);
+        expect(h.ingestMessages).toEqual([]);
+      },
+    );
+
+    it("leaves document count, chunks and validators unchanged on a refused run", async () => {
       const { h, sourceId } = await seeded(fourPages());
-      h.site.sitemap = { "a/": null, "b/": null, "c/": null, "d/": null, e: null };
-      h.site.pages = { "a/": "A.", "b/": "B.", "c/": "C.", "d/": "D.", e: "E." };
+      // Give each document chunks and a vector, as the indexing consumer would.
+      const docs = await forScheduledSync(env.DB, ORG).documents.listBySource(sourceId);
+      for (const doc of docs) {
+        await env.DB.prepare(
+          "INSERT INTO chunks (id, org_id, document_id, ordinal, text) VALUES (?1, ?2, ?3, 0, ?4)",
+        )
+          .bind(`chk_${doc.id}`, ORG, doc.id, `Chunk of ${doc.url}.`)
+          .run();
+      }
+      const retriever = h.deps().retriever as ReturnType<typeof memoryRetriever>;
+      await retriever.upsert(
+        docs.map((doc) => ({
+          chunkId: `chk_${doc.id}`,
+          vector: [1, 0],
+          orgId: ORG,
+          assistantId: "ast_fixture",
+        })),
+      );
+      const snapshot = async () => ({
+        documents: (
+          await env.DB.prepare("SELECT * FROM documents WHERE source_id = ?1 ORDER BY url")
+            .bind(sourceId)
+            .all()
+        ).results,
+        chunks: (await env.DB.prepare("SELECT * FROM chunks ORDER BY id").all()).results,
+        vectors: retriever.all(),
+      });
+      const before = await snapshot();
+      expect(before.documents).toHaveLength(4);
+      expect(before.chunks).toHaveLength(4);
+      expect(before.documents.every((d) => d.etag !== null && d.sync_checked_at !== null)).toBe(
+        true,
+      );
+
+      // `a` changed and `e` is new, but three of four would go.
+      h.site.sitemap = { a: "2026-11-12", e: null };
+      h.site.pages = { ...h.site.pages, a: "A, changed.", e: "E." };
+      h.ingestMessages.length = 0;
       await syncOnce(h, sourceId);
 
-      expect(await docUrls(sourceId)).toEqual(
-        [page("a"), page("b"), page("c"), page("d"), page("a/")]
-          .concat([page("b/"), page("c/"), page("d/"), page("e")])
-          .sort(),
-      );
       expect(await state(sourceId)).toMatchObject({
         outcome: "failed",
         error: "too_many_removals",
-        counts: { added: 5, removed: 0, withheld: 4, failed: 0 },
+        counts: { added: 0, updated: 0, unchanged: 0, removed: 0, withheld: 3 },
       });
+      expect(await snapshot()).toEqual(before);
+      expect(h.pageFetches).toEqual([]);
+      expect(h.ingestMessages).toEqual([]);
+    });
 
-      // With the new pages in, the old ones are now under half the source:
-      // the next run removes them without the owner having to step in.
-      h.advance(SYNC_INTERVAL_MS.daily);
+    it("Sync anyway adds, updates and removes in one run", async () => {
+      const { h, sourceId } = await seeded(fourPages());
+      // A whole-site change: `a` stays but changed, the rest moved.
+      h.site.sitemap = { a: null, "b/": null, "c/": null, "d/": null };
+      h.site.pages = { ...h.site.pages, a: "A, changed.", "b/": "B.", "c/": "C.", "d/": "D." };
       await syncOnce(h, sourceId);
-      expect(await docUrls(sourceId)).toEqual(
-        [page("a/"), page("b/"), page("c/"), page("d/"), page("e")].sort(),
-      );
+      expect(await docUrls(sourceId)).toEqual([page("a"), page("b"), page("c"), page("d")]);
+      expect((await state(sourceId))?.counts.withheld).toBe(3);
+
+      h.advance(60_000);
+      await startSourceSync(h.deps(), ORG, sourceId, { allowRemovals: 3 });
+      await h.drain();
+      expect(await docUrls(sourceId)).toEqual([page("a"), page("b/"), page("c/"), page("d/")]);
       expect(await state(sourceId)).toMatchObject({
         outcome: "succeeded",
-        counts: { added: 0, removed: 4, withheld: 0 },
+        error: null,
+        counts: { added: 3, updated: 1, removed: 3, withheld: 0 },
       });
     });
 
-    it("withholds the removal of the only page of a one-page source, and reports it", async () => {
+    it("refuses removing the only page of a one-page source, and adds nothing", async () => {
       const { h, sourceId } = await seeded({ sitemap: { a: null }, pages: { a: "A.", b: "B." } });
       h.site.sitemap = { b: null };
       await syncOnce(h, sourceId);
-      expect(await docUrls(sourceId)).toEqual([page("a"), page("b")]);
+      expect(await docUrls(sourceId)).toEqual([page("a")]);
       expect(await state(sourceId)).toMatchObject({
         outcome: "failed",
         error: "too_many_removals",
-        counts: { added: 1, withheld: 1 },
-      });
-    });
-
-    it("records a refused run with nothing to fetch as failed with the removals withheld", async () => {
-      const { h, sourceId } = await seeded({
-        sitemap: { a: "2026-11-01", b: null, c: null },
-        pages: { a: "A.", b: "B.", c: "C." },
-      });
-      h.site.sitemap = { a: "2026-11-01" };
-      const started = await syncOnce(h, sourceId);
-      expect(started.status).toBe("finished");
-      expect(h.pageFetches).toEqual([]);
-      expect(await state(sourceId)).toMatchObject({
-        outcome: "failed",
-        error: "too_many_removals",
-        counts: { unchanged: 1, withheld: 2, removed: 0 },
+        counts: { added: 0, withheld: 1 },
       });
     });
 
@@ -656,10 +712,10 @@ describe("scheduled sitemap sync", () => {
       h.site.pages.b = "B.";
       h.advance(SYNC_INTERVAL_MS.daily);
       await syncOnce(h, sourceId);
-      expect(await docUrls(sourceId)).toEqual([page("a"), page("b")]);
+      expect(await docUrls(sourceId)).toEqual([page("a")]);
       expect(await state(sourceId)).toMatchObject({
         error: "too_many_removals",
-        counts: { added: 1, withheld: 1 },
+        counts: { added: 0, withheld: 1 },
       });
     });
 

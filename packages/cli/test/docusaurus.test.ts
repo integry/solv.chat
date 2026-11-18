@@ -78,9 +78,13 @@ describe("solv push on a Docusaurus docs folder", () => {
           "",
           "Install it with your package manager.",
           "",
+          "**npm**",
+          "",
           "```bash",
           "npm install acme",
           "```",
+          "",
+          "**Yarn**",
           "",
           "```bash",
           "yarn add acme",
@@ -460,6 +464,41 @@ describe("Docusaurus rules", () => {
       ].join("\n"),
     );
     expect(out).toContain(code);
+  });
+
+  it("dedents indented tab content and keeps each tab's label as a bold line", async () => {
+    const file = join(fixtures, "docusaurus-tabs", "install.mdx");
+    const body = (await readFile(file, "utf8")).replace(/^---\n[\s\S]*?\n---\n/, "");
+    expect(cleanDocusaurusMarkdown(body)).toBe(
+      [
+        "# Install",
+        "",
+        "**macOS**",
+        "",
+        "Install with Homebrew:",
+        "",
+        // The fence loses the tab's four spaces and nothing else.
+        "```bash",
+        "brew install acme",
+        'if [ -n "$CI" ]; then',
+        "  acme --version",
+        "fi",
+        "```",
+        "",
+        "Then run `acme init`.",
+        "",
+        "**Windows**",
+        "",
+        "Use the installer.",
+        "",
+        // Indented past the tab's own indentation: still an indented block.
+        "    Indented four more stays an indented block.",
+        "",
+        // No label, so no bold line.
+        "No label here.",
+        "",
+      ].join("\n"),
+    );
   });
 
   it("strips only components with a closing tag or self-closing, never prose in angle brackets", () => {

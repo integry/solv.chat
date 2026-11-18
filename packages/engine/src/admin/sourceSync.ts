@@ -19,6 +19,12 @@ import { BadRequest, Conflict, NotFound } from "./errors.js";
 
 export type { SourceSyncStatus } from "@solvchat/core";
 
+/**
+ * The 409 `code` for "Sync anyway" (`allowRemovals`) sent when the source's
+ * latest run did not end `too_many_removals`.
+ */
+export const SYNC_ANYWAY_NOT_OFFERED = "sync_anyway_not_offered";
+
 function scheduleOf(settings: Record<string, unknown>): SyncSchedule {
   const value = settings.sync;
   return SYNC_SCHEDULES.includes(value as SyncSchedule) ? (value as SyncSchedule) : "off";
@@ -82,6 +88,9 @@ export async function getSourceSync(
  * pages are fetched by the queue afterwards. A run already going is a
  * conflict, not a second run. `options.allowRemovals` is "Sync anyway":
  * the removal-share guard is lifted for this run, up to that many removals.
+ * It is accepted only right after a run the guard refused (latest run ended
+ * `too_many_removals`); otherwise the answer is 409 with code
+ * `sync_anyway_not_offered`, so the guard is never lifted blind.
  */
 export async function syncSourceNow(
   deps: SyncStartDeps,
@@ -91,6 +100,15 @@ export async function syncSourceNow(
   options?: SyncRunOptions,
 ): Promise<SourceSyncStatus> {
   const source = await sitemapSource(tenant, sourceId);
+  if (options?.allowRemovals !== undefined) {
+    const last = await tenant.sync.get(source.id, (deps.now ?? Date.now)());
+    if (last?.outcome !== "failed" || last.error !== "too_many_removals") {
+      throw new Conflict(
+        "Sync anyway is only for a sync that was stopped because it would remove too many pages. Use Sync now.",
+        SYNC_ANYWAY_NOT_OFFERED,
+      );
+    }
+  }
   const started = await startSourceSyncFor(deps, tenant, orgId, source.id, options);
   if (started.status === "not_found") throw new NotFound("source");
   if (started.status === "busy") throw new Conflict("This source is already syncing.");

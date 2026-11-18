@@ -656,7 +656,13 @@ export async function adminRoutes(
       return Response.json({ error: error.message }, { status: 413 });
     }
     if (error instanceof Conflict) {
-      return Response.json({ error: error.message || "Please try again." }, { status: 409 });
+      return Response.json(
+        {
+          error: error.message || "Please try again.",
+          ...(error.code !== undefined ? { code: error.code } : {}),
+        },
+        { status: 409 },
+      );
     }
     if (error instanceof McpError) {
       // The server the owner pointed us at failed, not this request. The

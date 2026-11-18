@@ -299,11 +299,11 @@ function planRun(
  * `<urlset>` (a sitemap index is reported as `sitemap_index`), or lists no
  * page removes nothing, fetches nothing, and records the run as failed. One
  * that would remove more than the source's `maxRemovePercent` (default 50%)
- * of its documents still adds and updates the pages it lists but removes
- * nothing; the run is recorded as failed with `too_many_removals` and the
- * number it kept (`withheld`), so the owner can choose "Sync anyway"
- * (`options.allowRemovals`). Without that, a small source losing one page,
- * or a whole site moving to new URLs, would be refused on every run.
+ * of its documents changes nothing either: no additions, updates or
+ * removals. The run is recorded as failed with `too_many_removals` and the
+ * number it would have removed (`withheld`). It is refused on every run
+ * until the owner chooses "Sync anyway" (`options.allowRemovals`) or raises
+ * `maxRemovePercent`; a scheduled run never lifts it on its own.
  */
 export async function startSourceSync(
   deps: SyncSchedulerDeps,
@@ -388,19 +388,25 @@ export async function startSourceSyncFor(
     now: startedAt,
     recheckMs: recheckMsOf(source.settings),
   };
-  let plan = planRun(entries, documents, attempts, planOptions);
+  const plan = planRun(entries, documents, attempts, planOptions);
   const maxRemovePercent = maxRemovePercentOf(source.settings);
   const allowRemovals = positive(options?.allowRemovals);
-  let withheld = 0;
   if (
     plan.removed.length * 100 > maxRemovePercent * documents.length &&
     !(allowRemovals !== undefined && plan.removed.length <= allowRemovals)
   ) {
-    // Too many would go: keep them all, but still add and update what the
-    // sitemap lists, so a source whose ratio is tripped (one page of one
-    // removed, a site moved to new URLs) does not stop syncing for good.
-    withheld = plan.removed.length;
-    plan = planRun(entries, documents, attempts, { ...planOptions, removeAllowed: false });
+    // Too many would go: change nothing at all. Adding the listed pages
+    // while keeping the old ones would grow the source, so the same
+    // removals would pass the share check on a later run with nobody
+    // looking (a wrong sitemap of the same size would replace every real
+    // document in two runs). Only the owner lifts this: "Sync anyway"
+    // (`allowRemovals`) or a higher `maxRemovePercent`.
+    await tenant.sync.finish(source.id, runId, now(), {
+      outcome: "failed",
+      error: "too_many_removals",
+      withheld: plan.removed.length,
+    });
+    return { status: "finished", runId };
   }
 
   const removed =
@@ -419,13 +425,12 @@ export async function startSourceSyncFor(
       [...attempts.keys()].filter((url) => !listed.has(url)),
     );
   }
-  const known = { unchanged: plan.unchanged, removed, deferred: plan.deferred, withheld };
+  const known = { unchanged: plan.unchanged, removed, deferred: plan.deferred };
 
   if (plan.pages.length === 0) {
     await tenant.sync.finish(source.id, runId, now(), {
-      ...(withheld > 0
-        ? { outcome: "failed", error: "too_many_removals" }
-        : { outcome: "succeeded", error: null }),
+      outcome: "succeeded",
+      error: null,
       ...known,
     });
     return { status: "finished", runId };

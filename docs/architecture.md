@@ -71,7 +71,8 @@ from the auth seam and pass it down.
 - `source_syncs` — org_id, source_id, run_id, lease_until (set while a run
   holds the source), started_at, finished_at, outcome (`running` |
   `succeeded` | `partial` | `failed`), counts (added, updated, unchanged,
-  removed, failed, deferred, withheld: removals the wipe guard kept) and error
+  removed, failed, deferred, withheld: removals a run refused by the wipe
+  guard would have made) and error
   (a short code). One row per source: the current or latest run.
 - `source_sync_pages` — org_id, run_id, source_id, url, lastmod, state
   (`pending` | `added` | `updated` | `unchanged` | `failed`): the pages one run
@@ -221,17 +222,25 @@ A sitemap source can stay in step with its sitemap. Its `sync` setting is
    removes nothing, fetches nothing, and is recorded as failed. A sitemap with
    more than 50,000 entries removes nothing in that run.
    If the run would remove more than `maxRemovePercent` of the source's
-   documents, it removes none of them but goes on to add and update the
-   listed pages (steps 6 to 8); it records how many it kept (`withheld`) and
-   ends as `failed` with `too_many_removals` whatever its pages did. A refusal
-   that fetched nothing would leave a source stuck for good: a small source
-   losing one page of one, or a site whose every URL changed (a trailing
-   slash, a new host), would trip the guard on every run and never gain the
-   pages that would bring the share down. The admin's "Sync anyway" sends
-   `POST /api/admin/sources/:id/sync` with `{"allowRemovals": n}`, the
-   number it showed the owner: that run alone lifts the guard as long as it
-   would remove at most `n` documents, and is refused as usual (with the new
-   number) otherwise. The other guards stay.
+   documents, it changes nothing: no page is added, updated or removed, and
+   nothing is fetched. It records how many it would have removed
+   (`withheld`) and ends as `failed` with `too_many_removals`. Adding the
+   listed pages while keeping the old documents would grow the source until
+   the same removals passed the share check on a later run with nobody
+   looking, so a wrong sitemap of the same size (a staging host, another
+   section of the site) would replace every real document in two runs.
+   A scheduled run never lifts the guard; it is refused on every run until
+   the owner acts. That includes a whole-site URL change (a trailing slash,
+   a new host) and a very small source (one page of one, two of three).
+   The owner either raises `maxRemovePercent` or uses the admin's "Sync
+   anyway", which sends `POST /api/admin/sources/:id/sync` with
+   `{"allowRemovals": n}`, the number it showed the owner: that run alone
+   lifts the guard as long as it would remove at most `n` documents, and
+   adds, updates and removes in one go; it is refused as usual (with the
+   new number) otherwise. `allowRemovals` is accepted only while the
+   source's latest run ended `too_many_removals`; otherwise the request is
+   answered `409` with `code: "sync_anyway_not_offered"`. The other guards
+   stay.
 5. Removes the source's documents whose URL is no longer listed (that source
    only; vectors and R2 bodies are cleaned up as for a prune).
 6. Skips pages whose sitemap `<lastmod>` equals the one stored at the last
@@ -335,7 +344,8 @@ The Monitor screens read:
   that is not a sitemap answers `400`. Its body is optional: none (or `{}`)
   for Sync now, `{ "allowRemovals": n }` for "Sync anyway" after a
   `too_many_removals` run (the run's `counts.withheld` is the `n` the admin
-  shows). The schedule is changed with `PATCH /api/admin/sources/:id` and
+  shows); sent when the latest run did not end `too_many_removals`, it is
+  answered `409` with `code: "sync_anyway_not_offered"`. The schedule is changed with `PATCH /api/admin/sources/:id` and
   `{ "settings": { "sync": … } }`; `maxRemovePercent` and `recheckDays` the
   same way.
 - Gaps: `status=open` leaves out groups with a written answer newer than the

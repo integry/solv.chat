@@ -336,7 +336,7 @@ describe("Sources screen: sitemap sync", () => {
     const sync = cell(sourceRow("Help site"), "Sync");
     expect(sync.textContent).toContain("Last sync failed 2 hours ago.");
     expect(sync.textContent).toContain(
-      "It would have removed more than 20% of this source's pages, so none were removed.",
+      "It would have removed more than 20% of this source's pages, so nothing was changed.",
     );
     expect(sync.textContent).toContain("Next sync: soon.");
     // Nothing was withheld (an older run), so there is nothing to sync anyway.
@@ -351,7 +351,7 @@ describe("Sources screen: sitemap sync", () => {
         startedAt: NOW - HOUR,
         finishedAt: NOW - HOUR,
         outcome: "failed",
-        counts: { ...ZERO, added: 1, unchanged: 2, withheld: 3 },
+        counts: { ...ZERO, withheld: 3 },
         error: "too_many_removals",
         progress: null,
       },
@@ -359,10 +359,9 @@ describe("Sources screen: sitemap sync", () => {
     const { calls } = installServer({ sources: [source({ sync: withheld })] });
     await openSources();
     const sync = cell(sourceRow("Help site"), "Sync");
-    expect(sync.textContent).toContain(
-      "Last sync failed 1 hour ago: 1 added, 2 unchanged, 3 kept, not removed.",
-    );
-    expect(sync.textContent).toContain("Pages the sitemap lists were still added and updated.");
+    expect(sync.textContent).toContain("Last sync failed 1 hour ago: 3 kept, not removed.");
+    expect(sync.textContent).toContain("so nothing was changed.");
+    expect(sync.textContent).not.toContain("still added");
 
     // Cancelling sends nothing.
     fireEvent.click(within(sync).getByRole("button", { name: "Sync Help site anyway" }));

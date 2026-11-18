@@ -243,7 +243,12 @@ describe("admin source sync API", () => {
     await syncNow(h, sourceId);
     await h.drain();
 
-    // Both pages move to new URLs: the old ones are kept, the new ones added.
+    // Sync anyway is refused while no run was stopped by the guard.
+    let early = await h.call("POST", `/api/admin/sources/${sourceId}/sync`, { allowRemovals: 2 });
+    expect(early.status).toBe(409);
+    expect(await early.json()).toMatchObject({ code: "sync_anyway_not_offered" });
+
+    // Both pages move to new URLs: the run is refused and changes nothing.
     h.site.paths = ["a/", "b/"];
     await syncNow(h, sourceId);
     await h.drain();
@@ -251,8 +256,11 @@ describe("admin source sync API", () => {
     expect(sync?.last).toMatchObject({
       outcome: "failed",
       error: "too_many_removals",
-      counts: { added: 2, removed: 0, withheld: 2 },
+      counts: { added: 0, updated: 0, removed: 0, withheld: 2 },
     });
+    const before = await h.call("GET", `/api/admin/sources/${sourceId}/documents`);
+    const kept = (await before.json()) as { documents: Array<{ url: string }> };
+    expect(kept.documents.map((d) => d.url).sort()).toEqual([page("a"), page("b")]);
 
     for (const bad of [{ allowRemovals: -1 }, { allowRemovals: 1.5 }, { allowRemovals: "2" }, []]) {
       const res = await h.call("POST", `/api/admin/sources/${sourceId}/sync`, bad);
@@ -273,6 +281,11 @@ describe("admin source sync API", () => {
     const docs = await h.call("GET", `/api/admin/sources/${sourceId}/documents`);
     const { documents } = (await docs.json()) as { documents: Array<{ url: string }> };
     expect(documents.map((d) => d.url).sort()).toEqual([page("a/"), page("b/")]);
+
+    // Once that run succeeded, Sync anyway is not offered again.
+    early = await h.call("POST", `/api/admin/sources/${sourceId}/sync`, { allowRemovals: 2 });
+    expect(early.status).toBe(409);
+    expect(await early.json()).toMatchObject({ code: "sync_anyway_not_offered" });
   });
 
   it("answers a sitemap index in the preview with its own code, not its sitemaps as pages", async () => {

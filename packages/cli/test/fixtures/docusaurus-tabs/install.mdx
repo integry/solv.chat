@@ -1,0 +1,30 @@
+---
+title: Install
+---
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Install
+
+<Tabs groupId="os">
+  <TabItem value="mac" label="macOS" default>
+    Install with Homebrew:
+
+    ```bash
+    brew install acme
+    if [ -n "$CI" ]; then
+      acme --version
+    fi
+    ```
+
+    Then run `acme init`.
+  </TabItem>
+  <TabItem value="win" label={"Windows"}>
+    Use the installer.
+
+        Indented four more stays an indented block.
+  </TabItem>
+  <TabItem value="linux">
+    No label here.
+  </TabItem>
+</Tabs>

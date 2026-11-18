@@ -294,32 +294,21 @@ export function syncFor(db: D1Database, orgId: string) {
      * handed to the queue, all `pending`, and stamps each page as queued at
      * `attemptedAt` so the next capped run starts with other pages. Call
      * before sending the messages, so a message never arrives for a page
-     * that is not recorded. A `withheld` count above zero means the wipe
-     * guard kept documents: the run then ends as `failed` with
-     * `too_many_removals` whatever its pages do.
+     * that is not recorded.
      */
     async plan(
       sourceId: string,
       runId: string,
-      known: Pick<SyncCounts, "unchanged" | "removed" | "deferred"> &
-        Partial<Pick<SyncCounts, "withheld">>,
+      known: Pick<SyncCounts, "unchanged" | "removed" | "deferred">,
       pages: SyncPage[],
       attemptedAt: number,
     ): Promise<void> {
       const statements: D1PreparedStatement[] = [
         prepare(
           db,
-          `UPDATE source_syncs SET unchanged = ?4, removed = ?5, deferred = ?6, withheld = ?7
+          `UPDATE source_syncs SET unchanged = ?4, removed = ?5, deferred = ?6
             WHERE org_id = ?1 AND source_id = ?2 AND run_id = ?3 AND finished_at IS NULL`,
-        ).bind(
-          orgId,
-          sourceId,
-          runId,
-          known.unchanged,
-          known.removed,
-          known.deferred,
-          known.withheld ?? 0,
-        ),
+        ).bind(orgId, sourceId, runId, known.unchanged, known.removed, known.deferred),
       ];
       for (let i = 0; i < pages.length; i += PAGES_PER_INSERT) {
         statements.push(
@@ -376,8 +365,7 @@ export function syncFor(db: D1Database, orgId: string) {
     /**
      * Moves one page out of `pending` and, when it was the last, finishes the
      * run in the same D1 batch: the counts are added up once, from the pages,
-     * so a retried message cannot count a page twice. A run whose removals
-     * were withheld ends `failed` with `too_many_removals`. Returns true when this
+     * so a retried message cannot count a page twice. Returns true when this
      * call finished the run.
      *
      * Both statements require the run to still hold the source at `now`: a
@@ -406,12 +394,8 @@ export function syncFor(db: D1Database, orgId: string) {
                   updated = updated + ${pageCount("updated")},
                   unchanged = unchanged + ${pageCount("unchanged")},
                   failed = failed + ${pageCount("failed")},
-                  outcome = CASE WHEN withheld > 0 THEN 'failed'
-                                 WHEN ${pageCount("failed")} > 0 THEN 'partial'
-                                 ELSE 'succeeded' END,
-                  error = CASE WHEN withheld > 0 THEN 'too_many_removals'
-                               WHEN ${pageCount("failed")} > 0 THEN 'pages_failed'
-                               ELSE NULL END
+                  outcome = CASE WHEN ${pageCount("failed")} > 0 THEN 'partial' ELSE 'succeeded' END,
+                  error = CASE WHEN ${pageCount("failed")} > 0 THEN 'pages_failed' ELSE NULL END
             WHERE org_id = ?1 AND source_id = ?2 AND run_id = ?3 AND finished_at IS NULL
               AND lease_until > ?4
               AND NOT EXISTS (SELECT 1 FROM source_sync_pages

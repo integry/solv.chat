@@ -467,38 +467,85 @@ function scanComponentTags(text: string): ComponentTag[] {
  * closing tag pairs with the nearest unclosed opening tag of the same name;
  * opening tags skipped over that way have no closing tag.
  */
-function componentTagsToStrip(tags: readonly ComponentTag[]): Set<ComponentTag> {
-  const strip = new Set<ComponentTag>();
+function componentTagsToStrip(tags: readonly ComponentTag[]): Map<ComponentTag, number> {
+  // Self-closing tags map to -1; an opening tag and its closing tag share a
+  // pair number.
+  const strip = new Map<ComponentTag, number>();
   const open: ComponentTag[] = [];
+  let pairs = 0;
   for (const tag of tags) {
-    if (tag.kind === "self") strip.add(tag);
+    if (tag.kind === "self") strip.set(tag, -1);
     else if (tag.kind === "open") open.push(tag);
     else {
       let k = open.length - 1;
       while (k >= 0 && open[k]?.name !== tag.name) k--;
       if (k < 0) continue;
-      strip.add(open[k] as ComponentTag);
-      strip.add(tag);
+      strip.set(open[k] as ComponentTag, pairs);
+      strip.set(tag, pairs);
+      pairs++;
       open.length = k;
     }
   }
   return strip;
 }
 
-/** `text` without the tags of `tags` that are in `strip`. */
+/**
+ * `text` with the tags of `tags` that are in `strip` replaced: self-closing
+ * ones by nothing, an opening or closing tag of a pair by `marker(tag, pair)`.
+ */
 function removeTags(
   text: string,
   tags: readonly ComponentTag[],
-  strip: ReadonlySet<ComponentTag>,
+  strip: ReadonlyMap<ComponentTag, number>,
+  marker: (tag: ComponentTag, pair: number) => string,
 ): string {
   let out = "";
   let from = 0;
   for (const tag of tags) {
-    if (!strip.has(tag)) continue;
-    out += text.slice(from, tag.start);
+    const pair = strip.get(tag);
+    if (pair === undefined) continue;
+    out += text.slice(from, tag.start) + (pair === -1 ? "" : marker(tag, pair));
     from = tag.end;
   }
   return out + text.slice(from);
+}
+
+// `label="macOS"`, `label='macOS'` or `label={"macOS"}` in a tag.
+const LABEL_ATTR_RE =
+  /\slabel\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\})/;
+
+/** The `label` of a `<TabItem>` opening tag, if it has a plain one. */
+function tabLabel(text: string, tag: ComponentTag): string | undefined {
+  if (tag.kind !== "open" || tag.name !== "TabItem") return undefined;
+  const match = LABEL_ATTR_RE.exec(text.slice(tag.start, tag.end));
+  const label = (match?.[1] ?? match?.[2] ?? match?.[3] ?? match?.[4])?.trim();
+  return label ? label : undefined;
+}
+
+/** The longest run of leading whitespace that every string starts with. */
+function commonIndent(texts: readonly string[]): string {
+  let common: string | null = null;
+  for (const text of texts) {
+    const indent = /^[ \t]*/.exec(text)?.[0] ?? "";
+    if (common === null) {
+      common = indent;
+      continue;
+    }
+    let i = 0;
+    while (i < common.length && i < indent.length && common[i] === indent[i]) i++;
+    common = common.slice(0, i);
+    if (common === "") break;
+  }
+  return common ?? "";
+}
+
+/**
+ * Removes `indent` from the start of a line: all of it when the line starts
+ * with it, else only a whitespace-only line's own whitespace.
+ */
+function dedentLine(text: string, indent: string): string {
+  if (text.startsWith(indent)) return text.slice(indent.length);
+  return text.trim() === "" ? text.replace(/^[ \t]*/, "") : text;
 }
 
 /**
@@ -585,8 +632,11 @@ function protectCodeSpans(lines: Line[]): { lines: Line[]; restore: (text: strin
  * between an opening and a closing tag (see `componentTagsToStrip`). A tag
  * never spans a code block, but a component may hold one (`<TabItem>`, a
  * fence, `</TabItem>`), so tags are paired across the whole document.
- * Self-closing components have no text and disappear. Lower-case HTML tags
- * are left alone; inline code spans are already hidden by `protectCodeSpans`.
+ * Self-closing components have no text and disappear. The content of a
+ * removed component loses its common leading indentation (JSX indents it;
+ * Markdown would read four spaces as a code block), and a `<TabItem>`'s
+ * `label` becomes a bold line before its content. Lower-case HTML tags are
+ * left alone; inline code spans are already hidden by `protectCodeSpans`.
  */
 function stripComponentLines(lines: Line[]): Line[] {
   // Runs of non-code lines, each joined so a tag may span its lines.
@@ -607,20 +657,85 @@ function stripComponentLines(lines: Line[]): Line[] {
   }
   flush();
 
+  // A paired tag is first replaced by a marker, so its content can be
+  // dedented once every line is known; the markers go at the end.
+  const all = lines.map((line) => line.text).join("\n");
+  let code = 0xe100;
+  while (all.includes(String.fromCharCode(code))) code++;
+  const sentinel = String.fromCharCode(code);
+  const markerRe = new RegExp(`${sentinel}(/?)(\\d+)${sentinel}`, "g");
+  const labels = new Map<number, string>();
+
   const strip = componentTagsToStrip(parts.flatMap((part) => ("run" in part ? part.tags : [])));
-  const out: Line[] = [];
+  const marked: Array<Line & { changed: boolean }> = [];
   for (const part of parts) {
     if (!("run" in part)) {
-      out.push(part);
+      marked.push({ ...part, changed: false });
       continue;
     }
     const before = part.run;
-    const after = removeTags(before.join("\n"), part.tags, strip).split("\n");
+    const joined = before.join("\n");
+    const after = removeTags(joined, part.tags, strip, (tag, pair) => {
+      const label = tabLabel(joined, tag);
+      if (label !== undefined) labels.set(pair, label);
+      return `${sentinel}${tag.kind === "close" ? "/" : ""}${pair}${sentinel}`;
+    }).split("\n");
     for (const [index, text] of after.entries()) {
+      marked.push({ text, code: false, changed: text !== before[index] });
+    }
+  }
+
+  // Dedent each component's content by its common leading indentation, so
+  // text indented under `<TabItem>` is not read as an indented code block.
+  // Pairs are handled innermost first (in the order they close); code lines
+  // lose that common indentation and nothing else.
+  const openAt = new Map<number, number>();
+  const closeAt = new Map<number, number>();
+  for (const [index, line] of marked.entries()) {
+    if (line.code) continue;
+    for (const match of line.text.matchAll(markerRe)) {
+      (match[1] === "/" ? closeAt : openAt).set(Number(match[2]), index);
+    }
+  }
+  const isBlank = (text: string) => text.replace(markerRe, "").trim() === "";
+  const byClose = [...closeAt.entries()].sort((a, b) => a[1] - b[1]);
+  for (const [pair, last] of byClose) {
+    const first = openAt.get(pair);
+    if (first === undefined || last <= first) continue;
+    const inner: number[] = [];
+    for (let i = first + 1; i < last; i++) inner.push(i);
+    const closing = marked[last] as Line;
+    if (!isBlank(closing.text.slice(0, closing.text.indexOf(sentinel)))) inner.push(last);
+    const indent = commonIndent(
+      inner.map((i) => (marked[i] as Line).text).filter((text) => !isBlank(text)),
+    );
+    if (indent === "") continue;
+    for (const i of inner) {
+      const line = marked[i] as Line;
+      line.text = dedentLine(line.text, indent);
+    }
+  }
+
+  const out: Line[] = [];
+  for (const line of marked) {
+    if (line.code) {
+      out.push({ text: line.text, code: true });
+      continue;
+    }
+    // A tab's label becomes a bold line of its own before its content.
+    const texts = line.text
+      .replace(markerRe, (_, close: string, pair: string) => {
+        const label = close === "" ? labels.get(Number(pair)) : undefined;
+        return label === undefined ? "" : `\n\n**${label}**\n\n`;
+      })
+      .split("\n");
+    for (const text of texts) {
       // A line that only held tags becomes blank rather than stray spaces.
       const blanked = text.trim() === "" ? "" : text;
-      const changed = blanked !== before[index];
-      out.push({ text: changed ? blanked.replace(/[ \t]+(\r?)$/, "$1") : blanked, code: false });
+      out.push({
+        text: line.changed ? blanked.replace(/[ \t]+(\r?)$/, "$1") : blanked,
+        code: false,
+      });
     }
   }
   return out;
@@ -646,8 +761,9 @@ function tidyBlankLines(lines: Line[]): string {
 /**
  * Cleans a Docusaurus/MDX body into plain Markdown: admonitions become
  * labelled paragraphs, `import`/`export` lines go, JSX components are replaced
- * by their text content (or dropped when they have none), and fenced code
- * blocks and inline code spans are kept byte for byte.
+ * by their text content, dedented, (or dropped when they have none), a tab's
+ * label is kept as a bold line, and fenced code blocks and inline code spans
+ * are kept byte for byte apart from that dedent.
  */
 export function cleanDocusaurusMarkdown(body: string): string {
   const { lines, restore } = protectCodeSpans(markLines(body));
