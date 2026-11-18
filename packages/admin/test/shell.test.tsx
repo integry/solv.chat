@@ -519,6 +519,24 @@ describe("first-run state", () => {
     });
   });
 
+  it.each([
+    ["an address naming no assistant", "/admin/overview"],
+    ["an address naming one that is gone", "/admin/overview?assistant=ast_gone"],
+  ])("adds one history entry for Sources after creating from %s", async (_kind, start) => {
+    installServer([]);
+    window.history.replaceState(null, "", start);
+    render(<App />);
+    const form = await screen.findByRole("form", { name: "Create your first assistant" });
+    const before = window.history.length;
+    fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "Help Desk" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Create assistant" }));
+
+    await screen.findByRole("heading", { name: "Sources" });
+    expect(window.location.pathname).toBe("/admin/sources");
+    // Only Sources is added, so Back leaves it for the screen the form was on.
+    expect(window.history.length).toBe(before + 1);
+  });
+
   it("announces the same origin validation error as the dialog and stays put", async () => {
     installServer([]);
     window.history.replaceState(null, "", "/admin/widget");

@@ -1,11 +1,15 @@
-import { defaultVersionConfig } from "@solvchat/core";
+import {
+  type OverviewPeriod as CoreOverviewPeriod,
+  defaultVersionConfig,
+  type OverviewAttention,
+  type OverviewSetup,
+} from "@solvchat/core";
 import type { TopQuestionRow } from "../db/messages.js";
-import type { NotIndexedSource } from "../db/sources.js";
 import type { Tenant } from "../db/tenant.js";
 import type { EffectiveProviderSettings } from "../providers/config.js";
 import { DAY_MS, utcDay } from "../util/time.js";
 import { NotFound } from "./errors.js";
-import { type PeriodFigures, periodFigures, rangeFor } from "./reports.js";
+import { periodFigures, rangeFor } from "./reports.js";
 
 /** The Overview's stated period: the last 7 days, against the 7 before. */
 export const OVERVIEW_DAYS = 7;
@@ -15,31 +19,11 @@ export const OVERVIEW_DAYS = 7;
  */
 export const NOT_INDEXED_AFTER_MS = 15 * 60_000;
 
-export interface OverviewPeriod extends PeriodFigures {
+export type { OverviewAttention, OverviewSetup } from "@solvchat/core";
+
+/** The Overview's period is always `OVERVIEW_DAYS` long. */
+export interface OverviewPeriod extends CoreOverviewPeriod {
   days: typeof OVERVIEW_DAYS;
-  previous: PeriodFigures;
-}
-
-/** The getting-started checklist, each step read from stored state. */
-export interface OverviewSetup {
-  hasContent: boolean;
-  tried: boolean;
-  published: boolean;
-  installed: boolean;
-  visitorQuestion: boolean;
-}
-
-/** Things the owner should act on. Every list or count is empty or zero when there is nothing. */
-export interface OverviewAttention {
-  /** Unanswered question groups with no written answer and not dismissed. */
-  openGaps: number;
-  /** Failed tests in the latest test run. */
-  failingTests: number;
-  /**
-   * Sources with documents that did not get indexed: `failed` ones as soon as
-   * indexing records the failure, `waiting` ones once they are overdue.
-   */
-  notIndexed: NotIndexedSource[];
 }
 
 export interface AssistantOverview {

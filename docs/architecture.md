@@ -180,7 +180,8 @@ The Monitor screens read:
 - Gaps: `status=open` leaves out groups with a written answer newer than the
   group's latest ask (asked again after it, a group is open again, as after a
   dismissal). Overview's open gaps and Reports' "Most often unanswered" leave
-  out the same groups, and the asks from before a dismissal;
+  out the same groups, and the asks from before a dismissal. Left out,
+  `status` lists every group; any other value is refused;
   `POST …/gaps/dismiss` and `POST …/gaps/restore` take `{ question }`.
 
 ## Answering a message

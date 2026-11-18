@@ -235,11 +235,11 @@ export function Reports({ assistantId }: ReportsProps) {
           <div className="report-columns">
             <QuestionTable
               heading="Most asked questions"
-              explanation="What visitors want to know. Open one to read those conversations."
+              explanation="What visitors want to know, and how many times it was asked. Open one to read the conversations it was asked in."
               rows={report.topQuestions}
               linkTo={(question) => ({
                 to: "conversations",
-                query: questionConversationsQuery(assistantId, question),
+                query: questionConversationsQuery(assistantId, question, report.days),
               })}
             />
             <QuestionTable

@@ -25,7 +25,7 @@ import {
 import { getConversation, listConversations, readConversationFilter } from "./conversations.js";
 import { saveEntry } from "./entries.js";
 import { BadRequest, Conflict, NotFound, readJsonBody } from "./errors.js";
-import { dismissGap, listGaps, restoreGap } from "./gaps.js";
+import { dismissGap, listGaps, readGapsOpenOnly, restoreGap } from "./gaps.js";
 import { getInstallInfo } from "./install.js";
 import {
   createMcpServer,
@@ -313,7 +313,7 @@ async function assistantRoutes(
       return Response.json(
         await listGaps(tenant, assistantId, {
           ...readPagingParams(url),
-          openOnly: url.searchParams.get("status") === "open",
+          openOnly: readGapsOpenOnly(url),
         }),
       );
     }

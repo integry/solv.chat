@@ -21,6 +21,18 @@ export interface GapsPage {
 }
 
 /**
+ * Reads `?status=` from a gaps list request: `open` for the open groups only,
+ * left out for every group. Anything else is refused, as the conversation list
+ * refuses an unknown filter, so a typo does not silently show every group.
+ */
+export function readGapsOpenOnly(url: URL): boolean {
+  const status = url.searchParams.get("status");
+  if (status === null || status === "") return false;
+  if (status === "open") return true;
+  throw new BadRequest(["status: must be open"]);
+}
+
+/**
  * The unanswered questions. `answered = 0` is written by the chat pipeline when
  * nothing cleared the score floor, so this screen is a direct read of that
  * decision rather than a second heuristic that could disagree with it.

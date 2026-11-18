@@ -1,4 +1,19 @@
-import type { SourceKind, TestExpectation, VersionConfig } from "@solvchat/core";
+import type {
+  OverviewAttention,
+  OverviewPeriod,
+  OverviewSetup,
+  SourceKind,
+  TestExpectation,
+  VersionConfig,
+} from "@solvchat/core";
+
+// Overview and Reports shapes are declared once, in core, beside the engine's.
+export type {
+  OverviewAttention,
+  OverviewPeriod,
+  OverviewSetup,
+  PeriodFigures,
+} from "@solvchat/core";
 
 export interface Assistant {
   id: string;
@@ -168,36 +183,6 @@ export interface AssistantReport {
   topSources: SourceCitationCount[];
   uncitedSources: Array<{ url: string; title: string }>;
   uncitedTotal: number;
-}
-
-export interface PeriodFigures {
-  from: string;
-  to: string;
-  questions: number;
-  replies: number;
-  answeredShare: number;
-  thumbsDownShare: number;
-  costMicros: number;
-}
-
-export interface OverviewPeriod extends PeriodFigures {
-  days: number;
-  previous: PeriodFigures;
-}
-
-export interface OverviewSetup {
-  hasContent: boolean;
-  tried: boolean;
-  published: boolean;
-  installed: boolean;
-  visitorQuestion: boolean;
-}
-
-export interface OverviewAttention {
-  openGaps: number;
-  failingTests: number;
-  /** `failed`: indexing recorded a failure; `waiting`: none recorded, but overdue. */
-  notIndexed: Array<{ sourceId: string; label: string; failed: number; waiting: number }>;
 }
 
 export interface AssistantOverview {

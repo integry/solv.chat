@@ -1,5 +1,11 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { defaultVersionConfig, MAX_CHAT_MESSAGE_LENGTH, newId } from "@solvchat/core";
+import {
+  defaultVersionConfig,
+  MAX_CHAT_MESSAGE_LENGTH,
+  newId,
+  QUESTION_LINK_LENGTH,
+  toQuestionLink,
+} from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { NOT_INDEXED_AFTER_MS, overviewFor } from "../../src/admin/overview.js";
 import { conversationsFor } from "../../src/db/conversations.js";
@@ -801,7 +807,7 @@ describe("admin Monitor screen APIs", () => {
       }
     });
 
-    it("lists the conversations that asked a grouped question, as many as its count", async () => {
+    it("lists the conversations that asked a grouped question; its count is of asks", async () => {
       const ast = await seedAssistant(ORG_A);
       const app = appForOrg(ORG_A);
       const now = Date.now();
@@ -818,6 +824,16 @@ describe("admin Monitor screen APIs", () => {
         question: "  PRICING?  ",
         answered: true,
         createdAt: now - 3000,
+      });
+      // Asked a second time in the same conversation: one more ask, not one
+      // more conversation.
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        conversationId: asked.conversationId,
+        question: "pricing?",
+        answered: true,
+        createdAt: now - 3500,
       });
       // The phrase only in a reply, or inside a longer question: not this question.
       await seedTurn({
@@ -850,12 +866,14 @@ describe("admin Monitor screen APIs", () => {
         `/api/admin/assistants/${ast}/overview`,
       );
       const top = overview.topQuestions.find((item) => item.question === "pricing?");
-      expect(top?.count).toBe(2);
+      // Overview and Reports count each time it was asked; the list has each
+      // conversation once.
+      expect(top?.count).toBe(3);
 
       const list = (query: string) =>
         getJson<ConversationsBody>(app, `/api/admin/assistants/${ast}/conversations${query}`);
       const byKey = await list(`?question=${encodeURIComponent("pricing?")}`);
-      expect(byKey.total).toBe(top?.count);
+      expect(byKey.total).toBe(2);
       expect(byKey.conversations.map((c) => c.id)).toEqual([
         askedAgain.conversationId,
         asked.conversationId,
@@ -872,6 +890,73 @@ describe("admin Monitor screen APIs", () => {
         `/api/admin/assistants/${ast}/conversations?question=${"x".repeat(MAX_CHAT_MESSAGE_LENGTH * 3 + 1)}`,
       );
       expect(tooLong.status).toBe(400);
+    });
+
+    it("finds a long grouped question's conversations by the start its link sends", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      const now = Date.now();
+      const start = "ё".repeat(QUESTION_LINK_LENGTH - 1);
+      // Long questions that agree on the first characters a link carries.
+      const long = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: `${start}a and then a lot more`,
+        answered: true,
+        createdAt: now - 3000,
+      });
+      const sameStart = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: `${start}a, put another way`,
+        answered: true,
+        createdAt: now - 2000,
+      });
+      // Shorter than a link's start: only found by its whole text.
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: start,
+        answered: true,
+        createdAt: now - 1000,
+      });
+      // Agrees until the last character of the start.
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: `${start}b and more`,
+        answered: true,
+        createdAt: now - 500,
+      });
+
+      const list = async (question: string) =>
+        (
+          await getJson<ConversationsBody>(
+            app,
+            `/api/admin/assistants/${ast}/conversations?question=${encodeURIComponent(question)}`,
+          )
+        ).conversations.map((c) => c.id);
+      const link = toQuestionLink(normalizeQuestionText(`${start}a and then a lot more`));
+      expect(Array.from(link)).toHaveLength(QUESTION_LINK_LENGTH);
+      expect(await list(link)).toEqual([sameStart.conversationId, long.conversationId]);
+      // The whole key still finds only its own conversations.
+      expect(await list(`${start}a and then a lot more`)).toEqual([long.conversationId]);
+      // Text shorter than a link's start is a whole question, not a start.
+      expect(await list(start.slice(0, -10))).toEqual([]);
+
+      // A cut that lands on a space keeps the next character, so trimming
+      // what is sent leaves a start the list still reads as one.
+      const spaced = `${"x".repeat(QUESTION_LINK_LENGTH - 1)} y and more`;
+      const spacedTurn = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: spaced,
+        answered: true,
+        createdAt: now,
+      });
+      const spacedLink = toQuestionLink(normalizeQuestionText(spaced));
+      expect(spacedLink.endsWith(" y")).toBe(true);
+      expect(await list(spacedLink)).toEqual([spacedTurn.conversationId]);
     });
 
     it("never finds another org's conversations by search", async () => {
@@ -928,6 +1013,18 @@ describe("admin Monitor screen APIs", () => {
       expect(all.total).toBe(2);
       const open = await getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps?status=open`);
       expect(open).toMatchObject({ total: 1, gaps: [{ question: "open?", handled: false }] });
+      expect(
+        (await getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps?status=`)).total,
+      ).toBe(2);
+    });
+
+    it("refuses an unknown gaps status instead of listing every group", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      for (const status of ["opne", "OPEN", "closed", "all", "constructor"]) {
+        const res = await call(app, "GET", `/api/admin/assistants/${ast}/gaps?status=${status}`);
+        expect({ status, code: res.status }).toEqual({ status, code: 400 });
+      }
     });
 
     it("lists an answered group again once it is asked after the answer, wherever gaps show", async () => {

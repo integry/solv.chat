@@ -1,3 +1,4 @@
+import { QUESTION_LINK_LENGTH } from "@solvchat/core";
 import { messagesFor, searchableText } from "./messages.js";
 import { prepare, prepareInsert } from "./sql.js";
 
@@ -48,6 +49,9 @@ export interface ConversationFilter {
   /**
    * A grouped question's key (`normalizeQuestionText`): only conversations
    * where a visitor asked it, the ones its count in Reports and Overview counts.
+   * One of `QUESTION_LINK_LENGTH` characters or more is the start a link sends
+   * for a longer question (`toQuestionLink`): it matches every key starting
+   * with it.
    */
   question?: string;
 }
@@ -144,7 +148,8 @@ export function conversationsFor(db: D1Database, orgId: string) {
         }
       }
       // Each condition is switched on by its own parameter, so one statement
-      // serves every combination and nothing is spliced into the SQL.
+      // serves every combination and nothing a request sends is spliced into
+      // the SQL (the one number spliced in is a constant).
       // The search compares `search_text` with the search folded the same way
       // in JavaScript (SQLite's `lower()` only folds ASCII). Every write of
       // `content` here also writes `search_text`; a row still NULL now came
@@ -161,7 +166,10 @@ export function conversationsFor(db: D1Database, orgId: string) {
          AND (?9 = '' OR EXISTS (
            SELECT 1 FROM messages k
             WHERE k.org_id = c.org_id AND k.conversation_id = c.id
-              AND k.role = 'user' AND k.question_key = ?9
+              AND k.role = 'user'
+              AND (k.question_key = ?9
+                   OR (length(?9) >= ${QUESTION_LINK_LENGTH}
+                       AND substr(k.question_key, 1, length(?9)) = ?9))
          ))
          AND (?7 = '' OR EXISTS (
            SELECT 1 FROM messages s

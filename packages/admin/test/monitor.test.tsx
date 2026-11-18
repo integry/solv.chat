@@ -633,7 +633,8 @@ describe("Monitor screens", () => {
 
       const asked = await screen.findByRole("link", { name: "how do i reset my password?" });
       expect(asked.getAttribute("href")).toBe(
-        `/admin/conversations?question=how+do+i+reset+my+password%3F&assistant=${ASSISTANT.id}`,
+        // For the report's period, so the list opens on the same span.
+        `/admin/conversations?question=how+do+i+reset+my+password%3F&days=30&assistant=${ASSISTANT.id}`,
       );
       const csv = screen.getByRole("button", { name: "Download CSV" });
       const hint = document.getElementById(csv.getAttribute("aria-describedby") ?? "");
@@ -1283,6 +1284,32 @@ describe("Monitor screens", () => {
       expect(screen.queryByLabelText("Answer")).toBeNull();
     });
 
+    it("keeps the typed answer when Write an answer for this is pressed again", async () => {
+      installServer();
+      await open(`/admin/conversations?id=cnv_1&assistant=${ASSISTANT.id}`, {
+        hideScreens: ["gaps"],
+      });
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Write an answer for this" }));
+      fireEvent.change(screen.getByLabelText("Answer"), { target: { value: "Yes, in 3 days." } });
+      fireEvent.click(screen.getByRole("button", { name: "Write an answer for this" }));
+      expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+        "Yes, in 3 days.",
+      );
+    });
+
+    it("keeps the typed test when Add to tests is pressed again on the same reply", async () => {
+      installServer();
+      await open(`/admin/conversations?id=cnv_1&assistant=${ASSISTANT.id}`);
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+      const [first] = screen.getAllByRole("button", { name: "Add to tests" });
+      if (!first) throw new Error("Expected an Add to tests button");
+      fireEvent.click(first);
+      fireEvent.change(screen.getByLabelText("Words"), { target: { value: "Spain" } });
+      fireEvent.click(first);
+      expect((screen.getByLabelText("Words") as HTMLInputElement).value).toBe("Spain");
+    });
+
     it("retries after an error", async () => {
       let attempts = 0;
       installServer({
@@ -1598,6 +1625,62 @@ describe("Monitor screens", () => {
       expect(await screen.findByText(/Dismissed “Do you ship to Spain\?”/)).toBeTruthy();
       await waitFor(() => expect(items()).toHaveLength(1));
       expect((items()[0] as HTMLElement).querySelector("form")).toBeTruthy();
+    });
+
+    it("keeps an answer opened for a gap while its dismissal waits", async () => {
+      let release: (() => void) | undefined;
+      installServer({
+        holdDismiss: (r) => {
+          release = r;
+        },
+      });
+      await open("/admin/gaps");
+      await screen.findByText("Do you ship to Spain?");
+
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss “Do you ship to Spain?”" }));
+      await waitFor(() => expect(release).toBeDefined());
+      // Opened after Dismiss was pressed: a newer draft the dismissal must not close.
+      fireEvent.click(screen.getByRole("button", { name: "Write an answer" }));
+      fireEvent.change(screen.getByLabelText("Answer"), { target: { value: "Yes, in 3 days." } });
+
+      await act(async () => release?.());
+      expect(await screen.findByText(/Dismissed “Do you ship to Spain\?”/)).toBeTruthy();
+      await waitFor(() => expect(document.querySelector(".gap-item")).toBeNull());
+      expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).value).toBe(
+        "Yes, in 3 days.",
+      );
+    });
+
+    it("keeps a test opened for a gap while its dismissal waits", async () => {
+      let release: (() => void) | undefined;
+      installServer({
+        holdDismiss: (r) => {
+          release = r;
+        },
+      });
+      await open("/admin/gaps");
+      await screen.findByText("Do you ship to Spain?");
+
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss “Do you ship to Spain?”" }));
+      await waitFor(() => expect(release).toBeDefined());
+      fireEvent.click(screen.getByRole("button", { name: "Add to tests" }));
+      fireEvent.change(screen.getByLabelText("Words"), { target: { value: "Spain" } });
+
+      await act(async () => release?.());
+      expect(await screen.findByText(/Dismissed “Do you ship to Spain\?”/)).toBeTruthy();
+      await waitFor(() => expect(document.querySelector(".gap-item")).toBeNull());
+      expect((screen.getByLabelText("Words") as HTMLInputElement).value).toBe("Spain");
+    });
+
+    it("still closes the editor that was open when Dismiss was pressed", async () => {
+      installServer();
+      await open("/admin/gaps");
+      await screen.findByText("Do you ship to Spain?");
+      fireEvent.click(screen.getByRole("button", { name: "Write an answer" }));
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss “Do you ship to Spain?”" }));
+      expect(await screen.findByText(/Dismissed “Do you ship to Spain\?”/)).toBeTruthy();
+      await waitFor(() => expect(document.querySelector(".gap-item")).toBeNull());
+      expect(screen.queryByLabelText("Answer")).toBeNull();
     });
 
     it("keeps an answer draft when an unrelated dismissal's reload fails and is tried again", async () => {
@@ -1927,6 +2010,16 @@ describe("Monitor screens", () => {
       fireEvent.change(screen.getByLabelText("Answer"), { target: { value: "Yes, we do." } });
       fireEvent.click(screen.getByRole("button", { name: "Write an answer" }));
       expect((screen.getByLabelText("Answer") as HTMLTextAreaElement).value).toBe("Yes, we do.");
+    });
+
+    it("keeps the typed test when Add to tests is pressed again on the same gap", async () => {
+      installServer();
+      await open("/admin/gaps");
+      await screen.findByText("Do you ship to Spain?");
+      fireEvent.click(screen.getByRole("button", { name: "Add to tests" }));
+      fireEvent.change(screen.getByLabelText("Words"), { target: { value: "Spain" } });
+      fireEvent.click(screen.getByRole("button", { name: "Add to tests" }));
+      expect((screen.getByLabelText("Words") as HTMLInputElement).value).toBe("Spain");
     });
 
     it("opens the answer editor inline under its gap", async () => {

@@ -220,11 +220,18 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                           // Gaps is hidden by the host: write the answer here.
                           setAddingTest(null);
                           setStatusMessage(null);
-                          setAnswering({
-                            sessionId: nextAnswerSessionId.current++,
-                            turnId: turn.id,
-                            question,
-                          });
+                          // Pressed again on the turn already being answered,
+                          // it keeps what has been typed: a new session would
+                          // remount the editor empty.
+                          setAnswering((current) =>
+                            current?.turnId === turn.id
+                              ? current
+                              : {
+                                  sessionId: nextAnswerSessionId.current++,
+                                  turnId: turn.id,
+                                  question,
+                                },
+                          );
                         }}
                       >
                         Write an answer for this
@@ -236,13 +243,18 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                       onClick={() => {
                         setAnswering(null);
                         setStatusMessage(null);
-                        setAddingTest({
-                          sessionId: nextTestSessionId.current++,
-                          turnId: turn.id,
-                          // The visitor's question, not the reply: a test is a
-                          // question plus an expectation.
-                          question: questionTurn?.content ?? "",
-                        });
+                        // Pressed again on the same turn, it keeps the draft.
+                        setAddingTest((current) =>
+                          current?.turnId === turn.id
+                            ? current
+                            : {
+                                sessionId: nextTestSessionId.current++,
+                                turnId: turn.id,
+                                // The visitor's question, not the reply: a test
+                                // is a question plus an expectation.
+                                question: questionTurn?.content ?? "",
+                              },
+                        );
                       }}
                     >
                       Add to tests

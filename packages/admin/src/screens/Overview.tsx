@@ -144,7 +144,10 @@ export function Overview({ assistantId }: OverviewProps) {
                 <h2 id="top-questions-heading" className="section-heading">
                   Most asked questions
                 </h2>
-                <p className="muted">Since the start. Open one to read those conversations.</p>
+                <p className="muted">
+                  Since the start, and how many times each was asked. Open one to read the
+                  conversations it was asked in.
+                </p>
               </div>
               {overview.topQuestions.length === 0 ? (
                 <p className="muted">No questions asked yet.</p>

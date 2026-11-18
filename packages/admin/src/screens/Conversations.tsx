@@ -1,4 +1,4 @@
-import { toConversationSearch } from "@solvchat/core";
+import { isQuestionLinkStart, toConversationSearch } from "@solvchat/core";
 import { useEffect, useId, useState } from "react";
 import type { ConversationSummary, ConversationsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
@@ -433,12 +433,14 @@ export function Conversations({ assistantId }: ConversationsProps) {
       {question !== "" && (
         <div className="list-question">
           <span className="list-question-text" title={question}>
-            Asked: “{question}”
+            {/* A long question's link carries only its start. */}
+            Asked: “{question}
+            {isQuestionLinkStart(question) ? "…" : ""}”
           </span>
           <button
             type="button"
             className="btn btn-secondary btn-sm"
-            aria-label={`Remove “Asked: ${question}”`}
+            aria-label={`Remove “Asked: ${question}${isQuestionLinkStart(question) ? "…" : ""}”`}
             onClick={() => {
               setQuestion("");
               setOffset(0);

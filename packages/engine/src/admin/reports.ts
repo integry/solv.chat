@@ -1,3 +1,4 @@
+import type { PeriodFigures } from "@solvchat/core";
 import type { QuestionCount, ReportRange, SourceCitationCount } from "../db/reports.js";
 import type { Tenant } from "../db/tenant.js";
 import { DAY_MS, utcDay } from "../util/time.js";
@@ -46,16 +47,7 @@ export function parseReportDays(raw: string | null): ReportDays {
   return days as ReportDays;
 }
 
-/** The four headline figures for one range, shared by Reports and Overview. */
-export interface PeriodFigures {
-  from: string;
-  to: string;
-  questions: number;
-  replies: number;
-  answeredShare: number;
-  thumbsDownShare: number;
-  costMicros: number;
-}
+export type { PeriodFigures } from "@solvchat/core";
 
 export async function periodFigures(
   tenant: Tenant,

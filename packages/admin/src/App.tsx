@@ -261,20 +261,23 @@ function AdminShell({
   // address: an open conversation of the previous assistant is left behind.
   // A host screen's query is its own (it may use `id` for something else),
   // so there only `assistant` changes.
+  // `replace` writes the entry on show instead, for a caller about to move on
+  // at once: Back from where it goes then skips this step.
   const selectAssistant = useCallback(
-    (id: string) => {
+    (id: string, options: { replace?: boolean } = {}) => {
       setSelectedId(id);
+      const go = options.replace ? replaceAddress : navigate;
       if (shows(window.location.pathname)) {
         const hostScreen = screen !== null && config.extraScreenIds.has(screen);
-        navigate(withAssistant(id, { keepQuery: hostScreen }));
+        go(withAssistant(id, { keepQuery: hostScreen }));
         return;
       }
       // A Back or Forward is waiting, so the address belongs to another
       // screen: the switch keeps the screen on show, at its own address.
       const path = config.navItems.find((item) => item.id === screen)?.path;
-      if (path) navigate(screenAddress(path, { assistant: id }));
+      if (path) go(screenAddress(path, { assistant: id }));
     },
-    [navigate, shows, screen, config.navItems, config.extraScreenIds],
+    [navigate, replaceAddress, shows, screen, config.navItems, config.extraScreenIds],
   );
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
@@ -301,14 +304,17 @@ function AdminShell({
     moveTo(path);
   }
 
-  function handleCreated({ assistant, ingestKey }: CreatedAssistant) {
+  function handleCreated(
+    { assistant, ingestKey }: CreatedAssistant,
+    options: { replace?: boolean } = {},
+  ) {
     // Merge into the latest list: two create forms can have requests in flight at once.
     assistantsRes.setValue((prev) => {
       const current = prev?.assistants ?? [];
       if (current.some((a) => a.id === assistant.id)) return prev ?? { assistants: current };
       return { assistants: [...current, assistant] };
     });
-    selectAssistant(assistant.id);
+    selectAssistant(assistant.id, options);
     setDrawerOpen(false);
     if (ingestKey) {
       setCreatedKeys((prev) =>
@@ -320,8 +326,11 @@ function AdminShell({
   }
 
   function handleFirstRunCreated(created: CreatedAssistant) {
-    handleCreated(created);
     const sources = config.navItems.find((item) => item.id === "sources");
+    // Going on to Sources, the switch to the new assistant takes the entry on
+    // show rather than adding one: Back from Sources goes where the owner was
+    // before, not to that screen again with the new assistant.
+    handleCreated(created, { replace: sources !== undefined });
     if (sources) navigate(screenAddress(sources.path, { assistant: created.assistant.id }));
   }
 

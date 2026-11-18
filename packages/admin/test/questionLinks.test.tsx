@@ -1,4 +1,8 @@
-import { MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
+import {
+  MAX_CHAT_MESSAGE_LENGTH,
+  MAX_CONVERSATION_SEARCH_LENGTH,
+  QUESTION_LINK_LENGTH,
+} from "@solvchat/core";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
@@ -36,6 +40,9 @@ const SHORT_QUESTION = "do you offer volume discounts?";
 // Longer than the search limit, with a character made of two code units
 // sitting on the cut, so a careless cut would break the address.
 const LONG_QUESTION = `${"a".repeat(MAX_CONVERSATION_SEARCH_LENGTH - 1)}😀 ${"and then some more words ".repeat(4)}`;
+// A grouped question as long as a key gets, in letters that percent-encode
+// to several characters each: whole, its link would be far too long to load.
+const LONGEST_QUESTION = "ё".repeat(MAX_CHAT_MESSAGE_LENGTH * 3);
 
 function report(question: string): AssistantReport {
   return {
@@ -85,6 +92,7 @@ function installServer(question: string) {
     assistantId: string;
     q: string | null;
     question?: string | null;
+    days?: string;
   }> = [];
   vi.stubGlobal(
     "fetch",
@@ -106,9 +114,13 @@ function installServer(question: string) {
       if (resource === "report") return Response.json(report(asked));
       const q = url.searchParams.get("q");
       const askedQuestion = url.searchParams.get("question");
-      conversationRequests.push(
-        askedQuestion === null ? { assistantId, q } : { assistantId, q, question: askedQuestion },
-      );
+      const days = url.searchParams.get("days");
+      conversationRequests.push({
+        assistantId,
+        q,
+        ...(askedQuestion === null ? {} : { question: askedQuestion }),
+        ...(days === null ? {} : { days }),
+      });
       if (q !== null && q.length > MAX_CONVERSATION_SEARCH_LENGTH) {
         return Response.json(
           { error: `q: must be at most ${MAX_CONVERSATION_SEARCH_LENGTH} characters` },
@@ -159,23 +171,44 @@ describe("question links from Overview and Reports", () => {
   });
 
   describe.each([
-    { screenName: "Overview", path: "/admin/overview" },
-    { screenName: "Reports", path: "/admin/reports" },
-  ])("from $screenName", ({ path }) => {
+    // Overview's list is for all time; Reports' is for its period (30 days here).
+    { screenName: "Overview", path: "/admin/overview", days: null },
+    { screenName: "Reports", path: "/admin/reports", days: "30" },
+  ])("from $screenName", ({ path, days }) => {
     it.each([
-      { kind: "a short question", question: SHORT_QUESTION },
-      { kind: "a question longer than the search limit", question: LONG_QUESTION },
+      {
+        kind: "a short question",
+        question: SHORT_QUESTION,
+        sent: SHORT_QUESTION.trim(),
+        shown: SHORT_QUESTION.trim(),
+      },
+      {
+        kind: "a question longer than the search limit",
+        question: LONG_QUESTION,
+        // Only its start: the conversation list matches every group starting with it.
+        sent: "a".repeat(QUESTION_LINK_LENGTH),
+        shown: `${"a".repeat(QUESTION_LINK_LENGTH)}…`,
+      },
+      {
+        kind: "the longest question, in letters that encode long",
+        question: LONGEST_QUESTION,
+        sent: "ё".repeat(QUESTION_LINK_LENGTH),
+        shown: `${"ё".repeat(QUESTION_LINK_LENGTH)}…`,
+      },
     ])(
       "opens the second assistant's conversations for $kind in a new tab",
-      async ({ question }) => {
+      async ({ question, sent, shown }) => {
         const { conversationRequests } = installServer(question);
         const link = await openOnSecondAssistant(path, question);
         const href = link.getAttribute("href") ?? "";
+        // Short enough for any server or proxy on the way to load.
+        expect(href.length).toBeLessThan(2_000);
         const params = new URL(href, "https://example.com").searchParams;
         expect(params.get("assistant")).toBe(SECOND.id);
-        // The grouped question itself, whole: not a search for its words.
-        expect(params.get("question")).toBe(question);
+        // The grouped question itself (or its start): not a search for its words.
+        expect(params.get("question")).toBe(sent);
         expect(params.has("q")).toBe(false);
+        expect(params.get("days")).toBe(days);
 
         conversationRequests.length = 0;
         await openInNewTab(href);
@@ -183,12 +216,13 @@ describe("question links from Overview and Reports", () => {
         expect(await screen.findByText(`A question asked of ${SECOND.id}`)).toBeTruthy();
         expect(selectedAssistantId()).toBe(SECOND.id);
         expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe("");
-        expect(screen.getByText(`Asked: “${question.trim()}”`)).toBeTruthy();
+        expect(screen.getByText(`Asked: “${shown}”`)).toBeTruthy();
         expect(screen.queryByText("Could not load conversations.")).toBeNull();
         expect(conversationRequests).toContainEqual({
           assistantId: SECOND.id,
           q: null,
-          question: question.trim(),
+          question: sent,
+          ...(days === null ? {} : { days }),
         });
         expect(conversationRequests.some((r) => r.assistantId === FIRST.id)).toBe(false);
       },

@@ -123,15 +123,25 @@ export function Gaps({ assistantId }: GapsProps) {
   function startTest(gap: GapSummary) {
     setAnswering(null);
     setStatusMessage(null);
-    setAddingTest({
-      sessionId: nextTestSessionId.current++,
-      gapKey: gap.question,
-      draft: { question: gapTitle(gap), kind: "contains", detail: "" },
-      save: IDLE_SAVE,
-    });
+    // As with answers: pressing it again on the same gap keeps the draft.
+    setAddingTest((current) =>
+      current?.gapKey === gap.question
+        ? current
+        : {
+            sessionId: nextTestSessionId.current++,
+            gapKey: gap.question,
+            draft: { question: gapTitle(gap), kind: "contains", detail: "" },
+            save: IDLE_SAVE,
+          },
+    );
   }
 
   async function dismiss(gap: GapSummary) {
+    // The editors open for this gap when Dismiss is pressed are the ones it
+    // closes. An editor opened for the same gap while the request waits is a
+    // newer draft: it stays, above the list once its row is gone.
+    const answerSession = answering?.gapKey === gap.question ? answering.sessionId : null;
+    const testSession = addingTest?.gapKey === gap.question ? addingTest.sessionId : null;
     setBusyKey(gap.question);
     try {
       await postJson(`/api/admin/assistants/${assistantId}/gaps/dismiss`, {
@@ -139,10 +149,14 @@ export function Gaps({ assistantId }: GapsProps) {
       });
       setDismissed(gap);
       setStatusMessage(null);
-      // Read the editors as they are now, not as they were when Dismiss was
-      // pressed: another gap's editor may have opened while this waited.
-      setAnswering((current) => (current?.gapKey === gap.question ? null : current));
-      setAddingTest((current) => (current?.gapKey === gap.question ? null : current));
+      // Read the editors as they are now: another gap's editor, or a newer one
+      // for this gap, may have opened while this waited.
+      setAnswering((current) =>
+        current !== null && current.sessionId === answerSession ? null : current,
+      );
+      setAddingTest((current) =>
+        current !== null && current.sessionId === testSession ? null : current,
+      );
       gapsRes.reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not dismiss. Try again.");
