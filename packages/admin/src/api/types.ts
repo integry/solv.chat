@@ -218,6 +218,11 @@ export interface McpServerSummary {
   headerName: string | null;
   hasSecret: boolean;
   enabled: boolean;
+  /**
+   * "Send conversation context". Optional so a host serving an older engine,
+   * whose response lacks it, reads it as off.
+   */
+  sendConversationContext?: boolean;
   createdAt: number;
   toolCount: number;
   allowedCount: number;

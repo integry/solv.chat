@@ -23,6 +23,7 @@ export {
   runToolLoop,
   type StoredToolCall,
   TOOL_WALL_TIME_MS,
+  type ToolCallContext,
   type ToolLoopDeps,
   type ToolLoopEvent,
   type ToolLoopOutcome,
@@ -42,6 +43,12 @@ export {
   type McpCallResult,
   type McpClientOptions,
 } from "./mcp/client.js";
+export {
+  ASSISTANT_ID_HEADER,
+  CONVERSATION_ID_HEADER,
+  type McpConversationContext,
+  VISITOR_ID_HEADER,
+} from "./mcp/context.js";
 export {
   type McpAuthKind,
   McpError,

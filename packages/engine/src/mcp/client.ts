@@ -6,6 +6,7 @@ import {
   readCapped,
   UnsafeUrlError,
 } from "../security/urlGuard.js";
+import { conversationContextHeaders } from "./context.js";
 import { McpError, type McpTarget, type McpToolSpec } from "./types.js";
 
 // Transport: MCP Streamable HTTP.
@@ -67,6 +68,24 @@ function authHeaders(target: McpTarget): Record<string, string> {
     throw new McpError("unauthorized", "This server needs a credential that is not set.");
   }
   return { [target.headerName]: target.headerValue };
+}
+
+/**
+ * The auth header plus, when the owner asked for them, the context headers.
+ * A context header never replaces the credential: saving a server whose auth
+ * header uses one of those names is refused, and a row stored before that
+ * rule keeps its credential and loses the clashing context header instead.
+ */
+async function requestHeaders(target: McpTarget): Promise<Record<string, string>> {
+  const auth = authHeaders(target);
+  if (!target.conversationContext) return auth;
+  const context = await conversationContextHeaders(target.conversationContext);
+  const authNames = new Set(Object.keys(auth).map((name) => name.toLowerCase()));
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(context)) {
+    if (!authNames.has(name.toLowerCase())) headers[name] = value;
+  }
+  return { ...headers, ...auth };
 }
 
 function mapGuardError(err: unknown): McpError {
@@ -257,7 +276,7 @@ async function withSession<T>(
     throw mapGuardError(err);
   }
 
-  const headers = authHeaders(target);
+  const headers = await requestHeaders(target);
   const timeoutMs = options.timeoutMs ?? MCP_TIMEOUT_MS;
   const controller = new AbortController();
   const onCallerAbort = () => controller.abort();

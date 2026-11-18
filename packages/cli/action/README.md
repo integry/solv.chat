@@ -22,6 +22,15 @@ Pass `SOLV_INGEST_KEY` via `env:` from a GitHub secret. One key authenticates `p
 
 `solv apply` updates the assistant's draft only; publishing always happens in the admin. Because an ingest key can change draft behaviour as well as content, treat `SOLV_INGEST_KEY` as a secret.
 
+## Tool servers in `solv.config.json`
+
+An `mcpServers` array (`[{ "url": "https://tools.example.com/mcp", "sendConversationContext": false }]`) sets **Send conversation context** on tool servers already added in the admin, matched by address. The ingest key is a CI credential, so it is limited here:
+
+- It can turn the setting **off but not on**. Sending visitor ids to a server needs a signed-in admin: turn it on under **Tools**. If the file asks for on where a server is off, `solv apply` prints which server to turn on in the admin and exits non-zero. If the server is already on, that entry is accepted and changes nothing.
+- It never sees a server's key, and sees only the origin of its address (for example `https://tools.example.com`), never the path or query.
+
+`solv apply` checks `mcpServers` with the engine before it writes anything. If any entry would be refused, nothing changes: not the draft, the tests or any server.
+
 ## Usage
 
 The action installs dependencies and builds `@solvchat/cli` from its own checkout before running `solv push` and/or `solv apply`:
