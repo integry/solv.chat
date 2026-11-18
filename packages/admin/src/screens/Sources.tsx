@@ -547,8 +547,29 @@ export function Sources({ assistantId }: SourcesProps) {
   const [busySourceId, setBusySourceId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  // A schedule change or Sync now request in flight, by source.
-  const [syncBusyId, setSyncBusyId] = useState<string | null>(null);
+  // Schedule changes and Sync now requests in flight, by source. Each source's
+  // controls are locked only while its own request runs, so other sources stay
+  // usable. The ref is the guard (state lags a render behind a quick second
+  // action); the state drives what is disabled.
+  const syncBusyRef = useRef<ReadonlySet<string>>(new Set());
+  const [syncBusyIds, setSyncBusyIds] = useState<ReadonlySet<string>>(() => new Set());
+  function claimSyncBusy(sourceId: string): boolean {
+    if (syncBusyRef.current.has(sourceId)) return false;
+    syncBusyRef.current = new Set(syncBusyRef.current).add(sourceId);
+    setSyncBusyIds(syncBusyRef.current);
+    return true;
+  }
+  // A request finishing closes only its own source's confirm, not one the
+  // user has since opened for another source.
+  function closeConfirmSyncFor(sourceId: string) {
+    setConfirmSync((current) => (current?.source.id === sourceId ? null : current));
+  }
+  function releaseSyncBusy(sourceId: string) {
+    const next = new Set(syncBusyRef.current);
+    next.delete(sourceId);
+    syncBusyRef.current = next;
+    setSyncBusyIds(next);
+  }
   // A source's first sync brings in every page its sitemap lists: asked first.
   const [confirmSync, setConfirmSync] = useState<{
     source: SourceSummary;
@@ -764,8 +785,7 @@ export function Sources({ assistantId }: SourcesProps) {
   }
 
   async function saveSchedule(source: SourceSummary, schedule: SyncSchedule) {
-    if (syncBusyId !== null) return;
-    setSyncBusyId(source.id);
+    if (!claimSyncBusy(source.id)) return;
     setActionError(null);
     try {
       await patchJson(`/api/admin/sources/${source.id}`, { settings: { sync: schedule } });
@@ -774,23 +794,22 @@ export function Sources({ assistantId }: SourcesProps) {
           ? `${sourceName(source)} now syncs only when you choose Sync now.`
           : `${sourceName(source)} now syncs with its sitemap every ${schedule === "daily" ? "day" : "week"}.`,
       );
-      setConfirmSync(null);
+      closeConfirmSyncFor(source.id);
       sourcesRes.reload();
     } catch (err) {
-      setConfirmSync(null);
+      closeConfirmSyncFor(source.id);
       setActionError(
         err instanceof ApiError
           ? `Could not change how often ${sourceName(source)} syncs: ${err.fields["settings.sync"] ?? err.message}`
           : `Could not change how often ${sourceName(source)} syncs. Try again.`,
       );
     } finally {
-      setSyncBusyId(null);
+      releaseSyncBusy(source.id);
     }
   }
 
   async function startSync(source: SourceSummary) {
-    if (syncBusyId !== null) return;
-    setSyncBusyId(source.id);
+    if (!claimSyncBusy(source.id)) return;
     setActionError(null);
     try {
       const res = await postJson<{ sync: SourceSyncStatus }>(
@@ -804,16 +823,16 @@ export function Sources({ assistantId }: SourcesProps) {
       } else {
         toast.success(`Syncing ${sourceName(source)}…`);
       }
-      setConfirmSync(null);
+      closeConfirmSyncFor(source.id);
     } catch (err) {
-      setConfirmSync(null);
+      closeConfirmSyncFor(source.id);
       setActionError(
         err instanceof ApiError
           ? `Could not sync ${sourceName(source)}: ${err.message}`
           : `Could not sync ${sourceName(source)}. Try again.`,
       );
     } finally {
-      setSyncBusyId(null);
+      releaseSyncBusy(source.id);
       sourcesRes.reload();
     }
   }
@@ -919,7 +938,7 @@ export function Sources({ assistantId }: SourcesProps) {
                   source={source}
                   sync={source.sync}
                   name={sourceName(source)}
-                  busy={syncBusyId === source.id}
+                  busy={syncBusyIds.has(source.id)}
                   onScheduleChange={(schedule) => handleScheduleChange(source, schedule)}
                   onSyncNow={() => handleSyncNow(source)}
                 />
@@ -1257,7 +1276,7 @@ export function Sources({ assistantId }: SourcesProps) {
               : "Sync now"
         }
         busyLabel={confirmSync?.action === "now" ? "Starting…" : "Saving…"}
-        busy={confirmSync !== null && syncBusyId === confirmSync.source.id}
+        busy={confirmSync !== null && syncBusyIds.has(confirmSync.source.id)}
         onCancel={() => setConfirmSync(null)}
         onConfirm={() => {
           if (!confirmSync) return;

@@ -385,6 +385,111 @@ describe("Sources screen: sitemap sync", () => {
     await screen.findByText(/Could not change how often Help site syncs/);
   });
 
+  it("keeps another source's sync controls working while one source's request is pending", async () => {
+    const BLOG = source({
+      id: "src_blog",
+      label: "Blog",
+      settings: { url: "https://blog.example.com/sitemap.xml" },
+      sync: SYNCED,
+    });
+    let releaseA: (() => void) | undefined;
+    const running = (schedule: "daily" | "off") =>
+      Response.json(
+        {
+          sync: {
+            schedule,
+            nextSyncAt: null,
+            last: {
+              ...SYNCED.last,
+              startedAt: NOW,
+              finishedAt: null,
+              outcome: "running",
+              counts: ZERO,
+            },
+          },
+        },
+        { status: 202 },
+      );
+    const { calls } = installServer({
+      sources: [source({ sync: SYNCED }), BLOG],
+      onSync: (id) =>
+        id === "src_site"
+          ? new Promise<Response>((resolve) => {
+              releaseA = () => resolve(running("daily"));
+            })
+          : running("off"),
+    });
+    await openSources();
+    const a = cell(sourceRow("Help site"), "Sync");
+    const b = cell(sourceRow("Blog"), "Sync");
+
+    fireEvent.click(within(a).getByRole("button", { name: "Sync Help site now" }));
+    await waitFor(() => expect(releaseA).toBeDefined());
+    // A is locked while its own request runs; B is not.
+    expect(
+      (within(a).getByRole("button", { name: "Sync Help site now" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect((within(a).getByRole("combobox") as HTMLSelectElement).disabled).toBe(true);
+    expect((within(b).getByRole("combobox") as HTMLSelectElement).disabled).toBe(false);
+
+    fireEvent.change(within(b).getByRole("combobox"), { target: { value: "off" } });
+    await screen.findByText("Blog now syncs only when you choose Sync now.");
+    fireEvent.click(within(b).getByRole("button", { name: "Sync Blog now" }));
+    await screen.findByText("Syncing Blog…");
+
+    expect(calls.filter((c) => c.method === "PATCH")).toEqual([
+      { method: "PATCH", path: "/api/admin/sources/src_blog", body: { settings: { sync: "off" } } },
+    ]);
+    expect(calls.filter((c) => c.method === "POST").map((c) => c.path)).toEqual([
+      "/api/admin/sources/src_site/sync",
+      "/api/admin/sources/src_blog/sync",
+    ]);
+
+    releaseA?.();
+    await screen.findByText("Syncing Help site…");
+  });
+
+  it("does not close another source's first-sync question when a pending request finishes", async () => {
+    const never: SourceSyncStatus = { schedule: "off", last: null, nextSyncAt: null };
+    const NEW = source({
+      id: "src_new",
+      label: "New site",
+      settings: { url: "https://new.example.com/sitemap.xml" },
+      sync: never,
+    });
+    let releaseA: (() => void) | undefined;
+    const { calls } = installServer({
+      sources: [source({ sync: SYNCED }), NEW],
+      onPatch: (id) =>
+        id === "src_site"
+          ? new Promise<Response>((resolve) => {
+              releaseA = () => resolve(Response.json({ source: source({ sync: SYNCED }) }));
+            })
+          : Response.json({ source: NEW }),
+    });
+    await openSources();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "How often Help site syncs" }), {
+      target: { value: "weekly" },
+    });
+    await waitFor(() => expect(releaseA).toBeDefined());
+
+    const b = cell(sourceRow("New site"), "Sync");
+    fireEvent.change(within(b).getByRole("combobox"), { target: { value: "daily" } });
+    const dialog = await screen.findByRole("dialog", { name: "Sync New site every day?" });
+
+    releaseA?.();
+    await screen.findByText("Help site now syncs with its sitemap every week.");
+    expect(screen.getByRole("dialog", { name: "Sync New site every day?" })).toBe(dialog);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Sync every day" }));
+    await screen.findByText("New site now syncs with its sitemap every day.");
+    expect(calls.filter((c) => c.method === "PATCH").map((c) => c.path)).toEqual([
+      "/api/admin/sources/src_site",
+      "/api/admin/sources/src_new",
+    ]);
+  });
+
   it("works mounted by a host through mountAdmin", async () => {
     const { calls } = installServer({ sources: [source({ sync: SYNCED })] });
     window.history.pushState(null, "", `/admin/sources?assistant=${ASSISTANT.id}`);
