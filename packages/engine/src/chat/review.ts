@@ -138,18 +138,34 @@ export interface ReviewJob {
   question: string;
   reply: string;
   /**
-   * Nothing cleared the score floor and the reply is the fixed fallback text:
-   * `declined` without a model call.
+   * Nothing cleared the score floor and the reply is the fixed fallback text.
+   * Reviewed too, but only `declined`, `off_topic` or `wants_human` is kept
+   * (`MISS_OUTCOMES`); anything else, a failure or a skipped review stores
+   * `declined`, so a miss is never left empty and never counts as answered.
    */
   retrievalMiss: boolean;
 }
+
+/**
+ * The outcomes a retrieval miss may take. The question alone tells these
+ * apart; a fixed fallback reply cannot have answered, even partly.
+ */
+export const MISS_OUTCOMES: ReadonlySet<AnswerOutcome> = new Set<AnswerOutcome>([
+  "declined",
+  "off_topic",
+  "wants_human",
+]);
 
 export interface ReviewRunDeps {
   messages: {
     setOutcome(id: string, outcome: AnswerOutcome, confidence: number | null): Promise<boolean>;
   };
-  /** Built on first use, so a retrieval miss or a reached cap never reads a key. */
-  reviewer: () => Promise<AnswerReviewer>;
+  /**
+   * Built on first use, so a reached cap never reads a key. Null when
+   * "Review answers" is off (or no reviewer is configured): nothing is
+   * reviewed, and a retrieval miss is stored as `declined` without a call.
+   */
+  reviewer: (() => Promise<AnswerReviewer>) | null;
   limits: Limits;
   usage: UsageSink;
   now?: (() => number) | undefined;
@@ -187,31 +203,71 @@ async function capReached(deps: ReviewRunDeps, job: ReviewJob): Promise<boolean>
 }
 
 /**
+ * Up to `REVIEW_MAX_ATTEMPTS` reviewer calls, each with the timeout, the cap
+ * checked before each. Null when the cap is reached; throws when the last
+ * attempt failed.
+ */
+async function attemptReview(
+  deps: ReviewRunDeps,
+  source: () => Promise<AnswerReviewer>,
+  job: ReviewJob,
+): Promise<ReviewResult | null> {
+  for (let attempt = 1; ; attempt++) {
+    // Checked before each attempt: the first one's spend may be what
+    // reached the cap.
+    if (await capReached(deps, job)) return null;
+    try {
+      const reviewer = await source();
+      return await withTimeout(deps.timeoutMs ?? REVIEW_TIMEOUT_MS, (signal) =>
+        reviewer.review({ question: job.question, reply: job.reply }, { signal }),
+      );
+    } catch (err) {
+      if (attempt >= REVIEW_MAX_ATTEMPTS) throw err;
+    }
+  }
+}
+
+function logFailure(err: unknown): void {
+  console.error("chat: answer review failed", {
+    error: err instanceof Error ? err.message : String(err),
+  });
+}
+
+/**
+ * A retrieval miss: the reviewer's label if it is one a miss may take,
+ * otherwise `declined` (switch off, cap reached, failure, timeout, no label,
+ * or a label such as `answered` that a fallback reply cannot earn).
+ */
+async function reviewMiss(deps: ReviewRunDeps, job: ReviewJob): Promise<ReviewResult> {
+  const declined: ReviewResult = { outcome: "declined", confidence: null };
+  if (deps.reviewer === null) return declined;
+  try {
+    const result = await attemptReview(deps, deps.reviewer, job);
+    return result !== null && result.outcome !== null && MISS_OUTCOMES.has(result.outcome)
+      ? result
+      : declined;
+  } catch (err) {
+    logFailure(err);
+    return declined;
+  }
+}
+
+/**
  * Reviews one stored reply and writes its outcome. Never throws: it runs
- * after the visitor has the whole answer, and a failure (cap reached, timeout,
- * provider error, an unusable label, a failed write) only leaves the outcome
- * empty. Logs carry the error message only, never the question or reply.
+ * after the visitor has the whole answer. For a reply with content, a failure
+ * (cap reached, timeout, provider error, an unusable label, a failed write)
+ * only leaves the outcome empty; a retrieval miss falls back to `declined`.
+ * Logs carry the error message only, never the question or reply.
  */
 export async function runAnswerReview(deps: ReviewRunDeps, job: ReviewJob): Promise<void> {
   const clock = deps.now ?? Date.now;
   try {
-    let result: ReviewResult | null = null;
+    let result: ReviewResult | null;
     if (job.retrievalMiss) {
-      result = { outcome: "declined", confidence: null };
+      result = await reviewMiss(deps, job);
     } else {
-      for (let attempt = 1; attempt <= REVIEW_MAX_ATTEMPTS && result === null; attempt++) {
-        // Checked before each attempt: the first one's spend may be what
-        // reached the cap.
-        if (await capReached(deps, job)) return;
-        try {
-          const reviewer = await deps.reviewer();
-          result = await withTimeout(deps.timeoutMs ?? REVIEW_TIMEOUT_MS, (signal) =>
-            reviewer.review({ question: job.question, reply: job.reply }, { signal }),
-          );
-        } catch (err) {
-          if (attempt === REVIEW_MAX_ATTEMPTS) throw err;
-        }
-      }
+      if (deps.reviewer === null) return;
+      result = await attemptReview(deps, deps.reviewer, job);
     }
     if (result === null || result.outcome === null) return;
     const confidence =
@@ -234,8 +290,6 @@ export async function runAnswerReview(deps: ReviewRunDeps, job: ReviewJob): Prom
       review: { messageId: job.messageId, outcome: result.outcome, confidence },
     });
   } catch (err) {
-    console.error("chat: answer review failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
+    logFailure(err);
   }
 }

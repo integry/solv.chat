@@ -37,12 +37,14 @@ export const OUTCOME_BADGES: Record<
   off_topic: {
     label: "Off topic",
     tone: "neutral",
-    title: "Checked after sending: the question was not about this site.",
+    title:
+      "Checked after sending: the question was not about this site. It is left out of Gaps and the answered share.",
   },
   wants_human: {
     label: "Asked for a person",
     tone: "info",
-    title: "Checked after sending: the visitor asked for a person, a call back, or to complain.",
+    title:
+      "Checked after sending: the visitor asked for a person, a call back, or to complain. It is left out of Gaps.",
   },
 };
 
@@ -215,11 +217,18 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
           {detail.turns.map((turn, index) => {
             const isUser = turn.role === "user";
             const questionTurn = findQuestionForTurn(index);
-            // A reply with content that the review found declined is a gap
-            // too: Gaps lists it, so it offers the same fixes.
-            const isUnanswered = !isUser && (!turn.answered || turn.outcome === "declined");
+            // What Gaps lists, so it offers the same fixes: a reply the
+            // review found declined, or an unreviewed one with no content.
+            // A miss reviewed as off topic or asking for a person is not a gap.
+            const outcome = turn.outcome ?? null;
+            const isUnanswered =
+              !isUser && (outcome === "declined" || (outcome === null && !turn.answered));
+            // A miss that declined keeps the "Unanswered" badge below (no
+            // content found); every other reviewed reply shows its outcome.
             const outcomeBadge =
-              !isUser && turn.answered && turn.outcome ? OUTCOME_BADGES[turn.outcome] : null;
+              !isUser && outcome !== null && (turn.answered || outcome !== "declined")
+                ? OUTCOME_BADGES[outcome]
+                : null;
 
             return (
               <li
@@ -231,7 +240,7 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                     <Icon name={isUser ? "chat" : "conversations"} size={14} />
                     {isUser ? "Visitor" : "Assistant"}
                   </span>
-                  {!isUser && !turn.answered && !turn.answerDocumentId && (
+                  {!isUser && !turn.answered && isUnanswered && !turn.answerDocumentId && (
                     <StatusBadge tone="warning" title="No content was found for this question.">
                       Unanswered
                     </StatusBadge>

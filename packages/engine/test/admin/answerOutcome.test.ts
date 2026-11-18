@@ -121,9 +121,10 @@ describe("answer outcome in the admin", () => {
     ]);
   });
 
-  it("counts answered share from outcomes, partial as half, and unreviewed replies as before", async () => {
+  it("counts answered share from outcomes, partial as half, off topic left out, and unreviewed replies as before", async () => {
     const ast = await seedAssistant(ORG_A);
-    // Reviewed: 1 + 0.5 + 0 + 0 + 0.
+    // Reviewed: 1 + 0.5 + 0 (declined) + 0 (declined miss) + 0 (person, a
+    // miss); the two off-topic replies (one a miss) are not counted at all.
     await seedTurn({
       orgId: ORG_A,
       assistantId: ast,
@@ -159,15 +160,44 @@ describe("answer outcome in the admin", () => {
       answered: false,
       outcome: "declined",
     });
+    await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "h",
+      answered: false,
+      outcome: "off_topic",
+    });
+    await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "i",
+      answered: false,
+      outcome: "wants_human",
+    });
     // Unreviewed: today's rule, 1 + 0.
     await seedTurn({ orgId: ORG_A, assistantId: ast, question: "f", answered: true });
     await seedTurn({ orgId: ORG_A, assistantId: ast, question: "g", answered: false });
 
+    // 9 replies, 7 of them not off topic, 2.5 answered.
     const report = await reportFor(tenantFor(ORG_A), ast, 30, FIXED_NOW);
-    expect(report.replies).toBe(7);
+    expect(report.replies).toBe(9);
     expect(report.answeredShare).toBeCloseTo(2.5 / 7);
     const overview = await overviewFor(tenantFor(ORG_A), ast, { at: FIXED_NOW });
     expect(overview.period.answeredShare).toBeCloseTo(2.5 / 7);
+  });
+
+  it("gives an answered share of 0, not a division by zero, when every reply was off topic", async () => {
+    const ast = await seedAssistant(ORG_A);
+    await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "Weather?",
+      answered: false,
+      outcome: "off_topic",
+    });
+    const report = await reportFor(tenantFor(ORG_A), ast, 30, FIXED_NOW);
+    expect(report.replies).toBe(1);
+    expect(report.answeredShare).toBe(0);
   });
 
   it("reads unreviewed data exactly as before", async () => {
@@ -216,7 +246,22 @@ describe("answer outcome in the admin", () => {
       outcome: "declined",
       at: at + 30,
     });
-    // Not gaps: answered, partial, unreviewed with content, a person, off topic.
+    // Not gaps: answered, partial, unreviewed with content, a person, off
+    // topic, and retrieval misses reviewed as a person or off topic.
+    await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "I want to speak to a real person about a complaint",
+      answered: false,
+      outcome: "wants_human",
+    });
+    await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "What is the capital of Australia?",
+      answered: false,
+      outcome: "off_topic",
+    });
     await seedTurn({
       orgId: ORG_A,
       assistantId: ast,
@@ -293,7 +338,7 @@ describe("answer outcome in the admin", () => {
     expect(((await res.json()) as { total: number }).total).toBe(0);
   });
 
-  it("filters conversations by 'could not answer' and 'asked for a person', and shows the outcome per reply", async () => {
+  it("filters conversations by 'could not answer', 'asked for a person' and 'off topic', and shows the outcome per reply", async () => {
     const ast = await seedAssistant(ORG_A);
     const declined = await seedTurn({
       orgId: ORG_A,
@@ -317,6 +362,21 @@ describe("answer outcome in the admin", () => {
       outcome: "answered",
     });
     await seedTurn({ orgId: ORG_A, assistantId: ast, question: "w", answered: false });
+    // Retrieval misses: the most common way a visitor asks for a person.
+    const personMiss = await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "Can someone call me?",
+      answered: false,
+      outcome: "wants_human",
+    });
+    const offTopicMiss = await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "Capital of Australia?",
+      answered: false,
+      outcome: "off_topic",
+    });
     const app = appForOrg(ORG_A);
 
     const list = async (filter: string) => {
@@ -327,8 +387,12 @@ describe("answer outcome in the admin", () => {
       );
     };
     expect(await list("could_not_answer")).toEqual([declined.conversationId]);
-    expect(await list("asked_for_person")).toEqual([person.conversationId]);
+    expect((await list("asked_for_person")).sort()).toEqual(
+      [person.conversationId, personMiss.conversationId].sort(),
+    );
+    expect(await list("off_topic")).toEqual([offTopicMiss.conversationId]);
     expect(await list("could_not_answer,asked_for_person")).toEqual([]);
+    expect(await list("off_topic,asked_for_person")).toEqual([]);
     expect(
       (await call(app, `/api/admin/assistants/${ast}/conversations?filter=declined`)).status,
     ).toBe(400);

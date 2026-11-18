@@ -184,9 +184,9 @@ The Monitor screens read:
   error, sources with documents that failed to index, reported as soon as the
   failure is recorded, and sources with documents still not indexed 15 minutes
   after they were written, reported separately).
-- Conversations: `filter=unanswered,not_helpful,used_tool,could_not_answer,asked_for_person`
-  (the last two read the answer review's outcome: `declined` and
-  `wants_human`), `days=1|7|30|90`,
+- Conversations: `filter=unanswered,not_helpful,used_tool,could_not_answer,asked_for_person,off_topic`
+  (the last three read the answer review's outcome: `declined`,
+  `wants_human` and `off_topic`, retrieval misses included), `days=1|7|30|90`,
   `q=` (case-insensitive text in any message) and `question=` (a grouped
   question: conversations where a visitor asked it, matched by its key; what
   question links in Overview and Reports open), with `askedFrom=` and
@@ -201,9 +201,11 @@ The Monitor screens read:
   assistant reply was made (see "Answer traces"); `trace: null` for a reply
   with none, and 404 for a visitor message or a message outside that
   conversation or org.
-- Gaps: a group's questions are those whose reply found nothing above the
-  score floor (`answered = 0`) or was reviewed as `declined`; each group
-  carries `noContentTimes` and `declinedTimes` (they add up to `times`), shown
+- Gaps: a group's questions are those whose reply was reviewed as `declined`
+  (a retrieval miss or not), or, with no outcome (older rows, a review not yet
+  run), found nothing above the score floor (`answered = 0`). A reply reviewed
+  as `off_topic` or `wants_human` is not a content gap and is never listed.
+  Each group carries `noContentTimes` and `declinedTimes` (they add up to `times`), shown
   as "No content found" and "Had content, could not answer" (the second
   usually means the content is unclear). `status=open` leaves out groups with a written answer newer than the
   group's latest ask (asked again after it, a group is open again, as after a
@@ -247,13 +249,22 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   open engine's only queue is the ingest queue (whose consumer is built for
   documents), and the visitor is never waiting either way. Each attempt has a
   10-second timeout (`REVIEW_TIMEOUT_MS`); a failure or timeout is retried
-  once, an unusable label is not. A failed or skipped review leaves the
-  outcome NULL and changes nothing else.
+  once, an unusable label is not. For a reply with content, a failed or
+  skipped review leaves the outcome NULL and changes nothing else (a
+  retrieval miss differs, below).
 - **What is reviewed.** Completed replies to visitors (`POST /v1/chat`),
   including a paused reply once its continuation completes (never while
   paused). "Try it" previews and test runs are not reviewed.
 - **Retrieval misses.** A reply that is the fixed fallback text because nothing
-  cleared the floor is marked `declined` without a model call.
+  cleared the floor is reviewed too, with the same frame (the question and the
+  fallback reply): the question alone tells an off-topic question or a request
+  for a person from a real content gap. Only `declined`, `off_topic` or
+  `wants_human` is accepted (`MISS_OUTCOMES`); any other label (a fallback
+  reply cannot have answered, even partly), no label, a failure, a timeout,
+  the spend cap being reached, or "Review answers" off stores `declined`
+  (with no model call in the last two), so a miss is never left empty and
+  never counts as answered. Cost, cap, timeout and retry are as for any
+  review. `answered` stays 0 whatever the outcome.
 - **The reviewer.** One small interface, `AnswerReviewer` in
   `chat/review.ts`: question and reply in, `{ outcome, confidence }` out
   (`confidence` 0-1, or null when the backend cannot give one; stored as
@@ -281,20 +292,31 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   nothing (`messages`, tokens and cost all 0) and carries
   `review: { messageId, outcome, confidence }`, so a host can apply its own
   rule later. The open `usageDaily` writes nothing for such an event.
-- **Answered share** (Overview and Reports): over all replies in the range, a
-  reviewed reply counts 1 for `answered`, one half for `partial` and 0 for any
-  other outcome; a reply with no outcome counts as before (1 when retrieval
-  found content). Old data, and everything with review off, reads exactly as
-  it did.
+- **Answered share** (Overview and Reports): over the range's replies less
+  those reviewed as `off_topic` (an assistant that rightly refuses a question
+  about something else has not failed), a reviewed reply counts 1 for
+  `answered`, one half for `partial` and 0 for `declined` and `wants_human`;
+  a reply with no outcome counts as before (1 when retrieval found content).
+  Both screens' hint says off-topic questions are not counted. The
+  thumbs-down share and the reply count still count every reply. Old data
+  reads exactly as it did.
 - **Gaps** and Reports' "Most often unanswered" list questions with a reply
-  that found no content or was reviewed as `declined` (see "Admin API").
+  reviewed as `declined`, or unreviewed with no content found; never
+  `off_topic` or `wants_human` (see "Admin API").
 - **Conversations** shows the outcome as a badge on each reviewed assistant
   reply ("Answered", "Partly answered", "Could not answer", "Off topic",
-  "Asked for a person"), and a reply reviewed as `declined` offers "Write an
-  answer for this" like an unanswered one.
+  "Asked for a person"); a retrieval miss reviewed as `declined` keeps its
+  "Unanswered" badge. A reply that Gaps would list offers "Write an answer
+  for this"; one reviewed as `off_topic` or `wants_human` does not. The
+  "Could not answer", "Asked for a person" and "Off topic" filters read the
+  outcome, so "Asked for a person" finds a visitor who asked for one even
+  when retrieval missed.
 - **Switch.** Settings → Providers → "Review answers", per organisation, on by
   default (`reviewAnswers` on `PUT /api/admin/providers`; `null` restores the
-  default). Off is today's behaviour exactly: no call, no outcome, no event.
+  default). Off means no model call and no outcome for a reply with content;
+  a retrieval miss is still stored as `declined` (with its outcome event), so
+  Gaps, the answered share and the filters read as they did before review
+  existed.
 
 ## Answer traces
 

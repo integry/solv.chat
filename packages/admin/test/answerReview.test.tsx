@@ -146,10 +146,38 @@ describe("answer review in the admin", () => {
       expect(within(fixed).queryByText("Could not answer")).toBeNull();
       await expectNoSeriousA11yViolations(document.body);
     });
+
+    it("shows the outcome of a retrieval miss reviewed as a person or off topic, and offers no answer to write", async () => {
+      serve({
+        "/api/admin/conversations/cnv_1": () =>
+          detailWith([
+            { answered: false, outcome: "wants_human" },
+            { answered: false, outcome: "off_topic" },
+            { answered: false, outcome: null },
+          ]),
+      });
+      render(<Conversation assistantId="ast_1" conversationId="cnv_1" onBack={() => {}} />);
+      for (const [text, label] of [
+        ["Reply 0.", "Asked for a person"],
+        ["Reply 1.", "Off topic"],
+      ] as const) {
+        const item = await replyItem(text);
+        expect(within(item).getByText(label).closest(".status-badge")).toBeTruthy();
+        expect(within(item).queryByText("Unanswered")).toBeNull();
+        expect(item.className).not.toContain("turn-gap");
+        expect(within(item).queryByRole("button", { name: "Write an answer for this" })).toBeNull();
+      }
+      // A miss not reviewed yet reads as before.
+      const pending = await replyItem("Reply 2.");
+      expect(within(pending).getByText("Unanswered")).toBeTruthy();
+      expect(
+        within(pending).getByRole("button", { name: "Write an answer for this" }),
+      ).toBeTruthy();
+    });
   });
 
   describe("Conversations", () => {
-    it("filters by 'Could not answer' and 'Asked for a person'", async () => {
+    it("filters by 'Could not answer', 'Asked for a person' and 'Off topic'", async () => {
       const calls = serve({
         "/api/admin/assistants": () => ({
           assistants: [
@@ -188,6 +216,8 @@ describe("answer review in the admin", () => {
       expect(new URLSearchParams(window.location.search).get("filter")).toBe(
         "could_not_answer,asked_for_person",
       );
+      fireEvent.click(screen.getByRole("button", { name: "Off topic" }));
+      await waitFor(() => expect(lastFilter()).toBe("could_not_answer,asked_for_person,off_topic"));
     });
   });
 

@@ -399,24 +399,26 @@ async function resolveAnswerDeps(params: {
         });
   // Deferred work of its own (`waitUntil`), not part of the answer's stream:
   // the stream closes when the answer is done, and the review runs after.
-  const review: AnswerReviewHook | undefined =
-    reviewer === null
-      ? undefined
-      : {
-          schedule(job) {
-            params.ctx.waitUntil(
-              runAnswerReview(
-                {
-                  messages: params.tenant.messages,
-                  reviewer,
-                  limits: seams.limits,
-                  usage: seams.usage,
-                },
-                job,
-              ),
-            );
-          },
-        };
+  // With "Review answers" off (reviewer null) only a retrieval miss is
+  // scheduled, and it is stored as `declined` without a call, as before.
+  const review: AnswerReviewHook | undefined = params.preview
+    ? undefined
+    : {
+        schedule(job) {
+          if (reviewer === null && !job.retrievalMiss) return;
+          params.ctx.waitUntil(
+            runAnswerReview(
+              {
+                messages: params.tenant.messages,
+                reviewer,
+                limits: seams.limits,
+                usage: seams.usage,
+              },
+              job,
+            ),
+          );
+        },
+      };
 
   return {
     tenant: params.tenant,

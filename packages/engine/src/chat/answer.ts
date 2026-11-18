@@ -63,8 +63,9 @@ export interface AnswerDeps {
    */
   trace?: AnswerTraceContext | undefined;
   /**
-   * Answer review. Absent, nothing is reviewed: "Review answers" is off, or
-   * this is a preview or a test run. `schedule` must not wait for the review:
+   * Answer review. Absent, nothing is reviewed or stored: this is a preview
+   * or a test run. (With "Review answers" off the hook is still given: it
+   * stores `declined` on a retrieval miss and reviews nothing.) `schedule` must not wait for the review:
    * it is handed each completed visitor reply after its `done` event and
    * trace, and runs as deferred work that cannot reach the visitor.
    */

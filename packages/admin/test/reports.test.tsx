@@ -110,7 +110,9 @@ describe("Reports screen", () => {
     expect(screen.getByText("How many questions visitors asked in this period.")).toBeTruthy();
     expect(screen.getByText("75%")).toBeTruthy();
     expect(
-      screen.getByText("Share of answers your assistant could give from your content."),
+      screen.getByText(
+        "Share of answers your assistant could give from your content. Off-topic questions are not counted.",
+      ),
     ).toBeTruthy();
     expect(screen.getByText("13%")).toBeTruthy();
     expect(screen.getByText("Share of answers a visitor said did not help.")).toBeTruthy();

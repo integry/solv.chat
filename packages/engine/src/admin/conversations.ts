@@ -90,6 +90,7 @@ const FILTER_FLAGS = {
   used_tool: "usedTool",
   could_not_answer: "couldNotAnswer",
   asked_for_person: "wantsHuman",
+  off_topic: "offTopic",
 } as const;
 
 /** Date presets the Conversations screen offers. */
@@ -99,7 +100,7 @@ export const CONVERSATION_DAY_OPTIONS = [1, 7, 30, 90] as const;
 const MAX_SEARCH = MAX_CONVERSATION_SEARCH_LENGTH;
 
 /**
- * Reads `?filter=unanswered,not_helpful,used_tool,could_not_answer,asked_for_person`, `?days=1|7|30|90`,
+ * Reads `?filter=unanswered,not_helpful,used_tool,could_not_answer,asked_for_person,off_topic`, `?days=1|7|30|90`,
  * `?q=text` and `?question=` (a grouped question, matched by its key, as
  * Reports and Overview count it) from a list request. `?askedFrom=` and
  * `?askedTo=` (inclusive UTC days, `YYYY-MM-DD`) narrow `question` to asks

@@ -156,11 +156,13 @@ const QUALIFIED_COLUMNS =
   "m.id, m.org_id, m.conversation_id, m.role, m.content, m.citations, m.tool_calls, m.tokens_in, m.tokens_out, m.cost_micros, m.answered, m.created_at, m.reply_to, m.first_token_ms, m.total_ms, m.outcome, m.outcome_confidence";
 
 /**
- * A reply Gaps lists, on alias `a`: retrieval found nothing above the floor
- * (`answered = 0`), or the answer review found it declined although it had
- * content. Unreviewed replies are read as before: by `answered` alone.
+ * A reply Gaps lists, on alias `a`: the answer review stored `declined`
+ * (a retrieval miss, or a reply that had content and still did not answer).
+ * A miss reviewed as `off_topic` or `wants_human` is not a content gap and is
+ * left out. Unreviewed replies (older rows, a review still to run) are read
+ * as before: by `answered` alone.
  */
-export const GAP_REPLY = "(a.answered = 0 OR a.outcome = 'declined')";
+export const GAP_REPLY = "(a.outcome = 'declined' OR (a.outcome IS NULL AND a.answered = 0))";
 
 /**
  * Unanswered replies joined to the question each one answers, through the

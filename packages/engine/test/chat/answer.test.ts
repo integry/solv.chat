@@ -243,8 +243,20 @@ describe("chat/answer", () => {
     expect(events[1]?.type).toBe("done");
 
     // The question's embedding is its own event, recorded when billed; the
-    // answer counts a message and no model spend.
-    expect(usageSpy).toHaveBeenCalledTimes(2);
+    // answer counts a message and no model spend. A fake provider means no
+    // reviewer, so the miss is stored as `declined` without a call, and its
+    // outcome event (counting nothing) comes third.
+    expect(usageSpy).toHaveBeenCalledTimes(3);
+    expect(usageSpy).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        messages: 0,
+        tokensIn: 0,
+        tokensOut: 0,
+        costMicros: 0,
+        review: expect.objectContaining({ outcome: "declined" }),
+      }),
+    );
     expect(usageSpy).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
