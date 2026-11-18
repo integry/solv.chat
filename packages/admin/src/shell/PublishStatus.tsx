@@ -8,6 +8,7 @@ import { ConfirmDialog, Dialog } from "../ui/Dialog.js";
 import { RowMenu } from "../ui/RowMenu.js";
 import { StatusBadge, type StatusTone } from "../ui/StatusBadge.js";
 import { useToast } from "../ui/Toast.js";
+import { PublishConfirmDialog } from "./PublishConfirm.js";
 import { useAssistantMutation } from "./useAssistantMutations.js";
 
 /**
@@ -113,6 +114,7 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
   const toast = useToast();
   const [failedRun, setFailedRun] = useState<TestRunSummary | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [confirmPublish, setConfirmPublish] = useState(false);
   const [discardError, setDiscardError] = useState<string | null>(null);
 
   if (!snapshot) return null;
@@ -177,9 +179,9 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
                 ? "Save your changes before publishing."
                 : state === "live"
                   ? "Nothing new to publish."
-                  : "Runs your tests, then publishes."
+                  : "Shows what will change, runs your tests, then publishes."
             }
-            onClick={() => void handlePublish(false)}
+            onClick={() => setConfirmPublish(true)}
           >
             {mutation.publishing ? "Publishing…" : "Publish draft"}
           </button>
@@ -199,6 +201,16 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
           />
         </div>
       )}
+
+      <PublishConfirmDialog
+        assistantId={assistantId}
+        open={confirmPublish}
+        onCancel={() => setConfirmPublish(false)}
+        onConfirm={() => {
+          setConfirmPublish(false);
+          void handlePublish(false);
+        }}
+      />
 
       <ConfirmDialog
         open={confirmDiscard}

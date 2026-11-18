@@ -449,6 +449,25 @@ Install
 - A "Try it" pane is always available and talks to the draft.
 - Draft and Publish: edits change the draft; Publish runs the tests and promotes
   it; History lists versions with rollback.
+- What changed: Publish (the header button and the screens' own) first asks,
+  with "What will change": the saved draft compared with the published version,
+  each changed setting by its on-screen label with what it was and is now,
+  grouped by screen. Long text shows a word-level diff (removed words struck
+  through, added words underlined, both named for screen readers). "Nothing has
+  changed" leaves Publish disabled; with nothing published yet there is nothing
+  to compare. Each History row has a one-line summary ("3 changes: greeting,
+  tone, accent colour") and expands to its changes: a published version against
+  the one published before it, the draft against the live version. Restore shows
+  the changes from the live version to the one being restored before it asks.
+  The diff is one pure function in `@solvchat/core` (`diffVersionConfigs`)
+  driven by a field table (`VERSION_DIFF_FIELDS`: path, label, screen, kind
+  `text` / `longText` / `list` / `colour` / `boolean` / `secret`); a test walks
+  the version schema and fails for a setting with no entry. A `secret` setting
+  only ever reads "Credential replaced" (or added, removed), never its value;
+  no version setting is one today, as tool credentials live on the tool server.
+  Origins and tool names are shown in full. Tests are stored per assistant, not
+  per version, so they are not part of a version's diff; the daily spend cap,
+  which no screen edits, is grouped under "Spending".
 - Gaps and Conversations offer one-click fixes: "Write an answer" on Gaps (creates
   an entry source and removes the gap; Conversations' "Write an answer for this"
   opens it on Gaps, filled in), "Dismiss" with undo on Gaps, "Add to tests" on both.
@@ -538,7 +557,7 @@ closed by default on Monitor screens and open elsewhere, remembered per browser
 in `localStorage`; on narrow screens it is a sheet. Its transcript survives
 closing it. The package entry also exports the shared components the screens
 use (page header, empty state, status badge, dialogs, toasts, table, row menu,
-copy button, skeleton) and the date formatters.
+copy button, skeleton, the list of changes between versions) and the date formatters.
 
 With no assistant, every built-in screen except Providers shows one first-run
 state: what an assistant is, the "New assistant" form inline, and the next steps

@@ -4,6 +4,7 @@ import { ApiError, putJson } from "../api/client.js";
 import { FailedTestsError, publishAssistant } from "../api/publish.js";
 import type { TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { PublishConfirmDialog } from "../shell/PublishConfirm.js";
 import { useAssistantMutation, useReportUnsavedEdits } from "../shell/useAssistantMutations.js";
 import { CharCount } from "../ui/CharCount.js";
 import { ErrorState } from "../ui/ErrorState.js";
@@ -234,6 +235,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const [initializedFor, setInitializedFor] = useState<string | null>(null);
 
   const [showHistory, setShowHistory] = useState(false);
+  const [confirmPublish, setConfirmPublish] = useState(false);
   const [historyTick, setHistoryTick] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -489,7 +491,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
               className="btn btn-secondary"
               disabled={busy || unsaved}
               aria-describedby={unsaved ? "behaviour-publish-hint" : undefined}
-              onClick={() => void handlePublish(false)}
+              onClick={() => setConfirmPublish(true)}
             >
               {publishing ? "Publishing…" : "Publish"}
             </button>
@@ -614,6 +616,16 @@ export function Behaviour({ assistantId }: BehaviourProps) {
           </button>
         </div>
       </form>
+
+      <PublishConfirmDialog
+        assistantId={assistantId}
+        open={confirmPublish}
+        onCancel={() => setConfirmPublish(false)}
+        onConfirm={() => {
+          setConfirmPublish(false);
+          void handlePublish(false);
+        }}
+      />
 
       {showHistory && <History assistantId={assistantId} refreshKey={historyTick} />}
     </div>

@@ -76,3 +76,17 @@ export {
   type WidgetPosition,
 } from "./schemas/versionConfig.js";
 export { parseSseBlock, type ReadSseOptions, readSseBlocks, type SseBlock } from "./sse.js";
+export {
+  type ConfigChange,
+  type ConfigChangeGroup,
+  DIFF_SCREENS,
+  type DiffField,
+  type DiffFieldKind,
+  type DiffScreen,
+  diffVersionConfigs,
+  diffWords,
+  groupChanges,
+  summarizeChanges,
+  VERSION_DIFF_FIELDS,
+  type WordPart,
+} from "./versionDiff.js";

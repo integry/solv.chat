@@ -25,6 +25,7 @@ export { CopyButton, type CopyButtonProps } from "./ui/CopyButton.js";
 export { DataTable, type DataTableColumn, type DataTableProps } from "./ui/DataTable.js";
 export { RelativeTime, type RelativeTimeProps } from "./ui/DateText.js";
 export { ConfirmDialog, type ConfirmDialogProps, Dialog, type DialogProps } from "./ui/Dialog.js";
+export { DiffList, type DiffListProps } from "./ui/DiffList.js";
 export { EmptyState, type EmptyStateProps } from "./ui/EmptyState.js";
 export { ErrorState, type ErrorStateProps } from "./ui/ErrorState.js";
 export {
