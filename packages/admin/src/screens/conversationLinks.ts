@@ -1,5 +1,11 @@
 import { toQuestionLink } from "@solvchat/core";
 
+/** Inclusive UTC days, `YYYY-MM-DD`: the period a Reports count is for. */
+export interface AskedRange {
+  from: string;
+  to: string;
+}
+
 /**
  * Where a question in Overview or Reports leads: that assistant's
  * conversations in which a visitor asked it, matched by the grouped question
@@ -8,19 +14,19 @@ import { toQuestionLink } from "@solvchat/core";
  * a new tab does not land on another one. A very long question is sent as its
  * start (`toQuestionLink`), so the address stays short enough to load.
  *
- * `days` is the period the count is for, so the list opens on the same span.
- * The two can still differ a little: the count is for whole UTC days, while
- * the list's "last N days" runs back from now by when each conversation
- * started.
+ * `asked` is the report's period: the list keeps the conversations where the
+ * question was asked in those same UTC days, the asks the count is of. It is
+ * not the list's "Started" choice: a conversation started long before can
+ * hold a question asked this week.
  */
 export function questionConversationsQuery(
   assistantId: string,
   question: string,
-  days?: number,
+  asked?: AskedRange,
 ): Record<string, string> {
   return {
     question: toQuestionLink(question),
-    ...(days === undefined ? {} : { days: String(days) }),
+    ...(asked === undefined ? {} : { askedFrom: asked.from, askedTo: asked.to }),
     assistant: assistantId,
   };
 }

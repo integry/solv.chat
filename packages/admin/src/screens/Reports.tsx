@@ -239,7 +239,10 @@ export function Reports({ assistantId }: ReportsProps) {
               rows={report.topQuestions}
               linkTo={(question) => ({
                 to: "conversations",
-                query: questionConversationsQuery(assistantId, question, report.days),
+                query: questionConversationsQuery(assistantId, question, {
+                  from: report.from,
+                  to: report.to,
+                }),
               })}
             />
             <QuestionTable

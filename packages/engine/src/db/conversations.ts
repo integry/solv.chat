@@ -54,6 +54,13 @@ export interface ConversationFilter {
    * with it.
    */
   question?: string;
+  /**
+   * With `question`: only asks of it made at or after / at or before these
+   * milliseconds (the period a Reports count is for). Unlike `since`, these
+   * bound when the question was asked, not when its conversation started.
+   */
+  askedFrom?: number;
+  askedTo?: number;
 }
 
 interface SummaryRow {
@@ -167,6 +174,7 @@ export function conversationsFor(db: D1Database, orgId: string) {
            SELECT 1 FROM messages k
             WHERE k.org_id = c.org_id AND k.conversation_id = c.id
               AND k.role = 'user'
+              AND k.created_at >= ?10 AND k.created_at <= ?11
               AND (k.question_key = ?9
                    OR (length(?9) >= ${QUESTION_LINK_LENGTH}
                        AND substr(k.question_key, 1, length(?9)) = ?9))
@@ -187,6 +195,8 @@ export function conversationsFor(db: D1Database, orgId: string) {
         searchableText(search),
         search,
         filter.question ?? "",
+        filter.askedFrom ?? 0,
+        filter.askedTo ?? Number.MAX_SAFE_INTEGER,
       ];
       const [rowsRes, countRow] = await Promise.all([
         prepare(
@@ -206,7 +216,7 @@ export function conversationsFor(db: D1Database, orgId: string) {
                   EXISTS(${USED_TOOL}) AS used_tool
              ${where}
             ORDER BY c.last_message_at DESC, c.id DESC
-            LIMIT ?10 OFFSET ?11`,
+            LIMIT ?12 OFFSET ?13`,
         )
           .bind(...params, options.limit, options.offset)
           .all<SummaryRow>(),

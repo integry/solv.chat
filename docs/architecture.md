@@ -172,15 +172,19 @@ The Monitor screens read:
 - Conversations: `filter=unanswered,not_helpful,used_tool`, `days=1|7|30|90`,
   `q=` (case-insensitive text in any message) and `question=` (a grouped
   question: conversations where a visitor asked it, matched by its key; what
-  question links in Overview and Reports open); unknown values are refused.
-  The admin keeps all four in the screen's address.
+  question links in Overview and Reports open), with `askedFrom=` and
+  `askedTo=` (inclusive UTC days, `YYYY-MM-DD`; only with `question=`) keeping
+  the asks made in those days, the period a Reports count is for. `days=` is
+  when a conversation started, a separate filter; unknown values are refused.
+  The admin keeps all of them in the screen's address.
   `searchPending: true` means older messages are still being prepared for
   search: nothing was searched, `searchRemaining` says how many of the
   assistant's messages are left, and the admin asks again until it is false.
 - Gaps: `status=open` leaves out groups with a written answer newer than the
   group's latest ask (asked again after it, a group is open again, as after a
   dismissal). Overview's open gaps and Reports' "Most often unanswered" leave
-  out the same groups, and the asks from before a dismissal. Left out,
+  out the same groups, and the asks from before a dismissal (not counted, but
+  an answer written from one still answers its group). Left out,
   `status` lists every group; any other value is refused;
   `POST …/gaps/dismiss` and `POST …/gaps/restore` take `{ question }`.
 

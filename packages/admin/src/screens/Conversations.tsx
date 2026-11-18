@@ -13,6 +13,7 @@ import {
 import { RelativeTime } from "../ui/DateText.js";
 import { EmptyState } from "../ui/EmptyState.js";
 import { ErrorState } from "../ui/ErrorState.js";
+import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
 import { Skeleton } from "../ui/Skeleton.js";
 import { StatusBadge } from "../ui/StatusBadge.js";
@@ -71,14 +72,40 @@ interface ListView {
   days: string;
   /** A grouped question from Reports or Overview: only conversations that asked it. */
   question: string;
+  /**
+   * With `question`, from Reports: the UTC days (`YYYY-MM-DD`) it was asked
+   * in, the report's period. "" when not set. Cleared with the question.
+   */
+  askedFrom: string;
+  askedTo: string;
+}
+
+const UTC_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A `YYYY-MM-DD` day an address names, or "" for anything else. */
+function dayOf(raw: string | null): string {
+  const value = (raw ?? "").trim();
+  return UTC_DAY.test(value) ? value : "";
+}
+
+/** "from 18 Oct 2026 to 16 Nov 2026", or "" when the question has no period. */
+function askedPeriod(from: string, to: string): string {
+  if (from !== "" && to !== "") return ` from ${formatDate(from)} to ${formatDate(to)}`;
+  if (from !== "") return ` since ${formatDate(from)}`;
+  if (to !== "") return ` until ${formatDate(to)}`;
+  return "";
 }
 
 function viewOf(address: ConversationsAddress): ListView {
+  const question = (address.question ?? "").trim();
   return {
     search: toConversationSearch(address.q ?? ""),
     flags: flagsOf(address.filter),
     days: daysOf(address.days),
-    question: (address.question ?? "").trim(),
+    question,
+    // A period only narrows a question; without one it means nothing.
+    askedFrom: question === "" ? "" : dayOf(address.askedFrom),
+    askedTo: question === "" ? "" : dayOf(address.askedTo),
   };
 }
 
@@ -90,6 +117,8 @@ function viewQuery(view: ListView): Record<string, string> {
     ...(filter === "" ? {} : { filter }),
     ...(view.days === "" ? {} : { days: view.days }),
     ...(view.question === "" ? {} : { question: view.question }),
+    ...(view.askedFrom === "" ? {} : { askedFrom: view.askedFrom }),
+    ...(view.askedTo === "" ? {} : { askedTo: view.askedTo }),
   };
 }
 
@@ -114,6 +143,8 @@ interface ConversationsAddress {
   filter: string | null;
   days: string | null;
   question: string | null;
+  askedFrom: string | null;
+  askedTo: string | null;
 }
 
 function readAddress(): ConversationsAddress {
@@ -125,6 +156,8 @@ function readAddress(): ConversationsAddress {
     filter: readQueryParam("filter"),
     days: readQueryParam("days"),
     question: readQueryParam("question"),
+    askedFrom: readQueryParam("askedFrom"),
+    askedTo: readQueryParam("askedTo"),
   };
 }
 
@@ -234,6 +267,8 @@ export function Conversations({ assistantId }: ConversationsProps) {
   const [flags, setFlags] = useState<ReadonlySet<FlagKey>>(initialView.flags);
   const [days, setDays] = useState(initialView.days);
   const [question, setQuestion] = useState(initialView.question);
+  const [askedFrom, setAskedFrom] = useState(initialView.askedFrom);
+  const [askedTo, setAskedTo] = useState(initialView.askedTo);
   // Back, Forward and links that arrive at the list bring what it shows with
   // them (search, flags, dates, question): the address is what the screen
   // shows. Followed during render, not in an effect, so the effect below that
@@ -263,10 +298,15 @@ export function Conversations({ assistantId }: ConversationsProps) {
         setQuestion(arrived.question);
         changed = true;
       }
+      if (arrived.askedFrom !== askedFrom || arrived.askedTo !== askedTo) {
+        setAskedFrom(arrived.askedFrom);
+        setAskedTo(arrived.askedTo);
+        changed = true;
+      }
       if (changed) setOffset(0);
     }
   }
-  const view: ListView = { search, flags, days, question };
+  const view: ListView = { search, flags, days, question, askedFrom, askedTo };
   const query = viewQuery(view);
   const queryKey = new URLSearchParams(query).toString();
   const searchId = useId();
@@ -298,6 +338,8 @@ export function Conversations({ assistantId }: ConversationsProps) {
       filter: values.filter ?? null,
       days: values.days ?? null,
       question: values.question ?? null,
+      askedFrom: values.askedFrom ?? null,
+      askedTo: values.askedTo ?? null,
     });
   }, [queryKey, openId, assistantId, shows]);
 
@@ -361,6 +403,8 @@ export function Conversations({ assistantId }: ConversationsProps) {
     setFlags(new Set());
     setDays("");
     setQuestion("");
+    setAskedFrom("");
+    setAskedTo("");
     setSearchInput("");
     setSearch("");
     setOffset(0);
@@ -435,7 +479,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
           <span className="list-question-text" title={question}>
             {/* A long question's link carries only its start. */}
             Asked: “{question}
-            {isQuestionLinkStart(question) ? "…" : ""}”
+            {isQuestionLinkStart(question) ? "…" : ""}”{askedPeriod(askedFrom, askedTo)}
           </span>
           <button
             type="button"
@@ -443,6 +487,8 @@ export function Conversations({ assistantId }: ConversationsProps) {
             aria-label={`Remove “Asked: ${question}${isQuestionLinkStart(question) ? "…" : ""}”`}
             onClick={() => {
               setQuestion("");
+              setAskedFrom("");
+              setAskedTo("");
               setOffset(0);
             }}
           >

@@ -96,8 +96,12 @@ const MAX_SEARCH = MAX_CONVERSATION_SEARCH_LENGTH;
 /**
  * Reads `?filter=unanswered,not_helpful,used_tool`, `?days=1|7|30|90`,
  * `?q=text` and `?question=` (a grouped question, matched by its key, as
- * Reports and Overview count it) from a list request. Unknown values are refused rather than
- * ignored, so a typo does not silently show every conversation.
+ * Reports and Overview count it) from a list request. `?askedFrom=` and
+ * `?askedTo=` (inclusive UTC days, `YYYY-MM-DD`) narrow `question` to asks
+ * made in those days, the period a Reports count is for: a conversation
+ * started long before can hold a question asked in it, so `days` (when a
+ * conversation started) cannot stand in for it. Unknown values are refused
+ * rather than ignored, so a typo does not silently show every conversation.
  */
 export function readConversationFilter(url: URL, now: number = Date.now()): ConversationFilter {
   const filter: ConversationFilter = {};
@@ -139,8 +143,36 @@ export function readConversationFilter(url: URL, now: number = Date.now()): Conv
       filter.question = question;
     }
   }
+  const askedFrom = readUtcDay(url, "askedFrom", errors);
+  const askedTo = readUtcDay(url, "askedTo", errors);
+  if (askedFrom !== undefined || askedTo !== undefined) {
+    if (filter.question === undefined && !errors.some((e) => e.startsWith("question:"))) {
+      errors.push("askedFrom, askedTo: need a question");
+    }
+    if (askedFrom !== undefined && askedTo !== undefined && askedFrom > askedTo) {
+      errors.push("askedFrom: must not be after askedTo");
+    }
+    if (askedFrom !== undefined) filter.askedFrom = askedFrom;
+    // The whole of the last day, to its last millisecond, as Reports counts it.
+    if (askedTo !== undefined) filter.askedTo = askedTo + DAY_MS - 1;
+  }
   if (errors.length > 0) throw new BadRequest(errors);
   return filter;
+}
+
+const UTC_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A `YYYY-MM-DD` parameter as the millisecond its UTC day starts, or undefined when absent. */
+function readUtcDay(url: URL, name: string, errors: string[]): number | undefined {
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw === "") return undefined;
+  const start = UTC_DAY.test(raw) ? Date.parse(`${raw}T00:00:00Z`) : Number.NaN;
+  // A day that does not exist (2026-02-30) parses to another, so check it reads back.
+  if (Number.isNaN(start) || new Date(start).toISOString().slice(0, 10) !== raw) {
+    errors.push(`${name}: must be a day, YYYY-MM-DD`);
+    return undefined;
+  }
+  return start;
 }
 
 /** Lists conversations for an assistant, newest first and paged. */

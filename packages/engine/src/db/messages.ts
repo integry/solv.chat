@@ -132,9 +132,11 @@ const QUALIFIED_COLUMNS =
 
 /**
  * Unanswered replies joined to the question each one answers, through the
- * recorded `reply_to` link. `?1` org, `?2` assistant. A question asked before
- * the owner dismissed its group is left out; one asked after shows again.
- * Each row carries the newest answer written from it, if any, and when.
+ * recorded `reply_to` link. `?1` org, `?2` assistant. Each row carries the
+ * newest answer written from it, if any, and when, and whether it was asked
+ * before the owner dismissed its group (`dismissed`). A dismissed ask is kept
+ * here rather than left out: it is not counted, but an answer written from it
+ * (its conversation still offers "Write an answer") still answers the group.
  */
 const GAP_ROWS = `
   SELECT q.id AS question_id,
@@ -149,7 +151,14 @@ const GAP_ROWS = `
            LIMIT 1) AS document_id,
          (SELECT MAX(ga.created_at)
             FROM gap_answers ga
-           WHERE ga.org_id = a.org_id AND ga.message_id IN (q.id, a.id)) AS answered_at
+           WHERE ga.org_id = a.org_id AND ga.message_id IN (q.id, a.id)) AS answered_at,
+         EXISTS (
+           SELECT 1 FROM gap_dismissals gd
+            WHERE gd.org_id = a.org_id
+              AND gd.assistant_id = c.assistant_id
+              AND gd.question_key = q.question_key
+              AND gd.dismissed_at >= q.created_at
+         ) AS dismissed
     FROM messages a
     JOIN conversations c ON c.id = a.conversation_id AND c.org_id = a.org_id
     JOIN messages q ON q.org_id = a.org_id
@@ -161,30 +170,27 @@ const GAP_ROWS = `
      AND a.role = 'assistant'
      AND a.answered = 0
      AND q.question_key IS NOT NULL
-     AND q.question_key <> ''
-     AND NOT EXISTS (
-       SELECT 1 FROM gap_dismissals gd
-        WHERE gd.org_id = a.org_id
-          AND gd.assistant_id = c.assistant_id
-          AND gd.question_key = q.question_key
-          AND gd.dismissed_at >= q.created_at
-     )`;
+     AND q.question_key <> ''`;
 
 /**
  * One row per gap group, from `gap` (`GAP_ROWS`): its key, how often and when
- * it was last asked, and the answer document. Like a dismissal, a written
- * answer only covers the asks before it: a group asked again after its newest
- * answer is open again, with no document, and counts as open everywhere.
+ * it was last asked, and the answer document. Only asks after the group's
+ * dismissal are counted and give its latest ask; a group with none is not
+ * listed. Answers are read from every ask, dismissed or not, as any of them
+ * may be where the owner wrote it. Like a dismissal, a written answer only
+ * covers the asks before it: a group asked again after its newest answer is
+ * open again, with no document, and counts as open everywhere.
  */
 const GAP_GROUPS = `
   SELECT question_key, question_content, asked_at, question_id, times,
          CASE WHEN group_answered_at >= asked_at THEN group_document_id END AS group_document_id
     FROM (
-      SELECT question_key, question_content, asked_at, question_id,
+      SELECT question_key, question_content, asked_at, question_id, dismissed,
              ROW_NUMBER() OVER (
-               PARTITION BY question_key ORDER BY asked_at DESC, question_rowid DESC
+               PARTITION BY question_key
+               ORDER BY dismissed ASC, asked_at DESC, question_rowid DESC
              ) AS rn,
-             COUNT(*) OVER (PARTITION BY question_key) AS times,
+             SUM(CASE WHEN dismissed THEN 0 ELSE 1 END) OVER (PARTITION BY question_key) AS times,
              MAX(answered_at) OVER (PARTITION BY question_key) AS group_answered_at,
              FIRST_VALUE(document_id) OVER (
                PARTITION BY question_key
@@ -192,7 +198,7 @@ const GAP_GROUPS = `
              ) AS group_document_id
         FROM gap
     )
-   WHERE rn = 1`;
+   WHERE rn = 1 AND NOT dismissed`;
 
 /** The gap groups CTEs: `gap` rows, then `gap_group` rows. `?1` org, `?2` assistant. */
 export const GAP_GROUP_CTES = `gap AS (${GAP_ROWS}), gap_group AS (${GAP_GROUPS})`;

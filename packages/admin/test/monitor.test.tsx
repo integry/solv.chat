@@ -633,8 +633,9 @@ describe("Monitor screens", () => {
 
       const asked = await screen.findByRole("link", { name: "how do i reset my password?" });
       expect(asked.getAttribute("href")).toBe(
-        // For the report's period, so the list opens on the same span.
-        `/admin/conversations?question=how+do+i+reset+my+password%3F&days=30&assistant=${ASSISTANT.id}`,
+        // The report's UTC days, bounding when the question was asked (not
+        // when its conversation started), so the list holds the asks counted.
+        `/admin/conversations?question=how+do+i+reset+my+password%3F&askedFrom=2026-10-18&askedTo=2026-11-16&assistant=${ASSISTANT.id}`,
       );
       const csv = screen.getByRole("button", { name: "Download CSV" });
       const hint = document.getElementById(csv.getAttribute("aria-describedby") ?? "");
@@ -647,8 +648,12 @@ describe("Monitor screens", () => {
 
       fireEvent.click(asked);
       expect(await screen.findByRole("heading", { name: "Conversations", level: 1 })).toBeTruthy();
-      expect(screen.getByText("Asked: “how do i reset my password?”")).toBeTruthy();
+      expect(
+        screen.getByText("Asked: “how do i reset my password?” from 18 Oct 2026 to 16 Nov 2026"),
+      ).toBeTruthy();
       expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe("");
+      // The "Started" choice is left as it is: any time.
+      expect((screen.getByLabelText("Started") as HTMLSelectElement).value).toBe("");
     });
 
     it("shows a compact empty state for each list with nothing in the period", async () => {
@@ -1198,6 +1203,32 @@ describe("Monitor screens", () => {
           .at(-1)
           ?.search.has("question"),
       ).toBe(false);
+    });
+
+    it("asks for a question's report period apart from Started, and drops both on Remove", async () => {
+      const { calls } = installServer({
+        conversations: (search) => [
+          conversation({ firstQuestion: `Asked ${search.get("question") ?? "anything"}` }),
+        ],
+      });
+      await open(
+        `/admin/conversations?question=pricing%3F&askedFrom=2026-11-10&askedTo=2026-11-16&days=90&assistant=${ASSISTANT.id}`,
+      );
+      expect(await screen.findByRole("link", { name: /Asked pricing\?/ })).toBeTruthy();
+      expect(screen.getByText("Asked: “pricing?” from 10 Nov 2026 to 16 Nov 2026")).toBeTruthy();
+      const listCalls = () => calls.filter((c) => c.path.endsWith("/conversations"));
+      const sent = listCalls().at(-1)?.search;
+      expect(sent?.get("askedFrom")).toBe("2026-11-10");
+      expect(sent?.get("askedTo")).toBe("2026-11-16");
+      expect(sent?.get("days")).toBe("90");
+
+      fireEvent.click(screen.getByRole("button", { name: "Remove “Asked: pricing?”" }));
+      expect(await screen.findByRole("link", { name: /Asked anything/ })).toBeTruthy();
+      expect(window.location.search).toBe(`?days=90&assistant=${ASSISTANT.id}`);
+      const after = listCalls().at(-1)?.search;
+      expect(after?.has("askedFrom")).toBe(false);
+      expect(after?.has("askedTo")).toBe(false);
+      expect(after?.get("days")).toBe("90");
     });
 
     it("names the assistant on show in an address that named one not in the list", async () => {

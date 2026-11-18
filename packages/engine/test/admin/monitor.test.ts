@@ -892,6 +892,91 @@ describe("admin Monitor screen APIs", () => {
       expect(tooLong.status).toBe(400);
     });
 
+    it("finds a report question's conversations by when it was asked, not when they started", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      const now = Date.now();
+      // Started 40 days ago, with the question asked in it today.
+      const old = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Hello",
+        answered: true,
+        createdAt: now - 40 * DAY,
+      });
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        conversationId: old.conversationId,
+        question: "Pricing?",
+        answered: true,
+        createdAt: now - 1000,
+      });
+      // Asked 20 days ago, before the period, in a conversation that goes on
+      // into it with another question.
+      const earlier = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Pricing?",
+        answered: true,
+        createdAt: now - 20 * DAY,
+      });
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        conversationId: earlier.conversationId,
+        question: "Other?",
+        answered: true,
+        createdAt: now - 2000,
+      });
+
+      const report = await getJson<{
+        from: string;
+        to: string;
+        topQuestions: Array<{ question: string; count: number }>;
+      }>(app, `/api/admin/assistants/${ast}/report?days=7`);
+      expect(report.topQuestions).toContainEqual({ question: "pricing?", count: 1 });
+
+      const list = (query: string) =>
+        getJson<ConversationsBody>(app, `/api/admin/assistants/${ast}/conversations${query}`);
+      const link = `?question=pricing%3F&askedFrom=${report.from}&askedTo=${report.to}`;
+      // The one conversation holding the ask the report counted.
+      const drilled = await list(link);
+      expect(drilled.conversations.map((c) => c.id)).toEqual([old.conversationId]);
+      // The days a report covers are whole UTC days, to the last millisecond.
+      expect(
+        (
+          await list(
+            `?question=pricing%3F&askedFrom=${utcDay(now - 1000)}&askedTo=${utcDay(now - 1000)}`,
+          )
+        ).total,
+      ).toBe(1);
+      expect(
+        (await list(`?question=pricing%3F&askedTo=${utcDay(now - 2 * DAY)}`)).conversations.map(
+          (c) => c.id,
+        ),
+      ).toEqual([earlier.conversationId]);
+      // "Started" stays its own filter, on when a conversation started.
+      expect((await list(`${link}&days=7`)).total).toBe(0);
+      expect((await list(`${link}&days=90`)).total).toBe(1);
+      expect((await list("?question=pricing%3F&days=7")).total).toBe(0);
+    });
+
+    it("refuses an asked-in period that is not a day, is reversed, or has no question", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      for (const query of [
+        "?question=pricing&askedFrom=2026-02-30",
+        "?question=pricing&askedFrom=yesterday",
+        "?question=pricing&askedTo=2026-11-1",
+        "?question=pricing&askedFrom=2026-11-17&askedTo=2026-11-10",
+        "?askedFrom=2026-11-10&askedTo=2026-11-16",
+      ]) {
+        const res = await call(app, "GET", `/api/admin/assistants/${ast}/conversations${query}`);
+        expect({ query, status: res.status }).toEqual({ query, status: 400 });
+      }
+    });
+
     it("finds a long grouped question's conversations by the start its link sends", async () => {
       const ast = await seedAssistant(ORG_A);
       const app = appForOrg(ORG_A);
@@ -1086,6 +1171,89 @@ describe("admin Monitor screen APIs", () => {
       expect((await open()).total).toBe(0);
       expect(await openGaps()).toBe(0);
       expect(await unanswered()).toEqual([]);
+    });
+
+    it("closes a reopened group with an answer written from an ask before its dismissal", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      const first = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Do you ship?",
+        answered: false,
+        createdAt: Date.now() - 60_000,
+      });
+      const dismiss = await call(app, "POST", `/api/admin/assistants/${ast}/gaps/dismiss`, {
+        question: "do you ship?",
+      });
+      expect(dismiss.status).toBe(200);
+      // Asked again after the dismissal, and still not answered: open again.
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Do you ship?",
+        answered: false,
+        createdAt: Date.now() + 5,
+      });
+      const open = () => getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps?status=open`);
+      const all = () => getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps`);
+      const openGaps = async () =>
+        (await getJson<OverviewBody>(app, `/api/admin/assistants/${ast}/overview`)).attention
+          .openGaps;
+      const unanswered = async () =>
+        (
+          await getJson<{ topGaps: Array<{ question: string; count: number }> }>(
+            app,
+            `/api/admin/assistants/${ast}/report?days=7`,
+          )
+        ).topGaps;
+      expect(await open()).toMatchObject({ total: 1, gaps: [{ times: 1, handled: false }] });
+      expect(await openGaps()).toBe(1);
+      expect(await unanswered()).toEqual([{ question: "do you ship?", count: 1 }]);
+
+      // The owner writes the answer from the first conversation, after the
+      // second ask: it answers the group everywhere gaps show.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const res = await call(app, "POST", `/api/admin/assistants/${ast}/answers`, {
+        question: "Do you ship?",
+        answer: "Yes, everywhere.",
+        fromMessageId: first.replyId,
+      });
+      expect(res.status).toBe(201);
+      expect((await open()).total).toBe(0);
+      expect(await openGaps()).toBe(0);
+      expect(await unanswered()).toEqual([]);
+      // Still listed under all gaps as handled, counting only the ask after
+      // the dismissal.
+      expect(await all()).toMatchObject({
+        total: 1,
+        gaps: [{ question: "do you ship?", times: 1, handled: true }],
+      });
+    });
+
+    it("lists no group whose every ask was dismissed, even with an answer written from one", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      const asked = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Do you ship?",
+        answered: false,
+        createdAt: Date.now() - 60_000,
+      });
+      await call(app, "POST", `/api/admin/assistants/${ast}/gaps/dismiss`, {
+        question: "do you ship?",
+      });
+      const res = await call(app, "POST", `/api/admin/assistants/${ast}/answers`, {
+        question: "Do you ship?",
+        answer: "Yes, everywhere.",
+        fromMessageId: asked.replyId,
+      });
+      expect(res.status).toBe(201);
+      expect(await getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps`)).toMatchObject({
+        total: 0,
+        gaps: [],
+      });
     });
 
     it("leaves dismissed asks out of Reports' unanswered list, as Gaps does", async () => {

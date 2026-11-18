@@ -93,6 +93,8 @@ function installServer(question: string) {
     q: string | null;
     question?: string | null;
     days?: string;
+    askedFrom?: string;
+    askedTo?: string;
   }> = [];
   vi.stubGlobal(
     "fetch",
@@ -115,11 +117,15 @@ function installServer(question: string) {
       const q = url.searchParams.get("q");
       const askedQuestion = url.searchParams.get("question");
       const days = url.searchParams.get("days");
+      const askedFrom = url.searchParams.get("askedFrom");
+      const askedTo = url.searchParams.get("askedTo");
       conversationRequests.push({
         assistantId,
         q,
         ...(askedQuestion === null ? {} : { question: askedQuestion }),
         ...(days === null ? {} : { days }),
+        ...(askedFrom === null ? {} : { askedFrom }),
+        ...(askedTo === null ? {} : { askedTo }),
       });
       if (q !== null && q.length > MAX_CONVERSATION_SEARCH_LENGTH) {
         return Response.json(
@@ -171,10 +177,16 @@ describe("question links from Overview and Reports", () => {
   });
 
   describe.each([
-    // Overview's list is for all time; Reports' is for its period (30 days here).
-    { screenName: "Overview", path: "/admin/overview", days: null },
-    { screenName: "Reports", path: "/admin/reports", days: "30" },
-  ])("from $screenName", ({ path, days }) => {
+    // Overview's list is for all time; Reports' is for the UTC days of its
+    // period, bounding when the question was asked. Neither sets "Started".
+    { screenName: "Overview", path: "/admin/overview", asked: null, period: "" },
+    {
+      screenName: "Reports",
+      path: "/admin/reports",
+      asked: { askedFrom: "2026-10-18", askedTo: "2026-11-16" },
+      period: " from 18 Oct 2026 to 16 Nov 2026",
+    },
+  ])("from $screenName", ({ path, asked, period }) => {
     it.each([
       {
         kind: "a short question",
@@ -208,7 +220,9 @@ describe("question links from Overview and Reports", () => {
         // The grouped question itself (or its start): not a search for its words.
         expect(params.get("question")).toBe(sent);
         expect(params.has("q")).toBe(false);
-        expect(params.get("days")).toBe(days);
+        expect(params.has("days")).toBe(false);
+        expect(params.get("askedFrom")).toBe(asked?.askedFrom ?? null);
+        expect(params.get("askedTo")).toBe(asked?.askedTo ?? null);
 
         conversationRequests.length = 0;
         await openInNewTab(href);
@@ -216,13 +230,13 @@ describe("question links from Overview and Reports", () => {
         expect(await screen.findByText(`A question asked of ${SECOND.id}`)).toBeTruthy();
         expect(selectedAssistantId()).toBe(SECOND.id);
         expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe("");
-        expect(screen.getByText(`Asked: “${shown}”`)).toBeTruthy();
+        expect(screen.getByText(`Asked: “${shown}”${period}`)).toBeTruthy();
         expect(screen.queryByText("Could not load conversations.")).toBeNull();
         expect(conversationRequests).toContainEqual({
           assistantId: SECOND.id,
           q: null,
           question: sent,
-          ...(days === null ? {} : { days }),
+          ...(asked ?? {}),
         });
         expect(conversationRequests.some((r) => r.assistantId === FIRST.id)).toBe(false);
       },
