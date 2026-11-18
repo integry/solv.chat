@@ -297,11 +297,17 @@ export async function updateMcpServer(
   const input = readServerInput(body, false);
 
   // A row saved before the clash rule could still hold one of these names.
-  // Any save of it (not only turning the setting on) asks for a new name.
+  // Only turning the setting on is refused for it: disabling the server,
+  // clearing its credential or turning the setting off must keep working
+  // without a rename first. A newly supplied clashing name is already refused
+  // by `readServerInput`.
   const effectiveAuthKind = input.authKind ?? existing.authKind;
   const effectiveHeaderName =
     input.headerName !== undefined ? input.headerName : existing.headerName;
-  if (authHeaderClashesWithContext(effectiveAuthKind, effectiveHeaderName)) {
+  if (
+    input.sendConversationContext === true &&
+    authHeaderClashesWithContext(effectiveAuthKind, effectiveHeaderName)
+  ) {
     throw new BadRequest([CONTEXT_HEADER_CLASH_MESSAGE]);
   }
 

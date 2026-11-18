@@ -389,7 +389,39 @@ describe("conversation context headers to MCP servers", () => {
     expect((await tenant.mcp.getServer(SERVER_ID))?.headerName).toBe("Authorization");
   });
 
-  it("refuses any save of a stored server whose header already clashes until it is renamed", async () => {
+  it("still lets the owner disable, clear the key of, or turn off a server whose header clashes", async () => {
+    await seedServer({ headerName: "Solv-Visitor-Id" });
+    const app = appWith(fakeMcpServer({ tools: [LOOKUP] }));
+    const patch = (body: unknown) =>
+      admin(app, "PATCH", `/api/admin/mcp-servers/${SERVER_ID}`, body);
+
+    // What the edit form sends when Enabled is unchecked.
+    const disable = await patch({ enabled: false });
+    expect(disable.status).toBe(200);
+    expect((await tenant.mcp.getServer(SERVER_ID))?.enabled).toBe(false);
+
+    // Leaving the setting off is a no-op, never a reason to refuse.
+    const keepOff = await patch({ sendConversationContext: false });
+    expect(keepOff.status).toBe(200);
+    expect((await tenant.mcp.getServer(SERVER_ID))?.sendConversationContext).toBe(false);
+
+    // "Remove credential".
+    const clear = await patch({ headerValue: "" });
+    expect(clear.status).toBe(200);
+    expect(clear.text).not.toContain(CREDENTIAL);
+    const cleared = await tenant.mcp.getServer(SERVER_ID);
+    expect(cleared?.hasSecret).toBe(false);
+    expect(cleared?.headerName).toBe("Solv-Visitor-Id");
+
+    // Turning it on in the same save as another change is still refused.
+    const sneakOn = await patch({ enabled: true, sendConversationContext: true });
+    expect(sneakOn.status).toBe(400);
+    const after = await tenant.mcp.getServer(SERVER_ID);
+    expect(after?.enabled).toBe(false);
+    expect(after?.sendConversationContext).toBe(false);
+  });
+
+  it("refuses to turn the setting on for a stored server whose header already clashes until it is renamed", async () => {
     await seedServer({ headerName: "Solv-Visitor-Id" });
     const app = appWith(fakeMcpServer({ tools: [LOOKUP] }));
 

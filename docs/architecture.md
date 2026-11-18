@@ -333,7 +333,9 @@ carries:
 - The names are fixed. An owner's static auth header may not use any of them
   (any case): creating or saving such a server is refused with a message
   naming them, whether or not the setting is on. A row stored before this rule
-  keeps its credential and drops the clashing context header.
+  keeps its credential and drops the clashing context header. Turning the
+  setting on for such a row is refused until the header is renamed; disabling
+  it, removing its credential and turning the setting off still work.
 - Requests with no visitor conversation send `Solv-Assistant-Id` only: listing
   tools when a server is added or refreshed, the admin "Try it" pane, and answer
   tests run from the admin (Tests, Publish) or `solv test`. Previews and tests
