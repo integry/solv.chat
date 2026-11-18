@@ -366,7 +366,7 @@ describe("Reports screen", () => {
     }
   });
 
-  it("renders count pills as .badge elements inside .history-item rows", async () => {
+  it("renders count pills as .badge elements inside .row-item rows", async () => {
     installFakeServer({
       report: {
         ...SEEDED_REPORT,
@@ -384,8 +384,8 @@ describe("Reports screen", () => {
     fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
     const pill = await screen.findByText("9 times");
     expect(pill.classList.contains("badge")).toBe(true);
-    expect(pill.closest(".history-item")).toBeTruthy();
-    const badges = container.querySelectorAll(".history-item > .badge");
+    expect(pill.closest(".row-item")).toBeTruthy();
+    const badges = container.querySelectorAll(".row-item > .badge");
     expect(badges.length).toBeGreaterThanOrEqual(3);
   });
 });

@@ -173,9 +173,9 @@ export function Overview({ assistantId }: OverviewProps) {
               {overview.topQuestions.length === 0 ? (
                 <p className="muted">No questions asked yet.</p>
               ) : (
-                <ul className="history-list">
+                <ul className="row-list">
                   {overview.topQuestions.map((item) => (
-                    <li key={item.question} className="history-item">
+                    <li key={item.question} className="row-item">
                       <ScreenLink
                         to="conversations"
                         query={questionConversationsQuery(assistantId, item.question)}

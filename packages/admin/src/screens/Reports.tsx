@@ -146,7 +146,7 @@ function ReportList({
         <h2 className="section-heading">{heading}</h2>
         <p className="muted">{explanation}</p>
       </div>
-      {empty ? <NoneInPeriod /> : <ul className="history-list">{children}</ul>}
+      {empty ? <NoneInPeriod /> : <ul className="row-list">{children}</ul>}
       {footer}
     </section>
   );
@@ -166,7 +166,7 @@ function QuestionTable({
   return (
     <ReportList heading={heading} explanation={explanation} empty={rows.length === 0}>
       {rows.map((item) => (
-        <li key={item.question} className="history-item">
+        <li key={item.question} className="row-item">
           <ScreenLink {...linkTo(item.question)}>{item.question}</ScreenLink>
           <span className="badge">{formatTimes(item.count)}</span>
         </li>
@@ -329,7 +329,7 @@ export function Reports({ assistantId }: ReportsProps) {
               empty={report.topSources.length === 0}
             >
               {report.topSources.map((item) => (
-                <li key={item.url} className="history-item">
+                <li key={item.url} className="row-item">
                   <PageLink url={item.url} title={item.title} />
                   <span className="badge">{formatTimes(item.count)}</span>
                 </li>
@@ -349,7 +349,7 @@ export function Reports({ assistantId }: ReportsProps) {
               }
             >
               {report.uncitedSources.map((item) => (
-                <li key={item.url} className="history-item">
+                <li key={item.url} className="row-item">
                   <PageLink url={item.url} title={item.title} />
                 </li>
               ))}

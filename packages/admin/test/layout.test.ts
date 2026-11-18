@@ -89,6 +89,7 @@ const REPORT: AssistantReport = {
         "Can you explain in great detail how enterprise billing, invoicing, and annual renewals work across multiple regions?",
       count: 9,
     },
+    { question: "Do you ship to Spain?", count: 2 },
   ],
   topGaps: [
     {
@@ -820,7 +821,7 @@ describe("Admin layout regressions (Chromium)", () => {
 
     const measurePills = () =>
       cdp.evaluate<PillMetrics[]>(`(() => {
-        return Array.from(document.querySelectorAll(".history-item")).map((item) => {
+        return Array.from(document.querySelectorAll(".row-item")).map((item) => {
           const badge = item.querySelector(".badge");
           const first = item.firstElementChild;
           const range = document.createRange();
@@ -838,7 +839,7 @@ describe("Admin layout regressions (Chromium)", () => {
       })()`);
 
     for (const width of [1440, 390]) {
-      await openScreen("/admin/reports", width, ".history-item > .badge");
+      await openScreen("/admin/reports", width, ".row-item > .badge");
       const pills = await measurePills();
       expect(pills.length).toBeGreaterThanOrEqual(3);
       for (const pill of pills) {
@@ -848,6 +849,69 @@ describe("Admin layout regressions (Chromium)", () => {
       }
     }
   }, 15_000);
+
+  it("keeps each Reports and Overview count badge at its natural width, beside the question at 1280px, at 1280px and 390px", async () => {
+    interface BadgeMetrics {
+      text: string;
+      rowWidth: number;
+      badgeWidth: number;
+      contentWidth: number;
+      badgeLeft: number;
+      badgeMiddle: number;
+      firstRight: number;
+      firstTop: number;
+      firstBottom: number;
+    }
+
+    // Every list row that ends in a count badge. The badge's content width is
+    // its text plus its own padding and border, which is what it measures when
+    // nothing stretches it.
+    const measureBadges = () =>
+      cdp.evaluate<BadgeMetrics[]>(`(() => {
+        return Array.from(document.querySelectorAll(".row-item"))
+          .filter((row) => row.querySelector(":scope > .badge"))
+          .map((row) => {
+            const badge = row.querySelector(":scope > .badge");
+            const first = row.firstElementChild;
+            const range = document.createRange();
+            range.selectNodeContents(badge);
+            const style = getComputedStyle(badge);
+            const extra = ["paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth"]
+              .reduce((sum, key) => sum + parseFloat(style[key]), 0);
+            const badgeRect = badge.getBoundingClientRect();
+            const firstRect = first.getBoundingClientRect();
+            return {
+              text: badge.textContent,
+              rowWidth: row.getBoundingClientRect().width,
+              badgeWidth: badgeRect.width,
+              contentWidth: range.getBoundingClientRect().width + extra,
+              badgeLeft: badgeRect.left,
+              badgeMiddle: (badgeRect.top + badgeRect.bottom) / 2,
+              firstRight: firstRect.right,
+              firstTop: firstRect.top,
+              firstBottom: firstRect.bottom,
+            };
+          });
+      })()`);
+
+    for (const path of ["/admin/reports", "/admin/overview"]) {
+      for (const width of [1280, 390]) {
+        await openScreen(path, width, ".row-item > .badge");
+        const badges = await measureBadges();
+        expect(badges.length, `${path} at ${width}px`).toBeGreaterThanOrEqual(2);
+        for (const badge of badges) {
+          const where = `${badge.text} on ${path} at ${width}px`;
+          expect(Math.abs(badge.badgeWidth - badge.contentWidth), where).toBeLessThanOrEqual(2);
+          expect(badge.badgeWidth, where).toBeLessThan(badge.rowWidth / 2);
+          if (width === 1280) {
+            expect(badge.badgeLeft, where).toBeGreaterThanOrEqual(badge.firstRight - 1);
+            expect(badge.badgeMiddle, where).toBeGreaterThanOrEqual(badge.firstTop);
+            expect(badge.badgeMiddle, where).toBeLessThanOrEqual(badge.firstBottom);
+          }
+        }
+      }
+    }
+  }, 20_000);
 
   async function waitFor(expression: string, what: string) {
     const deadline = Date.now() + 5_000;

@@ -21,11 +21,11 @@ export function FailedTestsPanel({
     <section className="source-card stack" role="alert" aria-label="Tests that did not pass">
       <p className="error-text">Some tests did not pass, so nothing was published.</p>
       {run.stopped && <p className="muted">{run.stopped}</p>}
-      <ul className="history-list">
+      <ul className="row-list">
         {run.results
           .filter((result) => result.outcome !== "passed")
           .map((result) => (
-            <li key={result.testId} className="history-item">
+            <li key={result.testId} className="row-item">
               <span>{result.question}</span>
               <span className="muted">{result.reason}</span>
             </li>
