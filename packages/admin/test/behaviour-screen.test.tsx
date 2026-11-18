@@ -25,6 +25,24 @@ describe("Behaviour screen", () => {
     vi.unstubAllGlobals();
   });
 
+  it("opens History when the address asks for it, then drops the request from the address", async () => {
+    installBuildScreensFake();
+    window.history.replaceState(null, "", "/admin/behaviour?assistant=ast_1&history=open");
+    render(<App />);
+    expect(await screen.findByRole("region", { name: "Version history" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "History" }).getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+    expect(new URLSearchParams(window.location.search).has("history")).toBe(false);
+  });
+
+  it("keeps History closed by default", async () => {
+    installBuildScreensFake();
+    render(<App />);
+    await screen.findByLabelText("First thing it says");
+    expect(screen.queryByRole("region", { name: "Version history" })).toBeNull();
+  });
+
   it("groups the fields under plain headings, each with one line of help", async () => {
     installBuildScreensFake();
     render(<App />);
