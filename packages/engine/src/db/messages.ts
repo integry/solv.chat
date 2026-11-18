@@ -21,6 +21,8 @@ interface Row {
   answered: number;
   created_at: number;
   reply_to: string | null;
+  first_token_ms: number | null;
+  total_ms: number | null;
 }
 
 export interface MessageRow {
@@ -38,6 +40,10 @@ export interface MessageRow {
   createdAt: number;
   /** For an assistant reply, the visitor message it answers. */
   replyTo: string | null;
+  /** For an assistant reply, milliseconds until its first token reached the visitor; null before 0022 or with no text. */
+  firstTokenMs: number | null;
+  /** For an assistant reply, milliseconds from the request to the complete reply; null before 0022. */
+  totalMs: number | null;
 }
 
 export interface PendingReplyRow extends MessageRow {
@@ -66,6 +72,10 @@ export interface CreateMessageInput {
   replyTo?: string | null | undefined;
   /** Transient model continuation state for paused page-action replies. */
   resumeContext?: unknown | null | undefined;
+  /** Assistant replies only: when the first token reached the visitor, from the request's start. */
+  firstTokenMs?: number | null | undefined;
+  /** Assistant replies only: how long the request took until the reply was complete. */
+  totalMs?: number | null | undefined;
 }
 
 /** One group of unanswered questions sharing a normalised text. */
@@ -125,10 +135,10 @@ const SEARCH_FILL_BATCH = 200;
 const SEARCH_FILL_ROUNDS = 10;
 
 const COLUMNS =
-  "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to";
+  "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, first_token_ms, total_ms";
 
 const QUALIFIED_COLUMNS =
-  "m.id, m.org_id, m.conversation_id, m.role, m.content, m.citations, m.tool_calls, m.tokens_in, m.tokens_out, m.cost_micros, m.answered, m.created_at, m.reply_to";
+  "m.id, m.org_id, m.conversation_id, m.role, m.content, m.citations, m.tool_calls, m.tokens_in, m.tokens_out, m.cost_micros, m.answered, m.created_at, m.reply_to, m.first_token_ms, m.total_ms";
 
 /**
  * Unanswered replies joined to the question each one answers, through the
@@ -217,6 +227,8 @@ const map = (row: Row): MessageRow => ({
   answered: row.answered === 1,
   createdAt: row.created_at,
   replyTo: row.reply_to,
+  firstTokenMs: row.first_token_ms ?? null,
+  totalMs: row.total_ms ?? null,
 });
 
 interface PendingRow extends Row {
@@ -536,8 +548,8 @@ export function messagesFor(db: D1Database, orgId: string) {
       const questionKey = input.role === "user" ? normalizeQuestionText(input.content) : null;
       await prepareInsert(
         db,
-        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, question_key, resume_context, search_text)
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, question_key, resume_context, search_text, first_token_ms, total_ms)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)`,
       )
         .bind(
           orgId,
@@ -556,6 +568,8 @@ export function messagesFor(db: D1Database, orgId: string) {
           questionKey,
           input.resumeContext == null ? null : JSON.stringify(input.resumeContext),
           searchableText(input.content),
+          input.role === "assistant" ? (input.firstTokenMs ?? null) : null,
+          input.role === "assistant" ? (input.totalMs ?? null) : null,
         )
         .run();
 
@@ -573,6 +587,8 @@ export function messagesFor(db: D1Database, orgId: string) {
         answered: input.answered,
         createdAt: input.createdAt,
         replyTo,
+        firstTokenMs: input.role === "assistant" ? (input.firstTokenMs ?? null) : null,
+        totalMs: input.role === "assistant" ? (input.totalMs ?? null) : null,
       };
     },
 

@@ -2100,6 +2100,101 @@ a {
   overflow-wrap: anywhere;
 }
 
+/* "How this answer was made" under an assistant reply. */
+.answer-trace {
+  margin-top: var(--space-2);
+}
+
+.answer-trace > summary {
+  font-size: var(--text-sm);
+}
+
+.trace-body,
+.trace-part {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.trace-part + .trace-part {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.trace-part-heading,
+.trace-heading {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.trace-heading {
+  color: var(--muted);
+}
+
+.trace-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  overflow-wrap: anywhere;
+}
+
+.trace-content-title {
+  font-weight: 600;
+}
+
+.trace-content-section {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.trace-content-excerpt {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.trace-table th,
+.trace-table .data-table-end {
+  white-space: nowrap;
+}
+
+.trace-facts {
+  display: grid;
+  /* One label width for every list, so the facts and the cost line up. */
+  grid-template-columns: 11rem 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.trace-facts dt {
+  color: var(--muted);
+}
+
+.trace-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 599px) {
+  .trace-table .status-badge {
+    white-space: normal;
+  }
+
+  .trace-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .trace-facts dd {
+    margin-bottom: var(--space-2);
+  }
+}
+
 /* Gaps. */
 .gap-list {
   list-style: none;

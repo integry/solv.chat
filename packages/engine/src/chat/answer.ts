@@ -22,6 +22,15 @@ import {
   type ToolLoopContinuation,
   type ToolRunner,
 } from "./toolLoop.js";
+import {
+  type AnswerRecorder,
+  answerRecorder,
+  type KeySource,
+  type TraceCandidate,
+  type TracePart,
+  type TraceStop,
+  traceCandidates,
+} from "./trace.js";
 
 // A chunk below the floor is noise; including it would make the model answer
 // from unrelated pages, which is worse than admitting the gap. The numbers are
@@ -46,6 +55,17 @@ export interface AnswerDeps {
    * exactly: no `tools` key on the request, one model call.
    */
   runners?: readonly ToolRunner[] | undefined;
+  /**
+   * What the answer's trace needs that the answer path does not know: the
+   * version that answered and where the model key came from. Absent, no
+   * trace is written (previews and test runs store no message to keep one on).
+   */
+  trace?: AnswerTraceContext | undefined;
+}
+
+export interface AnswerTraceContext {
+  version: { id: string; state: "published" | "draft" };
+  keySource: KeySource;
 }
 
 export interface AnswerInput {
@@ -202,6 +222,99 @@ async function recordEmbeddingOnly(
   });
 }
 
+interface TraceFacts {
+  kind: TracePart["kind"];
+  candidates: TraceCandidate[];
+  timing: ReturnType<AnswerRecorder["snapshot"]>;
+  modelCalled: boolean;
+  stop: TraceStop;
+}
+
+function tracePartFor(deps: AnswerDeps, facts: TraceFacts): TracePart | null {
+  if (!deps.trace) return null;
+  return {
+    kind: facts.kind,
+    version: { ...deps.trace.version },
+    model: facts.modelCalled
+      ? { provider: deps.provider.name, id: deps.provider.model, keySource: deps.trace.keySource }
+      : null,
+    retrieval: { floor: SCORE_FLOOR, ms: facts.timing.retrievalMs, candidates: facts.candidates },
+    timing: { firstTokenMs: facts.timing.firstTokenMs, totalMs: facts.timing.totalMs },
+    tools: { rounds: facts.timing.toolRounds, ms: facts.timing.toolMs },
+    stop: facts.stop,
+  };
+}
+
+/**
+ * Writes a message's trace once its reply is complete and sent. A failure
+ * is logged (its message only: a trace holds ids and numbers, and the error
+ * names no request data) and swallowed: the visitor already has the answer.
+ */
+async function saveTrace(
+  deps: AnswerDeps,
+  messageId: string,
+  facts: TraceFacts,
+  clock: () => number,
+): Promise<void> {
+  const part = tracePartFor(deps, facts);
+  if (part === null) return;
+  try {
+    if (part.kind === "answer") {
+      await deps.tenant.traces.put(messageId, part, clock());
+    } else {
+      await deps.tenant.traces.append(messageId, part, clock());
+    }
+  } catch (err) {
+    console.error("chat: trace write failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function stopFor(stopReason: string | undefined): TraceStop {
+  return stopReason === "length" ? "length" : "complete";
+}
+
+/**
+ * Embeds the question, queries the retriever and resolves the hits through
+ * D1, timed as one retrieval step. Every hit is resolved, those under the
+ * floor too, so the trace can name their documents; only the chunks at or
+ * above the floor reach the model.
+ */
+async function retrieve(
+  deps: AnswerDeps,
+  input: Pick<AnswerInput, "orgId" | "assistantId">,
+  question: string,
+  recorder: AnswerRecorder,
+  clock: () => number,
+): Promise<{ chunks: ResolvedChunk[]; candidates: TraceCandidate[] } | null> {
+  return recorder.retrieval(async () => {
+    // The question's embedding is billed whatever happens next — a failing
+    // retriever, D1 read or model call must not make it vanish — so it is
+    // recorded the moment the provider reports it, as spend that is not a
+    // message. The answer's own usage event carries model tokens only.
+    const embedded = await deps.embedder.embed(
+      [question],
+      (tokens) => recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
+      deps.signal ? { signal: deps.signal } : undefined,
+    );
+    const [vector] = embedded.vectors;
+    if (!vector) return null;
+    const hits = await deps.retriever.query({
+      vector,
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      topK: TOP_K,
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    });
+    const resolved = await resolveChunks(deps.tenant, input.assistantId, hits);
+    return {
+      chunks: resolved.filter((chunk) => chunk.score >= SCORE_FLOOR),
+      candidates: traceCandidates(hits, SCORE_FLOOR, resolved),
+    };
+  });
+}
+
 /**
  * Runs the retrieval, prompt, streaming, citation, persistence, and usage
  * pipeline for one visitor message.
@@ -211,6 +324,7 @@ export async function* answerMessage(
   input: AnswerInput,
 ): AsyncIterable<ChatEvent> {
   const clock = deps.now ?? Date.now;
+  const recorder = answerRecorder(clock);
   const { conversationId, history } = await ensureConversation(deps, input, clock());
 
   // Persist the visitor's message before calling anything: if the provider
@@ -235,40 +349,24 @@ export async function* answerMessage(
     });
   }
 
-  // The question's embedding is billed whatever happens next — a failing
-  // retriever, D1 read or model call must not make it vanish — so it is
-  // recorded the moment the provider reports it, as spend that is not a
-  // message. The answer's own usage event below carries model tokens only.
-  const embedded = await deps.embedder.embed(
-    [input.message],
-    (tokens) => recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
-    deps.signal ? { signal: deps.signal } : undefined,
-  );
-  const [vector] = embedded.vectors;
-  if (!vector) {
+  const retrieved = await retrieve(deps, input, input.message, recorder, clock);
+  if (retrieved === null) {
     yield { type: "error", message: "The assistant could not complete this response." };
     return;
   }
-
-  const hits = await deps.retriever.query({
-    vector,
-    orgId: input.orgId,
-    assistantId: input.assistantId,
-    topK: TOP_K,
-    ...(deps.signal ? { signal: deps.signal } : {}),
-  });
-  const aboveFloor = hits.filter((hit) => hit.score >= SCORE_FLOOR);
-  const chunks = await resolveChunks(deps.tenant, input.assistantId, aboveFloor);
+  const { chunks, candidates } = retrieved;
 
   if (chunks.length === 0) {
     // No model call at all: there is nothing to answer from, so spending a
     // request to have the model say so is waste — and it might answer anyway
     // from its own training.
+    recorder.firstToken();
     yield { type: "token", text: input.behaviour.fallbackText };
     // Counted before the reply is stored, as on the model path below: the
     // visitor has already been answered, so a failing write must not erase it.
     await recordMessageUsage(deps, input, clock(), 0, 0, 0);
     const messageId = newId("msg");
+    const timing = recorder.snapshot();
     if (!input.preview) {
       await deps.tenant.messages.create({
         id: messageId,
@@ -283,9 +381,19 @@ export async function* answerMessage(
         answered: false,
         createdAt: clock(),
         replyTo: questionId,
+        firstTokenMs: timing.firstTokenMs,
+        totalMs: timing.totalMs,
       });
     }
     yield { type: "done", messageId, conversationId };
+    if (!input.preview) {
+      await saveTrace(
+        deps,
+        messageId,
+        { kind: "answer", candidates, timing, modelCalled: false, stop: "complete" },
+        clock,
+      );
+    }
     return;
   }
 
@@ -312,6 +420,7 @@ export async function* answerMessage(
   let toolCalls: StoredToolCall[] = [];
   let pending: ToolCall[] = [];
   let continuation: ToolLoopContinuation | undefined;
+  let stopReason: string | undefined;
   let tokensIn = 0;
   let tokensOut = 0;
   let modelCalls = 0;
@@ -346,6 +455,7 @@ export async function* answerMessage(
             messageCount,
           );
         },
+        onToolRound: (ms) => recorder.toolRound(ms),
         signal: deps.signal,
         now: deps.now,
       },
@@ -358,10 +468,12 @@ export async function* answerMessage(
         toolCalls = step.value.calls;
         pending = step.value.pending;
         continuation = step.value.continuation;
+        stopReason = step.value.stopReason;
         break;
       }
       const event = step.value;
       if (event.kind === "text") {
+        recorder.firstToken();
         yield { type: "token", text: event.text };
       } else {
         // Detail the widget may show and a v1 widget ignores.
@@ -386,6 +498,7 @@ export async function* answerMessage(
   const cited = citableByUrl(chunks);
   const messageId = newId("msg");
   const citations = cited.map((c) => ({ url: c.url, title: c.title }));
+  const timing = recorder.snapshot();
 
   if (pending.length > 0) {
     // Stored as it stands so the follow-up request can continue it, and so the
@@ -409,6 +522,8 @@ export async function* answerMessage(
         createdAt: clock(),
         replyTo: questionId,
         resumeContext: continuation ?? null,
+        firstTokenMs: timing.firstTokenMs,
+        totalMs: timing.totalMs,
       });
     }
     for (const call of pending) {
@@ -427,6 +542,14 @@ export async function* answerMessage(
       conversationId,
       awaitingActions: pending.map((call) => call.callId),
     };
+    if (!input.preview) {
+      await saveTrace(
+        deps,
+        messageId,
+        { kind: "answer", candidates, timing, modelCalled: true, stop: "paused" },
+        clock,
+      );
+    }
     return;
   }
 
@@ -452,10 +575,22 @@ export async function* answerMessage(
       answered: true,
       createdAt: clock(),
       replyTo: questionId,
+      firstTokenMs: timing.firstTokenMs,
+      totalMs: timing.totalMs,
     });
   }
 
   yield { type: "done", messageId, conversationId };
+  // After `done`, in the pipeline that persisted the message: the visitor has
+  // the whole answer before this write starts, and its failure is swallowed.
+  if (!input.preview) {
+    await saveTrace(
+      deps,
+      messageId,
+      { kind: "answer", candidates, timing, modelCalled: true, stop: stopFor(stopReason) },
+      clock,
+    );
+  }
 }
 
 const RESUME_NOT_FOUND_MESSAGE = "This answer can no longer be continued.";
@@ -492,6 +627,7 @@ export async function* answerWithActionResults(
   input: ResumeInput,
 ): AsyncIterable<ChatEvent> {
   const clock = deps.now ?? Date.now;
+  const recorder = answerRecorder(clock);
   const conversation = await deps.tenant.conversations.get(input.conversationId);
   if (
     conversation === null ||
@@ -614,8 +750,10 @@ export async function* answerWithActionResults(
     // Embedding spend is incurred once the provider reports it, even if the
     // resume lease is lost before the callback runs; the checkpoint right
     // below still fences retrieval, model calls, output, and reply persistence.
-    const embedded = await deps.embedder.embed([questionMsg.content], (tokens) =>
-      recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
+    const embedded = await recorder.retrieval(() =>
+      deps.embedder.embed([questionMsg.content], (tokens) =>
+        recordEmbeddingOnly(deps, input, clock(), embeddingCostMicros(tokens)),
+      ),
     );
     if (!(await ensureLease())) {
       yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
@@ -627,14 +765,19 @@ export async function* answerWithActionResults(
       return;
     }
 
-    const hits = await deps.retriever.query({
-      vector,
-      orgId: input.orgId,
-      assistantId: input.assistantId,
-      topK: TOP_K,
+    const { chunks, candidates } = await recorder.retrieval(async () => {
+      const hits = await deps.retriever.query({
+        vector,
+        orgId: input.orgId,
+        assistantId: input.assistantId,
+        topK: TOP_K,
+      });
+      const resolved = await resolveChunks(deps.tenant, input.assistantId, hits);
+      return {
+        chunks: resolved.filter((chunk) => chunk.score >= SCORE_FLOOR),
+        candidates: traceCandidates(hits, SCORE_FLOOR, resolved),
+      };
     });
-    const aboveFloor = hits.filter((hit) => hit.score >= SCORE_FLOOR);
-    const chunks = await resolveChunks(deps.tenant, input.assistantId, aboveFloor);
 
     const request = buildPrompt({
       behaviour: input.behaviour,
@@ -677,6 +820,7 @@ export async function* answerWithActionResults(
     let tokensIn = 0;
     let tokensOut = 0;
     let resumeCost: number | null = 0;
+    let stopReason: string | undefined;
 
     let abortedByLease = false;
 
@@ -697,6 +841,7 @@ export async function* answerWithActionResults(
             await recordMessageUsage(deps, input, clock(), callTokensIn, callTokensOut, cost, 0);
           },
           ensureLease: () => ensureLease(),
+          onToolRound: (ms) => recorder.toolRound(ms),
           now: deps.now,
         },
         request,
@@ -713,10 +858,12 @@ export async function* answerWithActionResults(
           nextPending = step.value.pending;
           nextContinuation = step.value.continuation;
           abortedByLease = step.value.abortedByLease ?? false;
+          stopReason = step.value.stopReason;
           break;
         }
         const event = step.value;
         if (event.kind === "text") {
+          recorder.firstToken();
           yield { type: "token", text: event.text };
         } else {
           yield {
@@ -732,6 +879,20 @@ export async function* answerWithActionResults(
     } catch (err) {
       if (err instanceof ProviderError) {
         yield { type: "error", message: "The assistant could not complete this response." };
+        // The paused reply is still stored, so the failed continuation is
+        // recorded on it: this is the one stored answer an error can explain.
+        await saveTrace(
+          deps,
+          pendingReply.id,
+          {
+            kind: "resume",
+            candidates,
+            timing: recorder.snapshot(),
+            modelCalled: true,
+            stop: "error",
+          },
+          clock,
+        );
         return;
       }
       throw err;
@@ -748,6 +909,7 @@ export async function* answerWithActionResults(
     const citations = mergeCitations(pendingReply.citations, resumedCitations);
 
     const mergedCalls = [...resolvedPriorCalls, ...newCalls];
+    const timing = recorder.snapshot();
     if (!(await ensureLease(true))) {
       yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
       return;
@@ -786,6 +948,12 @@ export async function* answerWithActionResults(
         conversationId: conversation.id,
         awaitingActions: nextPending.map((call) => call.callId),
       };
+      await saveTrace(
+        deps,
+        pendingReply.id,
+        { kind: "resume", candidates, timing, modelCalled: true, stop: "paused" },
+        clock,
+      );
       return;
     }
 
@@ -794,6 +962,12 @@ export async function* answerWithActionResults(
     }
 
     yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
+    await saveTrace(
+      deps,
+      pendingReply.id,
+      { kind: "resume", candidates, timing, modelCalled: true, stop: stopFor(stopReason) },
+      clock,
+    );
   } finally {
     if (!completed) {
       try {

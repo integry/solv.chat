@@ -9,6 +9,7 @@ import { Icon } from "../ui/Icon.js";
 import { PageHeader } from "../ui/PageHeader.js";
 import { Skeleton } from "../ui/Skeleton.js";
 import { StatusBadge } from "../ui/StatusBadge.js";
+import { AnswerTrace } from "./AnswerTrace.js";
 import { EntryEditor } from "./EntryEditor.js";
 import { TestEditor } from "./TestEditor.js";
 
@@ -202,6 +203,13 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                   <Timestamp value={turn.createdAt} />
                 </div>
                 <TurnBody turn={turn} />
+                {!isUser && (
+                  <AnswerTrace
+                    assistantId={assistantId}
+                    conversationId={detail.conversation.id}
+                    messageId={turn.id}
+                  />
+                )}
 
                 {!isUser && (
                   <div className="actions">

@@ -17,12 +17,19 @@ import { ProviderError } from "../providers/error.js";
 import { llmProviderFor } from "../providers/factory.js";
 import { type Embedder, type Retriever, vectorizeRetriever } from "../providers/retrieval.js";
 import type { LlmProvider } from "../providers/types.js";
-import type { AuthProvider, LlmProviderName, Principal, Seams } from "../seams/types.js";
+import type {
+  AuthProvider,
+  KeyProvider,
+  LlmProviderName,
+  Principal,
+  Seams,
+} from "../seams/types.js";
 import { actionRunnerFor } from "./actionRunner.js";
-import { answerMessage, answerWithActionResults } from "./answer.js";
+import { type AnswerTraceContext, answerMessage, answerWithActionResults } from "./answer.js";
 import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
 import { mcpRunnerFor } from "./mcpRunner.js";
 import type { ToolRunner } from "./toolLoop.js";
+import type { KeySource } from "./trace.js";
 
 export interface ChatEnv extends ProviderEnv {
   DB: D1Database;
@@ -151,6 +158,8 @@ interface StreamAnswerParams {
    * two can never disagree about which version is answering.
    */
   allowedTools: readonly string[];
+  /** The version the behaviour and tools came from, for the answer's trace. */
+  version: AnswerTraceContext["version"];
   conversationId: string | undefined;
   pageUrl: string | undefined;
   preview: boolean;
@@ -177,12 +186,30 @@ interface StreamResumeParams {
   behaviour: BehaviourConfig;
   /** The published version's tool allow-list, as for a fresh answer. */
   allowedTools: readonly string[];
+  version: AnswerTraceContext["version"];
   conversationId: string;
   resumeMessageId: string;
   actionResults: readonly ActionResult[];
   pageActions: readonly PageAction[] | undefined;
   actionsEnabled: boolean;
   origin: string | null;
+}
+
+/**
+ * Where the model key for `provider` comes from, for an answer's trace. Reads
+ * which providers have a stored key (names only, never the sealed value) and
+ * the seam's own flags: a host that manages keys and allows no own key
+ * always supplies it.
+ */
+async function modelKeySource(
+  tenant: ReturnType<typeof forPublicScope>,
+  keys: KeyProvider,
+  provider: LlmProviderName,
+): Promise<KeySource> {
+  if (keys.managed === true && keys.ownKeysAllowed !== true) return "managed";
+  const stored = await tenant.providerSettings.listKeys();
+  if (stored.some((key) => key.provider === provider)) return "stored";
+  return keys.managed === true ? "managed" : "environment";
 }
 
 /** Resolves the embedder, retriever, LLM provider, and model for chat or test runs. */
@@ -237,6 +264,7 @@ async function resolveAnswerDeps(params: {
   orgId: string;
   assistantId: string;
   allowedTools: readonly string[];
+  version: AnswerTraceContext["version"];
   pageActions: readonly PageAction[] | undefined;
   actionsEnabled: boolean;
   preview: boolean;
@@ -269,6 +297,14 @@ async function resolveAnswerDeps(params: {
   if (actionRunner) runners.push(actionRunner);
   if (mcp) runners.push(mcp);
 
+  // Previews store no message, so they keep no trace and skip the read.
+  const trace: AnswerTraceContext | undefined = params.preview
+    ? undefined
+    : {
+        version: params.version,
+        keySource: await modelKeySource(params.tenant, seams.keys, provider.name),
+      };
+
   return {
     tenant: params.tenant,
     embedder,
@@ -277,6 +313,7 @@ async function resolveAnswerDeps(params: {
     model,
     usage: seams.usage,
     runners,
+    trace,
   };
 }
 
@@ -444,6 +481,7 @@ export async function adminChatRoute(
     message,
     behaviour: version.config.behaviour,
     allowedTools: version.config.allowedTools,
+    version: { id: version.id, state: "draft" },
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: true,
@@ -529,6 +567,7 @@ export async function chatRoute(
       visitorId: parsed.value.visitorId,
       behaviour: version.config.behaviour,
       allowedTools: version.config.allowedTools,
+      version: { id: version.id, state: "published" },
       conversationId: parsed.value.conversationId ?? "",
       resumeMessageId: parsed.value.resumeMessageId ?? "",
       actionResults: parsed.value.actionResults,
@@ -555,6 +594,7 @@ export async function chatRoute(
     message,
     behaviour: version.config.behaviour,
     allowedTools: version.config.allowedTools,
+    version: { id: version.id, state: "published" },
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: false,

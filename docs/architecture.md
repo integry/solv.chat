@@ -76,7 +76,14 @@ from the auth seam and pass it down.
   existed, the migration fills it for ASCII text and the engine folds the rest
   of the searched assistant's messages before it runs a search, a bounded
   share per request; until none are left a search answers `searchPending: true`
-  with no results instead of searching).
+  with no results instead of searching), and for assistant replies
+  first_token_ms and total_ms (milliseconds from the request to the first
+  token sent to the visitor, and to the complete reply; NULL for replies
+  written before migration 0022, and for a paused reply they are the first
+  request's).
+- `message_traces` — org_id, message_id, detail JSON, created_at, updated_at;
+  one row per assistant reply to a visitor, keyed (org_id, message_id) and
+  deleted with its message. See "Answer traces".
 - `feedback` — message_id, value (`up` | `down`), note.
 - `mcp_servers` — id, assistant_id, label, url, auth_kind (`none` | `static_header`),
   secret_ciphertext, enabled.
@@ -180,6 +187,10 @@ The Monitor screens read:
   `searchPending: true` means older messages are still being prepared for
   search: nothing was searched, `searchRemaining` says how many of the
   assistant's messages are left, and the admin asks again until it is false.
+- Conversation: `GET …/conversations/:id/messages/:messageId/trace` is how one
+  assistant reply was made (see "Answer traces"); `trace: null` for a reply
+  with none, and 404 for a visitor message or a message outside that
+  conversation or org.
 - Gaps: `status=open` leaves out groups with a written answer newer than the
   group's latest ask (asked again after it, a group is open again, as after a
   dismissal). Overview's open gaps and Reports' "Most often unanswered" leave
@@ -198,10 +209,73 @@ The Monitor screens read:
 4. Call the model through the provider interface, streaming. If tools are allowed,
    run the MCP loop: the model asks for a tool, the Worker calls the MCP server,
    the result goes back as untrusted data.
-5. Persist messages, citations, token counts, cost; update `usage_daily`.
+5. Persist messages, citations, token counts, cost and the two timings; update
+   `usage_daily`. After the `done` event, in the same deferred pipeline, write
+   the answer's trace.
 6. If nothing was retrieved above the floor and no tool answered, say so, use the
    owner's fallback text, and mark the message `answered = false` so it shows
    under Gaps.
+
+## Answer traces
+
+Every assistant reply to a visitor (`POST /v1/chat`) records how it was made,
+so an owner can tell missing content from a retrieval miss from a model that
+ignored what it was given. A small recorder (`answerRecorder` in
+`chat/trace.ts`) is threaded through the answer path and is the only clock
+the trace reads.
+
+- Retrieval: every candidate the retriever returned (at most 20; `TOP_K` is 6
+  today), best first, with chunk id, document id, similarity score (four
+  decimal places), and whether it was passed to the model or dropped:
+  `below_floor` (under the score floor, which is recorded too) or `not_found`
+  (the vector matched but its chunk is no longer in D1). There is no prompt
+  budget that drops chunks today, so no reason exists for one.
+- The version that answered (its id, and `published` for a visitor).
+- The provider and model id actually called, or none when nothing relevant
+  was found and no model was asked, and where the model key came from:
+  `stored` (Settings → Providers), `environment` (Worker secret) or `managed`
+  (`KeyProvider.managed`). Never any key material.
+- Timing in milliseconds: retrieval (embedding, vector query and D1 lookup),
+  first token sent to the visitor, total; tool rounds run and their total time.
+- Stop reason: `complete`, `length` (the model hit its output limit),
+  `spend_cap`, `error`, or `paused` (waiting for page actions). The open
+  engine refuses an over-cap request before answering and stores no reply for
+  a failed one, so `spend_cap` never appears on its own replies and `error`
+  only on a paused reply whose continuation failed.
+- A paused reply's continuations are appended as further parts (at most 8 per
+  message: the first answer and the newest resumes).
+
+The trace holds references, never copies: no prompt, question, chunk text,
+tool or action output. It is written after the reply is complete and sent, in
+the deferred step that persisted the message; a failed write is logged (the
+error message only) and swallowed, and never delays or fails the answer.
+One message's stored JSON is capped at 32 KiB (`MAX_TRACE_BYTES`): ids are
+clipped and candidates and older resumes dropped to fit, marked `truncated`,
+and the table refuses a longer row.
+
+"Try it" previews and test runs store no message (see "Answer tests"), so
+they keep no trace.
+
+The admin's Conversation screen shows it under each assistant reply as "How
+this answer was made", closed and loaded on first open: the content it was
+given, ranked, with scores and a plain label for what was not used; the
+settings version with a link to History; the model; the three timings; tokens
+and cost. Chunk ids are resolved to the document's current title and text when
+the view is read, and a chunk that no longer exists says "This content has
+since changed or been removed." Replies from before traces say "No details
+were recorded for this answer."
+
+## Privacy and retention
+
+- Conversations and their messages are kept until they are deleted; the open
+  engine has no automatic expiry. Deleting a conversation (or its assistant)
+  deletes its messages, and with them their feedback, linked gap answers and
+  answer traces, by foreign-key cascade.
+- A trace adds no visitor or owner text to what is stored: ids, scores,
+  timings, a model id and a key source. It is read only by the signed-in
+  owner of the org (`/api/admin/*`, org from the auth seam).
+- There is no export of conversations today. Whatever export or deletion path
+  is added for messages must cover `message_traces` with them.
 
 ## Providers
 
