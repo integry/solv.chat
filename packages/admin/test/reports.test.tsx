@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
-import type { Assistant, AssistantReport } from "../src/api/types.js";
+import type { Assistant, AssistantReport, ResponseTimePeriod } from "../src/api/types.js";
 
 function makeAssistant(): Assistant {
   return {
@@ -387,5 +387,154 @@ describe("Reports screen", () => {
     expect(pill.closest(".history-item")).toBeTruthy();
     const badges = container.querySelectorAll(".history-item > .badge");
     expect(badges.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+const RESPONSE_TIME: ResponseTimePeriod = {
+  days: 30,
+  from: "2026-10-16",
+  to: "2026-11-15",
+  status: "measured",
+  answers: 40,
+  timed: 40,
+  firstTokenMedianMs: 820,
+  firstTokenP90Ms: 2_450,
+  totalMedianMs: 6_100,
+  previous: {
+    from: "2026-09-16",
+    to: "2026-10-15",
+    status: "measured",
+    answers: 30,
+    timed: 28,
+    firstTokenMedianMs: 1_240,
+    firstTokenP90Ms: 2_430,
+    totalMedianMs: 5_800,
+  },
+};
+
+describe("Reports response time", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    window.history.pushState(null, "", "/admin");
+  });
+
+  it("shows the three waits in plain words, each against the 30 days before", async () => {
+    installFakeServer({ report: { ...SEEDED_REPORT, responseTime: RESPONSE_TIME } });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+
+    const section = await screen.findByRole("region", { name: "Response time" });
+    expect(section.textContent).toContain("Try it and tests are not counted.");
+    expect(section.textContent).not.toMatch(/TTFT|token|percentile/i);
+
+    const starts = screen.getByRole("region", { name: "Answer starts appearing" });
+    expect(starts.textContent).toContain("0.8 s");
+    expect(starts.textContent).toContain("0.4 s faster than the 30 days before");
+    expect(starts.textContent).toContain("Typical time until the answer starts appearing.");
+    // 2.45 s and 2.43 s are compared as shown: "2.5 s" against "2.4 s".
+    const slowest = screen.getByRole("region", { name: "Slowest 1 in 10 start after" });
+    expect(slowest.textContent).toContain("2.5 s");
+    expect(slowest.textContent).toContain("0.1 s slower than the 30 days before");
+    const full = screen.getByRole("region", { name: "Full answer" });
+    expect(full.textContent).toContain("6.1 s");
+    expect(full.textContent).toContain("0.3 s slower than the 30 days before");
+  });
+
+  it("says why there is no number when most answers have no timing", async () => {
+    installFakeServer({
+      report: {
+        ...SEEDED_REPORT,
+        responseTime: {
+          ...RESPONSE_TIME,
+          status: "mostly_untimed",
+          timed: 3,
+          firstTokenMedianMs: null,
+          firstTokenP90Ms: null,
+          totalMedianMs: null,
+          previous: { ...RESPONSE_TIME.previous, status: "no_answers", answers: 0, timed: 0 },
+        },
+      },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+
+    const section = await screen.findByRole("region", { name: "Response time" });
+    expect(section.textContent).toContain(
+      "Most answers in this period are from before answer times were recorded, so a number would mislead.",
+    );
+    const starts = screen.getByRole("region", { name: "Answer starts appearing" });
+    expect(starts.textContent).toContain("Not measured");
+    expect(starts.textContent).not.toMatch(/\d+(\.\d)? s/);
+    expect(starts.textContent).not.toContain("than the 30 days before");
+  });
+
+  it("notes a previous period with no figure instead of comparing with it", async () => {
+    installFakeServer({
+      report: {
+        ...SEEDED_REPORT,
+        responseTime: {
+          ...RESPONSE_TIME,
+          previous: {
+            ...RESPONSE_TIME.previous,
+            status: "mostly_untimed",
+            firstTokenMedianMs: null,
+            firstTokenP90Ms: null,
+            totalMedianMs: null,
+          },
+        },
+      },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+    const starts = await screen.findByRole("region", { name: "Answer starts appearing" });
+    expect(starts.textContent).toContain("0.8 s");
+    expect(starts.textContent).toContain("No figure for the 30 days before");
+  });
+
+  it("puts the three waits and the period before in the CSV", async () => {
+    installFakeServer({
+      report: {
+        ...SEEDED_REPORT,
+        responseTime: {
+          ...RESPONSE_TIME,
+          previous: {
+            ...RESPONSE_TIME.previous,
+            status: "mostly_untimed",
+            firstTokenMedianMs: null,
+            firstTokenP90Ms: null,
+            totalMedianMs: null,
+          },
+        },
+      },
+    });
+    const blobs: Blob[] = [];
+    const origCreateObjectURL = URL.createObjectURL;
+    const origRevokeObjectURL = URL.revokeObjectURL;
+    URL.createObjectURL = (blob: Blob) => {
+      blobs.push(blob);
+      return "blob:report";
+    };
+    URL.revokeObjectURL = () => {};
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    try {
+      render(<App />);
+      fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Download CSV" }));
+      const text = (await blobs[0]?.text()) ?? "";
+      const lines = text.split("\r\n");
+      const start = lines.indexOf(`"Response time"`);
+      expect(start).toBeGreaterThan(-1);
+      expect(lines.slice(start + 1, start + 5)).toEqual([
+        `"Figure","This period","The 30 days before"`,
+        `"Answer starts appearing","0.8 s","Not measured"`,
+        `"Slowest 1 in 10 start after","2.5 s","Not measured"`,
+        `"Full answer","6.1 s","Not measured"`,
+      ]);
+    } finally {
+      URL.createObjectURL = origCreateObjectURL;
+      URL.revokeObjectURL = origRevokeObjectURL;
+    }
   });
 });

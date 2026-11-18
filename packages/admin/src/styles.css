@@ -1610,6 +1610,16 @@ a {
   }
 }
 
+.overview-grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+}
+
+@media (min-width: 900px) {
+  .overview-grid-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 .stat-card {
   display: flex;
   flex-direction: column;

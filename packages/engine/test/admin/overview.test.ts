@@ -1,11 +1,14 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
+import { overviewFor } from "../../src/admin/overview.js";
+import { forPrincipal } from "../../src/db/tenant.js";
 import { utcDay } from "../../src/util/time.js";
 import { createTestApp, TEST_ORG_ID } from "../helpers/app.js";
 
 const ORG_A = TEST_ORG_ID;
 const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
+const DAY_MS = 86_400_000;
 
 function appForOrg(orgId: string) {
   return createTestApp({
@@ -204,5 +207,56 @@ describe("admin overview API", () => {
     expect(resNoKey.status).toBe(200);
     const noKeyBody = (await resNoKey.json()) as { configError: string | null };
     expect(noKeyBody.configError).toContain("SOLV_OPENROUTER_KEY");
+  });
+
+  it("gives the last 7 days' response time against the 7 days before, for the org's assistant only", async () => {
+    const at = Date.UTC(2026, 10, 15, 12, 0, 0);
+    const start = Date.UTC(2026, 10, 9); // First millisecond of the 7-day period.
+    const astA = await seedAssistant(ORG_A);
+    const astB = await seedAssistant(ORG_B);
+    const convA = newId("cnv");
+    const convB = newId("cnv");
+    const reply = (orgId: string, conv: string, createdAt: number, firstTokenMs: number | null) =>
+      env.DB.prepare(
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, answered, created_at, first_token_ms, total_ms)
+         VALUES (?1, ?2, ?3, 'assistant', 'An answer.', '[]', 1, ?4, ?5, ?5)`,
+      ).bind(newId("msg"), orgId, conv, createdAt, firstTokenMs);
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES (?1, ?2, ?3, 'vis_1', 1000, '')",
+      ).bind(convA, ORG_A, astA),
+      env.DB.prepare(
+        "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES (?1, ?2, ?3, 'vis_2', 1000, '')",
+      ).bind(convB, ORG_B, astB),
+      reply(ORG_A, convA, start, 800),
+      reply(ORG_A, convA, at, 1200),
+      reply(ORG_A, convA, start - 1, 2000),
+      // The week before is mostly from before timings: no number for it.
+      reply(ORG_A, convA, start - DAY_MS, null),
+      reply(ORG_A, convA, start - 2 * DAY_MS, null),
+      reply(ORG_B, convB, at, 60_000),
+    ]);
+
+    const overview = await overviewFor(
+      forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" }),
+      astA,
+      { at },
+    );
+    expect(overview.responseTime).toMatchObject({
+      days: 7,
+      from: "2026-11-09",
+      to: "2026-11-15",
+      status: "measured",
+      answers: 2,
+      firstTokenMedianMs: 1000,
+      previous: {
+        from: "2026-11-02",
+        to: "2026-11-08",
+        status: "mostly_untimed",
+        answers: 3,
+        timed: 1,
+        firstTokenMedianMs: null,
+      },
+    });
   });
 });

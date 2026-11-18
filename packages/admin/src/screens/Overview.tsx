@@ -9,9 +9,12 @@ import { questionConversationsQuery } from "./conversationLinks.js";
 import {
   costChange,
   countChange,
+  durationChange,
   formatCost,
   formatPercent,
+  formatResponseTime,
   formatTimes,
+  responseTimeNote,
   shareChange,
 } from "./figures.js";
 import {
@@ -61,6 +64,7 @@ export function Overview({ assistantId }: OverviewProps) {
   const current = period ?? EMPTY_FIGURES;
   const previous = period?.previous ?? EMPTY_FIGURES;
   const unit = overview?.costUnit;
+  const responseTime = overview?.responseTime;
 
   return (
     <div className="screen screen-wide">
@@ -134,6 +138,21 @@ export function Overview({ assistantId }: OverviewProps) {
                 </p>
               )}
             </StatCard>
+            {responseTime && (
+              <StatCard
+                label="Time until the answer starts appearing"
+                value={formatResponseTime(responseTime.firstTokenMedianMs, responseTime.status)}
+                explanation={
+                  responseTimeNote(responseTime.status) ??
+                  "Typical wait for answers on your site. Try it and tests are not counted."
+                }
+                change={durationChange(
+                  responseTime.firstTokenMedianMs,
+                  responseTime.previous.firstTokenMedianMs,
+                  responseTime.days,
+                )}
+              />
+            )}
           </div>
 
           <div className="overview-columns">

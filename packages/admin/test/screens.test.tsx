@@ -336,6 +336,62 @@ describe("admin phase 1 screens", () => {
     expect(screen.getByText("7 times")).toBeTruthy();
   });
 
+  it("renders Overview's response time: the typical wait against the 7 days before", async () => {
+    const week = {
+      from: "2026-11-10",
+      to: "2026-11-16",
+      status: "measured" as const,
+      answers: 12,
+      timed: 12,
+      firstTokenMedianMs: 1_900,
+      firstTokenP90Ms: 4_000,
+      totalMedianMs: 7_000,
+    };
+    installFakeServer({
+      overview: makeOverview({
+        responseTime: {
+          ...week,
+          days: 7,
+          previous: { ...week, from: "2026-11-03", to: "2026-11-09", firstTokenMedianMs: 1_400 },
+        },
+      }),
+    });
+    render(<App />);
+
+    const figure = await screen.findByRole("region", {
+      name: "Time until the answer starts appearing",
+    });
+    expect(figure.textContent).toContain("1.9 s");
+    expect(figure.textContent).toContain("0.5 s slower than the 7 days before");
+    expect(figure.textContent).toContain("Try it and tests are not counted.");
+  });
+
+  it("says Overview's response time is not measured when most answers have no timing", async () => {
+    const week = {
+      from: "2026-11-10",
+      to: "2026-11-16",
+      status: "mostly_untimed" as const,
+      answers: 12,
+      timed: 2,
+      firstTokenMedianMs: null,
+      firstTokenP90Ms: null,
+      totalMedianMs: null,
+    };
+    installFakeServer({
+      overview: makeOverview({ responseTime: { ...week, days: 7, previous: week } }),
+    });
+    render(<App />);
+
+    const figure = await screen.findByRole("region", {
+      name: "Time until the answer starts appearing",
+    });
+    expect(figure.textContent).toContain("Not measured");
+    expect(figure.textContent).toContain(
+      "Most answers in this period are from before answer times",
+    );
+    expect(figure.querySelector(".stat-change")).toBeNull();
+  });
+
   it("renders configuration error and unknown-cost spend cap warning on Overview", async () => {
     installFakeServer({
       overview: makeOverview({
