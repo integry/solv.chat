@@ -318,24 +318,30 @@ describe("admin reports API", () => {
       { question: "refunds?", count: 1 },
     ]);
     expect(report.topGaps).toEqual([{ question: "refunds?", count: 1, topic: null }]);
+    const page = { documentId: expect.any(String), kind: "page" };
     expect(report.topSources).toEqual([
-      { url: "https://docs.example.com/pricing", title: "Pricing", count: 2 },
-      { url: "https://docs.example.com/sso", title: "SSO", count: 1 },
+      { ...page, url: "https://docs.example.com/pricing", title: "Pricing", count: 2 },
+      { ...page, url: "https://docs.example.com/sso", title: "SSO", count: 1 },
     ]);
     // Out-of-range citation of /unused does not hide it from uncitedSources in this range.
     expect(report.uncitedSources).toEqual([
-      { url: "https://docs.example.com/unused", title: "Unused" },
+      { ...page, url: "https://docs.example.com/unused", title: "Unused" },
     ]);
     expect(report.uncitedTotal).toBe(1);
   });
 
   it("de-duplicates multiple thumbs-down rows per reply and duplicate URL citations per reply", async () => {
     const astA = await seedAssistant(ORG_A);
+    const srcA = await seedSource(ORG_A, astA);
     const convA = await seedConversation(ORG_A, astA);
     const r1 = newId("msg");
     const r2 = newId("msg");
+    const docA = newId("doc");
 
     await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO documents (id, org_id, source_id, external_id, url, title, content_hash, updated_at) VALUES (?1, ?2, ?3, 'a', 'https://docs.example.com/a', 'Page A', 'h', 1)",
+      ).bind(docA, ORG_A, srcA),
       env.DB.prepare(
         "INSERT INTO messages (id, org_id, conversation_id, role, content, citations, answered, created_at) VALUES (?1, ?2, ?3, 'assistant', 'Reply 1', ?4, 1, ?5)",
       ).bind(
@@ -367,7 +373,13 @@ describe("admin reports API", () => {
     expect(report.replies).toBe(2);
     expect(report.thumbsDownShare).toBeCloseTo(0.5);
     expect(report.topSources).toEqual([
-      { url: "https://docs.example.com/a", title: "Page A", count: 1 },
+      {
+        documentId: docA,
+        kind: "page",
+        url: "https://docs.example.com/a",
+        title: "Page A",
+        count: 1,
+      },
     ]);
   });
 

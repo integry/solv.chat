@@ -32,9 +32,24 @@ const SEEDED_REPORT: AssistantReport = {
   topSources: [
     { url: "https://docs.example.com/pricing", title: "Pricing", count: 12 },
     { url: "javascript:alert(1)", title: "Unsafe page", count: 2 },
+    {
+      documentId: "doc_answer",
+      kind: "answer",
+      url: "https://engine.example/admin/sources#entry:refunds",
+      title: "How long do refunds take?",
+      count: 6,
+    },
   ],
-  uncitedSources: [{ url: "https://docs.example.com/changelog", title: "Changelog" }],
-  uncitedTotal: 4,
+  uncitedSources: [
+    { url: "https://docs.example.com/changelog", title: "Changelog" },
+    {
+      documentId: "doc_unused_answer",
+      kind: "answer",
+      url: "https://engine.example/admin/sources#entry:hours",
+      title: "When are you open?",
+    },
+  ],
+  uncitedTotal: 5,
 };
 
 function installFakeServer(options?: {
@@ -129,6 +144,17 @@ describe("Reports screen", () => {
     expect(screen.getByText("Unsafe page")).toBeTruthy();
     expect(screen.getByText("Changelog")).toBeTruthy();
     expect(screen.getByText("and 3 more")).toBeTruthy();
+
+    // Written answers are listed by their question and open Sources in the
+    // admin, not their stored address.
+    expect(screen.getByRole("region", { name: "Content used most" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Content never used" })).toBeTruthy();
+    expect(screen.queryByText("Pages used most")).toBeNull();
+    const answerLink = screen.getByRole("link", { name: "How long do refunds take?" });
+    expect(answerLink.getAttribute("href")).toBe("/admin/sources?assistant=ast_1");
+    const unusedAnswer = screen.getByRole("link", { name: "When are you open?" });
+    expect(unusedAnswer.getAttribute("href")).toBe("/admin/sources?assistant=ast_1");
+    expect(screen.getAllByText("Written answer")).toHaveLength(2);
   });
 
   it("omits and-N-more when uncitedTotal matches the list length", async () => {
@@ -208,10 +234,16 @@ describe("Reports screen", () => {
       expect(text).toContain(`"'=SUM(A1:A2), ""pricing""?\nDetails","8"`);
       expect(text).toContain("Most often unanswered");
       expect(text).toContain("Do you support SAML?");
-      expect(text).toContain("Pages used most");
-      expect(text).toContain("https://docs.example.com/pricing");
-      expect(text).toContain("Pages never used");
-      expect(text).toContain("Changelog");
+      expect(text).toContain("Content used most");
+      expect(text).toContain(`"Content","Type","Address","Times"`);
+      expect(text).toContain(`"Pricing","Page","https://docs.example.com/pricing","12"`);
+      expect(text).toContain(
+        `"How long do refunds take?","Written answer","https://engine.example/admin/sources#entry:refunds","6"`,
+      );
+      expect(text).toContain("Content never used");
+      expect(text).toContain(`"Changelog","Page","https://docs.example.com/changelog"`);
+      expect(text).toContain(`"When are you open?","Written answer"`);
+      expect(text).not.toContain("Pages used most");
       expect(revoked).toEqual(["blob:report"]);
     } finally {
       URL.createObjectURL = origCreateObjectURL;

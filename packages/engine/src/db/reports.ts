@@ -58,11 +58,64 @@ function percentileOf(ranked: string, percent: 50 | 90): string {
                      FROM ${ranked}))`;
 }
 
-export interface SourceCitationCount {
+/** A page (its address is public) or an answer written in the admin (its address is not). */
+export type ContentKind = "page" | "answer";
+
+/** A document of the assistant's content, for the Reports usage lists. */
+export interface UnusedDocument {
+  documentId: string;
+  kind: ContentKind;
+  /** A page's public address; for a written answer, its address in the admin's Sources. */
   url: string;
+  /** For a written answer, its question. */
   title: string;
+}
+
+export interface SourceCitationCount extends UnusedDocument {
   count: number;
 }
+
+function contentKind(sourceKind: string): ContentKind {
+  return sourceKind === "entry" ? "answer" : "page";
+}
+
+/**
+ * `used (message_id, document_id)`: each document a visitor reply in the
+ * range (`?1` org, `?2` assistant, `?3`..`?4` the range) was given to answer
+ * from, once per reply. Only stored replies are read, and only visitor
+ * answers are stored: "Try it" previews and test runs write no message, so
+ * they never count.
+ *
+ * A reply records what it was given in `message_documents` (migration 0029),
+ * by document id, written answers included. A reply written before that has
+ * no rows; for it the URLs in its citations are matched to the assistant's
+ * documents, as the report counted before, which finds pages but never a
+ * written answer (citations hold only public addresses). Each reply is read
+ * one way or the other, never both, so nothing counts twice.
+ */
+const USED_DOCUMENTS = `
+  replies AS MATERIALIZED (
+    SELECT m.id AS id, m.citations AS citations,
+           EXISTS (SELECT 1 FROM message_documents md
+                    WHERE md.org_id = ?1 AND md.message_id = m.id) AS recorded
+      FROM messages m
+      JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+     WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'assistant'
+       AND m.created_at >= ?3 AND m.created_at <= ?4
+  ),
+  used AS MATERIALIZED (
+    SELECT r.id AS message_id, md.document_id AS document_id
+      FROM replies r
+      JOIN message_documents md ON md.org_id = ?1 AND md.message_id = r.id
+     WHERE r.recorded = 1
+    UNION
+    SELECT r.id AS message_id, d.id AS document_id
+      FROM replies r,
+           json_each(CASE WHEN json_valid(r.citations) THEN r.citations ELSE '[]' END) AS citation
+      JOIN documents d ON d.org_id = ?1 AND d.url = json_extract(citation.value, '$.url')
+      JOIN sources s ON s.id = d.source_id AND s.org_id = d.org_id AND s.assistant_id = ?2
+     WHERE r.recorded = 0
+  )`;
 
 /**
  * Tenant-scoped aggregates for the Reports screen.
@@ -379,10 +432,11 @@ export function reportsFor(db: D1Database, orgId: string) {
     },
 
     /**
-     * Most cited pages. `citations` is a JSON array on each reply, so the count
-     * comes from `json_each`; grouping by `(message_id, url)` means a reply
-     * that cited one page twice counts once, whatever the pipeline does in
-     * future.
+     * Content used most: per document, the period's replies that were given
+     * it to answer from, most used first. Counted by document id over
+     * `USED_DOCUMENTS`, so written answers count as pages do; a reply counts
+     * a document once however often it was given. Deleted documents are not
+     * listed (they cannot be opened); their past use stays recorded.
      */
     async topSources(
       assistantId: string,
@@ -391,66 +445,52 @@ export function reportsFor(db: D1Database, orgId: string) {
     ): Promise<SourceCitationCount[]> {
       const res = await prepare(
         db,
-        `SELECT url, MAX(title) AS title, COUNT(*) AS count FROM (
-           SELECT m.id AS message_id,
-                  json_extract(citation.value, '$.url') AS url,
-                  MAX(json_extract(citation.value, '$.title')) AS title
-             FROM messages m
-             JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id,
-                  json_each(m.citations) AS citation
-            WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'assistant'
-              AND m.created_at >= ?3 AND m.created_at <= ?4
-              AND json_valid(m.citations)
-              AND json_extract(citation.value, '$.url') IS NOT NULL
-            GROUP BY m.id, url
-         )
-         GROUP BY url
-         ORDER BY count DESC, url ASC
-         LIMIT ?5`,
+        `WITH ${USED_DOCUMENTS}
+         SELECT d.id AS id, d.url AS url, d.title AS title, s.kind AS kind, COUNT(*) AS count
+           FROM used u
+           JOIN documents d ON d.org_id = ?1 AND d.id = u.document_id
+           JOIN sources s ON s.id = d.source_id AND s.org_id = d.org_id AND s.assistant_id = ?2
+          GROUP BY d.id
+          ORDER BY count DESC, d.url ASC, d.id ASC
+          LIMIT ?5`,
       )
         .bind(orgId, assistantId, range.fromMs, range.toMs, limit)
-        .all<{ url: string; title: string | null; count: number }>();
+        .all<{ id: string; url: string; title: string; kind: string; count: number }>();
       return res.results.map((row) => ({
+        documentId: row.id,
+        kind: contentKind(row.kind),
         url: row.url,
-        title: row.title ?? row.url,
+        title: row.title || row.url,
         count: row.count,
       }));
     },
 
     /**
-     * Pages that were never cited in the range, with the total so the screen
-     * can say how many more there are. "Your content is being used" and "847
-     * pages have never been used" are different answers, and the second is the
-     * one an owner can act on.
+     * The assistant's content no reply in the range was given, with the
+     * total so the screen can say how many more there are. "Your content is
+     * being used" and "847 pages have never been used" are different
+     * answers, and the second is the one an owner can act on. By document
+     * id over `USED_DOCUMENTS`, so a written answer that was used is not
+     * listed.
      */
     async uncitedSources(
       assistantId: string,
       range: ReportRange,
       limit = REPORT_TOP_LIMIT,
-    ): Promise<{ documents: Array<{ url: string; title: string }>; total: number }> {
+    ): Promise<{ documents: UnusedDocument[]; total: number }> {
       const where = `
         FROM documents d
         JOIN sources s ON s.id = d.source_id AND s.org_id = d.org_id
        WHERE d.org_id = ?1 AND s.assistant_id = ?2
-         AND d.url NOT IN (
-           SELECT json_extract(citation.value, '$.url')
-             FROM messages m
-             JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id,
-                  json_each(m.citations) AS citation
-            WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'assistant'
-              AND m.created_at >= ?3 AND m.created_at <= ?4
-              AND json_valid(m.citations)
-              AND json_extract(citation.value, '$.url') IS NOT NULL
-         )`;
+         AND d.id NOT IN (SELECT document_id FROM used)`;
       const [rows, count] = await db.batch([
-        prepare(db, `SELECT d.url, d.title ${where} ORDER BY d.updated_at DESC LIMIT ?5`).bind(
-          orgId,
-          assistantId,
-          range.fromMs,
-          range.toMs,
-          limit,
-        ),
-        prepare(db, `SELECT COUNT(*) AS total ${where}`).bind(
+        prepare(
+          db,
+          `WITH ${USED_DOCUMENTS}
+           SELECT d.id AS id, d.url AS url, d.title AS title, s.kind AS kind ${where}
+            ORDER BY d.updated_at DESC, d.id ASC LIMIT ?5`,
+        ).bind(orgId, assistantId, range.fromMs, range.toMs, limit),
+        prepare(db, `WITH ${USED_DOCUMENTS} SELECT COUNT(*) AS total ${where}`).bind(
           orgId,
           assistantId,
           range.fromMs,
@@ -458,7 +498,11 @@ export function reportsFor(db: D1Database, orgId: string) {
         ),
       ]);
       return {
-        documents: ((rows?.results ?? []) as Array<{ url: string; title: string }>).map((row) => ({
+        documents: (
+          (rows?.results ?? []) as Array<{ id: string; url: string; title: string; kind: string }>
+        ).map((row) => ({
+          documentId: row.id,
+          kind: contentKind(row.kind),
           url: row.url,
           title: row.title,
         })),

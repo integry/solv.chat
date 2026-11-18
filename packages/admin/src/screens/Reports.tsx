@@ -1,5 +1,11 @@
 import { type ReactNode, useState } from "react";
-import type { AssistantReport, ResponseTimePeriod, TopGap, TopicsReport } from "../api/types.js";
+import type {
+  AssistantReport,
+  ReportContent,
+  ResponseTimePeriod,
+  TopGap,
+  TopicsReport,
+} from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { buildCsv } from "../csv.js";
 import { ScreenLink, useAdminNavigation } from "../routing.js";
@@ -70,16 +76,20 @@ function csvFor(report: AssistantReport): string {
       rows: report.topGaps.map((item) => [item.question, item.topic?.name ?? "", item.count]),
     },
     {
-      title: "Pages used most",
-      header: ["Page", "Address", "Times"],
-      rows: report.topSources.map((item) => [item.title, item.url, item.count]),
+      title: "Content used most",
+      header: ["Content", "Type", "Address", "Times"],
+      rows: report.topSources.map((item) => [item.title, contentType(item), item.url, item.count]),
     },
     {
-      title: "Pages never used",
-      header: ["Page", "Address"],
-      rows: report.uncitedSources.map((item) => [item.title, item.url]),
+      title: "Content never used",
+      header: ["Content", "Type", "Address"],
+      rows: report.uncitedSources.map((item) => [item.title, contentType(item), item.url]),
     },
   ]);
+}
+
+function contentType(item: ReportContent): string {
+  return item.kind === "answer" ? "Written answer" : "Page";
 }
 
 /** The three response-time figures, in the order and words the screen uses. */
@@ -268,6 +278,21 @@ function TopicsList({
   );
 }
 
+function ContentLink({ item, assistantId }: { item: ReportContent; assistantId: string }) {
+  if (item.kind === "answer") {
+    // A written answer has no public address: it lives in Sources.
+    return (
+      <div>
+        <ScreenLink to="sources" query={{ assistant: assistantId }}>
+          {item.title || "Written answer"}
+        </ScreenLink>
+        <div className="muted">Written answer</div>
+      </div>
+    );
+  }
+  return <PageLink url={item.url} title={item.title} />;
+}
+
 function PageLink({ url, title }: { url: string; title: string }) {
   // Filtered like every other citation link in the admin: the URL came from
   // ingested content.
@@ -438,20 +463,20 @@ export function Reports({ assistantId }: ReportsProps) {
             />
 
             <ReportList
-              heading="Pages used most"
-              explanation="The content your assistant answers from."
+              heading="Content used most"
+              explanation="The pages and written answers your assistant answers from."
               empty={report.topSources.length === 0}
             >
               {report.topSources.map((item) => (
-                <li key={item.url} className="row-item">
-                  <PageLink url={item.url} title={item.title} />
+                <li key={item.documentId ?? item.url} className="row-item">
+                  <ContentLink item={item} assistantId={assistantId} />
                   <span className="badge">{formatTimes(item.count)}</span>
                 </li>
               ))}
             </ReportList>
 
             <ReportList
-              heading="Pages never used"
+              heading="Content never used"
               explanation="Nobody was shown these in this period. They may be out of date, or nobody asks about them."
               empty={report.uncitedSources.length === 0}
               footer={
@@ -463,8 +488,8 @@ export function Reports({ assistantId }: ReportsProps) {
               }
             >
               {report.uncitedSources.map((item) => (
-                <li key={item.url} className="row-item">
-                  <PageLink url={item.url} title={item.title} />
+                <li key={item.documentId ?? item.url} className="row-item">
+                  <ContentLink item={item} assistantId={assistantId} />
                 </li>
               ))}
             </ReportList>

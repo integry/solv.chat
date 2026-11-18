@@ -248,9 +248,18 @@ export interface TopicsList {
   reviewAnswers: boolean;
 }
 
-export interface SourceCitationCount {
+/** A document of the assistant's content, as the Reports usage lists give it. */
+export interface ReportContent {
+  /** Optional so a report from an engine older than content usage still renders. */
+  documentId?: string;
+  /** `answer`: written in the admin; its `url` is its place in Sources, not a public address. */
+  kind?: "page" | "answer";
   url: string;
+  /** For a written answer, its question. */
   title: string;
+}
+
+export interface SourceCitationCount extends ReportContent {
   count: number;
 }
 
@@ -268,7 +277,7 @@ export interface AssistantReport {
   /** Optional so a report from an engine older than topics still renders. */
   topics?: TopicsReport;
   topSources: SourceCitationCount[];
-  uncitedSources: Array<{ url: string; title: string }>;
+  uncitedSources: ReportContent[];
   uncitedTotal: number;
   /** Optional so a report from an engine older than the figure still renders. */
   responseTime?: ResponseTimePeriod;
