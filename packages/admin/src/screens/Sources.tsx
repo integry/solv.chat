@@ -1,6 +1,6 @@
-import type { SourceKind } from "@solvchat/core";
+import type { SourceKind, SourceSyncStatus, SyncSchedule } from "@solvchat/core";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { ApiError, deleteJson, getJson, postJson } from "../api/client.js";
+import { ApiError, deleteJson, getJson, patchJson, postJson } from "../api/client.js";
 import type { DocumentSummary, IndexErrorCode, SourceSummary } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { ScreenLink } from "../routing.js";
@@ -19,6 +19,7 @@ import { StatusBadge, type StatusTone } from "../ui/StatusBadge.js";
 import { useToast } from "../ui/Toast.js";
 import { cliPushCommand } from "./cliCommand.js";
 import { EntryEditor } from "./EntryEditor.js";
+import { isSyncing, SyncCell, SyncingStatus, syncCountsText, syncErrorText } from "./SourceSync.js";
 
 export interface SourcesProps {
   assistantId: string;
@@ -29,7 +30,7 @@ const MAX_IMPORT_URLS = 100;
 // The engine imports at most this many pages per request so one request
 // stays inside the Workers subrequest limit; a selection goes in batches.
 export const IMPORT_BATCH_URLS = 5;
-/** How often the list is checked while something is being indexed or retried. */
+/** How often the list is checked while something is being indexed, retried or synced. */
 export const INDEXING_POLL_MS = 5000;
 
 const KIND_TEXT: Record<SourceKind, { icon: IconName; type: string }> = {
@@ -319,9 +320,9 @@ function SitemapImport({
   return (
     <div className="stack">
       <p className="field-hint">
-        Lists the pages in a sitemap so you can choose which to copy in. This is a one-off import,
-        not a crawl: when those pages change, choose Re-import from the source's menu to copy them
-        in again.
+        Lists the pages in a sitemap so you can choose which to copy in. Only the pages it lists are
+        read; links on them are not followed. When those pages change, choose Re-import from the
+        source's menu, or set the source to sync with its sitemap every day or week.
       </p>
 
       <form className="stack" onSubmit={(e) => void handlePreview(e)}>
@@ -463,7 +464,7 @@ const ADD_CHOICES: ReadonlyArray<{ id: AddChoice; icon: IconName; title: string;
     id: "sitemap",
     icon: "globe",
     title: "Import from a sitemap",
-    text: "Copy pages from your site once.",
+    text: "Copy in the pages your sitemap lists.",
   },
   {
     id: "cli",
@@ -489,7 +490,10 @@ export function Sources({ assistantId }: SourcesProps) {
   const loadedSources = sourcesRes.value?.sources ?? lastSources;
   const sources = loadedSources ?? [];
   // Also keep checking while a failure is retried: the Queue can still index it.
-  const anyIndexing = sources.some((s) => (s.indexingCount ?? 0) > 0 || mayRecover(s));
+  // And while a sync runs, so its progress and outcome show without a reload.
+  const anyIndexing = sources.some(
+    (s) => (s.indexingCount ?? 0) > 0 || mayRecover(s) || isSyncing(s),
+  );
 
   // The chosen way to add stays set after Close, so reopening shows the same one.
   const [addChoice, setAddChoice] = useState<AddChoice>("write");
@@ -543,6 +547,13 @@ export function Sources({ assistantId }: SourcesProps) {
   const [busySourceId, setBusySourceId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // A schedule change or Sync now request in flight, by source.
+  const [syncBusyId, setSyncBusyId] = useState<string | null>(null);
+  // A source's first sync brings in every page its sitemap lists: asked first.
+  const [confirmSync, setConfirmSync] = useState<{
+    source: SourceSummary;
+    action: "now" | Exclude<SyncSchedule, "off">;
+  } | null>(null);
   const [reimport, setReimport] = useState<{
     sourceId: string;
     done: number;
@@ -752,6 +763,77 @@ export function Sources({ assistantId }: SourcesProps) {
     }
   }
 
+  async function saveSchedule(source: SourceSummary, schedule: SyncSchedule) {
+    if (syncBusyId !== null) return;
+    setSyncBusyId(source.id);
+    setActionError(null);
+    try {
+      await patchJson(`/api/admin/sources/${source.id}`, { settings: { sync: schedule } });
+      toast.success(
+        schedule === "off"
+          ? `${sourceName(source)} now syncs only when you choose Sync now.`
+          : `${sourceName(source)} now syncs with its sitemap every ${schedule === "daily" ? "day" : "week"}.`,
+      );
+      setConfirmSync(null);
+      sourcesRes.reload();
+    } catch (err) {
+      setConfirmSync(null);
+      setActionError(
+        err instanceof ApiError
+          ? `Could not change how often ${sourceName(source)} syncs: ${err.fields["settings.sync"] ?? err.message}`
+          : `Could not change how often ${sourceName(source)} syncs. Try again.`,
+      );
+    } finally {
+      setSyncBusyId(null);
+    }
+  }
+
+  async function startSync(source: SourceSummary) {
+    if (syncBusyId !== null) return;
+    setSyncBusyId(source.id);
+    setActionError(null);
+    try {
+      const res = await postJson<{ sync: SourceSyncStatus }>(
+        `/api/admin/sources/${source.id}/sync`,
+      );
+      const last = res.sync.last;
+      if (last?.outcome === "failed") {
+        toast.error(`${sourceName(source)} did not sync: ${syncErrorText(last.error, source)}`);
+      } else if (last?.outcome === "succeeded" || last?.outcome === "partial") {
+        toast.success(`${sourceName(source)} synced: ${syncCountsText(last.counts)}.`);
+      } else {
+        toast.success(`Syncing ${sourceName(source)}…`);
+      }
+      setConfirmSync(null);
+    } catch (err) {
+      setConfirmSync(null);
+      setActionError(
+        err instanceof ApiError
+          ? `Could not sync ${sourceName(source)}: ${err.message}`
+          : `Could not sync ${sourceName(source)}. Try again.`,
+      );
+    } finally {
+      setSyncBusyId(null);
+      sourcesRes.reload();
+    }
+  }
+
+  function handleScheduleChange(source: SourceSummary, schedule: SyncSchedule) {
+    if (schedule !== "off" && source.sync?.last === null) {
+      setConfirmSync({ source, action: schedule });
+      return;
+    }
+    void saveSchedule(source, schedule);
+  }
+
+  function handleSyncNow(source: SourceSummary) {
+    if (source.sync?.last === null) {
+      setConfirmSync({ source, action: "now" });
+      return;
+    }
+    void startSync(source);
+  }
+
   if (sourcesRes.status === "loading" && loadedSources === null) {
     return (
       <div className="screen">
@@ -806,6 +888,7 @@ export function Sources({ assistantId }: SourcesProps) {
             <ImportProgress done={reimport.done} total={reimport.total} label="Re-importing" />
           );
         }
+        if (source.sync && isSyncing(source)) return <SyncingStatus sync={source.sync} />;
         const status = indexStatus(source);
         return (
           <div className="source-status">
@@ -825,6 +908,25 @@ export function Sources({ assistantId }: SourcesProps) {
           <RelativeTime value={source.lastUpdatedAt} />
         ),
     },
+    ...(sources.some((s) => s.sync !== undefined)
+      ? [
+          {
+            key: "sync",
+            header: "Sync",
+            render: (source: SourceSummary) =>
+              source.sync ? (
+                <SyncCell
+                  source={source}
+                  sync={source.sync}
+                  name={sourceName(source)}
+                  busy={syncBusyId === source.id}
+                  onScheduleChange={(schedule) => handleScheduleChange(source, schedule)}
+                  onSyncNow={() => handleSyncNow(source)}
+                />
+              ) : null,
+          },
+        ]
+      : []),
     {
       key: "actions",
       header: "Actions",
@@ -837,7 +939,7 @@ export function Sources({ assistantId }: SourcesProps) {
         if (source.kind === "sitemap" && typeof source.settings.url === "string") {
           items.push({
             label: "Re-import",
-            disabled: reimport !== null,
+            disabled: reimport !== null || isSyncing(source),
             onSelect: () => void handleReimport(source),
           });
         }
@@ -1136,6 +1238,33 @@ export function Sources({ assistantId }: SourcesProps) {
           </div>
         </section>
       )}
+
+      <ConfirmDialog
+        open={confirmSync !== null}
+        title={
+          confirmSync
+            ? confirmSync.action === "now"
+              ? `Sync ${sourceName(confirmSync.source)} now?`
+              : `Sync ${sourceName(confirmSync.source)} every ${confirmSync.action === "daily" ? "day" : "week"}?`
+            : "Sync this source?"
+        }
+        description="Syncing keeps this source in step with its sitemap: every page the sitemap lists is added, not only the ones you chose when importing; changed pages are updated; and pages it no longer lists are removed. A large sitemap is worked through over several syncs."
+        confirmLabel={
+          confirmSync?.action === "daily"
+            ? "Sync every day"
+            : confirmSync?.action === "weekly"
+              ? "Sync every week"
+              : "Sync now"
+        }
+        busyLabel={confirmSync?.action === "now" ? "Starting…" : "Saving…"}
+        busy={confirmSync !== null && syncBusyId === confirmSync.source.id}
+        onCancel={() => setConfirmSync(null)}
+        onConfirm={() => {
+          if (!confirmSync) return;
+          if (confirmSync.action === "now") void startSync(confirmSync.source);
+          else void saveSchedule(confirmSync.source, confirmSync.action);
+        }}
+      />
 
       <ConfirmDialog
         open={confirmDelete !== null}

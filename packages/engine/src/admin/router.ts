@@ -2,6 +2,7 @@ import { isPlainObject } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
 import { plainPageFetcher } from "../ingest/pageFetcher.js";
+import type { SyncStartDeps } from "../ingest/sync.js";
 import { McpError } from "../mcp/types.js";
 import type { EffectiveProviderSettings } from "../providers/config.js";
 import type { Retriever } from "../providers/retrieval.js";
@@ -50,6 +51,7 @@ import {
 } from "./providers.js";
 import { parseReportDays, reportFor } from "./reports.js";
 import { importSitemapUrls, previewSitemap } from "./sitemap.js";
+import { getSourceSync, syncSourceNow } from "./sourceSync.js";
 import {
   createSource,
   deleteSource,
@@ -90,6 +92,8 @@ export interface AdminRouteDeps {
   secretKey?: string | undefined;
   /** Lazily resolves provider/embedder/seams dependencies when running answer tests. */
   resolveRunDeps?: (() => Promise<RunDeps>) | undefined;
+  /** What "Sync now" needs to start a run; `createApp` always passes it. */
+  syncStart?: SyncStartDeps | undefined;
 }
 
 function mcpDeps(deps: AdminRouteDeps): McpDeps {
@@ -429,6 +433,16 @@ async function sourceRoutes(
     const sub = segments[2];
     if (sub === "documents" && method === "GET") {
       return Response.json(await listSourceDocuments(tenant, sourceId, readPagingParams(url)));
+    }
+    if (sub === "sync" && method === "GET") {
+      return Response.json({ sync: await getSourceSync(tenant, sourceId) });
+    }
+    if (sub === "sync" && method === "POST") {
+      if (!deps.syncStart) throw new NotFound();
+      return Response.json(
+        { sync: await syncSourceNow(deps.syncStart, tenant, deps.orgId, sourceId) },
+        { status: 202 },
+      );
     }
     if (sub === "entries" && method === "POST") {
       const source = await tenant.sources.get(sourceId);

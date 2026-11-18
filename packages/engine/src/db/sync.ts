@@ -1,42 +1,10 @@
+import type { SyncCounts, SyncErrorCode, SyncOutcome } from "@solvchat/core";
 import { prepare, prepareInsert } from "./sql.js";
 
-/** `partial`: the run finished but some pages could not be fetched or written. */
-export type SyncOutcome = "running" | "succeeded" | "partial" | "failed";
-
-/**
- * Why a run failed or was partial. Codes, not messages: the admin words them,
- * and a remote server's own text never reaches the database.
- *
- * - `sitemap_unavailable`: the sitemap could not be fetched or was refused.
- * - `sitemap_invalid`: the sitemap was not a complete, well-formed `<urlset>`
- *   (cut short, broken XML, or another kind of document), so its list of
- *   pages cannot be trusted to say which pages left it.
- * - `sitemap_empty`: the sitemap listed no usable page.
- * - `too_many_removals`: the run would have removed more than the allowed share.
- * - `limit_refused`: the Limits seam refused the run (a suspended org, a plan).
- * - `pages_failed`: the run finished, but some pages could not be fetched or written.
- * - `interrupted`: the run's lease ran out before every page was handled.
- */
-export type SyncErrorCode =
-  | "sitemap_unavailable"
-  | "sitemap_invalid"
-  | "sitemap_empty"
-  | "too_many_removals"
-  | "limit_refused"
-  | "pages_failed"
-  | "interrupted";
+// Declared in core so the admin words the same codes the engine records.
+export type { SyncCounts, SyncErrorCode, SyncOutcome } from "@solvchat/core";
 
 export type SyncPageState = "pending" | "added" | "updated" | "unchanged" | "failed";
-
-export interface SyncCounts {
-  added: number;
-  updated: number;
-  unchanged: number;
-  removed: number;
-  failed: number;
-  /** Pages left for a later run by a cap. */
-  deferred: number;
-}
 
 export interface SourceSyncState {
   sourceId: string;
@@ -47,6 +15,11 @@ export interface SourceSyncState {
   /** While running, includes the pages handled so far. */
   counts: SyncCounts;
   error: SyncErrorCode | null;
+  /**
+   * While running: pages handled so far out of the pages the run queued (0
+   * while the sitemap is still being read). Null once the run has ended.
+   */
+  progress: { done: number; total: number } | null;
 }
 
 export interface SyncPage {
@@ -72,6 +45,8 @@ interface SyncRow {
   live_updated: number | null;
   live_unchanged: number | null;
   live_failed: number | null;
+  live_pages: number | null;
+  live_pending: number | null;
 }
 
 const OUTCOMES: ReadonlySet<string> = new Set<SyncOutcome>([
@@ -119,6 +94,54 @@ const pageCount = (state: SyncPageState): string =>
   `(SELECT COUNT(*) FROM source_sync_pages p
      WHERE p.org_id = ?1 AND p.run_id = ?3 AND p.state = '${state}')`;
 
+// The run's own row, with its pages added up while it is going. `?1` is the
+// org; callers add their WHERE and GROUP BY.
+const SYNC_STATE_SELECT = `SELECT y.source_id, y.run_id, y.lease_until, y.started_at, y.finished_at,
+                y.outcome, y.added, y.updated, y.unchanged, y.removed, y.failed, y.deferred, y.error,
+                SUM(CASE WHEN p.state = 'added' THEN 1 ELSE 0 END) AS live_added,
+                SUM(CASE WHEN p.state = 'updated' THEN 1 ELSE 0 END) AS live_updated,
+                SUM(CASE WHEN p.state = 'unchanged' THEN 1 ELSE 0 END) AS live_unchanged,
+                SUM(CASE WHEN p.state = 'failed' THEN 1 ELSE 0 END) AS live_failed,
+                COUNT(p.url) AS live_pages,
+                SUM(CASE WHEN p.state = 'pending' THEN 1 ELSE 0 END) AS live_pending
+           FROM source_syncs y
+           LEFT JOIN source_sync_pages p
+             ON p.org_id = y.org_id AND p.run_id = y.run_id AND y.finished_at IS NULL`;
+
+/**
+ * A run whose lease ran out before it finished is reported as `failed` with
+ * `interrupted`; its late queue messages change nothing.
+ */
+function toSyncState(row: SyncRow, now: number): SourceSyncState {
+  const running = row.finished_at === null;
+  const live = (n: number | null) => (running ? Number(n ?? 0) : 0);
+  const counts: SyncCounts = {
+    added: Number(row.added) + live(row.live_added),
+    updated: Number(row.updated) + live(row.live_updated),
+    unchanged: Number(row.unchanged) + live(row.live_unchanged),
+    removed: Number(row.removed),
+    failed: Number(row.failed) + live(row.live_failed),
+    deferred: Number(row.deferred),
+  };
+  const interrupted = running && (row.lease_until === null || row.lease_until <= now);
+  const outcome = OUTCOMES.has(row.outcome) ? (row.outcome as SyncOutcome) : "failed";
+  const total = live(row.live_pages);
+  return {
+    sourceId: row.source_id,
+    runId: row.run_id,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    outcome: interrupted ? "failed" : outcome,
+    counts,
+    error: interrupted
+      ? "interrupted"
+      : row.error !== null && ERROR_CODES.has(row.error)
+        ? (row.error as SyncErrorCode)
+        : null,
+    progress: running && !interrupted ? { done: total - live(row.live_pending), total } : null,
+  };
+}
+
 /** Tenant-scoped data access for `source_syncs` and `source_sync_pages`. */
 export function syncFor(db: D1Database, orgId: string) {
   return {
@@ -130,46 +153,33 @@ export function syncFor(db: D1Database, orgId: string) {
     async get(sourceId: string, now: number = Date.now()): Promise<SourceSyncState | null> {
       const row = await prepare(
         db,
-        `SELECT y.source_id, y.run_id, y.lease_until, y.started_at, y.finished_at, y.outcome,
-                y.added, y.updated, y.unchanged, y.removed, y.failed, y.deferred, y.error,
-                SUM(CASE WHEN p.state = 'added' THEN 1 ELSE 0 END) AS live_added,
-                SUM(CASE WHEN p.state = 'updated' THEN 1 ELSE 0 END) AS live_updated,
-                SUM(CASE WHEN p.state = 'unchanged' THEN 1 ELSE 0 END) AS live_unchanged,
-                SUM(CASE WHEN p.state = 'failed' THEN 1 ELSE 0 END) AS live_failed
-           FROM source_syncs y
-           LEFT JOIN source_sync_pages p
-             ON p.org_id = y.org_id AND p.run_id = y.run_id AND y.finished_at IS NULL
+        `${SYNC_STATE_SELECT}
           WHERE y.org_id = ?1 AND y.source_id = ?2
           GROUP BY y.source_id`,
       )
         .bind(orgId, sourceId)
         .first<SyncRow>();
-      if (!row) return null;
-      const running = row.finished_at === null;
-      const live = (n: number | null) => (running ? Number(n ?? 0) : 0);
-      const counts: SyncCounts = {
-        added: Number(row.added) + live(row.live_added),
-        updated: Number(row.updated) + live(row.live_updated),
-        unchanged: Number(row.unchanged) + live(row.live_unchanged),
-        removed: Number(row.removed),
-        failed: Number(row.failed) + live(row.live_failed),
-        deferred: Number(row.deferred),
-      };
-      const interrupted = running && (row.lease_until === null || row.lease_until <= now);
-      const outcome = OUTCOMES.has(row.outcome) ? (row.outcome as SyncOutcome) : "failed";
-      return {
-        sourceId: row.source_id,
-        runId: row.run_id,
-        startedAt: row.started_at,
-        finishedAt: row.finished_at,
-        outcome: interrupted ? "failed" : outcome,
-        counts,
-        error: interrupted
-          ? "interrupted"
-          : row.error !== null && ERROR_CODES.has(row.error)
-            ? (row.error as SyncErrorCode)
-            : null,
-      };
+      return row ? toSyncState(row, now) : null;
+    },
+
+    /**
+     * The current or latest run of every source of the assistant that ever
+     * synced, by source id, in one statement (the Sources list reads it).
+     */
+    async listForAssistant(
+      assistantId: string,
+      now: number = Date.now(),
+    ): Promise<Map<string, SourceSyncState>> {
+      const res = await prepare(
+        db,
+        `${SYNC_STATE_SELECT}
+           JOIN sources s ON s.org_id = y.org_id AND s.id = y.source_id
+          WHERE y.org_id = ?1 AND s.assistant_id = ?2
+          GROUP BY y.source_id`,
+      )
+        .bind(orgId, assistantId)
+        .all<SyncRow>();
+      return new Map(res.results.map((row) => [row.source_id, toSyncState(row, now)]));
     },
 
     /**

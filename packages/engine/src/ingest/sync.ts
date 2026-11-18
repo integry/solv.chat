@@ -128,6 +128,9 @@ export interface SyncSchedulerDeps {
   maxSources?: number | undefined;
 }
 
+/** What starting one run needs: the scheduler's deps less what only the cron uses. */
+export type SyncStartDeps = Omit<SyncSchedulerDeps, "db" | "resolveOrg" | "maxSources">;
+
 export type SyncStartResult =
   /** Pages were queued; the run finishes when the consumer has handled them. */
   | { status: "queued"; runId: string; queued: number }
@@ -260,8 +263,20 @@ export async function startSourceSync(
   orgId: string,
   sourceId: string,
 ): Promise<SyncStartResult> {
+  return startSourceSyncFor(deps, forScheduledSync(deps.db, orgId), orgId, sourceId);
+}
+
+/**
+ * `startSourceSync` through a `Tenant` the caller built from the auth seam:
+ * the admin's "Sync now" passes the signed-in principal's tenant and org.
+ */
+export async function startSourceSyncFor(
+  deps: SyncStartDeps,
+  tenant: Tenant,
+  orgId: string,
+  sourceId: string,
+): Promise<SyncStartResult> {
   const now = deps.now ?? Date.now;
-  const tenant = forScheduledSync(deps.db, orgId);
   const source = await tenant.sources.get(sourceId);
   if (source === null || source.kind !== "sitemap") return { status: "not_found" };
 

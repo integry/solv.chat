@@ -271,7 +271,9 @@ The Monitor screens read:
   attention (open gaps, failed tests in the latest run, the configuration
   error, sources with documents that failed to index, reported as soon as the
   failure is recorded, and sources with documents still not indexed 15 minutes
-  after they were written, reported separately).
+  after they were written, reported separately, and sitemap sources whose
+  latest sync failed or was interrupted, `syncFailed`, with the error code;
+  a `partial` run is shown on Sources only).
 - Conversations: `filter=unanswered,not_helpful,used_tool`, `days=1|7|30|90`,
   `q=` (case-insensitive text in any message) and `question=` (a grouped
   question: conversations where a visitor asked it, matched by its key; what
@@ -283,6 +285,20 @@ The Monitor screens read:
   `searchPending: true` means older messages are still being prepared for
   search: nothing was searched, `searchRemaining` says how many of the
   assistant's messages are left, and the admin asks again until it is false.
+- Sources: the list (`GET …/assistants/:id/sources`) gives each sitemap
+  source a `sync` object: `schedule`, `last` (the current or latest run:
+  start and end times, outcome, counts, error code, and while running
+  `progress` as pages handled of pages queued) and `nextSyncAt` (the earliest
+  time the scheduler takes it up again: a full interval less the 15-minute
+  slack after the last run started; already passed means at the next check;
+  null while off or running). `GET /api/admin/sources/:id/sync` returns the
+  same object for one source. `POST /api/admin/sources/:id/sync` ("Sync now")
+  starts a run at once, whatever the schedule, through the same steps as a
+  scheduled one (lease, `Limits.checkSync`, guards, caps; the org is the
+  signed-in principal's), reads the sitemap in the request and answers `202`
+  with the object; a run already holding the source answers `409`; a source
+  that is not a sitemap answers `400`. The schedule is changed with `PATCH
+  /api/admin/sources/:id` and `{ "settings": { "sync": … } }`.
 - Gaps: `status=open` leaves out groups with a written answer newer than the
   group's latest ask (asked again after it, a group is open again, as after a
   dismissal). Overview's open gaps and Reports' "Most often unanswered" leave
@@ -556,6 +572,14 @@ Install
   an entry source and removes the gap; Conversations' "Write an answer for this"
   opens it on Gaps, filled in), "Dismiss" with undo on Gaps, "Add to tests" on both.
 - Plain words on every control. No model, temperature or chunking settings.
+- Sources gives a sitemap source a Sync column: how often it syncs (Off,
+  Every day, Every week), when it last synced with the outcome and counts or
+  the last error in plain words, when it next syncs, and "Sync now". A
+  running sync shows in Status the way "Indexing…" does, and the list is
+  checked again until it ends. A source's first sync (Sync now or turning a
+  schedule on) asks first, because it brings in every page the sitemap lists,
+  not only the ones chosen at import. Push and entry sources show no Sync
+  column; with none to sync, the column is left out.
 - Leaving a screen (a link, the browser's Back or Forward, or switching
   assistant) with unsaved edits on Behaviour or Widget asks first; "Stay here"
   keeps the screen and puts the address back. A move made while a save is

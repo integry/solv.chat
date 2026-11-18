@@ -3,6 +3,7 @@ import type {
   OverviewPeriod,
   OverviewSetup,
   SourceKind,
+  SourceSyncStatus,
   TestExpectation,
   VersionConfig,
 } from "@solvchat/core";
@@ -55,6 +56,8 @@ export interface SourceSummary {
   retryingCount?: number;
   /** Why (one of the failed documents), as a code the admin words. */
   indexError?: IndexErrorCode | null;
+  /** A sitemap source's sync schedule and latest run. Absent for other kinds and older engines. */
+  sync?: SourceSyncStatus;
 }
 
 export type IndexErrorCode = "too_long" | "missing_body" | "embedding_failed";

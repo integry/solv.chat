@@ -4,6 +4,7 @@ import { ScreenLink, useAdminNavigation } from "../routing.js";
 import { formatDate } from "../ui/format.js";
 import { Icon } from "../ui/Icon.js";
 import type { Change } from "./figures.js";
+import { syncErrorText } from "./SourceSync.js";
 
 /** Asks the shell to open the Try it pane (it owns the pane and its toggle). */
 export const OPEN_TRY_IT_EVENT = "solvchat:open-try-it";
@@ -358,6 +359,20 @@ export function NeedsAttention({
         ),
       });
     }
+  }
+  for (const source of attention?.syncFailed ?? []) {
+    items.push({
+      key: `source-sync-${source.sourceId}`,
+      tone: "danger",
+      body: (
+        <>
+          <ScreenLink to="sources" query={{ assistant: assistantId }}>
+            {source.label}: the last sync failed
+          </ScreenLink>
+          . {syncErrorText(source.error)}
+        </>
+      ),
+    });
   }
   if (items.length === 0) return null;
   return (
