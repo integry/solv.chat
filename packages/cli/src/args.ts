@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 import type { ApplyOptions } from "./apply.js";
 import { CliError } from "./http.js";
-import type { PushOptions } from "./push.js";
+import type { ExtraFile, PushOptions } from "./push.js";
 import type { TestOptions } from "./test.js";
 
 export type ParsedCommand =
@@ -24,15 +24,27 @@ Run 'solv <command> --help' for command-specific options.`;
 
 export const PUSH_HELP = `Usage: solv push [dir] [options]
 
+Pushes .md, .markdown and .mdx files. Docusaurus folders are found from their
+front matter and syntax, and get Docusaurus URLs, titles and cleanup. In them,
+files and folders whose names start with _ and pages marked draft: true or
+unlisted: true are left out, as Docusaurus gives them no page.
+
 Options:
-  --endpoint <url>    Worker base URL (required)
-  --assistant <id>    Assistant ID, e.g. ast_... (required)
-  --base-url <url>    Site URL that document paths are joined to
-  --json <file>       Push a prepared JSON batch instead of a Markdown folder
-  --source-id <id>    Target pushed-content source ID (optional)
-  --prune             Delete documents not in the pushed set
-  --dry-run           Print what would be pushed without sending requests
-  -h, --help          Show this help message
+  --endpoint <url>      Worker base URL (required)
+  --assistant <id>      Assistant ID, e.g. ast_... (required)
+  --base-url <url>      Site URL that document paths are joined to
+  --include <glob>      Push only files matching the glob, relative to dir
+                        (repeatable)
+  --exclude <glob>      Leave out files matching the glob (repeatable)
+  --file <path>=<url>   Also push one file with its own URL, for example
+                        README.md=https://example.com/ (repeatable)
+  --json <file>         Push a prepared JSON batch instead of a Markdown folder
+  --source <name>       Name of this content; --prune then deletes only
+                        documents pushed under the same name
+  --source-id <id>      Target pushed-content source ID (optional)
+  --prune               Delete documents not in the pushed set
+  --dry-run             Print what would be pushed without sending requests
+  -h, --help            Show this help message
 
 Environment variables:
   SOLV_INGEST_KEY     Bearer key used to authenticate ingest requests`;
@@ -89,6 +101,47 @@ function readBoolean(
   return values[name] === true;
 }
 
+function readStrings(
+  values: Record<string, string | boolean | (string | boolean)[] | undefined>,
+  name: string,
+): string[] {
+  const val = values[name];
+  if (!Array.isArray(val)) return [];
+  return val.filter((item): item is string => typeof item === "string");
+}
+
+// The ingest API's bounds for a source name.
+const MAX_SOURCE_LENGTH = 80;
+
+function readSource(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_SOURCE_LENGTH) {
+    throw new CliError(`--source must be 1 to ${MAX_SOURCE_LENGTH} characters`);
+  }
+  return trimmed;
+}
+
+/**
+ * Parses `--file <path>=<url>`. The split is at the first `=` followed by an
+ * `http://` or `https://` URL, so URLs with `=` in their query still work.
+ */
+function parseExtraFile(value: string): ExtraFile {
+  const at = value.search(/=https?:\/\//i);
+  const path = at > 0 ? value.slice(0, at).trim() : "";
+  const url = at > 0 ? value.slice(at + 1).trim() : "";
+  let parsedUrl: URL | null = null;
+  try {
+    parsedUrl = url === "" ? null : new URL(url);
+  } catch {
+    parsedUrl = null;
+  }
+  if (path === "" || parsedUrl === null) {
+    throw new CliError(`--file must be <path>=<url>, for example README.md=https://example.com/`);
+  }
+  return { path, url: parsedUrl.href };
+}
+
 function requireOption(value: string | undefined, flag: string): string {
   if (!value || value.trim().length === 0) {
     throw new CliError(`Missing required option ${flag}`);
@@ -115,6 +168,10 @@ function parsePushArgs(args: string[], env: Record<string, string | undefined>):
         "base-url": { type: "string" },
         json: { type: "string" },
         "source-id": { type: "string" },
+        source: { type: "string" },
+        include: { type: "string", multiple: true },
+        exclude: { type: "string", multiple: true },
+        file: { type: "string", multiple: true },
         prune: { type: "boolean", default: false },
         "dry-run": { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -135,13 +192,26 @@ function parsePushArgs(args: string[], env: Record<string, string | undefined>):
   const json = readString(parsed.values, "json");
   const baseUrl = readString(parsed.values, "base-url");
   const sourceId = readString(parsed.values, "source-id");
+  const source = readSource(readString(parsed.values, "source"));
+  const include = readStrings(parsed.values, "include");
+  const exclude = readStrings(parsed.values, "exclude");
+  const files = readStrings(parsed.values, "file").map(parseExtraFile);
   const dir = parsed.positionals[0];
 
   if (json !== undefined && dir !== undefined) {
     throw new CliError("Specify either a content directory or --json, not both");
   }
-  if (json === undefined && dir === undefined) {
-    throw new CliError("Provide a content directory or --json <file>");
+  if (json !== undefined && files.length > 0) {
+    throw new CliError("Specify either --file or --json, not both");
+  }
+  if (json === undefined && dir === undefined && files.length === 0) {
+    throw new CliError("Provide a content directory, --file <path>=<url> or --json <file>");
+  }
+  if (dir === undefined && (include.length > 0 || exclude.length > 0)) {
+    throw new CliError("--include and --exclude select files in a content directory; give one");
+  }
+  if (source !== undefined && sourceId !== undefined) {
+    throw new CliError("Specify either --source or --source-id, not both");
   }
 
   const options: PushOptions = {
@@ -154,6 +224,10 @@ function parsePushArgs(args: string[], env: Record<string, string | undefined>):
   if (json !== undefined) options.json = json;
   if (baseUrl !== undefined) options.baseUrl = baseUrl;
   if (sourceId !== undefined) options.sourceId = sourceId;
+  if (source !== undefined) options.source = source;
+  if (include.length > 0) options.include = include;
+  if (exclude.length > 0) options.exclude = exclude;
+  if (files.length > 0) options.files = files;
   if (env.SOLV_INGEST_KEY !== undefined) options.ingestKey = env.SOLV_INGEST_KEY;
 
   return { kind: "push", options };

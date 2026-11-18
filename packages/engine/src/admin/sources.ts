@@ -4,15 +4,31 @@ import type { SourceRow, SourceWithStatsRow } from "../db/sources.js";
 import type { Tenant } from "../db/tenant.js";
 import { type DeleteDeps, deleteDocuments } from "../ingest/documents.js";
 import { BadRequest, NotFound } from "./errors.js";
+import { type SourceSyncStatus, syncStatusFor } from "./sourceSync.js";
 
-/** Lists all sources for an assistant with document counts and newest `updated_at`. */
+/** A listed source; a sitemap source also carries its sync schedule and latest run. */
+export type ListedSource = SourceWithStatsRow & { sync?: SourceSyncStatus };
+
+/**
+ * Lists all sources for an assistant with document counts and newest
+ * `updated_at`, and for sitemap sources their sync status.
+ */
 export async function listSources(
   tenant: Tenant,
   assistantId: string,
-): Promise<SourceWithStatsRow[]> {
+  now: number = Date.now(),
+): Promise<ListedSource[]> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
-  return tenant.sources.listWithStats(assistantId);
+  const [sources, syncs] = await Promise.all([
+    tenant.sources.listWithStats(assistantId),
+    tenant.sync.listForAssistant(assistantId, now),
+  ]);
+  return sources.map((source) =>
+    source.kind === "sitemap"
+      ? { ...source, sync: syncStatusFor(source, syncs.get(source.id) ?? null, now) }
+      : source,
+  );
 }
 
 /** Creates an `entry` or `sitemap` source for an assistant. `push` sources are created by ingest only. */
@@ -55,10 +71,14 @@ export async function updateSource(
     throw new BadRequest(["body: must be a JSON object"]);
   }
 
+  // Settings are merged into the stored ones, so changing one field (the
+  // sync schedule, say) keeps the others.
   const parsed = parseSourceInput({
     kind: existing.kind,
     label: body.label ?? existing.label,
-    settings: body.settings ?? existing.settings,
+    settings: isPlainObject(body.settings)
+      ? { ...existing.settings, ...body.settings }
+      : (body.settings ?? existing.settings),
   });
   if (!parsed.ok) throw new BadRequest(parsed.errors);
 

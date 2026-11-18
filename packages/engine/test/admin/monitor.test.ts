@@ -523,6 +523,7 @@ describe("admin Monitor screen APIs", () => {
         openGaps: 1,
         failingTests: 1,
         notIndexed: [{ sourceId: docs, label: "Docs", failed: 0, waiting: 2 }],
+        syncFailed: [],
       });
       // A test run goes through the same pipeline as Try it.
       expect(body.setup.tried).toBe(true);

@@ -1,4 +1,10 @@
-export { type App, type AppOptions, createApp, type Env } from "./app.js";
+export {
+  type App,
+  type AppOptions,
+  createApp,
+  type Env,
+  type RunDueSyncsOptions,
+} from "./app.js";
 export {
   type AnswerDeps,
   type AnswerInput,
@@ -30,9 +36,34 @@ export {
   type ToolRunner,
   type ToolRunResult,
 } from "./chat/toolLoop.js";
+export type {
+  SourceSyncState,
+  SyncCounts,
+  SyncErrorCode,
+  SyncOutcome,
+} from "./db/sync.js";
 export { type Chunk, chunkMarkdown, MAX_CHARS, OVERLAP_CHARS } from "./ingest/chunk.js";
 export { type IngestConsumerDeps, runIngestBatch } from "./ingest/consumer.js";
+export { extractHtml, htmlToTitleAndMarkdown } from "./ingest/htmlToMarkdown.js";
+export {
+  MAX_PAGE_BYTES,
+  MAX_PAGE_REDIRECTS,
+  PAGE_FETCH_TIMEOUT_MS,
+  type PlainPageFetcherOptions,
+  plainPageFetcher,
+} from "./ingest/pageFetcher.js";
 export { type ResolvedChunk, resolveChunks } from "./ingest/resolve.js";
+export {
+  DEFAULT_SYNC_MAX_DOCUMENTS,
+  DEFAULT_SYNC_MAX_PAGES,
+  type DueSyncsResult,
+  MAX_SYNC_SITEMAP_URLS,
+  MAX_SYNC_SOURCES_PER_TICK,
+  SYNC_DUE_SLACK_MS,
+  SYNC_INTERVAL_MS,
+  SYNC_LEASE_MS,
+  type SyncCaps,
+} from "./ingest/sync.js";
 export {
   callTool,
   listTools,
@@ -109,10 +140,18 @@ export {
   type LimitDecision,
   type Limits,
   type LlmProviderName,
+  type PageContent,
+  type PageFetcher,
+  type PageFetchResult,
+  type PageNoContent,
+  type PageNotModified,
+  type PageValidators,
   type Principal,
   type ScopeClaim,
   type Seams,
   StoredKeyError,
+  type SyncLimitDecision,
+  type SyncLimitRequest,
   type UsageEvent,
   type UsageSink,
 } from "./seams/types.js";
@@ -122,3 +161,4 @@ export {
   SecretBoxError,
   sealSecret,
 } from "./security/secretBox.js";
+export type { HostResolver } from "./security/urlGuard.js";

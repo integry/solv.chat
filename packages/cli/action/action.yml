@@ -2,16 +2,28 @@ name: Sync solv.chat content and draft config
 description: Pushes Markdown content and/or applies solv.config.json to a solv.chat assistant's draft.
 inputs:
   endpoint:
-    description: The Worker's base URL, for example https://chat.example.com
-    required: true
+    description: The Worker's base URL, for example https://chat.example.com. When empty, the action skips with a notice.
+    required: false
   assistant:
-    description: The assistant id (ast_...)
-    required: true
+    description: The assistant id (ast_...). When empty, the action skips with a notice.
+    required: false
   base-url:
     description: The site URL that document paths are joined to (required when content is set)
     required: false
   content:
     description: Folder of Markdown files to push
+    required: false
+  include:
+    description: Push only files in the content folder that match these globs, one per line
+    required: false
+  exclude:
+    description: Leave out files in the content folder that match these globs, one per line
+    required: false
+  files:
+    description: Extra files to push, one per line as path=url, for example README.md=https://docs.example.com/
+    required: false
+  source:
+    description: Name of this content; prune then deletes only documents pushed under the same name
     required: false
   prune:
     description: Delete documents that are no longer in the folder
@@ -30,6 +42,8 @@ runs:
         node-version: "24"
     # The ingest key comes from the environment, not an input: an input would
     # appear in the workflow run's inputs view, and this value is a credential.
+    # Inputs reach run.sh only as environment variables, never interpolated
+    # into the script.
     - shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -40,41 +54,8 @@ runs:
         INPUT_BASE_URL: ${{ inputs.base-url }}
         INPUT_PRUNE: ${{ inputs.prune }}
         INPUT_TEST: ${{ inputs.test }}
-      run: |
-        action_repo="$(cd "$ACTION_PATH/../../.." && pwd)"
-        if [ ! -d "$action_repo/node_modules" ] || [ ! -f "$action_repo/packages/cli/dist/index.js" ]; then
-          npm ci --prefix "$action_repo" --no-audit --no-fund
-          npm run build --prefix "$action_repo" -w @solvchat/cli
-        fi
-        if [ -z "$INPUT_CONTENT" ] && [ -z "$INPUT_CONFIG" ] && [ "$INPUT_TEST" != "true" ]; then
-          echo "Provide at least one of 'content', 'config', or 'test: true'." >&2
-          exit 1
-        fi
-        if [ -n "$INPUT_CONTENT" ]; then
-          if [ -z "$INPUT_BASE_URL" ]; then
-            echo "'base-url' is required when 'content' is set." >&2
-            exit 1
-          fi
-          args=(
-            "$INPUT_CONTENT"
-            --endpoint "$INPUT_ENDPOINT"
-            --assistant "$INPUT_ASSISTANT"
-            --base-url "$INPUT_BASE_URL"
-          )
-          if [ "$INPUT_PRUNE" = "true" ]; then
-            args+=(--prune)
-          fi
-          node "$action_repo/packages/cli/bin/solv.js" push "${args[@]}"
-        fi
-        if [ -n "$INPUT_CONFIG" ]; then
-          node "$action_repo/packages/cli/bin/solv.js" apply \
-            "$INPUT_CONFIG" \
-            --endpoint "$INPUT_ENDPOINT" \
-            --assistant "$INPUT_ASSISTANT"
-        fi
-        # After apply, so the tests that run are the ones the file declares.
-        if [ "$INPUT_TEST" = "true" ]; then
-          node "$action_repo/packages/cli/bin/solv.js" test \
-            --endpoint "$INPUT_ENDPOINT" \
-            --assistant "$INPUT_ASSISTANT"
-        fi
+        INPUT_SOURCE: ${{ inputs.source }}
+        INPUT_INCLUDE: ${{ inputs.include }}
+        INPUT_EXCLUDE: ${{ inputs.exclude }}
+        INPUT_FILES: ${{ inputs.files }}
+      run: bash "$ACTION_PATH/run.sh"

@@ -1,8 +1,26 @@
 import { readFile } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { extname, relative, resolve } from "node:path";
 import { isPlainObject } from "@solvchat/core";
+import {
+  cleanDocusaurusMarkdown,
+  docusaurusBaseId,
+  docusaurusSlug,
+  hasDocusaurusFrontMatter,
+  hasDocusaurusSyntax,
+  isDocusaurusHiddenDoc,
+  isDocusaurusPartialPath,
+  withDescription,
+} from "./docusaurus.js";
+import { selectPaths } from "./glob.js";
 import { assertValidHeaderValue, CliError, normalizeEndpoint, requestJson } from "./http.js";
-import { externalIdFor, firstHeading, markdownFiles, splitFrontMatter } from "./markdown.js";
+import {
+  externalIdFor,
+  firstHeading,
+  frontMatterBlock,
+  markdownFiles,
+  readFrontMatterString,
+  splitFrontMatter,
+} from "./markdown.js";
 
 // One request per 10 documents, sized to Workers Free rather than the ingest
 // API's cap of 100. Cloudflare counts calls to R2 and D1 as subrequests, and
@@ -22,6 +40,12 @@ export interface PushDocument {
   [key: string]: unknown;
 }
 
+/** A single file pushed from outside the folder, with its own URL. */
+export interface ExtraFile {
+  path: string;
+  url: string;
+}
+
 export interface PushOptions {
   dir?: string;
   json?: string;
@@ -29,6 +53,14 @@ export interface PushOptions {
   assistant: string;
   baseUrl?: string;
   sourceId?: string;
+  /** Names the push source; `--prune` then deletes only that source's documents. */
+  source?: string;
+  /** Globs (relative to `dir`) selecting files; all Markdown files when empty. */
+  include?: string[];
+  /** Globs (relative to `dir`) of files to leave out. */
+  exclude?: string[];
+  /** Files outside the folder, each with an explicit URL. */
+  files?: ExtraFile[];
   ingestKey?: string;
   prune?: boolean;
   dryRun?: boolean;
@@ -51,36 +83,189 @@ function resolveDocumentUrl(externalId: string, baseUrl: string): string {
   return new URL(encodedPath, normalizedBase).href;
 }
 
-async function loadFromDir(dir: string, baseUrl: string): Promise<PushDocument[]> {
+/** Joins a Docusaurus slug (`/guides/intro`, `/` for the root) to the docs' base URL. */
+function resolveSlugUrl(slug: string, baseUrl: string): string {
+  const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+  const path = slug.replace(/^\/+/, "");
+  if (path === "") return new URL(normalizedBase).href;
+  return new URL(path.split("/").map(encodeURIComponent).join("/"), normalizedBase).href;
+}
+
+interface SourceFile {
+  file: string;
+  /** Path under the folder with `/` separators and its extension. */
+  rel: string;
+  raw: string;
+  block: string | null;
+  body: string;
+}
+
+function looksLikeDocusaurus(entry: SourceFile): boolean {
+  return (
+    extname(entry.file).toLowerCase() === ".mdx" ||
+    hasDocusaurusFrontMatter(entry.block) ||
+    hasDocusaurusSyntax(entry.body)
+  );
+}
+
+function readKey(block: string | null, key: string): string | undefined {
+  if (block === null) return undefined;
+  const value = readFrontMatterString(block, key)?.trim();
+  return value === undefined || value === "" ? undefined : value;
+}
+
+async function readSource(file: string, rel: string): Promise<SourceFile> {
+  const raw = await readFile(file, "utf8");
+  const { block, body } = frontMatterBlock(raw);
+  return { file, rel, raw, block, body };
+}
+
+/**
+ * A Docusaurus document: front matter `title`, then `sidebar_label`, then the
+ * first heading names it; `description` leads the body; the body is cleaned
+ * of MDX and admonition syntax.
+ */
+function docusaurusDocument(
+  entry: SourceFile,
+  externalId: string,
+  url: (relPath: string, fm: { id?: string; slug?: string }) => string,
+): PushDocument {
+  const relPath = entry.rel.replace(/\.[^./]+$/, "");
+  const fm: { id?: string; slug?: string } = {};
+  const id = readKey(entry.block, "id");
+  const slug = readKey(entry.block, "slug");
+  if (id !== undefined) fm.id = id;
+  if (slug !== undefined) fm.slug = slug;
+  const cleaned = cleanDocusaurusMarkdown(entry.body);
+  return {
+    externalId,
+    title:
+      readKey(entry.block, "title") ??
+      readKey(entry.block, "sidebar_label") ??
+      firstHeading(cleaned) ??
+      docusaurusBaseId(relPath, fm),
+    url: url(relPath, fm),
+    markdown: withDescription(cleaned, readKey(entry.block, "description")),
+  };
+}
+
+/** A plain Markdown document, exactly as `solv push` has always built it. */
+function plainDocument(entry: SourceFile, externalId: string, url: string): PushDocument {
+  const { frontMatter, body } = splitFrontMatter(entry.raw);
+  return {
+    externalId,
+    // Front matter wins over the first heading: an author who wrote an
+    // explicit title meant it, and headings are often shorter than the
+    // page's real name.
+    title: frontMatter.title ?? firstHeading(body) ?? externalId,
+    url,
+    markdown: body,
+  };
+}
+
+interface Loaded {
+  documents: PushDocument[];
+  docusaurus: boolean;
+  /** Docusaurus files left out: `_` partials, drafts and unlisted pages. */
+  hidden: number;
+}
+
+async function loadFromDir(
+  dir: string,
+  baseUrl: string,
+  include: readonly string[],
+  exclude: readonly string[],
+): Promise<Loaded> {
   const root = resolve(dir);
-  const files = await markdownFiles(root);
+  const all = await markdownFiles(root);
+  const relOf = new Map(all.map((file) => [relative(root, file).split(/[\\/]/).join("/"), file]));
+  // One file at a time, as before: a large folder must not run out of file handles.
+  const allEntries: SourceFile[] = [];
+  for (const [rel, file] of relOf) allEntries.push(await readSource(file, rel));
+  const selected = new Set(selectPaths([...relOf.keys()], include, exclude));
+  const entries = allEntries.filter((entry) => selected.has(entry.rel));
+
+  // Decided for the whole folder, before --include and --exclude: a page
+  // without front matter still needs its number prefixes stripped like the
+  // rest, and choosing fewer files must not change any file's URL.
+  const docusaurus = allEntries.some(looksLikeDocusaurus);
+  // Docusaurus builds no page for a `_` file or folder, a draft or an
+  // unlisted doc, so an answer could not link to one. `--file` pushes one anyway.
+  const visible = docusaurus
+    ? entries.filter(
+        (entry) => !isDocusaurusPartialPath(entry.rel) && !isDocusaurusHiddenDoc(entry.block),
+      )
+    : entries;
   const documents: PushDocument[] = [];
   const seen = new Map<string, string>();
 
-  for (const file of files) {
-    const externalId = externalIdFor(root, file);
+  for (const entry of visible) {
+    const externalId = externalIdFor(root, entry.file);
     const normalizedId = externalId.trim();
     const existing = seen.get(normalizedId);
     if (existing !== undefined) {
       throw new CliError(
-        `Duplicate document ID "${normalizedId}" generated from "${relative(root, existing)}" and "${relative(root, file)}"`,
+        `Duplicate document ID "${normalizedId}" generated from "${relative(root, existing)}" and "${relative(root, entry.file)}"`,
       );
     }
-    seen.set(normalizedId, file);
+    seen.set(normalizedId, entry.file);
 
-    const { frontMatter, body } = splitFrontMatter(await readFile(file, "utf8"));
-    documents.push({
-      externalId,
-      // Front matter wins over the first heading: an author who wrote an
-      // explicit title meant it, and headings are often shorter than the
-      // page's real name.
-      title: frontMatter.title ?? firstHeading(body) ?? externalId,
-      url: resolveDocumentUrl(externalId, baseUrl),
-      markdown: body,
-    });
+    documents.push(
+      docusaurus
+        ? docusaurusDocument(entry, externalId, (relPath, fm) =>
+            resolveSlugUrl(docusaurusSlug(relPath, fm), baseUrl),
+          )
+        : plainDocument(entry, externalId, resolveDocumentUrl(externalId, baseUrl)),
+    );
   }
 
+  return { documents, docusaurus, hidden: entries.length - visible.length };
+}
+
+/**
+ * The external id of a `--file`: its path relative to the working directory,
+ * with `/` separators, so the same command in any checkout gives the same id.
+ */
+export function extraFileId(path: string, cwd: string = process.cwd()): string {
+  return relative(cwd, resolve(cwd, path)).split(/[\\/]/).join("/");
+}
+
+/**
+ * Loads `--file` documents. Each is read on its own: Docusaurus cleanup
+ * applies only when that file itself uses Docusaurus syntax or front matter,
+ * and its URL is always the one given.
+ */
+async function loadExtraFiles(files: readonly ExtraFile[]): Promise<PushDocument[]> {
+  const documents: PushDocument[] = [];
+  for (const extra of files) {
+    const externalId = extraFileId(extra.path);
+    let entry: SourceFile;
+    try {
+      entry = await readSource(extra.path, externalId);
+    } catch {
+      throw new CliError(`Cannot read --file ${extra.path}`);
+    }
+    documents.push(
+      looksLikeDocusaurus(entry)
+        ? docusaurusDocument(entry, externalId, () => extra.url)
+        : plainDocument(entry, externalId, extra.url),
+    );
+  }
   return documents;
+}
+
+function assertUniqueIds(documents: PushDocument[]): void {
+  const seen = new Set<string>();
+  for (const doc of documents) {
+    if (typeof doc.externalId !== "string") continue;
+    const id = doc.externalId.trim();
+    if (seen.has(id)) {
+      throw new CliError(
+        `Duplicate document ID "${id}": a --file has the same ID as another document`,
+      );
+    }
+    seen.add(id);
+  }
 }
 
 async function loadFromJson(file: string, baseUrl?: string): Promise<PushDocument[]> {
@@ -121,15 +306,40 @@ async function loadFromJson(file: string, baseUrl?: string): Promise<PushDocumen
  */
 export async function push(options: PushOptions, deps: CliDeps): Promise<void> {
   let documents: PushDocument[];
+  let docusaurus = false;
+  let hidden = 0;
   if (options.json !== undefined) {
     documents = await loadFromJson(options.json, options.baseUrl);
-  } else if (options.dir !== undefined) {
-    if (!options.baseUrl) {
-      throw new CliError("--base-url is required when pushing a Markdown folder");
+  } else if (options.dir !== undefined || (options.files?.length ?? 0) > 0) {
+    documents = [];
+    if (options.dir !== undefined) {
+      if (!options.baseUrl) {
+        throw new CliError("--base-url is required when pushing a Markdown folder");
+      }
+      const loaded = await loadFromDir(
+        options.dir,
+        options.baseUrl,
+        options.include ?? [],
+        options.exclude ?? [],
+      );
+      documents = loaded.documents;
+      docusaurus = loaded.docusaurus;
+      hidden = loaded.hidden;
     }
-    documents = await loadFromDir(options.dir, options.baseUrl);
+    documents.push(...(await loadExtraFiles(options.files ?? [])));
+    assertUniqueIds(documents);
   } else {
-    throw new CliError("Provide a content directory or --json <file>");
+    throw new CliError("Provide a content directory, --file <path>=<url> or --json <file>");
+  }
+
+  const target = options.source !== undefined ? { source: options.source } : {};
+  if (docusaurus) {
+    deps.log("Docusaurus content found: using its URLs, titles and cleanup");
+    if (hidden > 0) {
+      deps.log(
+        `Left out ${hidden === 1 ? "1 file" : `${hidden} files`} with no page on the site: names starting with _, drafts and unlisted pages`,
+      );
+    }
   }
 
   if (options.dryRun) {
@@ -142,7 +352,11 @@ export async function push(options: PushOptions, deps: CliDeps): Promise<void> {
       deps.log(`  ${id} -> ${url}`);
     }
     if (options.prune) {
-      deps.log(`Would prune documents not in the ${documents.length}-document pushed set`);
+      deps.log(
+        options.source !== undefined
+          ? `Would prune documents of source "${options.source}" not in the ${documents.length}-document pushed set`
+          : `Would prune documents not in the ${documents.length}-document pushed set`,
+      );
     }
     return;
   }
@@ -168,7 +382,7 @@ export async function push(options: PushOptions, deps: CliDeps): Promise<void> {
     const body =
       options.sourceId !== undefined
         ? { sourceId: options.sourceId, documents: batch }
-        : { documents: batch };
+        : { ...target, documents: batch };
     const res = await requestJson<IngestCounts>(
       deps.fetchImpl,
       url,
@@ -190,7 +404,7 @@ export async function push(options: PushOptions, deps: CliDeps): Promise<void> {
     const pruneBody =
       options.sourceId !== undefined
         ? { sourceId: options.sourceId, prune: true, keep }
-        : { prune: true, keep };
+        : { ...target, prune: true, keep };
     const res = await requestJson<IngestCounts>(
       deps.fetchImpl,
       url,

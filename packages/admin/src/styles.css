@@ -2444,6 +2444,42 @@ a {
   color: var(--muted);
 }
 
+.source-sync {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.source-sync-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.source-sync-line {
+  font-size: var(--text-sm);
+}
+
+.source-sync-failed {
+  color: var(--danger);
+}
+
+@media (min-width: 600px) {
+  .sources-table td .source-sync {
+    min-width: 14rem;
+  }
+}
+
+@media (max-width: 599px) {
+  /* Push and entry sources have no Sync cell: no empty labelled row on a phone. */
+  .sources-table td:empty {
+    display: none;
+  }
+}
+
 .source-doc-meta {
   overflow-wrap: anywhere;
   font-size: var(--text-sm);
