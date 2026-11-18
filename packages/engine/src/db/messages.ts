@@ -83,6 +83,27 @@ export interface CreateMessageInput {
   firstTokenMs?: number | null | undefined;
   /** Assistant replies only: how long the request took until the reply was complete. */
   totalMs?: number | null | undefined;
+  /**
+   * Assistant replies only: the documents the reply was given to answer from
+   * (every kind, written answers included), for the Reports usage lists.
+   * Stored in `message_documents`, never in `citations`: see migration 0029.
+   */
+  documentIds?: readonly string[] | undefined;
+}
+
+/**
+ * Records the documents a reply was given (`?1` org, `?2` message, `?3` a
+ * JSON array of document ids), ignoring ones already recorded: a resume adds
+ * to what its pause stored. `when` is an extra condition, checked in the same
+ * statement; it is a literal from this module, never input.
+ */
+function recordDocuments(db: D1Database, when = ""): D1PreparedStatement {
+  return prepareInsert(
+    db,
+    `INSERT OR IGNORE INTO message_documents (org_id, message_id, document_id)
+     SELECT DISTINCT ?1, ?2, value FROM json_each(?3)
+      WHERE typeof(value) = 'text' ${when}`,
+  );
 }
 
 /** One group of unanswered questions sharing a normalised text. */
@@ -448,8 +469,10 @@ export function messagesFor(db: D1Database, orgId: string) {
       tokensOut: number;
       /** Added to the stored cost; null marks it unknown. Omitted leaves it as is. */
       costMicros?: number | null | undefined;
+      /** Documents this continuation was given, added to those the pause recorded. */
+      documentIds?: readonly string[] | undefined;
     }): Promise<boolean> {
-      const res = await prepare(
+      const update = prepare(
         db,
         `UPDATE messages
             SET content = ?3,
@@ -484,9 +507,30 @@ export function messagesFor(db: D1Database, orgId: string) {
           params.revision,
           params.costMicros === undefined ? 0 : params.costMicros,
           searchableText(params.content),
-        )
-        .run();
-      return (res.meta.changes ?? 0) > 0;
+        );
+      const documentIds = params.documentIds ?? [];
+      if (documentIds.length === 0) {
+        const res = await update.run();
+        return (res.meta.changes ?? 0) > 0;
+      }
+      // Recorded first, in one transaction with the update and under the same
+      // claim check, so a continuation that lost its claim records nothing.
+      const [, res] = await db.batch([
+        recordDocuments(
+          db,
+          `AND EXISTS (SELECT 1 FROM messages
+                        WHERE org_id = ?1 AND id = ?2 AND role = 'assistant'
+                          AND resume_claim = ?4 AND resume_revision = ?5)`,
+        ).bind(
+          orgId,
+          params.id,
+          JSON.stringify([...documentIds]),
+          params.claimToken,
+          params.revision,
+        ),
+        update,
+      ]);
+      return (res?.meta.changes ?? 0) > 0;
     },
 
     /**
@@ -578,32 +622,40 @@ export function messagesFor(db: D1Database, orgId: string) {
     async create(input: CreateMessageInput): Promise<MessageRow> {
       const replyTo = input.role === "assistant" ? (input.replyTo ?? null) : null;
       const questionKey = input.role === "user" ? normalizeQuestionText(input.content) : null;
-      await prepareInsert(
+      const insert = prepareInsert(
         db,
         `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, question_key, resume_context, search_text, first_token_ms, total_ms)
          VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)`,
-      )
-        .bind(
-          orgId,
-          input.id,
-          input.conversationId,
-          input.role,
-          input.content,
-          JSON.stringify(input.citations),
-          input.toolCalls === null ? null : JSON.stringify(input.toolCalls),
-          input.tokensIn,
-          input.tokensOut,
-          input.costMicros ?? null,
-          input.answered ? 1 : 0,
-          input.createdAt,
-          replyTo,
-          questionKey,
-          input.resumeContext == null ? null : JSON.stringify(input.resumeContext),
-          searchableText(input.content),
-          input.role === "assistant" ? (input.firstTokenMs ?? null) : null,
-          input.role === "assistant" ? (input.totalMs ?? null) : null,
-        )
-        .run();
+      ).bind(
+        orgId,
+        input.id,
+        input.conversationId,
+        input.role,
+        input.content,
+        JSON.stringify(input.citations),
+        input.toolCalls === null ? null : JSON.stringify(input.toolCalls),
+        input.tokensIn,
+        input.tokensOut,
+        input.costMicros ?? null,
+        input.answered ? 1 : 0,
+        input.createdAt,
+        replyTo,
+        questionKey,
+        input.resumeContext == null ? null : JSON.stringify(input.resumeContext),
+        searchableText(input.content),
+        input.role === "assistant" ? (input.firstTokenMs ?? null) : null,
+        input.role === "assistant" ? (input.totalMs ?? null) : null,
+      );
+      const documentIds = input.role === "assistant" ? (input.documentIds ?? []) : [];
+      // One transaction: a reply is never stored without the record of what
+      // it was given, which the Reports usage lists count.
+      if (documentIds.length === 0) await insert.run();
+      else {
+        await db.batch([
+          insert,
+          recordDocuments(db).bind(orgId, input.id, JSON.stringify([...documentIds])),
+        ]);
+      }
 
       return {
         id: input.id,

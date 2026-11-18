@@ -103,6 +103,13 @@ const REPORT: AssistantReport = {
       title: "Enterprise Billing Guide",
       count: 7,
     },
+    {
+      documentId: "doc_answer",
+      kind: "answer",
+      url: "https://engine.example/admin/sources#entry:refunds",
+      title: "How long do refunds take to reach my card after I cancel an annual plan?",
+      count: 6,
+    },
   ],
   uncitedSources: [],
   uncitedTotal: 0,

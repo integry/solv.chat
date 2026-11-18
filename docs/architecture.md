@@ -113,6 +113,12 @@ from the auth seam and pass it down.
 - `message_traces` — org_id, message_id, detail JSON, created_at, updated_at;
   one row per assistant reply to a visitor, keyed (org_id, message_id) and
   deleted with its message. See "Answer traces".
+- `message_documents` — org_id, message_id, document_id: the documents an
+  assistant reply to a visitor was given to answer from, every kind (pages,
+  pushed documents, written answers), once each; written with the reply (and
+  by a resume, under its claim) and deleted with it. Internal: citations keep
+  only public addresses, and nothing here reaches a visitor. `document_id`
+  has no foreign key, so deleting a document keeps the record. See "Reports".
 - `feedback` — message_id, value (`up` | `down`), note.
 - `mcp_servers` — id, assistant_id, label, url, auth_kind (`none` | `static_header`),
   header_name, secret_ciphertext, enabled, send_conversation_context (default 0;
@@ -902,8 +908,20 @@ phrase, does not contain a phrase, or declines (uses the fallback).
 The Reports screen answers "is it working?" over a date range the owner picks
 (7, 30 or 90 days): questions asked, share answered, share with a thumbs down,
 cost, response time, the topics, the most asked questions, the most frequent
-unanswered questions, and the sources cited most and never. Everything is
+unanswered questions, and the content used most and never. Everything is
 computed from stored rows; the table can be downloaded as CSV.
+
+"Content used most" and "Content never used" count by document id: a reply
+used a document when it was given it to answer from (the same chunks its
+citations come from), recorded in `message_documents`. Written answers count
+as pages do; one is listed by its question, with a link to Sources instead of
+an address (the CSV gives its Sources address and the type "Written answer").
+A reply counts a document once. Only visitor answers count; "Try it" and test
+runs store no message. Replies written before migration 0029 have no record:
+for them the URLs in their citations are matched to the assistant's
+documents, as before, so older periods count pages but not written answers
+(and list a written answer used then as never used). A deleted document is in
+neither list, for any period.
 
 The Topics list is the period's visitor questions grouped by topic, most
 asked first: each topic, its questions, and the share that could not be

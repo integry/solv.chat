@@ -128,6 +128,15 @@ function citableByUrl(chunks: readonly ResolvedChunk[]): ResolvedChunk[] {
 }
 
 /**
+ * The documents an answer was given to answer from, every kind included
+ * (written answers too), for the Reports usage lists. Internal: stored apart
+ * from the citations and never sent to the visitor.
+ */
+function usedDocumentIds(chunks: readonly ResolvedChunk[]): string[] {
+  return [...new Set(chunks.map((chunk) => chunk.documentId))];
+}
+
+/**
  * Combines pre-pause citations with newly retrieved citations, deduplicating by
  * URL so the completed answer retains attribution for text generated before and
  * after each pause.
@@ -538,6 +547,7 @@ export async function* answerMessage(
   const cited = citableByUrl(chunks);
   const messageId = newId("msg");
   const citations = cited.map((c) => ({ url: c.url, title: c.title }));
+  const documentIds = usedDocumentIds(chunks);
   const timing = recorder.snapshot();
 
   if (pending.length > 0) {
@@ -564,6 +574,7 @@ export async function* answerMessage(
         resumeContext: continuation ?? null,
         firstTokenMs: timing.firstTokenMs,
         totalMs: timing.totalMs,
+        documentIds,
       });
     }
     for (const call of pending) {
@@ -617,6 +628,7 @@ export async function* answerMessage(
       replyTo: questionId,
       firstTokenMs: timing.firstTokenMs,
       totalMs: timing.totalMs,
+      documentIds,
     });
   }
 
@@ -975,6 +987,7 @@ export async function* answerWithActionResults(
       tokensIn,
       tokensOut,
       costMicros: resumeCost,
+      documentIds: usedDocumentIds(chunks),
     });
     if (!saved) {
       yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };

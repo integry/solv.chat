@@ -9,6 +9,7 @@ import type {
   QuestionCount,
   ReportRange,
   SourceCitationCount,
+  UnusedDocument,
 } from "../db/reports.js";
 import type { Tenant } from "../db/tenant.js";
 import { DAY_MS, utcDay } from "../util/time.js";
@@ -27,7 +28,7 @@ export interface AssistantReport extends PeriodFigures {
   topGaps: GapQuestionCount[];
   topics: TopicsReport;
   topSources: SourceCitationCount[];
-  uncitedSources: Array<{ url: string; title: string }>;
+  uncitedSources: UnusedDocument[];
   uncitedTotal: number;
   responseTime: ResponseTimePeriod;
 }

@@ -1101,6 +1101,15 @@ describe("chat/pageActions", () => {
     const conversation = await getConversation(tenant, done1.conversationId);
     const assistantTurn = conversation.turns.find((t) => t.id === done1.messageId);
     expect(assistantTurn?.citations).toEqual(expectedCitations);
+
+    // What the pause and both continuations were given is recorded for
+    // Reports, by document id, once each.
+    const used = await env.DB.prepare(
+      "SELECT document_id FROM message_documents WHERE org_id = ?1 AND message_id = ?2 ORDER BY document_id",
+    )
+      .bind(TEST_ORG_ID, done1.messageId)
+      .all<{ document_id: string }>();
+    expect(used.results.map((r) => r.document_id)).toEqual(["doc_1", "doc_2", "doc_3"]);
   });
 
   it("F5: fences an active resume worker that loses lease ownership before it emits output or records usage", async () => {
