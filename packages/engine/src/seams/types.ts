@@ -14,8 +14,10 @@ export interface Principal {
  * - `ingest_key`: `/v1/ingest/:assistantId/*` (checked against the hashed key
  *   only after the org is known).
  * - `preflight`: `OPTIONS /v1/chat`, `OPTIONS /v1/feedback` (an Origin, no key).
- * - `queued_ingest`: an ingest Queue message; its `orgId` was written by the
- *   engine from an org this seam resolved, and is re-checked here.
+ * - `queued_ingest`: an ingest Queue message, or a scheduled sync run; its
+ *   `orgId` was written by the engine (into the message, or the `sources`
+ *   row) from an org this seam resolved, and is re-checked here. Answering
+ *   null for a suspended org stops both its queued work and its syncs.
  */
 export type ScopeClaim =
   | { kind: "public_key"; publicKey: string }
@@ -100,8 +102,32 @@ export type LimitAction =
 
 export type LimitDecision = { ok: true } | { ok: false; reason: "spend_cap" | "rate_limit" };
 
+/**
+ * The answer before a scheduled sync of one source. `maxPages` (pages fetched
+ * in this run) and `maxDocuments` (documents the source may hold) can only
+ * lower the engine's own caps, never raise them.
+ */
+export type SyncLimitDecision =
+  | { ok: true; maxPages?: number | undefined; maxDocuments?: number | undefined }
+  | { ok: false; reason: "suspended" | "plan_limit" };
+
+export interface SyncLimitRequest {
+  sourceId: string;
+}
+
 export interface Limits {
   check(orgId: string, assistantId: string, action: LimitAction): Promise<LimitDecision>;
+  /**
+   * Asked before every scheduled sync run. Optional so hosts written before
+   * scheduled sync keep compiling: when absent, every run may go ahead with
+   * the engine's caps. A refusal records the run as failed (`limit_refused`)
+   * without fetching anything.
+   */
+  checkSync?(
+    orgId: string,
+    assistantId: string,
+    request: SyncLimitRequest,
+  ): Promise<SyncLimitDecision>;
 }
 
 /**

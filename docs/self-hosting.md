@@ -84,6 +84,17 @@ SOLV_INGEST_KEY=<the key> npx solv push ./content \
 5. In `/admin`, open **Behaviour** (or **Widget**) and click **Publish** so the assistant goes live (Publish promotes your draft — behaviour, widget settings, and any enabled tools — to visitors).
 6. Open **Install**, copy the `<script>` tag, paste it into your site, and ask a question.
 
+## Keeping a sitemap source in sync (optional)
+
+A source imported from a sitemap can be read again on a schedule: set its `sync` setting to `"daily"` or `"weekly"` (it is `"off"` by default, so nothing changes until you turn it on). Each run reads the sitemap again, adds pages that are new, re-fetches pages that may have changed, and removes documents whose page is no longer in the sitemap. Only the pages the sitemap lists are fetched; links are not followed.
+
+- **Cheap when nothing changed**: a page whose sitemap `<lastmod>` is the same as last time is not fetched; other pages are asked for with `If-None-Match` / `If-Modified-Since`, and a page whose text has not changed is never embedded again.
+- **Safe against a broken sitemap**: if the sitemap cannot be loaded, lists no pages, or would remove more than half of the source's documents (the `maxRemovePercent` setting, default `50`), the run removes nothing and is recorded as failed.
+- **Caps**: at most 200 pages are fetched per run and a source holds at most 500 documents; the rest are counted as deferred and come up in later runs.
+- Each source records when its last run started and finished, the outcome, the counts (added, updated, unchanged, removed, failed, deferred) and the last error.
+
+The schedule is driven by the cron trigger in `packages/engine/wrangler.jsonc` (`"triggers": { "crons": ["17 * * * *"] }`, hourly; each tick starts at most three due sources). It is deployed with `wrangler deploy`; Workers Free allows 5 cron triggers per account. A daily source runs about once a day, at the first tick a day after its previous run.
+
 ## 5. Tools (optional)
 
 Open **Tools** and add an MCP server by URL (Streamable HTTP over `https:`). Every tool on a newly added server starts off, because every tool call runs with the credential you give — a visitor asking a question is what triggers it. **Use a token that can only read.**
@@ -154,9 +165,10 @@ npm run build
 cd packages/engine && npx wrangler deploy
 ```
 
-No environment variable needs to change. Upgrading to this version signs existing admin sessions out once because session cookies are now signed with a key derived from `SOLV_SECRET_KEY`; sign in again after deploying.
+No environment variable needs to change. The scheduled sitemap sync adds a cron trigger to `wrangler.jsonc`; `wrangler deploy` installs it, and no source syncs until you set its schedule. Upgrading to this version signs existing admin sessions out once because session cookies are now signed with a key derived from `SOLV_SECRET_KEY`; sign in again after deploying.
 
 ## Not here yet
 
 - The cloud layer: public sign-up, teams and roles, billing, managed model keys, and scheduled email digests. Those live in a separate, closed repository; nothing here needs them.
-- A crawler. Content is pushed with `solv push`, imported once from a sitemap, or written by hand under **Sources**.
+- A crawler that follows links. Content is pushed with `solv push`, imported from a sitemap (once, or again daily or weekly; see "Keeping a sitemap source in sync"), or written by hand under **Sources**. Only pages a sitemap lists are ever fetched.
+- A screen for the sync schedule. For now, set `sync` with the admin API (`PATCH /api/admin/sources/<id>` with `{ "settings": { "sync": "daily" } }`).

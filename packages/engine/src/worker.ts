@@ -28,4 +28,8 @@ export default {
   queue(batch: MessageBatch<unknown>, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
     return buildApp(env).queue(batch, env, ctx);
   },
+  // Cron schedule: `triggers.crons` in wrangler.jsonc.
+  scheduled(controller: ScheduledController, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
+    return buildApp(env).scheduled(controller, env, ctx);
+  },
 } satisfies ExportedHandler<WorkerEnv>;

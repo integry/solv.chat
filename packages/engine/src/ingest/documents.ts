@@ -292,6 +292,42 @@ export async function pushDocuments(
 }
 
 /**
+ * Deletes these documents of one source (cascading chunks) in one D1 batch,
+ * then cleans up their vectors and R2 bodies on a best-effort basis. Returns
+ * how many rows were actually removed.
+ */
+export async function removeSourceDocuments(
+  deps: DeleteDeps,
+  sourceId: string,
+  toDelete: ReadonlyArray<{ id: string; bodyKey: string | null }>,
+): Promise<number> {
+  // One D1 batch for every row, then batched cleanup: a large source or
+  // prune stays within the per-request query and subrequest limits instead
+  // of costing several calls per document.
+  const removed = await deps.tenant.documents.removeMany(toDelete.map((doc) => doc.id));
+
+  const vectorIds = [...removed.values()].flat();
+  if (vectorIds.length > 0) {
+    try {
+      await deps.retriever.remove(vectorIds);
+    } catch (err) {
+      console.warn("ingest delete: best-effort vector cleanup failed", {
+        sourceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const bodyKeys = toDelete
+    .filter((doc) => removed.has(doc.id) && doc.bodyKey !== null)
+    .map((doc) => doc.bodyKey as string);
+  for (let i = 0; i < bodyKeys.length; i += R2_DELETE_KEYS_LIMIT) {
+    await tryDeleteObject(deps.docs, bodyKeys.slice(i, i + R2_DELETE_KEYS_LIMIT), sourceId);
+  }
+  return removed.size;
+}
+
+/**
  * Deletes documents by `externalIds` or prunes everything not in `keep`.
  * Deletes the D1 row first (cascading chunks), then performs best-effort
  * cleanup of vectors and R2 objects.
@@ -341,30 +377,7 @@ export async function deleteDocuments(
         )
       : await deps.tenant.documents.getByExternalIds(source.id, externalIds);
 
-  // One D1 batch for every row, then batched cleanup: a large source or
-  // prune stays within the per-request query and subrequest limits instead
-  // of costing several calls per document.
-  const removed = await deps.tenant.documents.removeMany(toDelete.map((doc) => doc.id));
-  const deleted = removed.size;
-
-  const vectorIds = [...removed.values()].flat();
-  if (vectorIds.length > 0) {
-    try {
-      await deps.retriever.remove(vectorIds);
-    } catch (err) {
-      console.warn("ingest delete: best-effort vector cleanup failed", {
-        sourceId: source.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  const bodyKeys = toDelete
-    .filter((doc) => removed.has(doc.id) && doc.bodyKey !== null)
-    .map((doc) => doc.bodyKey as string);
-  for (let i = 0; i < bodyKeys.length; i += R2_DELETE_KEYS_LIMIT) {
-    await tryDeleteObject(deps.docs, bodyKeys.slice(i, i + R2_DELETE_KEYS_LIMIT), source.id);
-  }
+  const deleted = await removeSourceDocuments(deps, source.id, toDelete);
 
   return { written: 0, unchanged: 0, deleted };
 }

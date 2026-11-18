@@ -58,11 +58,23 @@ from the auth seam and pass it down.
   published version, and inserts a fresh draft with the same config; rollback
   republishes an archived version.
 - `sources` — id, assistant_id, kind (`push` | `sitemap` | `entry`), label, settings.
+  A sitemap source's settings are `url` (the sitemap), `sync` (`off` | `daily` |
+  `weekly`; left out means `off`) and `maxRemovePercent` (1–100, default 50); see
+  "Scheduled sitemap sync".
 - `documents` — id, source_id, external_id, url, title, content_hash, updated_at,
   indexed_hash (the content last made searchable), index_error and
   index_error_hash (a short code saying why the content with that hash could
   not be indexed: `too_long`, `missing_body` or `embedding_failed`; never a
-  provider message).
+  provider message), and for sitemap sync: etag, last_modified and
+  sitemap_lastmod (validators from the last check) and sync_checked_at.
+- `source_syncs` — org_id, source_id, run_id, lease_until (set while a run
+  holds the source), started_at, finished_at, outcome (`running` |
+  `succeeded` | `partial` | `failed`), counts (added, updated, unchanged,
+  removed, failed, deferred) and error (a short code). One row per source: the
+  current or latest run.
+- `source_sync_pages` — org_id, run_id, source_id, url, lastmod, state
+  (`pending` | `added` | `updated` | `unchanged` | `failed`): the pages one run
+  queued. Deleted when the source's next run starts.
 - `chunks` — id, document_id, ordinal, text, heading_path. Vectors live in Vectorize
   keyed by chunk id, with `org_id` and `assistant_id` as metadata filters.
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
@@ -133,8 +145,10 @@ consumer recorded an error for the current hash (every failed attempt records
 one; a later success or a new push makes it stale), and "Ready" otherwise, and
 it re-checks every few seconds while anything is indexing or has a failure
 the Queue retries (every code but `too_long`), so a retry that succeeds turns
-the row Ready. There is no crawler in v1: content is pushed (CLI, GitHub
-Action), imported once from a sitemap, or written by hand as an entry.
+the row Ready. Content is pushed (CLI, GitHub Action), imported from a sitemap
+(once, or again on a schedule; see "Scheduled sitemap sync"), or written by
+hand as an entry. There is no crawler that follows links: only the pages a
+sitemap lists are ever fetched.
 
 Sitemap import fetches each chosen page through the `PageFetcher` seam (see
 "Extension seams"). The open build's fetcher validates every URL and redirect
@@ -145,6 +159,61 @@ image) is skipped and counted in the import's `skipped`. Because Workers
 `fetch` resolves the hostname separately from that pre-check, a host that
 changes its DNS answer between the check and the fetch is not caught; that is
 an accepted limitation for an action only the signed-in owner can trigger.
+
+### Scheduled sitemap sync
+
+A sitemap source can stay in step with its sitemap. Its `sync` setting is
+`off` (the default, so sources created before this existed do not change),
+`daily` or `weekly`. A run:
+
+1. Takes the source's lease (`source_syncs.lease_until`, 6 hours) in one
+   statement, so two runs of one source never overlap: a cron firing twice,
+   or a host's cron beside the open one, starts one run. A run still
+   unfinished when its lease ends is reported as `failed` with
+   `interrupted`, and its late queue messages change nothing.
+2. Asks `Limits.checkSync`. A refusal records the run as failed
+   (`limit_refused`) and fetches nothing. The org itself was first passed to
+   `AuthProvider.resolveOrg` (`queued_ingest`); an org it refuses is not read.
+3. Reads the sitemap (the preview's guards and its 2 MiB cap; up to 50,000
+   `<url>` entries with their `<lastmod>`; a sitemap index is not followed).
+4. Guards against a broken sitemap: if it cannot be read (`sitemap_unavailable`),
+   lists no page (`sitemap_empty`), or would remove more than
+   `maxRemovePercent` of the source's documents (`too_many_removals`), the run
+   removes nothing, fetches nothing, and is recorded as failed. A sitemap with
+   more than 50,000 entries removes nothing in that run.
+5. Removes the source's documents whose URL is no longer listed (that source
+   only; vectors and R2 bodies are cleaned up as for a prune).
+6. Skips pages whose sitemap `<lastmod>` equals the one stored at the last
+   check, without fetching them. The rest are queued, new pages first, then
+   the ones checked longest ago, up to the per-run page cap (200) and the
+   source's document cap (500 documents); pages over a cap are counted as
+   `deferred` and come up in a later run. Both caps can be lowered per run by
+   `Limits.checkSync` and for every source by `createApp`'s `sync` option.
+7. Each page is one message on the ingest queue (`kind: "sync_page"`). The
+   consumer fetches it through the `PageFetcher` seam with the stored ETag and
+   Last-Modified as `If-None-Match` / `If-Modified-Since`; a 304 is unchanged,
+   and a fetched page is written through the same path as a push, so an
+   unchanged `content_hash` is a no-op and never re-embedded. A changed page
+   queues the usual chunk-and-embed message. One page per message keeps a
+   consumer batch of four within Workers Free's 50 external subrequests (each
+   page is up to four hops of two DNS-over-HTTPS lookups and a fetch). A page
+   that cannot be fetched or is not a page counts as failed (the run then ends
+   `partial`, with `pages_failed`); a fault in D1 or R2 is retried, and on the
+   third attempt counted as failed.
+8. A page leaves `pending` once, so a retried message is not counted twice;
+   the run finishes, adding up its counts from the pages, when none is
+   pending. Writes are keyed on the document's external id, so nothing is
+   duplicated.
+
+A source is due when its schedule is on, no run holds it, and a full interval
+less 15 minutes has passed since its last run started (so a cron at the same
+minute each day does not miss a day). `app.runDueSyncs(env)` starts up to
+three due sources per call, oldest first; the Workers `scheduled` handler
+calls it, and the open build's `wrangler.jsonc` runs it hourly. A host with
+its own cron (every 10 minutes, say) calls `runDueSyncs` instead. Finding due
+sources is the one query without an org filter: a cron has no request and so
+no org, so it reads only org and source ids, and everything after goes
+through the org's `Tenant` once the auth seam has vouched for it.
 
 D1 is the only source of truth for live chunks; readers resolve retrieved vector
 ids through D1, so leftover vectors and R2 objects can accumulate after failures.
@@ -577,7 +646,13 @@ The cloud layer replaces these and nothing else:
   is also true.
 - `UsageSink` — receives usage events. The open build writes `usage_daily`.
 - `Limits` — answers "may this org do this?". The open build enforces only the
-  per-assistant spend cap and rate limits.
+  per-assistant spend cap and rate limits. The optional
+  `checkSync(orgId, assistantId, { sourceId })` is asked before every
+  scheduled sync run and answers `{ ok: true, maxPages?, maxDocuments? }`
+  (caps that can only lower the engine's) or
+  `{ ok: false, reason: "suspended" | "plan_limit" }`. Left out, every run may
+  go ahead, so hosts written before it compile unchanged. A host keeps a
+  suspended org from syncing by refusing here (or in `resolveOrg`).
 - `PageFetcher` — turns one https URL into
   `{ finalUrl, status, markdown, title, etag, lastModified, notModified }`.
   `fetchPage(url, { etag, lastModified })` sends those validators as
@@ -595,12 +670,17 @@ The cloud layer replaces these and nothing else:
   optional: when a host passes none, `createApp` applies `plainPageFetcher`, so
   `createApp` itself imports it from `src/ingest/` rather than `seams/open/`.
 
+`createApp(seams, options)` returns `fetch`, `queue`, `scheduled` (the Workers
+cron handler) and `runDueSyncs(env)` (the same work, for a host's own cron).
+
 `packages/engine` exports `createApp(seams)` and the open seam implementations
 (`passwordAuth`, `PasswordAuthEnv`, `SINGLE_ORG_ID`, `secretKeys`, `SecretKeyEnv`,
 `usageDaily`, `basicLimits`, `CapMicrosResolver`, `DEFAULT_DAILY_CAP_MICROS`,
 `plainPageFetcher`, `PlainPageFetcherOptions`) and the `PageFetcher` types
 (`PageFetcher`, `PageFetchResult`, `PageContent`, `PageNotModified`,
-`PageNoContent`, `PageValidators`),
+`PageNoContent`, `PageValidators`), the sync types (`SyncLimitDecision`,
+`SyncLimitRequest`, `SourceSyncState`, `SyncCounts`, `SyncOutcome`,
+`SyncErrorCode`, `SyncCaps`, `DueSyncsResult`, `RunDueSyncsOptions`) and caps,
 along with `./migrations/*` and `./package.json` so an embedder can apply
 migrations from the installed package:
 

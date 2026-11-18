@@ -7,7 +7,29 @@ export type SourceKind = "push" | "sitemap" | "entry";
 export type SourceInput =
   | { kind: "push"; label: string; settings: Record<string, never> }
   | { kind: "entry"; label: string; settings: Record<string, never> }
-  | { kind: "sitemap"; label: string; settings: { url: string } };
+  | { kind: "sitemap"; label: string; settings: SitemapSourceSettings };
+
+/** How often a sitemap source is read again. `off` (the default) means only when the owner imports. */
+export type SyncSchedule = "off" | "daily" | "weekly";
+
+export const SYNC_SCHEDULES: readonly SyncSchedule[] = ["off", "daily", "weekly"];
+
+/**
+ * The largest share of a source's documents one scheduled sync may remove,
+ * in percent, unless the owner sets another. A run that would remove more
+ * removes nothing and is recorded as failed: a sitemap that suddenly lists
+ * half the site is more likely broken than pruned.
+ */
+export const DEFAULT_SYNC_MAX_REMOVE_PERCENT = 50;
+
+// A type, not an interface, so it stays assignable to `Record<string, unknown>`.
+export type SitemapSourceSettings = {
+  url: string;
+  /** Left out means `off`, so sources created before scheduling existed do not change. */
+  sync?: SyncSchedule;
+  /** 1 to 100; left out means `DEFAULT_SYNC_MAX_REMOVE_PERCENT`. */
+  maxRemovePercent?: number;
+};
 
 export interface EntryInput {
   question: string;
@@ -70,8 +92,25 @@ export function parseSourceInput(value: unknown): Result<SourceInput> {
     }
     const url = parseUrl(value.settings.url, ["https:"]);
     if (url === null) errors.add("settings.url", "must be an https URL");
+    const sync = value.settings.sync;
+    if (sync !== undefined && !SYNC_SCHEDULES.includes(sync as SyncSchedule)) {
+      errors.add("settings.sync", 'must be "off", "daily", or "weekly"');
+    }
+    const maxRemovePercent = value.settings.maxRemovePercent;
+    if (
+      maxRemovePercent !== undefined &&
+      (typeof maxRemovePercent !== "number" ||
+        !Number.isInteger(maxRemovePercent) ||
+        maxRemovePercent < 1 ||
+        maxRemovePercent > 100)
+    ) {
+      errors.add("settings.maxRemovePercent", "must be a whole number from 1 to 100");
+    }
     if (errors.failed || label === null || url === null) return fail(...errors.list);
-    return ok({ kind: "sitemap", label, settings: { url: url.href } });
+    const settings: SitemapSourceSettings = { url: url.href };
+    if (sync !== undefined) settings.sync = sync as SyncSchedule;
+    if (maxRemovePercent !== undefined) settings.maxRemovePercent = maxRemovePercent as number;
+    return ok({ kind: "sitemap", label, settings });
   }
 
   if (value.settings !== undefined && !isPlainObject(value.settings)) {

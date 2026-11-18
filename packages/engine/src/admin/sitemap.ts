@@ -18,7 +18,7 @@ import {
 import { sha256Hex } from "../util/crypto.js";
 import { BadRequest, NotFound } from "./errors.js";
 
-async function hashUrlExternalId(normalizedUrl: string): Promise<string> {
+export async function hashUrlExternalId(normalizedUrl: string): Promise<string> {
   return `sitemap:${await sha256Hex(normalizedUrl)}`;
 }
 
@@ -39,34 +39,111 @@ export const MAX_URLS = 500;
 export const MAX_IMPORT_URLS = 5;
 export const FETCH_TIMEOUT_MS = PAGE_FETCH_TIMEOUT_MS;
 
+/** A `<loc>` value as the sitemap wrote it, unwrapped and decoded; "" when blank. */
+function locValue(inner: string): string {
+  const raw = inner.trim();
+  const cdata = /^<!\[CDATA\[([\s\S]*?)\]\]>$/.exec(raw);
+  if (cdata?.[1] !== undefined) return cdata[1].trim();
+  return decodeXmlEntities(raw).trim();
+}
+
+/** The URL normalized, or null for a non-https or private URL listed in a sitemap. */
+function safeLoc(raw: string): string | null {
+  if (!raw) return null;
+  try {
+    return assertPublicHttpsUrl(raw).href;
+  } catch {
+    return null;
+  }
+}
+
 function extractLocs(xml: string): string[] {
   const seen = new Set<string>();
   const urls: string[] = [];
   const locRe = /<loc(?:\s[^>]*)?>([\s\S]*?)<\/loc>/gi;
 
   for (const match of xml.matchAll(locRe)) {
-    let raw = (match[1] ?? "").trim();
-    const cdata = /^<!\[CDATA\[([\s\S]*?)\]\]>$/.exec(raw);
-    if (cdata?.[1] !== undefined) {
-      raw = cdata[1].trim();
-    } else {
-      raw = decodeXmlEntities(raw);
-    }
-    if (!raw) continue;
-
-    try {
-      const safe = assertPublicHttpsUrl(raw);
-      if (!seen.has(safe.href)) {
-        seen.add(safe.href);
-        urls.push(safe.href);
-        if (urls.length >= MAX_URLS) break;
-      }
-    } catch {
-      // Skip non-https or private URLs listed in a sitemap.
+    const safe = safeLoc(locValue(match[1] ?? ""));
+    if (safe !== null && !seen.has(safe)) {
+      seen.add(safe);
+      urls.push(safe);
+      if (urls.length >= MAX_URLS) break;
     }
   }
 
   return urls;
+}
+
+/** One page a sitemap lists, with its `<lastmod>` as written, or null when it has none. */
+export interface SitemapEntry {
+  url: string;
+  lastmod: string | null;
+}
+
+export interface SitemapEntries {
+  entries: SitemapEntry[];
+  /** True when the sitemap listed more pages than `maxUrls`; the rest were not read. */
+  truncated: boolean;
+  /** True for a sitemap index, which lists other sitemaps rather than pages. */
+  isIndex: boolean;
+}
+
+/**
+ * Reads `<url>` entries with their `<lastmod>`. A sitemap written as bare
+ * `<loc>` elements (no `<url>` wrappers) is read the way the preview reads it,
+ * without dates.
+ */
+export function extractSitemapEntries(xml: string, maxUrls: number): SitemapEntries {
+  const isIndex = /<sitemapindex[\s>]/i.test(xml);
+  const seen = new Set<string>();
+  const entries: SitemapEntry[] = [];
+  let truncated = false;
+  const add = (url: string | null, lastmod: string | null): boolean => {
+    if (url === null || seen.has(url)) return true;
+    if (entries.length >= maxUrls) {
+      truncated = true;
+      return false;
+    }
+    seen.add(url);
+    entries.push({ url, lastmod });
+    return true;
+  };
+
+  const urlRe = /<url(?:\s[^>]*)?>([\s\S]*?)<\/url>/gi;
+  let sawUrl = false;
+  for (const match of xml.matchAll(urlRe)) {
+    sawUrl = true;
+    const block = match[1] ?? "";
+    const loc = /<loc(?:\s[^>]*)?>([\s\S]*?)<\/loc>/i.exec(block);
+    const lastmod = /<lastmod(?:\s[^>]*)?>([\s\S]*?)<\/lastmod>/i.exec(block);
+    const lastmodValue = lastmod ? locValue(lastmod[1] ?? "").slice(0, 64) : "";
+    if (!add(safeLoc(locValue(loc?.[1] ?? "")), lastmodValue === "" ? null : lastmodValue)) break;
+  }
+  if (!sawUrl) {
+    for (const match of xml.matchAll(/<loc(?:\s[^>]*)?>([\s\S]*?)<\/loc>/gi)) {
+      if (!add(safeLoc(locValue(match[1] ?? "")), null)) break;
+    }
+  }
+  return { entries, truncated, isIndex };
+}
+
+/** Fetches a sitemap under the same guards and caps as the preview. */
+export async function fetchSitemapXml(
+  url: string,
+  fetchImpl: typeof fetch = fetch,
+  options?: SitemapFetchOptions,
+): Promise<string> {
+  const target = assertPublicHttpsUrl(url);
+  // Redirects are followed manually so each hop is checked: `redirect: "follow"`
+  // would let a public URL redirect to a link-local metadata address.
+  const { body } = await fetchCapped(target, fetchImpl, {
+    maxRedirects: MAX_REDIRECTS,
+    timeoutMs: options?.timeoutMs ?? FETCH_TIMEOUT_MS,
+    maxBytes: MAX_SITEMAP_BYTES,
+    accept: "application/xml, text/xml, */*",
+    resolveHost: options?.resolveHost,
+  });
+  return body;
 }
 
 /**
@@ -86,16 +163,7 @@ export async function previewSitemap(
   fetchImpl: typeof fetch = fetch,
   options?: SitemapFetchOptions,
 ): Promise<string[]> {
-  const target = assertPublicHttpsUrl(url);
-  // Redirects are followed manually so each hop is checked: `redirect: "follow"`
-  // would let a public URL redirect to a link-local metadata address.
-  const { body: xml } = await fetchCapped(target, fetchImpl, {
-    maxRedirects: MAX_REDIRECTS,
-    timeoutMs: options?.timeoutMs ?? FETCH_TIMEOUT_MS,
-    maxBytes: MAX_SITEMAP_BYTES,
-    accept: "application/xml, text/xml, */*",
-    resolveHost: options?.resolveHost,
-  });
+  const xml = await fetchSitemapXml(url, fetchImpl, options);
   // A deliberately small extractor rather than an XML parser dependency: we
   // need <loc> values, and anything else in the document is not our business.
   return extractLocs(xml);

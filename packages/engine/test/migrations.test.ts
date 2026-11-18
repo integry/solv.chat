@@ -21,6 +21,8 @@ const EXPECTED_TABLES = [
   "test_runs",
   "gap_answers",
   "assistant_origins",
+  "source_syncs",
+  "source_sync_pages",
 ];
 
 describe("migrations", () => {

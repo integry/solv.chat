@@ -9,8 +9,9 @@ Runs on Cloudflare Workers with your own Anthropic, OpenAI, or OpenRouter key.
 **Status: self-hostable.** The chat engine, widget, admin, MCP tools, page
 actions, answer tests and reports work. The cloud layer — sign-up, teams,
 billing, managed keys, email — is phase 3 and not in this repository; it is not
-needed to run your own. There is no crawler: content is pushed, imported once
-from a sitemap, or written by hand.
+needed to run your own. Content is pushed, imported from a sitemap (once, or
+again daily or weekly), or written by hand. There is no crawler that follows
+links: only the pages a sitemap lists are fetched.
 
 To run your own, follow [docs/self-hosting.md](docs/self-hosting.md). The
 design is in [docs/architecture.md](docs/architecture.md).

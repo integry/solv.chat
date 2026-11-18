@@ -8,10 +8,18 @@ import {
   publicConfigRoute,
   resolveChatProviders,
 } from "./chat/route.js";
-import { forPrincipal, type Tenant } from "./db/tenant.js";
+import { forPrincipal, forScheduledSync, type Tenant } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
 import { plainPageFetcher } from "./ingest/pageFetcher.js";
 import { type IngestResource, ingestRoutes } from "./ingest/router.js";
+import {
+  type DueSyncsResult,
+  isSyncPageMessage,
+  runDueSyncs,
+  runSyncPageBatch,
+  type SyncCaps,
+  type SyncQueue,
+} from "./ingest/sync.js";
 import {
   checkLlmConfigError,
   embedderFor,
@@ -60,11 +68,27 @@ export interface Env extends ProviderEnv {
 export interface App {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response>;
   queue(batch: MessageBatch<unknown>, env: Env, ctx: ExecutionContext): Promise<void>;
+  /** The Workers cron handler: starts the sitemap syncs that are due. */
+  scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void>;
+  /**
+   * The same work as `scheduled`, for a host that runs its own cron: picks
+   * the sitemap sources that are due and starts their runs. Safe to call
+   * often (every 10 minutes, say) and from more than one place at once.
+   */
+  runDueSyncs(env: Env, options?: RunDueSyncsOptions): Promise<DueSyncsResult>;
+}
+
+export interface RunDueSyncsOptions {
+  /** Sources started per call; defaults to `MAX_SYNC_SOURCES_PER_TICK`. */
+  maxSources?: number | undefined;
+  now?: (() => number) | undefined;
 }
 
 export interface AppOptions {
   chat?: ChatRouteOverrides | undefined;
   fetch?: typeof fetch | undefined;
+  /** Lower the engine's sync caps for every source; the Limits seam may lower them further per run. */
+  sync?: SyncCaps | undefined;
 }
 
 /** Creates the Worker fetch and queue handlers wired to the given extension seams. */
@@ -75,8 +99,30 @@ export function createApp(seams: Seams, options?: AppOptions): App {
       : options?.chat;
   // The fifth seam is optional so hosts written before it keep working.
   const pages = seams.pages ?? plainPageFetcher({ fetch: options?.fetch });
+  const resolveQueuedOrg = (orgId: string) =>
+    seams.auth.resolveOrg({ kind: "queued_ingest", orgId });
+
+  const dueSyncs = (env: Env, runOptions?: RunDueSyncsOptions) =>
+    runDueSyncs({
+      db: env.DB,
+      docs: env.DOCS,
+      queue: env.INGEST_QUEUE as unknown as SyncQueue,
+      retriever: vectorizeRetriever(env.VECTORS),
+      limits: seams.limits,
+      resolveOrg: resolveQueuedOrg,
+      fetchImpl: options?.fetch,
+      caps: options?.sync,
+      maxSources: runOptions?.maxSources,
+      now: runOptions?.now,
+    });
 
   return {
+    async scheduled(controller, env, ctx) {
+      void controller;
+      void ctx;
+      await dueSyncs(env);
+    },
+    runDueSyncs: dueSyncs,
     async fetch(request, env, ctx) {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") {
@@ -205,7 +251,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
       }
 
       const retriever = vectorizeRetriever(env.VECTORS);
-      const resolveOrg = (orgId: string) => seams.auth.resolveOrg({ kind: "queued_ingest", orgId });
+      const resolveOrg = resolveQueuedOrg;
       for (const [claimedOrgId, messages] of byOrg) {
         // The message's org is a claim until the auth seam vouches for it:
         // no key is fetched and nothing is read for an org it refuses.
@@ -214,6 +260,20 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           for (const message of messages) message.ack();
           continue;
         }
+        // Sync pages need no embedding key: they fetch and write a page, and
+        // a changed page queues its own chunk-and-embed message.
+        const syncPages = messages.filter((message) => isSyncPageMessage(message.body));
+        const ingest = messages.filter((message) => !isSyncPageMessage(message.body));
+        if (syncPages.length > 0) {
+          await runSyncPageBatch(syncPages, {
+            tenant: forScheduledSync(env.DB, orgId),
+            orgId,
+            docs: env.DOCS,
+            queue: env.INGEST_QUEUE,
+            pages,
+          });
+        }
+        if (ingest.length === 0) continue;
         const settings = await resolveProviderSettings(env.DB, env, orgId);
         const embedder = await embedderFor(
           orgId,
@@ -222,7 +282,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           options?.fetch,
         );
         await runIngestBatch(
-          { messages },
+          { messages: ingest },
           {
             db: env.DB,
             docs: env.DOCS,

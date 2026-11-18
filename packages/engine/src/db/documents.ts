@@ -88,6 +88,26 @@ export interface UpsertDocumentInput {
   updatedAt: number;
 }
 
+/** What a scheduled sync needs to know about a document it may check again. */
+export interface DocumentSyncRow {
+  id: string;
+  externalId: string;
+  url: string;
+  bodyKey: string | null;
+  etag: string | null;
+  lastModified: string | null;
+  sitemapLastmod: string | null;
+  syncCheckedAt: number | null;
+}
+
+/** Validators recorded when a sync checks a page, for the next run's conditional request. */
+export interface DocumentSyncCheck {
+  etag: string | null;
+  lastModified: string | null;
+  sitemapLastmod: string | null;
+  checkedAt: number;
+}
+
 export interface ChunkInput {
   id: string;
   ordinal: number;
@@ -259,6 +279,75 @@ export function documentsFor(db: D1Database, orgId: string) {
         });
       }
       return result;
+    },
+
+    /** Every document of the source, with the validators a sync stored for it. */
+    async listForSync(sourceId: string): Promise<DocumentSyncRow[]> {
+      const res = await prepare(
+        db,
+        `SELECT id, external_id, url, body_key, etag, last_modified, sitemap_lastmod, sync_checked_at
+           FROM documents WHERE org_id = ?1 AND source_id = ?2`,
+      )
+        .bind(orgId, sourceId)
+        .all<{
+          id: string;
+          external_id: string;
+          url: string;
+          body_key: string | null;
+          etag: string | null;
+          last_modified: string | null;
+          sitemap_lastmod: string | null;
+          sync_checked_at: number | null;
+        }>();
+      return res.results.map((row) => ({
+        id: row.id,
+        externalId: row.external_id,
+        url: row.url,
+        bodyKey: row.body_key,
+        etag: row.etag,
+        lastModified: row.last_modified,
+        sitemapLastmod: row.sitemap_lastmod,
+        syncCheckedAt: row.sync_checked_at,
+      }));
+    },
+
+    /** The validators a sync stored for one document, or null when there is no such document. */
+    async syncValidators(
+      sourceId: string,
+      externalId: string,
+    ): Promise<{ id: string; etag: string | null; lastModified: string | null } | null> {
+      const row = await prepare(
+        db,
+        `SELECT id, etag, last_modified FROM documents
+          WHERE org_id = ?1 AND source_id = ?2 AND external_id = ?3`,
+      )
+        .bind(orgId, sourceId, externalId)
+        .first<{ id: string; etag: string | null; last_modified: string | null }>();
+      return row ? { id: row.id, etag: row.etag, lastModified: row.last_modified } : null;
+    },
+
+    /** Stores what a sync learned about a page; false when the document does not exist. */
+    async recordSyncCheck(
+      sourceId: string,
+      externalId: string,
+      check: DocumentSyncCheck,
+    ): Promise<boolean> {
+      const res = await prepare(
+        db,
+        `UPDATE documents SET etag = ?4, last_modified = ?5, sitemap_lastmod = ?6, sync_checked_at = ?7
+          WHERE org_id = ?1 AND source_id = ?2 AND external_id = ?3`,
+      )
+        .bind(
+          orgId,
+          sourceId,
+          externalId,
+          check.etag,
+          check.lastModified,
+          check.sitemapLastmod,
+          check.checkedAt,
+        )
+        .run();
+      return (res.meta.changes ?? 0) > 0;
     },
 
     async upsert(input: UpsertDocumentInput): Promise<DocumentRow> {
