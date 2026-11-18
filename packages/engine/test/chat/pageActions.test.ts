@@ -8,6 +8,7 @@ import {
 } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getConversation } from "../../src/admin/conversations.js";
+import { responseTimeFigures } from "../../src/admin/reports.js";
 import { createApp } from "../../src/app.js";
 import { RESUME_CLAIM_TTL_MS } from "../../src/chat/answer.js";
 import { SAFETY_FRAME } from "../../src/chat/prompt.js";
@@ -373,6 +374,98 @@ describe("chat/pageActions", () => {
       ["resume", "complete", 0],
     ]);
     expect(JSON.stringify(trace)).not.toContain("Ignore previous instructions");
+  });
+
+  it("leaves answers that used a page action out of Response time, before and after they complete", async () => {
+    await publishConfig(true);
+    const everything = {
+      fromDay: "1970-01-01",
+      toDay: "2999-12-31",
+      fromMs: 0,
+      toMs: Number.MAX_SAFE_INTEGER,
+    };
+    const figures = () => responseTimeFigures(tenant, "ast_1", everything);
+    const appWith = (rounds: ScriptRound[]) =>
+      createApp(fakeSeams(), {
+        chat: {
+          embedder,
+          retriever,
+          provider: scriptedProvider(rounds),
+          model: ANTHROPIC_MODELS.fast,
+        },
+      });
+    const doneOf = (events: ChatEvent[]) => {
+      const done = events.find((e) => e.type === "done");
+      if (done?.type !== "done") throw new Error(`expected done, got ${JSON.stringify(events)}`);
+      return done;
+    };
+    async function pauseThenFinish(text: string, callId: string) {
+      const app = appWith([
+        { text, calls: [{ ...NAVIGATE_CALL, callId }] },
+        { text: "You are on the billing page now.", calls: [] },
+      ]);
+      const paused = doneOf(
+        await postChat(app, {
+          message: "How do I change my plan?",
+          pageActions: [NAVIGATE_ACTION],
+        }),
+      );
+      expect(paused.awaitingActions).toEqual([callId]);
+      const stored = await tenant.messages.get(paused.messageId);
+      return {
+        stored,
+        finish: async () => {
+          const finished = doneOf(
+            await postChat(app, {
+              conversationId: paused.conversationId,
+              resumeMessageId: paused.messageId,
+              actionResults: [{ callId, ok: true, result: "{}" }],
+            }),
+          );
+          expect(finished.awaitingActions).toBeUndefined();
+          expect(finished.messageId).toBe(paused.messageId);
+          return tenant.messages.get(paused.messageId);
+        },
+      };
+    }
+
+    // An action with no text before it: no first token, which is not an old answer.
+    const actionOnly = await pauseThenFinish("", "call_nav_only");
+    expect(actionOnly.stored?.firstTokenMs).toBeNull();
+    expect(await figures()).toMatchObject({
+      status: "page_actions_only",
+      answers: 0,
+      pageActionAnswers: 1,
+      timed: 0,
+    });
+    // Completed, it still has only the first request's timings, and is still left out.
+    const actionOnlyDone = await actionOnly.finish();
+    expect(actionOnlyDone?.content).toBe("You are on the billing page now.");
+    expect(actionOnlyDone?.totalMs).toBe(actionOnly.stored?.totalMs);
+    expect(await figures()).toMatchObject({ status: "page_actions_only", pageActionAnswers: 1 });
+
+    // Text before the pause: it has a first token, and is left out all the same.
+    const textFirst = await pauseThenFinish("Let me open that for you. ", "call_nav_text");
+    expect(textFirst.stored?.firstTokenMs).toEqual(expect.any(Number));
+    expect(await figures()).toMatchObject({ status: "page_actions_only", pageActionAnswers: 2 });
+    await textFirst.finish();
+    expect(await figures()).toMatchObject({ status: "page_actions_only", pageActionAnswers: 2 });
+
+    // An ordinary answer: the figures are its own.
+    const plain = doneOf(
+      await postChat(appWith([{ text: "Open the billing page.", calls: [] }]), {
+        message: "How do I change my plan?",
+      }),
+    );
+    const plainRow = await tenant.messages.get(plain.messageId);
+    expect(await figures()).toMatchObject({
+      status: "measured",
+      answers: 1,
+      pageActionAnswers: 2,
+      timed: 1,
+      firstTokenMedianMs: plainRow?.firstTokenMs,
+      totalMedianMs: plainRow?.totalMs,
+    });
   });
 
   it("refuses unknown, completed, foreign-org, wrong-visitor, and wrong-conversation resumes identically", async () => {

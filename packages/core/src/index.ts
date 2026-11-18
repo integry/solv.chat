@@ -5,6 +5,9 @@ export type {
   OverviewPeriod,
   OverviewSetup,
   PeriodFigures,
+  ResponseTimeFigures,
+  ResponseTimePeriod,
+  ResponseTimeStatus,
 } from "./monitor.js";
 export { Errors, fail, ok, type Result } from "./result.js";
 export {

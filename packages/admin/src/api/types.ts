@@ -2,6 +2,7 @@ import type {
   OverviewAttention,
   OverviewPeriod,
   OverviewSetup,
+  ResponseTimePeriod,
   SourceKind,
   TestExpectation,
   VersionConfig,
@@ -13,6 +14,9 @@ export type {
   OverviewPeriod,
   OverviewSetup,
   PeriodFigures,
+  ResponseTimeFigures,
+  ResponseTimePeriod,
+  ResponseTimeStatus,
 } from "@solvchat/core";
 
 export interface Assistant {
@@ -236,6 +240,8 @@ export interface AssistantReport {
   topSources: SourceCitationCount[];
   uncitedSources: Array<{ url: string; title: string }>;
   uncitedTotal: number;
+  /** Optional so a report from an engine older than the figure still renders. */
+  responseTime?: ResponseTimePeriod;
 }
 
 export interface AssistantOverview {
@@ -249,6 +255,7 @@ export interface AssistantOverview {
   daily?: Array<{ day: string; questions: number }>;
   setup?: OverviewSetup;
   attention?: OverviewAttention;
+  responseTime?: ResponseTimePeriod;
 }
 
 export interface InstallInfo {

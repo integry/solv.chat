@@ -2,6 +2,7 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import { type ChatEvent, defaultVersionConfig, parseChatEventLine } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnswerTraceView } from "../../src/admin/conversations.js";
+import { responseTimeFigures } from "../../src/admin/reports.js";
 import { createApp } from "../../src/app.js";
 import { type AnswerDeps, answerMessage, SCORE_FLOOR } from "../../src/chat/answer.js";
 import { SAFETY_FRAME } from "../../src/chat/prompt.js";
@@ -599,6 +600,32 @@ describe("chat/trace", () => {
         n: number;
       }>();
       expect(left?.n).toBe(0);
+    });
+
+    it("counts only visitor answers in Response time: a Try it or test-run answer is left out", async () => {
+      await seedChunk("chk_hit", "doc_hit", CHUNK_TEXT, QUESTION);
+      // A visitor answer, through the real route.
+      const { done } = await ask(appFor());
+      const visitor = await tenant.messages.get(done.messageId);
+      // A "Try it" answer and a test run take this same path with `preview: true`.
+      const provider = scripted([
+        async function* () {
+          yield { kind: "text", text: "Invoices go out monthly." };
+          yield { kind: "usage", tokensIn: 50, tokensOut: 6, stopReason: "end" };
+        },
+      ]);
+      await drain(answerMessage(depsWith(provider), { ...input, preview: true }));
+      await drain(answerMessage(depsWith(provider), { ...input, preview: true }));
+
+      const figures = await responseTimeFigures(tenant, "ast_1", {
+        fromDay: "1970-01-01",
+        toDay: "2999-12-31",
+        fromMs: 0,
+        toMs: Number.MAX_SAFE_INTEGER,
+      });
+      expect(figures).toMatchObject({ status: "measured", answers: 1, timed: 1 });
+      expect(figures.firstTokenMedianMs).toBe(visitor?.firstTokenMs);
+      expect(figures.totalMedianMs).toBe(visitor?.totalMs);
     });
   });
 });

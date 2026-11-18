@@ -22,6 +22,49 @@ export interface OverviewPeriod extends PeriodFigures {
   previous: PeriodFigures;
 }
 
+/**
+ * Why a response-time figure has no number: `no_answers` (no answer in the
+ * range), `page_actions_only` (every answer in the range used a page action,
+ * and those are left out), or `mostly_untimed` (most answers in the range were
+ * written before answers were timed, so a number from the few timed ones would
+ * mislead).
+ */
+export type ResponseTimeStatus = "measured" | "no_answers" | "page_actions_only" | "mostly_untimed";
+
+/**
+ * How fast visitor answers came over one range. The three times are whole
+ * milliseconds, and `null` unless `status` is `measured`.
+ */
+export interface ResponseTimeFigures {
+  /** First UTC day of the range, `YYYY-MM-DD`. */
+  from: string;
+  /** Last UTC day of the range, `YYYY-MM-DD`. */
+  to: string;
+  status: ResponseTimeStatus;
+  /** Visitor answers in the range the figures are about: page-action answers are not among them. */
+  answers: number;
+  /**
+   * Visitor answers in the range that used a page action, left out of every
+   * figure: their stored times cover only the request before the page action,
+   * not the rest of the answer written after it.
+   */
+  pageActionAnswers: number;
+  /** Of those, answers that have timings. */
+  timed: number;
+  /** Median time until the answer starts appearing. */
+  firstTokenMedianMs: number | null;
+  /** 90th percentile of the time until the answer starts appearing. */
+  firstTokenP90Ms: number | null;
+  /** Median time until the answer is complete. */
+  totalMedianMs: number | null;
+}
+
+/** Response time for a period, with the same figures for the period of the same length before it. */
+export interface ResponseTimePeriod extends ResponseTimeFigures {
+  days: number;
+  previous: ResponseTimeFigures;
+}
+
 /** The getting-started checklist, each step read from stored state. */
 export interface OverviewSetup {
   hasContent: boolean;
