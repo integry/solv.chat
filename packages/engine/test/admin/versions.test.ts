@@ -165,9 +165,81 @@ describe("admin versions API", () => {
     expect(versions.slice(0, 100).every((v) => v.state === "archived")).toBe(true);
     expect(versions.find((v) => v.state === "draft")?.id).toBe(draftRow?.id);
     expect(versions.find((v) => v.state === "published")?.id).toBe(pub.version.id);
-    // Still newest first.
-    const created = versions.map((v) => v.createdAt);
-    expect(created).toEqual([...created].sort((a, b) => b - a));
+    // Still newest first, by when each was published (the draft: created).
+    const times = versions.map((v) => v.publishedAt ?? v.createdAt);
+    expect(times).toEqual([...times].sort((a, b) => b - a));
+  });
+
+  it("keeps published versions unbroken when an old draft is published and then replaced past the history limit", async () => {
+    const pub = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`)
+    ).json()) as { version: VersionRow };
+    const oldDraft = (await tableVersions(assistantId)).find((r) => r.state === "draft");
+    expect(oldDraft).toBeDefined();
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Old draft greeting" },
+    });
+
+    // 100 restores while the draft is kept: each archived the live version
+    // and published a newer row, all created after the draft.
+    const t0 = Date.now() + 60_000;
+    const restoreIds = Array.from({ length: 100 }, () => newId("ver"));
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE assistant_versions SET state = 'archived' WHERE assistant_id = ?1 AND state = 'published'",
+      ).bind(assistantId),
+      ...restoreIds.map((id, i) =>
+        env.DB.prepare(
+          "INSERT INTO assistant_versions (id, org_id, assistant_id, state, config, created_at, published_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        ).bind(
+          id,
+          TEST_ORG_ID,
+          assistantId,
+          i === restoreIds.length - 1 ? "published" : "archived",
+          JSON.stringify({
+            ...JSON.parse(oldDraft?.config ?? "{}"),
+            behaviour: {
+              ...JSON.parse(oldDraft?.config ?? "{}").behaviour,
+              greeting: `Restore ${i}`,
+            },
+          }),
+          t0 + i * 1_000,
+        ),
+      ),
+    ]);
+
+    // Publish the old draft: it keeps its old created_at.
+    vi.useFakeTimers();
+    vi.setSystemTime(t0 + 200_000);
+    const published = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    expect(published.status).toBe(200);
+    expect(((await published.json()) as { version: VersionRow }).version.id).toBe(oldDraft?.id);
+
+    // Restore a visible archived version: the old draft is now archived.
+    vi.setSystemTime(t0 + 300_000);
+    const restored = await call(
+      app,
+      "POST",
+      `/api/admin/assistants/${assistantId}/versions/${restoreIds[98]}/rollback`,
+    );
+    expect(restored.status).toBe(200);
+    const restoredId = ((await restored.json()) as { version: VersionRow }).version.id;
+    expect((await tableVersions(assistantId)).find((r) => r.id === oldDraft?.id)?.state).toBe(
+      "archived",
+    );
+
+    const res = await call(app, "GET", `/api/admin/assistants/${assistantId}/versions`);
+    const { versions } = (await res.json()) as { versions: VersionRow[] };
+    const listed = versions.filter((v) => v.publishedAt !== null).map((v) => v.id);
+    // The listed publications are exactly the newest ones, with no gap.
+    const all = (await tableVersions(assistantId))
+      .filter((r) => r.published_at !== null)
+      .sort((a, b) => (b.published_at ?? 0) - (a.published_at ?? 0))
+      .map((r) => r.id);
+    expect(listed).toEqual(all.slice(0, listed.length));
+    // The restore is listed right above the old draft it replaced.
+    expect(listed.slice(0, 3)).toEqual([restoredId, oldDraft?.id, restoreIds[99]]);
+    expect(listed).not.toContain(pub.version.id);
   });
 
   it("rollback republishes an archived config without mutating the old row or the draft", async () => {
