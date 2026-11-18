@@ -37,8 +37,15 @@ function row(
   };
 }
 
-/** Answers the versions list and rollback for one assistant. */
-function stubVersions(versions: VersionRow[]) {
+/**
+ * Answers the versions list, the draft and rollback for one assistant. The
+ * draft defaults to the one in the list; pass `draft` to serve one the
+ * (bounded) list does not contain.
+ */
+function stubVersions(
+  versions: VersionRow[],
+  draft: VersionRow | null = versions.find((v) => v.state === "draft") ?? null,
+) {
   const calls: Array<{ method: string; path: string }> = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -48,6 +55,11 @@ function stubVersions(versions: VersionRow[]) {
     calls.push({ method, path });
     if (path === "/api/admin/assistants/ast_1/versions" && method === "GET") {
       return Response.json({ versions });
+    }
+    if (path === "/api/admin/assistants/ast_1/draft" && method === "GET") {
+      return draft
+        ? Response.json({ draft })
+        : Response.json({ error: "Not found." }, { status: 404 });
     }
     const rollback = /\/versions\/([^/]+)\/rollback$/.exec(path);
     if (rollback && method === "POST") {
@@ -149,6 +161,23 @@ describe("DiffList", () => {
     expect(item.textContent).toContain("NowTwo?, One?");
   });
 
+  it("shows the new order when kept items move and an item is added", () => {
+    const changes = diffVersionConfigs(
+      config((c) => {
+        c.behaviour.suggestedQuestions = ["One?", "Two?"];
+      }),
+      config((c) => {
+        c.behaviour.suggestedQuestions = ["Two?", "One?", "Three?"];
+      }),
+    );
+    render(<DiffList changes={changes} />);
+    const item = screen.getByText("Suggested questions").closest("li") as HTMLElement;
+    expect(item.textContent).toContain("Added: Three?");
+    expect(item.textContent).toContain("The order changed too.");
+    expect(item.textContent).toContain("WasOne?, Two?");
+    expect(item.textContent).toContain("NowTwo?, One?, Three?");
+  });
+
   it("shows a replaced credential without its value", () => {
     const fields: DiffField[] = [
       { path: "tool.credential", label: "Order lookup key", screen: "Tools", kind: "secret" },
@@ -213,6 +242,32 @@ describe("Publish confirmation", () => {
     expect(publish.disabled).toBe(true);
     fireEvent.click(publish);
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("finds the draft even when History no longer lists it", async () => {
+    // 100 newer restores push the draft out of the bounded versions list.
+    const restores = Array.from({ length: 100 }, (_, i) =>
+      row(
+        `ver_r${i}`,
+        i === 0 ? "published" : "archived",
+        LIVE,
+        1_700_000_900_000 - i,
+        1_700_000_900_000 - i,
+      ),
+    );
+    const { calls } = stubVersions(restores, row("ver_draft", "draft", EDITED, null));
+    const onConfirm = vi.fn();
+    render(
+      <PublishConfirmDialog assistantId="ast_1" open onConfirm={onConfirm} onCancel={() => {}} />,
+    );
+    const region = screen.getByRole("region", { name: "What will change" });
+    await within(region).findByText("Greeting");
+    expect(screen.queryByText("There is no draft to publish.")).toBeNull();
+    expect(calls).toContainEqual({ method: "GET", path: "/api/admin/assistants/ast_1/draft" });
+    const publish = screen.getByRole("button", { name: "Publish now" }) as HTMLButtonElement;
+    expect(publish.disabled).toBe(false);
+    fireEvent.click(publish);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 
   it("allows the first publish with nothing to compare", async () => {

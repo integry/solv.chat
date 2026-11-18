@@ -3,11 +3,26 @@ import type { Tenant } from "../db/tenant.js";
 import { expectedVersionConfig, type VersionRow } from "../db/versions.js";
 import { BadRequest, Conflict, NotFound } from "./errors.js";
 
-/** Lists version history for an assistant, newest first. */
+/**
+ * Lists version history for an assistant, newest first. History is bounded,
+ * and the draft and the live version keep their original created_at (a
+ * rollback inserts newer rows without touching either), so they can fall
+ * outside it. They are always added at the end: by created_at they are older
+ * than every row the bounded list kept. Publish, Restore and the draft row
+ * compare against them, so the list must never hide them.
+ */
 export async function listVersions(tenant: Tenant, assistantId: string): Promise<VersionRow[]> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
-  return tenant.versions.history(assistantId);
+  const [history, draft, published] = await Promise.all([
+    tenant.versions.history(assistantId),
+    tenant.versions.draft(assistantId),
+    tenant.versions.published(assistantId),
+  ]);
+  const missing = [draft, published]
+    .filter((v): v is VersionRow => v !== null && !history.some((h) => h.id === v.id))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  return missing.length === 0 ? history : [...history, ...missing];
 }
 
 /** Reads the assistant's current draft version. */

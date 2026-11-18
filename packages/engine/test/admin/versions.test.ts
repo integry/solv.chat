@@ -141,6 +141,35 @@ describe("admin versions API", () => {
     expect(versions[2]?.id).toBe(pub1.version.id);
   });
 
+  it("always lists the draft and the live version, even past the history limit", async () => {
+    const pub = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`)
+    ).json()) as { version: VersionRow };
+    const rows = await tableVersions(assistantId);
+    const draftRow = rows.find((r) => r.state === "draft");
+    expect(draftRow).toBeDefined();
+    // 100 newer rows, as repeated restores leave behind: the bounded history
+    // ordered by created_at no longer reaches the draft or the live version.
+    const later = Date.now() + 60_000;
+    await env.DB.batch(
+      Array.from({ length: 100 }, (_, i) =>
+        env.DB.prepare(
+          "INSERT INTO assistant_versions (id, org_id, assistant_id, state, config, created_at, published_at) VALUES (?1, ?2, ?3, 'archived', ?4, ?5, ?5)",
+        ).bind(newId("ver"), TEST_ORG_ID, assistantId, draftRow?.config, later + i),
+      ),
+    );
+
+    const res = await call(app, "GET", `/api/admin/assistants/${assistantId}/versions`);
+    const { versions } = (await res.json()) as { versions: VersionRow[] };
+    expect(versions).toHaveLength(102);
+    expect(versions.slice(0, 100).every((v) => v.state === "archived")).toBe(true);
+    expect(versions.find((v) => v.state === "draft")?.id).toBe(draftRow?.id);
+    expect(versions.find((v) => v.state === "published")?.id).toBe(pub.version.id);
+    // Still newest first.
+    const created = versions.map((v) => v.createdAt);
+    expect(created).toEqual([...created].sort((a, b) => b - a));
+  });
+
   it("rollback republishes an archived config without mutating the old row or the draft", async () => {
     const t0 = Date.now() + 1_000;
     vi.useFakeTimers();

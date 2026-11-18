@@ -78,27 +78,32 @@ function WordDiff({ words }: { words: readonly WordPart[] }) {
 }
 
 function ListChange({ change }: { change: Extract<ConfigChange, { kind: "list" }> }) {
-  if (change.reordered) {
-    return (
-      <>
-        <p className="diff-note">Same items, new order.</p>
-        <WasNow before={change.before.join(", ")} after={change.after.join(", ")} />
-      </>
-    );
-  }
+  const membership = change.added.length > 0 || change.removed.length > 0;
   return (
-    <ul className="diff-items">
-      {change.added.map((item) => (
-        <li key={`added-${item}`} className="diff-item-added">
-          <span className="diff-mark">Added:</span> {item}
-        </li>
-      ))}
-      {change.removed.map((item) => (
-        <li key={`removed-${item}`} className="diff-item-removed">
-          <span className="diff-mark">Removed:</span> {item}
-        </li>
-      ))}
-    </ul>
+    <>
+      {membership && (
+        <ul className="diff-items">
+          {change.added.map((item) => (
+            <li key={`added-${item}`} className="diff-item-added">
+              <span className="diff-mark">Added:</span> {item}
+            </li>
+          ))}
+          {change.removed.map((item) => (
+            <li key={`removed-${item}`} className="diff-item-removed">
+              <span className="diff-mark">Removed:</span> {item}
+            </li>
+          ))}
+        </ul>
+      )}
+      {change.reordered && (
+        <>
+          <p className="diff-note">
+            {membership ? "The order changed too." : "Same items, new order."}
+          </p>
+          <WasNow before={change.before.join(", ")} after={change.after.join(", ")} />
+        </>
+      )}
+    </>
   );
 }
 

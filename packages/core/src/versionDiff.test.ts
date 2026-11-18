@@ -169,6 +169,37 @@ describe("diffVersionConfigs", () => {
     });
   });
 
+  it("notices kept items changing order alongside an addition", () => {
+    const before = config((c) => {
+      c.behaviour.suggestedQuestions = ["One?", "Two?"];
+    });
+    const after = config((c) => {
+      c.behaviour.suggestedQuestions = ["Two?", "One?", "Three?"];
+    });
+    expect(only(diffVersionConfigs(before, after))).toMatchObject({
+      kind: "list",
+      before: ["One?", "Two?"],
+      after: ["Two?", "One?", "Three?"],
+      added: ["Three?"],
+      removed: [],
+      reordered: true,
+    });
+  });
+
+  it("does not call a list reordered when only additions or removals moved items", () => {
+    const before = config((c) => {
+      c.behaviour.suggestedQuestions = ["One?", "Two?", "Three?"];
+    });
+    const after = config((c) => {
+      c.behaviour.suggestedQuestions = ["Zero?", "One?", "Three?"];
+    });
+    expect(only(diffVersionConfigs(before, after))).toMatchObject({
+      added: ["Zero?"],
+      removed: ["Two?"],
+      reordered: false,
+    });
+  });
+
   it("gives long text a word-level diff", () => {
     const before = config((c) => {
       c.behaviour.persona = "Friendly and concise.";

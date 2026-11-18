@@ -24,7 +24,7 @@ export const DIFF_SCREENS: readonly DiffScreen[] = [
 /**
  * - `text`: a short value shown whole, old and new.
  * - `longText`: shown as a word-level diff.
- * - `list`: items added and removed (and whether only the order changed).
+ * - `list`: items added and removed, and whether the kept items changed order.
  * - `colour`: a hex colour, shown as text beside a swatch.
  * - `boolean`: "On" or "Off".
  * - `secret`: never shown; only that it changed.
@@ -121,7 +121,10 @@ export type ConfigChange =
       after: string[];
       added: string[];
       removed: string[];
-      /** Same items, different order. */
+      /**
+       * The items in both lists are in a different order. Can be true
+       * alongside additions and removals: the order is visitor-visible.
+       */
       reordered: boolean;
     })
   // No values at all: a credential is never part of a diff.
@@ -251,6 +254,8 @@ function diffField(field: DiffField, beforeRaw: unknown, afterRaw: unknown): Con
       if (sameList(before, after)) return null;
       const added = after.filter((item) => !before.includes(item));
       const removed = before.filter((item) => !after.includes(item));
+      const keptBefore = before.filter((item) => after.includes(item));
+      const keptAfter = after.filter((item) => before.includes(item));
       return {
         ...base,
         kind: "list",
@@ -258,7 +263,7 @@ function diffField(field: DiffField, beforeRaw: unknown, afterRaw: unknown): Con
         after,
         added,
         removed,
-        reordered: added.length === 0 && removed.length === 0,
+        reordered: !sameList(keptBefore, keptAfter),
       };
     }
     case "boolean": {

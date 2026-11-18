@@ -465,7 +465,12 @@ Install
   the version schema and fails for a setting with no entry. A `secret` setting
   only ever reads "Credential replaced" (or added, removed), never its value;
   no version setting is one today, as tool credentials live on the tool server.
-  Origins and tool names are shown in full. Tests are stored per assistant, not
+  Origins and tool names are shown in full. A list whose kept items change
+  order shows its full old and new order, also when items were added or
+  removed. Publish reads the draft from the draft endpoint, not from History.
+  The versions list is the newest 100, plus the draft and the live version
+  whenever those are older than that, so the live version is always there to
+  compare with. Tests are stored per assistant, not
   per version, so they are not part of a version's diff; the daily spend cap,
   which no screen edits, is grouped under "Spending".
 - Gaps and Conversations offer one-click fixes: "Write an answer" on Gaps (creates

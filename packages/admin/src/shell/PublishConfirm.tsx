@@ -23,15 +23,28 @@ export function PublishConfirmDialog(props: PublishConfirmDialogProps) {
 }
 
 function PublishConfirmBody({ assistantId, onConfirm, onCancel }: PublishConfirmDialogProps) {
-  const res = useResource<{ versions: VersionRow[] }>(
+  // The draft comes from its own endpoint, the one Publish sends: never from
+  // History, which is bounded. The engine always includes the live version in
+  // the versions list, however long History has grown.
+  const draftRes = useResource<{ draft: VersionRow }>(`/api/admin/assistants/${assistantId}/draft`);
+  const versionsRes = useResource<{ versions: VersionRow[] }>(
     `/api/admin/assistants/${assistantId}/versions`,
   );
   const cancelRef = useRef<HTMLButtonElement>(null);
-  const versions = res.status === "ready" ? (res.value?.versions ?? null) : null;
-  const draft = versions?.find((v) => v.state === "draft") ?? null;
-  const published = versions?.find((v) => v.state === "published") ?? null;
+  const status =
+    draftRes.status === "error" || versionsRes.status === "error"
+      ? "error"
+      : draftRes.status === "ready" && versionsRes.status === "ready"
+        ? "ready"
+        : "loading";
+  const error = draftRes.error ?? versionsRes.error;
+  const ready = status === "ready";
+  const draft = ready ? (draftRes.value?.draft ?? null) : null;
+  const published = ready
+    ? (versionsRes.value?.versions.find((v) => v.state === "published") ?? null)
+    : null;
   const changes = draft && published ? diffVersionConfigs(published.config, draft.config) : null;
-  const firstPublish = versions !== null && draft !== null && published === null;
+  const firstPublish = ready && draft !== null && published === null;
   const canPublish = firstPublish || (changes !== null && changes.length > 0);
 
   return (
@@ -62,16 +75,16 @@ function PublishConfirmBody({ assistantId, onConfirm, onCancel }: PublishConfirm
         <h3 id="publish-diff-heading" className="diff-section-heading">
           What will change
         </h3>
-        {res.status === "loading" && <p className="muted">Comparing with the live version…</p>}
-        {res.status === "error" && (
+        {status === "loading" && <p className="muted">Comparing with the live version…</p>}
+        {status === "error" && (
           <p className="error-text" role="alert">
-            {res.error}
+            {error}
           </p>
         )}
-        {versions !== null && firstPublish && (
+        {firstPublish && (
           <p className="muted">Nothing is live yet. This will be the first version visitors get.</p>
         )}
-        {versions !== null && !draft && <p className="muted">There is no draft to publish.</p>}
+        {ready && !draft && <p className="muted">There is no draft to publish.</p>}
         {changes !== null && (
           <DiffList changes={changes} headingLevel={4} emptyText="Nothing has changed." />
         )}
