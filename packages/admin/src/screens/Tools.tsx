@@ -403,6 +403,67 @@ function EditServerForm({
   );
 }
 
+/**
+ * "Send conversation context", on the server's card so the owner sees at a
+ * glance which servers get the ids. Saved at once, like a tool switch.
+ */
+function ContextSwitch({
+  server,
+  onSaved,
+}: {
+  server: McpServerSummary;
+  onSaved: (server: McpServerSummary) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const on = server.sendConversationContext === true;
+  const hintId = `context-hint-${server.id}`;
+
+  async function toggle() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await patchJson<{ server: McpServerSummary }>(
+        `/api/admin/mcp-servers/${server.id}`,
+        { sendConversationContext: !on },
+      );
+      onSaved(res.server);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not change that setting.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="context-switch">
+      <label className="checkbox-label">
+        <input
+          type="checkbox"
+          role="switch"
+          checked={on}
+          aria-checked={on}
+          aria-describedby={hintId}
+          disabled={busy}
+          onChange={() => void toggle()}
+        />
+        <span>Send conversation context</span>
+      </label>
+      <p id={hintId} className="field-hint">
+        Adds this chat's conversation, visitor and assistant ids to each request (never messages,
+        addresses or pages), so a server you run or trust can tell visitors apart, for example to
+        limit each one.
+      </p>
+      {error && (
+        <p className="error-text" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function ToolList({
   server,
   refreshVersion,
@@ -692,6 +753,25 @@ export function Tools({ assistantId }: ToolsProps) {
                   </button>
                 </div>
               </div>
+
+              <ContextSwitch
+                server={server}
+                onSaved={(saved) => {
+                  if (serversRes.value) {
+                    serversRes.setValue({
+                      servers: serversRes.value.servers.map((s) =>
+                        s.id === saved.id ? { ...s, ...saved } : s,
+                      ),
+                    });
+                  }
+                  toast.success(
+                    saved.sendConversationContext
+                      ? `${saved.label} now gets conversation context.`
+                      : `${saved.label} no longer gets conversation context.`,
+                  );
+                  serversRes.reload();
+                }}
+              />
 
               {connection[server.id]?.ok === false && (
                 <Notice tone="warning">

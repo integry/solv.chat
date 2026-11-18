@@ -300,4 +300,113 @@ describe("solv apply", () => {
     expect(called).toBe(false);
     expect(logs.join("\n")).toContain(expected);
   });
+
+  it("sets Send conversation context from mcpServers and keeps the key out of the config PUT", async () => {
+    const configPath = join(root, "solv.config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        behaviour: { greeting: "Welcome" },
+        mcpServers: [{ url: "https://tools.example.com/mcp", sendConversationContext: true }],
+      }),
+      "utf8",
+    );
+
+    // A stand-in for the engine: stores the setting so GET after PUT reads it back.
+    const stored = new Map([["https://tools.example.com/mcp", false]]);
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      calls.push({ url, method, ...(body === undefined ? {} : { body }) });
+      if (url.endsWith("/mcp-servers")) {
+        let changed = 0;
+        if (method === "PUT") {
+          for (const s of (
+            body as { servers: Array<{ url: string; sendConversationContext: boolean }> }
+          ).servers) {
+            if (stored.get(s.url) !== s.sendConversationContext) changed += 1;
+            stored.set(s.url, s.sendConversationContext);
+          }
+        }
+        return Response.json({
+          servers: [...stored].map(([u, on]) => ({
+            label: "Orders",
+            url: u,
+            sendConversationContext: on,
+          })),
+          changed,
+        });
+      }
+      return Response.json({ config: defaultVersionConfig() });
+    };
+
+    const logs: string[] = [];
+    await apply(
+      {
+        file: configPath,
+        endpoint: "https://chat.example.com",
+        assistant: "ast_123",
+        ingestKey: "ik_secret_key",
+      },
+      { fetchImpl, log: (line) => logs.push(line) },
+    );
+
+    const configPut = calls.find((c) => c.method === "PUT" && c.url.endsWith("/config"));
+    expect(configPut?.body).toEqual({ behaviour: { greeting: "Welcome" } });
+    const serversPut = calls.find((c) => c.url.endsWith("/mcp-servers"));
+    expect(serversPut?.url).toBe("https://chat.example.com/v1/ingest/ast_123/mcp-servers");
+    expect(serversPut?.method).toBe("PUT");
+    expect(serversPut?.body).toEqual({
+      servers: [{ url: "https://tools.example.com/mcp", sendConversationContext: true }],
+    });
+    expect(stored.get("https://tools.example.com/mcp")).toBe(true);
+    expect(logs).toContain(
+      "Tool server Orders (https://tools.example.com/mcp): send conversation context on.",
+    );
+    expect(logs).toContain("Tool servers: 1 changed.");
+
+    // Applying the same file again changes nothing.
+    logs.length = 0;
+    await apply(
+      {
+        file: configPath,
+        endpoint: "https://chat.example.com",
+        assistant: "ast_123",
+        ingestKey: "ik_secret_key",
+      },
+      { fetchImpl, log: (line) => logs.push(line) },
+    );
+    expect(logs).toContain("Tool servers: 0 changed.");
+  });
+
+  it("refuses an invalid mcpServers entry before sending anything", async () => {
+    const configPath = join(root, "solv.config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        mcpServers: [{ url: "http://tools.example.com/mcp", sendConversationContext: "yes" }],
+      }),
+      "utf8",
+    );
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      calls.push(String(input));
+      return Response.json({});
+    };
+    const logs: string[] = [];
+    await expect(
+      apply(
+        {
+          file: configPath,
+          endpoint: "https://chat.example.com",
+          assistant: "ast_123",
+          ingestKey: "ik_secret_key",
+        },
+        { fetchImpl, log: (line) => logs.push(line) },
+      ),
+    ).rejects.toThrow(/mcpServers\[0\]\.url/);
+    expect(calls).toEqual([]);
+  });
 });

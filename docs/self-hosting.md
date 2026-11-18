@@ -92,6 +92,28 @@ A tool runs for visitors only when both are true: you switched it on under **Too
 
 If the server needs a key, enter the header name it expects and the key value. It is stored encrypted with `SOLV_SECRET_KEY` and never shown again, so keep your own copy. If you rotate `SOLV_SECRET_KEY`, stored tool credentials become unreadable until you re-enter them on the **Tools** screen.
 
+### Send conversation context
+
+Every tool call comes from your Worker, so a tool server sees all your visitors as one caller. If the server limits or tracks work per visitor, switch on **Send conversation context** on that server's card under **Tools** (it is off for every server until you do, and takes effect at once; it is not part of Publish). Each request the engine then makes to that server for a visitor's chat (`initialize`, `tools/list` and `tools/call`) carries three headers:
+
+| Header                 | Value                                                         |
+| ---------------------- | ------------------------------------------------------------- |
+| `Solv-Conversation-Id` | the conversation id (`cnv_…`)                                 |
+| `Solv-Visitor-Id`      | the random id the widget keeps for the visitor in the browser |
+| `Solv-Assistant-Id`    | the assistant id (`ast_…`)                                    |
+
+Values are the engine's own opaque ids: an id of 1 to 128 letters, digits, `_` or `-` is sent as it is, and any other id as the first 32 hex characters of its SHA-256. Nothing else is sent in these headers: no IP address, page address or message text.
+
+Requests from the admin and from CI belong to no visitor, so they carry `Solv-Assistant-Id` only: listing a server's tools when you add it or press **Refresh**, the "Try it" pane, and answer tests run from **Tests**, **Publish** or `solv test`. None of these stores a conversation, so none sends `Solv-Conversation-Id` or `Solv-Visitor-Id`.
+
+The ids say nothing about who a visitor is, but they let the server link all of one visitor's conversations (in the same browser). **Turn this on only for a server you run or trust.** The three header names are reserved: a server whose key header is named like one of them cannot be saved.
+
+You can also set it from `solv.config.json`; `solv apply` changes servers already added in the admin, matched by address, and leaves the rest alone:
+
+```json
+{ "mcpServers": [{ "url": "https://tools.example.com/mcp", "sendConversationContext": true }] }
+```
+
 Tool runs are capped at 4 iterations per turn, 20 tool calls per conversation, 15 seconds of wall time per answer, 10 seconds per MCP request, and 8192 bytes per tool result.
 
 ## 6. Page actions (optional)

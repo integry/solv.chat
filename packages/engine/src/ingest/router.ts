@@ -1,5 +1,6 @@
 import { type RunDeps, replaceTests, runAnswerTests } from "../admin/answerTests.js";
 import { BadRequest, Conflict, NotFound, readJsonBody } from "../admin/errors.js";
+import { applyMcpServerSettings, listMcpServerSettings } from "../admin/mcp.js";
 import { getDraft, updateDraft } from "../admin/versions.js";
 import { forIngestScope, type Tenant } from "../db/tenant.js";
 import type { Retriever } from "../providers/retrieval.js";
@@ -7,7 +8,7 @@ import type { AuthProvider, Limits } from "../seams/types.js";
 import { ingestScopeFor } from "./auth.js";
 import { deleteDocuments, type IngestQueueMessage, pushDocuments, TooLarge } from "./documents.js";
 
-export type IngestResource = "documents" | "config" | "tests" | "test-runs";
+export type IngestResource = "documents" | "config" | "tests" | "test-runs" | "mcp-servers";
 
 export interface IngestRouteDeps {
   db: D1Database;
@@ -19,7 +20,7 @@ export interface IngestRouteDeps {
   resolveRunDeps: (orgId: string, tenant: Tenant) => Promise<RunDeps>;
 }
 
-/** Handles `/v1/ingest/:assistantId/{documents,config,tests,test-runs}`. */
+/** Handles `/v1/ingest/:assistantId/{documents,config,tests,test-runs,mcp-servers}`. */
 export async function ingestRoutes(
   request: Request,
   assistantId: string,
@@ -30,7 +31,7 @@ export async function ingestRoutes(
     if (request.method !== "PUT" && request.method !== "DELETE") {
       return Response.json({ error: "Not found." }, { status: 404 });
     }
-  } else if (resource === "config" || resource === "tests") {
+  } else if (resource === "config" || resource === "tests" || resource === "mcp-servers") {
     if (request.method !== "GET" && request.method !== "PUT") {
       return Response.json({ error: "Not found." }, { status: 404 });
     }
@@ -70,6 +71,17 @@ export async function ingestRoutes(
       // with nothing to explain why it came back.
       const result = await replaceTests(tenant, scope.assistantId, await readJsonBody(request));
       return Response.json(result);
+    }
+
+    if (resource === "mcp-servers") {
+      // Only the "Send conversation context" setting: an ingest key can
+      // neither add a server nor read or change its address or credential.
+      if (request.method === "GET") {
+        return Response.json(await listMcpServerSettings(tenant, scope.assistantId));
+      }
+      return Response.json(
+        await applyMcpServerSettings(tenant, scope.assistantId, await readJsonBody(request)),
+      );
     }
 
     if (resource === "test-runs") {

@@ -113,9 +113,10 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           fetchImpl: chatOverrides?.fetch,
         };
       };
-      const ingestMatch = /^\/v1\/ingest\/([^/]+)\/(documents|config|tests|test-runs)$/.exec(
-        url.pathname,
-      );
+      const ingestMatch =
+        /^\/v1\/ingest\/([^/]+)\/(documents|config|tests|test-runs|mcp-servers)$/.exec(
+          url.pathname,
+        );
       if (ingestMatch?.[1] && ingestMatch[2]) {
         const assistantId = decodeSegment(ingestMatch[1]);
         if (assistantId === null) return notFound();

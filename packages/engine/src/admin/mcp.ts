@@ -7,6 +7,10 @@ import type {
 } from "../db/mcp.js";
 import type { Tenant } from "../db/tenant.js";
 import { listTools as listRemoteTools } from "../mcp/client.js";
+import {
+  CONVERSATION_CONTEXT_HEADER_NAMES,
+  isConversationContextHeaderName,
+} from "../mcp/context.js";
 import { McpError, type McpTarget } from "../mcp/types.js";
 import { MAX_SECRET_LENGTH, openSecret, sealSecret } from "../security/secretBox.js";
 import { assertPublicHttpsUrl } from "../security/urlGuard.js";
@@ -29,6 +33,8 @@ export interface McpServerSummary {
   /** "set" or "not set" on the screen. The value is never returned. */
   hasSecret: boolean;
   enabled: boolean;
+  /** "Send conversation context": off unless the owner turned it on. */
+  sendConversationContext: boolean;
   createdAt: number;
   toolCount: number;
   allowedCount: number;
@@ -53,6 +59,7 @@ function toServerSummary(row: McpServerWithStatsRow): McpServerSummary {
     headerName: row.headerName,
     hasSecret: row.hasSecret,
     enabled: row.enabled,
+    sendConversationContext: row.sendConversationContext,
     createdAt: row.createdAt,
     toolCount: row.toolCount,
     allowedCount: row.allowedCount,
@@ -77,6 +84,7 @@ interface ParsedServerInput {
   headerName?: string | null;
   headerValue?: string | null;
   enabled?: boolean;
+  sendConversationContext?: boolean;
 }
 
 const RESERVED_HEADER_NAMES = new Set([
@@ -87,6 +95,9 @@ const RESERVED_HEADER_NAMES = new Set([
   "connection",
   "transfer-encoding",
 ]);
+
+/** Shown when the owner's auth header would clash with a context header. */
+export const CONTEXT_HEADER_CLASH_MESSAGE = `headerName: ${CONVERSATION_CONTEXT_HEADER_NAMES.join(", ")} are sent by solv.chat itself when "Send conversation context" is on. Choose another header name.`;
 
 function isReservedHeaderName(name: string): boolean {
   const lower = name.toLowerCase();
@@ -136,6 +147,14 @@ function readServerInput(body: unknown, forCreate: boolean): ParsedServerInput {
     }
   }
 
+  if (body.sendConversationContext !== undefined) {
+    if (typeof body.sendConversationContext !== "boolean") {
+      errors.push("sendConversationContext: must be a boolean");
+    } else {
+      parsed.sendConversationContext = body.sendConversationContext;
+    }
+  }
+
   if (body.headerName !== undefined) {
     if (body.headerName === null || body.headerName === "") {
       parsed.headerName = null;
@@ -145,6 +164,10 @@ function readServerInput(body: unknown, forCreate: boolean): ParsedServerInput {
         // Header names go straight into an outbound request; anything outside
         // this set could split a header.
         errors.push("headerName: must be letters, digits and hyphens");
+      } else if (isConversationContextHeaderName(headerName)) {
+        // Refused whether or not the setting is on, so turning it on later
+        // can never make a context header stand in for the credential.
+        errors.push(CONTEXT_HEADER_CLASH_MESSAGE);
       } else if (isReservedHeaderName(headerName)) {
         errors.push("headerName: header name is reserved");
       } else {
@@ -230,6 +253,7 @@ export async function createMcpServer(
         ? await sealSecret(deps.secretKey, input.headerValue)
         : null,
     enabled: true,
+    sendConversationContext: input.sendConversationContext ?? false,
     createdAt: Date.now(),
   });
 
@@ -259,6 +283,19 @@ export async function updateMcpServer(
   if (existing === null) throw new NotFound("mcp server");
   const input = readServerInput(body, false);
 
+  // A row saved before the clash rule could still hold one of these names.
+  // Any save of it (not only turning the setting on) asks for a new name.
+  const effectiveAuthKind = input.authKind ?? existing.authKind;
+  const effectiveHeaderName =
+    input.headerName !== undefined ? input.headerName : existing.headerName;
+  if (
+    effectiveAuthKind === "static_header" &&
+    effectiveHeaderName !== null &&
+    isConversationContextHeaderName(effectiveHeaderName)
+  ) {
+    throw new BadRequest([CONTEXT_HEADER_CLASH_MESSAGE]);
+  }
+
   const secretCiphertext =
     input.headerValue === null
       ? null
@@ -271,6 +308,7 @@ export async function updateMcpServer(
     input.label !== undefined ||
     input.url !== undefined ||
     input.enabled !== undefined ||
+    input.sendConversationContext !== undefined ||
     input.authKind !== undefined ||
     input.headerName !== undefined ||
     secretCiphertext !== undefined;
@@ -285,6 +323,7 @@ export async function updateMcpServer(
       label: input.label,
       url: input.url,
       enabled: input.enabled,
+      sendConversationContext: input.sendConversationContext,
       authKind: input.authKind,
       headerName,
       secretCiphertext,
@@ -300,6 +339,7 @@ export async function updateMcpServer(
       label: input.label,
       url: input.url,
       enabled: input.enabled,
+      sendConversationContext: input.sendConversationContext,
       headerName,
       secretCiphertext,
       expectedAuthKind: current.authKind,
@@ -414,6 +454,11 @@ export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<
     };
     if (snapshot.authKind === "static_header" && snapshot.secretCiphertext !== null) {
       target.headerValue = await openSecret(deps.secretKey, snapshot.secretCiphertext);
+    }
+    if (snapshot.sendConversationContext) {
+      // An owner's add or refresh belongs to no conversation: the assistant id
+      // is all there is to send.
+      target.conversationContext = { assistantId: snapshot.assistantId };
     }
 
     const remote = await listRemoteTools(target, { fetchImpl: deps.fetchImpl });
@@ -580,4 +625,95 @@ export async function setMcpToolAllowed(
   }
 
   throw new Conflict("The draft changed while you were saving. Please try again.");
+}
+
+/** One server as `solv apply` sees it: no credential, no header name. */
+export interface McpServerContextSetting {
+  id: string;
+  label: string;
+  url: string;
+  sendConversationContext: boolean;
+}
+
+/** The "Send conversation context" setting of every server on an assistant. */
+export async function listMcpServerSettings(
+  tenant: Tenant,
+  assistantId: string,
+): Promise<{ servers: McpServerContextSetting[] }> {
+  const assistant = await tenant.assistants.get(assistantId);
+  if (assistant === null) throw new NotFound("assistant");
+  const rows = await tenant.mcp.listServers(assistantId);
+  return {
+    servers: rows.map((row) => ({
+      id: row.id,
+      label: row.label,
+      url: row.url,
+      sendConversationContext: row.sendConversationContext,
+    })),
+  };
+}
+
+/**
+ * Sets "Send conversation context" from `solv.config.json`'s `mcpServers`.
+ *
+ * Servers are matched by address on this assistant. The file cannot add a
+ * server (its credential has no place in a repository), so an address with no
+ * server is refused, and nothing changes unless every entry is valid. Servers
+ * the file does not list keep their setting.
+ */
+export async function applyMcpServerSettings(
+  tenant: Tenant,
+  assistantId: string,
+  body: unknown,
+): Promise<{ servers: McpServerContextSetting[]; changed: number }> {
+  const assistant = await tenant.assistants.get(assistantId);
+  if (assistant === null) throw new NotFound("assistant");
+  if (!isPlainObject(body) || !Array.isArray(body.servers)) {
+    throw new BadRequest(["servers: must be an array"]);
+  }
+  const rows = await tenant.mcp.listServers(assistantId);
+  const errors: string[] = [];
+  const wanted = new Map<string, boolean>();
+
+  body.servers.forEach((entry: unknown, i: number) => {
+    const at = `mcpServers[${i}]`;
+    if (!isPlainObject(entry)) {
+      errors.push(`${at}: must be an object`);
+      return;
+    }
+    let url: string;
+    try {
+      url = assertPublicHttpsUrl(typeof entry.url === "string" ? entry.url.trim() : "").href;
+    } catch {
+      errors.push(`${at}.url: must be an https URL that is not a private or loopback address`);
+      return;
+    }
+    if (typeof entry.sendConversationContext !== "boolean") {
+      errors.push(`${at}.sendConversationContext: must be true or false`);
+      return;
+    }
+    if (!rows.some((row) => row.url === url)) {
+      errors.push(
+        `${at}.url: this assistant has no tool server at ${url}. Add it on the Tools screen first.`,
+      );
+      return;
+    }
+    const previous = wanted.get(url);
+    if (previous !== undefined && previous !== entry.sendConversationContext) {
+      errors.push(`${at}.url: ${url} is listed twice with different settings`);
+      return;
+    }
+    wanted.set(url, entry.sendConversationContext);
+  });
+  if (errors.length > 0) throw new BadRequest(errors);
+
+  let changed = 0;
+  for (const row of rows) {
+    const next = wanted.get(row.url);
+    if (next === undefined || next === row.sendConversationContext) continue;
+    // Several servers may share an address; the setting is about where the
+    // ids go, so each of them follows the file.
+    if (await tenant.mcp.updateServer(row.id, { sendConversationContext: next })) changed += 1;
+  }
+  return { ...(await listMcpServerSettings(tenant, assistantId)), changed };
 }

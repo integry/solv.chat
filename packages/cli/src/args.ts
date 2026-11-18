@@ -47,6 +47,10 @@ Options:
   --assistant <id>    Assistant ID, e.g. ast_... (required)
   -h, --help          Show this help message
 
+A "tests" array replaces the assistant's tests. An "mcpServers" array of
+{ "url", "sendConversationContext" } sets that switch on tool servers already
+added in the admin.
+
 Environment variables:
   SOLV_INGEST_KEY     Bearer key used to authenticate ingest requests`;
 

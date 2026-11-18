@@ -20,6 +20,55 @@ interface ConfigResponse {
   config?: VersionConfig;
 }
 
+/** One `mcpServers` entry: which tool server, and whether it gets the ids. */
+export interface DeclaredMcpServer {
+  url: string;
+  sendConversationContext: boolean;
+}
+
+interface McpServersResponse {
+  servers?: Array<{ label: string; url: string; sendConversationContext: boolean }>;
+  changed?: number;
+}
+
+/**
+ * Validates `mcpServers` from `solv.config.json`. The file only sets "Send
+ * conversation context" on servers already added in the admin: a server's
+ * credential has no place in a repository, so the file cannot add one.
+ */
+export function parseDeclaredMcpServers(
+  raw: unknown,
+  file: string,
+  log?: (line: string) => void,
+): DeclaredMcpServer[] {
+  if (!Array.isArray(raw)) {
+    throw new CliError(`${file}: mcpServers must be an array`);
+  }
+  const items: DeclaredMcpServer[] = [];
+  const errors: string[] = [];
+  raw.forEach((entry: unknown, i) => {
+    if (!isPlainObject(entry)) {
+      errors.push(`mcpServers[${i}]: must be an object`);
+      return;
+    }
+    const url = typeof entry.url === "string" ? entry.url.trim() : "";
+    if (!url.startsWith("https://")) {
+      errors.push(`mcpServers[${i}].url: must be the https address of a tool server`);
+      return;
+    }
+    if (typeof entry.sendConversationContext !== "boolean") {
+      errors.push(`mcpServers[${i}].sendConversationContext: must be true or false`);
+      return;
+    }
+    items.push({ url, sendConversationContext: entry.sendConversationContext });
+  });
+  if (errors.length > 0) {
+    for (const error of errors) log?.(error);
+    throw new CliError(errors.join("; "));
+  }
+  return items;
+}
+
 function flattenConfig(value: unknown, prefix = ""): Array<[string, string]> {
   if (Array.isArray(value) || typeof value !== "object" || value === null) {
     return [[prefix, JSON.stringify(value)]];
@@ -89,8 +138,14 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
   if (isPlainObject(rawJson) && rawJson.tests !== undefined) {
     declaredTests = parseDeclaredTests(rawJson.tests, options.file, deps.log);
   }
+  let declaredMcpServers: DeclaredMcpServer[] | null = null;
+  if (isPlainObject(rawJson) && rawJson.mcpServers !== undefined) {
+    declaredMcpServers = parseDeclaredMcpServers(rawJson.mcpServers, options.file, deps.log);
+  }
   const configOnly = isPlainObject(rawJson)
-    ? Object.fromEntries(Object.entries(rawJson).filter(([key]) => key !== "tests"))
+    ? Object.fromEntries(
+        Object.entries(rawJson).filter(([key]) => key !== "tests" && key !== "mcpServers"),
+      )
     : rawJson;
 
   if (!options.ingestKey) {
@@ -156,5 +211,29 @@ export async function apply(options: ApplyOptions, deps: CliDeps): Promise<void>
       "SOLV_INGEST_KEY",
     );
     deps.log(`Tests: ${synced.created} declared, ${synced.removed} removed.`);
+  }
+
+  if (declaredMcpServers !== null) {
+    // Takes effect at once, like the switch on the Tools screen: this setting
+    // belongs to the server, not to the draft, so Publish does not gate it.
+    const result = await requestJson<McpServersResponse>(
+      deps.fetchImpl,
+      `${assistantBase}/mcp-servers`,
+      {
+        method: "PUT",
+        headers: {
+          ...authHeaders,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ servers: declaredMcpServers }),
+      },
+      "SOLV_INGEST_KEY",
+    );
+    for (const server of result.servers ?? []) {
+      deps.log(
+        `Tool server ${server.label} (${server.url}): send conversation context ${server.sendConversationContext ? "on" : "off"}.`,
+      );
+    }
+    deps.log(`Tool servers: ${result.changed ?? 0} changed.`);
   }
 }
