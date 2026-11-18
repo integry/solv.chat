@@ -130,18 +130,27 @@ interface Line {
 
 /**
  * Marks every line inside a fenced code block (fences included), so the
- * cleanup never changes a byte of code. An unclosed fence runs to the end,
- * as in CommonMark.
+ * cleanup never changes a byte of code. Fences inside blockquotes (`> ~~~`)
+ * count too; such a fence ends at its closing line or where the quote ends.
+ * An unclosed fence runs to the end, as in CommonMark.
  */
 function markLines(body: string): Line[] {
   const out: Line[] = [];
-  let fence: { char: string; length: number } | null = null;
+  let fence: { char: string; length: number; quotes: number } | null = null;
   for (const text of body.split("\n")) {
-    const match = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(text.replace(/\r$/, ""));
+    const match = /^((?:[ \t]*>)*)[ \t]*(`{3,}|~{3,})(.*)$/.exec(text.replace(/\r$/, ""));
+    if (fence !== null && quoteDepth(text) < fence.quotes) {
+      // The blockquote holding the fence ended, and the fence with it.
+      fence = null;
+    }
     if (fence === null) {
-      const delimiter = match?.[1];
-      if (delimiter && !(delimiter[0] === "`" && (match?.[2] ?? "").includes("`"))) {
-        fence = { char: delimiter[0] as string, length: delimiter.length };
+      const delimiter = match?.[2];
+      if (delimiter && !(delimiter[0] === "`" && (match?.[3] ?? "").includes("`"))) {
+        fence = {
+          char: delimiter[0] as string,
+          length: delimiter.length,
+          quotes: quoteDepth(match?.[1] ?? ""),
+        };
         out.push({ text, code: true });
         continue;
       }
@@ -149,17 +158,23 @@ function markLines(body: string): Line[] {
       continue;
     }
     out.push({ text, code: true });
-    const delimiter = match?.[1];
+    const delimiter = match?.[2];
     if (
       delimiter &&
       delimiter[0] === fence.char &&
       delimiter.length >= fence.length &&
-      (match?.[2] ?? "").trim() === ""
+      quoteDepth(match?.[1] ?? "") === fence.quotes &&
+      (match?.[3] ?? "").trim() === ""
     ) {
       fence = null;
     }
   }
   return out;
+}
+
+/** How many blockquote markers (`>`) start a line. */
+function quoteDepth(text: string): number {
+  return (/^(?:[ \t]*>)*/.exec(text)?.[0] ?? "").split(">").length - 1;
 }
 
 function admonitionLabel(type: string, title: string | undefined): string {
@@ -280,14 +295,13 @@ function stripComponents(text: string): string {
     if (ch === "`") {
       let run = 1;
       while (text[i + run] === "`") run++;
-      const fence = "`".repeat(run);
-      const close = text.indexOf(fence, i + run);
-      if (close !== -1 && text[close + run] !== "`") {
+      const close = closingBacktickRun(text, i + run, run);
+      if (close !== -1) {
         out += text.slice(i, close + run);
         i = close + run;
         continue;
       }
-      out += fence;
+      out += "`".repeat(run);
       i += run;
       continue;
     }
@@ -302,6 +316,22 @@ function stripComponents(text: string): string {
     i++;
   }
   return out;
+}
+
+/**
+ * Where the code span opened by a run of `length` backticks closes: the next
+ * run of exactly that many backticks at or after `from`, or -1 when there is
+ * none. Longer or shorter runs in between belong to the span's content.
+ */
+function closingBacktickRun(text: string, from: number, length: number): number {
+  let i = text.indexOf("`", from);
+  while (i !== -1) {
+    let run = 1;
+    while (text[i + run] === "`") run++;
+    if (run === length) return i;
+    i = text.indexOf("`", i + run);
+  }
+  return -1;
 }
 
 function stripComponentLines(lines: Line[]): Line[] {

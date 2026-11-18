@@ -423,6 +423,33 @@ describe("Docusaurus rules", () => {
     expect(out).toContain(code);
   });
 
+  it("keeps fenced code inside blockquotes byte for byte", () => {
+    const quoted = ["> ~~~jsx", "> <Tabs>example</Tabs>", "> ~~~"].join("\n");
+    const nested = ["> > ```", "> > <Tabs>", "> > ```"].join("\n");
+    const input = [quoted, "", nested, "", "> After <Tabs>quote</Tabs>"].join("\n");
+    expect(cleanDocusaurusMarkdown(input)).toBe(
+      [quoted, "", nested, "", "> After quote", ""].join("\n"),
+    );
+    // Admonitions and imports inside a quoted fence are code, not signals.
+    expect(hasDocusaurusSyntax("> ```md\n> :::tip\n> ```\n")).toBe(false);
+  });
+
+  it("ends a quoted fence where its blockquote ends", () => {
+    const input = ["> ```", "> <Tabs>code</Tabs>", "", "Text <Tabs>after</Tabs>"].join("\n");
+    expect(cleanDocusaurusMarkdown(input)).toBe(
+      ["> ```", "> <Tabs>code</Tabs>", "", "Text after", ""].join("\n"),
+    );
+  });
+
+  it("closes a code span only on a backtick run of the same length", () => {
+    const span = "`a `` <Tabs> b`";
+    expect(cleanDocusaurusMarkdown(`Use ${span} and <Tabs>x</Tabs>.`)).toBe(`Use ${span} and x.\n`);
+    const double = "``a ` <Tabs> ``` b``";
+    expect(cleanDocusaurusMarkdown(`${double} <Badge>y</Badge>`)).toBe(`${double} y\n`);
+    // A run with no matching closer is literal, and tags after it still go.
+    expect(cleanDocusaurusMarkdown("A `` lone <Tabs>z</Tabs>")).toBe("A `` lone z\n");
+  });
+
   it("puts the description after a leading heading, or first", () => {
     expect(withDescription("# T\n\nBody\n", "About it.")).toBe("# T\n\nAbout it.\n\nBody\n");
     expect(withDescription("Body\n", "About it.")).toBe("About it.\n\nBody\n");
