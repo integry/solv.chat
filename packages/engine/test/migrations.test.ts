@@ -481,12 +481,70 @@ describe("migrations", () => {
     const prefixes = names.map((name) => {
       const match = /^(\d{4})_/.exec(name);
       expect(match, `Migration ${name} must start with a 4-digit prefix`).not.toBeNull();
-      return match?.[1] ?? "";
+      return Number(match?.[1] ?? "");
     });
 
     expect(new Set(prefixes).size).toBe(prefixes.length);
     for (let i = 0; i < prefixes.length; i++) {
-      expect(Number(prefixes[i])).toBe(i + 1);
+      expect(prefixes[i]).toBe(i + 1);
     }
+  });
+
+  it("leaves every MCP server stored before 0025 with conversation context off", async () => {
+    const orgId = "org_00000000000000000000";
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0025_"));
+    expect(migration?.queries.length).toBe(1);
+
+    // The 0025 statement run against a table shaped as mcp_servers was before
+    // it, holding rows written then.
+    await env.DB.batch([
+      env.DB.prepare("DROP TABLE IF EXISTS mcp_servers_before_0025"),
+      env.DB.prepare(
+        `CREATE TABLE mcp_servers_before_0025 (
+           id TEXT PRIMARY KEY, org_id TEXT NOT NULL, assistant_id TEXT NOT NULL,
+           label TEXT NOT NULL, url TEXT NOT NULL, auth_kind TEXT NOT NULL,
+           secret_ciphertext TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+           created_at INTEGER NOT NULL, header_name TEXT)`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO mcp_servers_before_0025 (id, org_id, assistant_id, label, url, auth_kind, enabled, created_at)
+         VALUES ('mcp_old_1', ?1, 'ast_1', 'Old', 'https://a.example/mcp', 'none', 1, 1),
+                ('mcp_old_2', ?1, 'ast_1', 'Off', 'https://b.example/mcp', 'none', 0, 2)`,
+      ).bind(orgId),
+    ]);
+    for (const sql of migration?.queries ?? []) {
+      expect(sql).toMatch(/ALTER TABLE mcp_servers ADD COLUMN/);
+      await env.DB.prepare(sql.replace(/\bmcp_servers\b/, "mcp_servers_before_0025")).run();
+    }
+    const migrated = await env.DB.prepare(
+      "SELECT id, enabled, send_conversation_context FROM mcp_servers_before_0025 ORDER BY id",
+    ).all<{ id: string; enabled: number; send_conversation_context: number }>();
+    expect(migrated.results).toEqual([
+      { id: "mcp_old_1", enabled: 1, send_conversation_context: 0 },
+      { id: "mcp_old_2", enabled: 0, send_conversation_context: 0 },
+    ]);
+    await expect(
+      env.DB.prepare(
+        "UPDATE mcp_servers_before_0025 SET send_conversation_context = 2 WHERE id = 'mcp_old_1'",
+      ).run(),
+    ).rejects.toThrow();
+    await env.DB.prepare("DROP TABLE mcp_servers_before_0025").run();
+
+    // The real table: a row written the way an older Worker writes it is off.
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'Site', 'pk_1', 1)",
+      ).bind(orgId),
+      env.DB.prepare(
+        `INSERT INTO mcp_servers (id, org_id, assistant_id, label, url, auth_kind, secret_ciphertext, enabled, created_at)
+         VALUES ('mcp_1', ?1, 'ast_1', 'Tools', 'https://a.example/mcp', 'none', NULL, 1, 1)`,
+      ).bind(orgId),
+    ]);
+    const row = await env.DB.prepare(
+      "SELECT send_conversation_context FROM mcp_servers WHERE org_id = ?1 AND id = 'mcp_1'",
+    )
+      .bind(orgId)
+      .first<{ send_conversation_context: number }>();
+    expect(row?.send_conversation_context).toBe(0);
   });
 });

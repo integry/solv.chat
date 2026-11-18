@@ -730,4 +730,87 @@ describe("mcp client", () => {
       expect(callServer.calls[0]?.body.method).toBe("initialize");
     },
   );
+
+  describe("conversation context headers", () => {
+    function toolServer() {
+      return mcpServer((method, id) =>
+        method === "tools/call"
+          ? Response.json({
+              jsonrpc: "2.0",
+              id,
+              result: { content: [{ type: "text", text: "ok" }] },
+            })
+          : Response.json({ jsonrpc: "2.0", id, result: { tools: [] } }),
+      );
+    }
+    const headersOf = (call: RecordedCall) => new Headers(call.init?.headers);
+
+    it("puts them on every request of the session when the target carries a context", async () => {
+      const server = toolServer();
+      await callTool(
+        {
+          url: "https://mcp.example.com/rpc",
+          authKind: "static_header",
+          headerName: "Authorization",
+          headerValue: SECRET,
+          conversationContext: {
+            assistantId: "ast_1",
+            conversationId: "cnv_1",
+            visitorId: "vis 1",
+          },
+        },
+        "lookup",
+        {},
+        { fetchImpl: server.impl, resolveHost: PUBLIC_HOST },
+      );
+      expect(server.calls.map((c) => c.body.method)).toEqual([
+        "initialize",
+        "notifications/initialized",
+        "tools/call",
+      ]);
+      for (const call of server.calls) {
+        const headers = headersOf(call);
+        expect(headers.get("Solv-Assistant-Id")).toBe("ast_1");
+        expect(headers.get("Solv-Conversation-Id")).toBe("cnv_1");
+        expect(headers.get("Solv-Visitor-Id")).toMatch(/^h_[0-9a-f]{32}$/);
+        expect(headers.get("Authorization")).toBe(SECRET);
+      }
+    });
+
+    it("sends none of them without a context", async () => {
+      const server = toolServer();
+      await listTools(
+        { url: "https://mcp.example.com/rpc", authKind: "none" },
+        { fetchImpl: server.impl, resolveHost: PUBLIC_HOST },
+      );
+      for (const call of server.calls) {
+        const headers = headersOf(call);
+        expect(headers.get("Solv-Assistant-Id")).toBeNull();
+        expect(headers.get("Solv-Conversation-Id")).toBeNull();
+        expect(headers.get("Solv-Visitor-Id")).toBeNull();
+      }
+    });
+
+    it("never lets a context header replace a clashing auth header", async () => {
+      const server = toolServer();
+      await callTool(
+        {
+          url: "https://mcp.example.com/rpc",
+          authKind: "static_header",
+          // A row stored before the clash rule existed.
+          headerName: "solv-visitor-id",
+          headerValue: SECRET,
+          conversationContext: { assistantId: "ast_1", visitorId: "vis_1" },
+        },
+        "lookup",
+        {},
+        { fetchImpl: server.impl, resolveHost: PUBLIC_HOST },
+      );
+      for (const call of server.calls) {
+        const headers = headersOf(call);
+        expect(headers.get("Solv-Visitor-Id")).toBe(SECRET);
+        expect(headers.get("Solv-Assistant-Id")).toBe("ast_1");
+      }
+    });
+  });
 });

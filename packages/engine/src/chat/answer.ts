@@ -348,6 +348,9 @@ export async function* answerMessage(
         },
         signal: deps.signal,
         now: deps.now,
+        // A preview's conversation id is made up for this request and names
+        // no stored row, so it is not passed on to a tool server.
+        ...(input.preview ? {} : { callContext: { conversationId, visitorId: input.visitorId } }),
       },
       request,
     );
@@ -698,6 +701,7 @@ export async function* answerWithActionResults(
           },
           ensureLease: () => ensureLease(),
           now: deps.now,
+          callContext: { conversationId: conversation.id, visitorId: conversation.visitorId },
         },
         request,
         pendingReply.content,

@@ -119,6 +119,44 @@ A tool runs for visitors only when both are true: you switched it on under **Too
 
 If the server needs a key, enter the header name it expects and the key value. It is stored encrypted with `SOLV_SECRET_KEY` and never shown again, so keep your own copy. If you rotate `SOLV_SECRET_KEY`, stored tool credentials become unreadable until you re-enter them on the **Tools** screen.
 
+### Send conversation context
+
+Every tool call comes from your Worker, so a tool server sees all your visitors as one caller. If the server limits or tracks work per visitor, switch on **Send conversation context** on that server's card under **Tools** (it is off for every server until you do, and takes effect at once; it is not part of Publish). Each request the engine then makes to that server for a visitor's chat (`initialize`, `tools/list` and `tools/call`) carries three headers:
+
+| Header                 | Value                                                         |
+| ---------------------- | ------------------------------------------------------------- |
+| `Solv-Conversation-Id` | the conversation id (`cnv_…`)                                 |
+| `Solv-Visitor-Id`      | the random id the widget keeps for the visitor in the browser |
+| `Solv-Assistant-Id`    | the assistant id (`ast_…`)                                    |
+
+Values are the engine's own opaque ids: an id of 1 to 128 letters, digits, `_` or `-` that does not start with `h_` is sent as it is, and any other id as `h_` followed by the first 32 hex characters of its SHA-256. Because an id that starts with `h_` is always hashed, a hashed value can never equal a raw id, so a visitor cannot pass off another visitor's hashed value as their own. Nothing else is sent in these headers: no IP address, page address or message text.
+
+Requests from the admin and from CI belong to no visitor, so they carry `Solv-Assistant-Id` only: listing a server's tools when you add it or press **Refresh**, the "Try it" pane, and answer tests run from **Tests**, **Publish** or `solv test`. None of these stores a conversation, so none sends `Solv-Conversation-Id` or `Solv-Visitor-Id`.
+
+The ids say nothing about who a visitor is, but they let the server link all of one visitor's conversations (in the same browser). **Turn this on only for a server you run or trust.** The three header names are reserved: you cannot add a server, or rename its key header, to one of them (in any case). A server saved with such a key header before this rule keeps working and can still be edited, disabled, have its key removed or keep the setting off; only turning **Send conversation context** on is refused until you rename the header.
+
+#### What your tool server may rely on
+
+- Trust these headers only on requests that carry the server's key. A server with no key cannot tell the engine's requests from anyone else's, so anyone can forge them.
+- `Solv-Conversation-Id` is issued by the engine; a visitor cannot choose it. But a visitor can start as many conversations as they like.
+- `Solv-Visitor-Id` comes from the visitor's browser. It is a hint, not proof: a visitor can change it or copy someone else's.
+- So keep a limit per assistant, or for everyone, behind any limit per conversation or per visitor.
+
+#### From `solv.config.json`
+
+`solv apply` changes servers already added in the admin, matched by address, and leaves the rest alone:
+
+```json
+{ "mcpServers": [{ "url": "https://tools.example.com/mcp", "sendConversationContext": false }] }
+```
+
+The ingest key is a CI credential, so it can do less here than you can in the admin:
+
+- It can turn **Send conversation context** off, but not on. Turn it on under **Tools** in the admin. If the file asks for on where a server is off, `solv apply` names that server, changes nothing and fails; if the server is already on, that entry is fine and changes nothing.
+- Reading the servers with it shows each server's name, setting and the start of its address (for example `https://tools.example.com`), never the rest of the address or its key.
+
+`solv apply` checks `mcpServers` with the engine before it writes anything, so if any entry would be refused, the draft, tests and servers are all left as they were.
+
 Tool runs are capped at 4 iterations per turn, 20 tool calls per conversation, 15 seconds of wall time per answer, 10 seconds per MCP request, and 8192 bytes per tool result.
 
 ## 6. Page actions (optional)

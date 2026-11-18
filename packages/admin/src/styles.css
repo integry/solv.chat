@@ -673,6 +673,18 @@ a {
   color: var(--muted);
 }
 
+/* Tools: "Send conversation context" on each server card. */
+.context-switch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.context-switch .field-hint {
+  margin: 0;
+  max-width: 70ch;
+}
+
 .field-error,
 .error-text {
   margin: 0;

@@ -99,7 +99,8 @@ from the auth seam and pass it down.
   with no results instead of searching).
 - `feedback` — message_id, value (`up` | `down`), note.
 - `mcp_servers` — id, assistant_id, label, url, auth_kind (`none` | `static_header`),
-  secret_ciphertext, enabled.
+  header_name, secret_ciphertext, enabled, send_conversation_context (default 0;
+  see "Conversation context headers").
 - `mcp_tools` — server_id, name, description, input_schema, allowed (default false).
 - `tests` — id, assistant_id, question, expectation (must-cite URL, must-contain,
   must-not-contain, or must-decline).
@@ -149,6 +150,17 @@ that fails one gets a plain error event and costs nothing.
   draft config.
 - `PUT /v1/ingest/:assistantId/config` — bearer ingest key. Validates and updates
   the draft config only (never publishes, rolls back, or reads history).
+- `GET` / `PUT /v1/ingest/:assistantId/mcp-servers` — bearer ingest key. Reads
+  or turns off "Send conversation context" on the assistant's MCP servers. `GET`
+  returns `{ servers: [{ id, label, origin, sendConversationContext }] }`: the
+  origin of each url only, never its path or query, a header name or a
+  credential. `PUT` takes
+  `{ servers: [{ url, sendConversationContext }], dryRun? }`, matches existing
+  servers by url, refuses a url with no server, refuses `true` for a server
+  whose setting is off (only a signed-in admin can turn it on), and changes
+  nothing unless every entry is valid; servers it does not list keep their
+  setting. With `dryRun: true` it validates and returns the would-be `changed`
+  count without writing.
 
 Ingest writes the document row, enqueues it, and a Queue consumer chunks, embeds
 and upserts vectors. Until the consumer commits, the new content is not
@@ -468,6 +480,74 @@ credential. The rules that follow from that:
 - Per-conversation caps on the number of tool calls and on wall time.
 - Server URLs must be https and must not resolve to private or loopback ranges.
 
+### Conversation context headers
+
+Because every call comes from the Worker, a server cannot tell visitors apart,
+so one visitor could use up a budget the server shares between all of them.
+Each server has a "Send conversation context" setting (`sendConversationContext`
+in the admin API and `solv.config.json`, `send_conversation_context` in D1),
+off for existing and new servers. It belongs to the server, not to a version:
+it takes effect when saved and Publish does not gate it. When it is on, every
+request the engine makes to that server for a chat turn (`initialize`,
+`notifications/initialized`, `tools/list` when listed, and `tools/call`)
+carries:
+
+| Header                 | Value                                               |
+| ---------------------- | --------------------------------------------------- |
+| `Solv-Conversation-Id` | the conversation id, when a conversation row exists |
+| `Solv-Visitor-Id`      | the widget's visitor id stored on that conversation |
+| `Solv-Assistant-Id`    | the assistant id                                    |
+
+- Values are existing opaque ids only. An id matching `[A-Za-z0-9_-]{1,128}`
+  that does not start with `h_` (in any case) is sent as is; any other id (the
+  widget's visitor id is any 1 to 128 characters) is sent as `h_` followed by
+  the first 32 hex characters of its SHA-256, never raw. Because a raw id that
+  starts with `h_` is hashed too, a hashed value and a raw id can never be
+  equal: a visitor cannot send another visitor's hashed value as their own id.
+  Nothing else (IP address, page URL, message text) is ever sent in them.
+- The ids come from the stored conversation, never from the model's tool call.
+- The names are fixed. An owner's static auth header may not use any of them
+  (any case): creating or saving such a server is refused with a message
+  naming them, whether or not the setting is on. A row stored before this rule
+  keeps its credential and drops the clashing context header. Turning the
+  setting on for such a row is refused until the header is renamed; disabling
+  it, removing its credential and turning the setting off still work.
+- Requests with no visitor conversation send `Solv-Assistant-Id` only: listing
+  tools when a server is added or refreshed, the admin "Try it" pane, and answer
+  tests run from the admin (Tests, Publish) or `solv test`. Previews and tests
+  store no conversation row, so they never send `Solv-Conversation-Id` or
+  `Solv-Visitor-Id` (the preview's made-up conversation id is not sent). A
+  visitor's chat, including one that resumes after page actions, sends all three.
+- The ids are opaque, but they let a third-party server correlate one visitor's
+  conversations. The admin says so next to the switch ("These ids let that
+  server link one visitor's conversations, so turn this on only for a server
+  you run or trust."), and the setting is for servers the owner controls or
+  trusts.
+- The ingest key (`GET`/`PUT /v1/ingest/:assistantId/mcp-servers`, used by
+  `solv apply`) is a CI credential, so it sees and does less than the admin. A
+  `GET` returns each server's id, label, setting and the origin of its URL
+  only, never the path or query (which may carry a token) or the credential. A
+  `PUT` can turn the setting off but not on: turning it on needs a signed-in
+  admin, and an entry asking for on where a server is off is refused with a
+  message naming that server. An entry asking for on where it already is on is
+  accepted and changes nothing. `dryRun: true` checks a `PUT` and reports what
+  would change without changing it; `solv apply` runs it before writing the
+  draft, the tests or any server, so a refused `mcpServers` entry changes
+  nothing.
+
+#### What a receiving server may rely on
+
+- Trust the headers only on requests that carry the server's static
+  credential. A server with no auth cannot tell the engine's requests from
+  anyone else's, so anyone can forge them.
+- `Solv-Conversation-Id` is issued by the engine; a visitor cannot choose it.
+  A visitor can start any number of conversations, though, so a new id is
+  cheap.
+- `Solv-Visitor-Id` comes from the visitor's browser. It is an unauthenticated
+  hint: a visitor can rotate it or copy someone else's.
+- So keep a per-assistant or global ceiling behind any per-conversation or
+  per-visitor limit.
+
 Phase 2 note on OpenAI: the phase 1 provider called Chat Completions. Per the
 model pages checked on 2026-11-15 (https://developers.openai.com/api/docs/models),
 both `gpt-6.1-sol` and `gpt-6-luna` support tool calling through the Responses
@@ -733,7 +813,13 @@ widget and tests. `solv apply` writes the draft with the ingest key
 (`SOLV_INGEST_KEY`); publishing always happens in the admin. `solv push` sends
 content; `solv test` runs the tests. The admin and the file edit the same draft.
 A `tests` array in `solv.config.json` **replaces** the assistant's stored tests
-rather than merging with them.
+rather than merging with them. An `mcpServers` array
+(`[{ "url", "sendConversationContext" }]`) sets "Send conversation context" on
+servers already added in the admin, matched by url; the file cannot add a
+server, because its credential has no place in a repository. Through the ingest
+key it can turn the setting off but not on (see "Conversation context
+headers"), and `solv apply` checks `mcpServers` with a dry run before writing
+anything, so a refused entry leaves the draft, tests and servers unchanged.
 Because an ingest key can change an assistant's draft behaviour as well as its
 content, it must be kept as a secret.
 
