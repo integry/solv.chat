@@ -50,7 +50,10 @@ const ADDRESS_SUFFIX =
 const UK_POSTCODE = /\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i;
 const DIGIT = /\p{Nd}/u;
 const LONG_NUMBER = /\p{Nd}{7,}/u;
-const NUMBER_SEPARATOR = /(\p{Nd})[\s/,-]+(?=\p{Nd})/gu;
+// Every non-alphanumeric character `ALLOWED` keeps can group digits
+// ("1 234 567", "1'234'567", "1’234’567", "1/234/567", "1&234&567"), so all of
+// them are ignored between digits before the length is counted.
+const NUMBER_SEPARATOR = /(\p{Nd})[\s&'’/,-]+(?=\p{Nd})/gu;
 
 /** Why a name was refused, for the owner's rename; the reviewer's proposals just fall back. */
 export type TopicNameProblem = "empty" | "too_long" | "too_many_words" | "characters" | "personal";

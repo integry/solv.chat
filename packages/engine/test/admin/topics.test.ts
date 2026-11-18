@@ -295,7 +295,14 @@ describe("topics", () => {
       expect(await topicOf(q2.questionId)).toBe(hours.id);
 
       expect((await call(app, "PATCH", path, { name: "when OPEN" })).status).toBe(409);
-      for (const name of ["jane@example.com", "Call 0161 496 0000", "", "x".repeat(41)]) {
+      for (const name of [
+        "jane@example.com",
+        "Call 0161 496 0000",
+        "Account 1'234'567",
+        "Account 1’234’567",
+        "",
+        "x".repeat(41),
+      ]) {
         expect((await call(app, "PATCH", path, { name })).status, name).toBe(400);
       }
       // A change of case is a rename of the same topic.

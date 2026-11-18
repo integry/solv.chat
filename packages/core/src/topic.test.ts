@@ -60,6 +60,23 @@ describe("topic names", () => {
     expect(checkTopicName("Order 123456")).toEqual({ ok: true, name: "Order 123456" });
   });
 
+  it("refuses long numbers grouped by any separator a name may keep", () => {
+    for (const unsafe of [
+      "Account 1'234'567",
+      "Account 1’234’567",
+      "Account 1' 234' 567",
+      "Ref 12&345&678",
+      "Ref 12/345/678",
+      "Ref 1,234,567",
+    ]) {
+      expect(checkTopicName(unsafe), unsafe).toEqual({ ok: false, problem: "personal" });
+    }
+    // Six digits stay allowed whatever groups them, and apostrophes in words still work.
+    expect(cleanTopicName("Plan 123'456")).toBe("Plan 123'456");
+    expect(cleanTopicName("Plan 123’456")).toBe("Plan 123’456");
+    expect(cleanTopicName("Kid’s menu")).toBe("Kid’s menu");
+  });
+
   it("refuses names that would start a spreadsheet formula", () => {
     expect(cleanTopicName("=HYPERLINK(1)")).toBeNull();
     expect(cleanTopicName("+cmd")).toBeNull();

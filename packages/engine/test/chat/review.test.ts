@@ -603,6 +603,8 @@ describe("chat/review: topics", () => {
     for (const unsafe of [
       "jane@example.com",
       "Call 0123 456 789",
+      "Account 1'234'567",
+      "Account 1’234’567",
       "12 Baker Street",
       "www example com",
       "a very long topic name that goes on and on",
@@ -660,6 +662,20 @@ describe("chat/review: topics", () => {
     const { deps } = runDeps({ reviewer: async () => reviewerFrom(provider), topics: store });
     await runAnswerReview(deps, TOPIC_JOB);
     expect(nameOf(assigned[0]?.topicId ?? "")).toBe("Other");
+  });
+
+  it("stores Other for a long number grouped by apostrophes", async () => {
+    for (const unsafe of ["Account 1'234'567", "Account 1’234’567"]) {
+      const { store, topics, assigned, nameOf } = memoryTopics();
+      const { provider } = scriptedProvider(out("answered", unsafe));
+      const { deps } = runDeps({ reviewer: async () => reviewerFrom(provider), topics: store });
+      await runAnswerReview(deps, TOPIC_JOB);
+      expect(nameOf(assigned[0]?.topicId ?? ""), unsafe).toBe("Other");
+      expect(
+        topics.map((t) => t.name),
+        unsafe,
+      ).not.toContain(unsafe);
+    }
   });
 
   it("tells the reviewer when the list is full and stores Other for a new name anyway", async () => {
