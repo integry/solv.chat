@@ -99,6 +99,19 @@ const RESERVED_HEADER_NAMES = new Set([
 /** Shown when the owner's auth header would clash with a context header. */
 export const CONTEXT_HEADER_CLASH_MESSAGE = `headerName: ${CONVERSATION_CONTEXT_HEADER_NAMES.join(", ")} are sent by solv.chat itself when "Send conversation context" is on. Choose another header name.`;
 
+/**
+ * True when a static credential would travel in a header that the
+ * conversation context also uses. The outbound request keeps the credential
+ * and drops the context value, so the setting could never do its job.
+ */
+function authHeaderClashesWithContext(authKind: McpAuthKind, headerName: string | null): boolean {
+  return (
+    authKind === "static_header" &&
+    headerName !== null &&
+    isConversationContextHeaderName(headerName)
+  );
+}
+
 function isReservedHeaderName(name: string): boolean {
   const lower = name.toLowerCase();
   return RESERVED_HEADER_NAMES.has(lower) || lower.startsWith("mcp-");
@@ -288,11 +301,7 @@ export async function updateMcpServer(
   const effectiveAuthKind = input.authKind ?? existing.authKind;
   const effectiveHeaderName =
     input.headerName !== undefined ? input.headerName : existing.headerName;
-  if (
-    effectiveAuthKind === "static_header" &&
-    effectiveHeaderName !== null &&
-    isConversationContextHeaderName(effectiveHeaderName)
-  ) {
+  if (authHeaderClashesWithContext(effectiveAuthKind, effectiveHeaderName)) {
     throw new BadRequest([CONTEXT_HEADER_CLASH_MESSAGE]);
   }
 
@@ -695,6 +704,19 @@ export async function applyMcpServerSettings(
     if (!rows.some((row) => row.url === url)) {
       errors.push(
         `${at}.url: this assistant has no tool server at ${url}. Add it on the Tools screen first.`,
+      );
+      return;
+    }
+    // Same rule as the Tools screen: a server whose key travels in one of the
+    // context headers cannot have the setting turned on until it is renamed.
+    if (
+      entry.sendConversationContext &&
+      rows.some(
+        (row) => row.url === url && authHeaderClashesWithContext(row.authKind, row.headerName),
+      )
+    ) {
+      errors.push(
+        `${at}.url: the tool server at ${url} sends its key in one of ${CONVERSATION_CONTEXT_HEADER_NAMES.join(", ")}, which solv.chat sends itself when "Send conversation context" is on. Choose another header name on the Tools screen first.`,
       );
       return;
     }

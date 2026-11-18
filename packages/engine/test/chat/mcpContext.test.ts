@@ -410,6 +410,48 @@ describe("conversation context headers to MCP servers", () => {
     expect(saved?.sendConversationContext).toBe(true);
   });
 
+  it("refuses to turn the setting on with the ingest key while a server's header clashes", async () => {
+    // A legacy row whose credential travels in Solv-Visitor-Id, sharing its
+    // address with a server that is fine: nothing may change for either.
+    await seedServer({ headerName: "Solv-Visitor-Id" });
+    await tenant.mcp.createServer({
+      id: "mcp_srv_other",
+      assistantId: "ast_a",
+      label: "Orders backup",
+      url: SERVER_URL,
+      authKind: "none",
+      headerName: null,
+      secretCiphertext: null,
+      enabled: true,
+      createdAt: 1001,
+    });
+    const server = fakeMcpServer({ tools: [LOOKUP] });
+    const app = appWith(server);
+    const auth = { Authorization: `Bearer ${INGEST_KEY}` };
+
+    const turnOn = await send(app, "/v1/ingest/ast_a/mcp-servers", {
+      method: "PUT",
+      headers: auth,
+      body: { servers: [{ url: SERVER_URL, sendConversationContext: true }] },
+    });
+    expect(turnOn.status).toBe(400);
+    expect(turnOn.text).toContain("mcpServers[0].url");
+    expect(turnOn.text).toContain("Choose another header name");
+    expect(turnOn.text).not.toContain(CREDENTIAL);
+    expect((await tenant.mcp.getServer(SERVER_ID))?.sendConversationContext).toBe(false);
+    expect((await tenant.mcp.getServer("mcp_srv_other"))?.sendConversationContext).toBe(false);
+    expect(server.calls).toEqual([]);
+
+    // Turning it off (or leaving it off) is still allowed.
+    const keepOff = await send(app, "/v1/ingest/ast_a/mcp-servers", {
+      method: "PUT",
+      headers: auth,
+      body: { servers: [{ url: SERVER_URL, sendConversationContext: false }] },
+    });
+    expect(keepOff.status).toBe(200);
+    expect(JSON.parse(keepOff.text).changed).toBe(0);
+  });
+
   it("reads and sets the setting with the ingest key, as solv apply does", async () => {
     await seedServer();
     const app = appWith(fakeMcpServer());
