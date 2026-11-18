@@ -81,6 +81,20 @@ SOLV_INGEST_KEY=<the key> npx solv push ./content \
 
 `solv push` sends 10 documents per request so each request fits the Workers Free limit of 50 subrequests (calls to R2 and D1 count; see [Cloudflare's limits page](https://developers.cloudflare.com/workers/platform/limits/)). If you call the ingest API yourself, keep batches that small on Free; batches up to the API's cap of 100 need the Paid plan.
 
+`solv push` reads `.md`, `.markdown` and `.mdx` files. A few options shape what it sends:
+
+- `--include <glob>` and `--exclude <glob>` choose files, relative to the folder. Both can be given more than once. `*` matches within one folder, `**` across folders, and `{md,mdx}` either. For example, `--exclude "**/_*"` leaves out Docusaurus partials and `--exclude "drafts/**"` a drafts folder.
+- `--file <path>=<url>` also pushes one file from outside the folder, with its own URL, for example `--file README.md=https://example.com/ --file CHANGELOG.md=https://example.com/changelog`. With only `--file`, no folder or `--base-url` is needed.
+- `--source <name>` names the content. Use it when more than one repository pushes into the same assistant: each name is its own source under **Sources**, and `--prune` then deletes only documents pushed under the same name. Without `--source`, everything goes to the assistant's one default source, as before. Use the same name on every push: a renamed source starts empty, and the old one keeps its documents.
+
+If the folder is a Docusaurus docs folder, `solv push` finds that from the files themselves: an `.mdx` file, a Docusaurus front matter key such as `sidebar_position` or `sidebar_label`, an admonition (`:::note`), or an import from `@theme/`, `@site/` or `@docusaurus/`. Then, for every file in the folder:
+
+- URLs follow Docusaurus: `slug` and `id` front matter are honoured, number prefixes (`01-intro.md`, `02-guides/`) are dropped, and `index.md`, `README.md` or a file named like its folder gives the folder's URL. Point `--base-url` at your docs root, for example `https://example.com/docs`.
+- The title is the front matter `title`, else `sidebar_label`, else the first heading. The front matter `description` is put at the top of the document.
+- Admonitions become plain labelled paragraphs (`**Tip:** …`, or the admonition's own title), `import`/`export` lines are dropped, and components such as `<Tabs>` are replaced by the text inside them (or dropped when there is none). Code blocks are kept exactly.
+
+Other folders are pushed as they always were. Run with `--dry-run` to see each document's URL before pushing.
+
 5. In `/admin`, open **Behaviour** (or **Widget**) and click **Publish** so the assistant goes live (Publish promotes your draft — behaviour, widget settings, and any enabled tools — to visitors).
 6. Open **Install**, copy the `<script>` tag, paste it into your site, and ask a question.
 

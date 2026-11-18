@@ -6,6 +6,7 @@
       "!**/lib",
       "!**/node_modules",
       "!**/.wrangler",
+      "!**/test/fixtures",
       "!**/widgetBundle.ts",
       "!**/adminBundle.ts"
     ]

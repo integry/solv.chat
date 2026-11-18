@@ -1,0 +1,51 @@
+---
+sidebar_label: Install Acme
+---
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+export const Highlight = ({children}) => (
+  <span style={{color: 'green'}}>{children}</span>
+);
+
+# Installation
+
+Install it with <Highlight>your package manager</Highlight>.
+
+<Tabs>
+  <TabItem value="npm" label="npm">
+
+```bash
+npm install acme
+```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn" attributes={{className: "tab-yarn"}}>
+
+```bash
+yarn add acme
+```
+
+  </TabItem>
+</Tabs>
+
+:::tip[Pro tip]
+
+Pin the version in CI.
+
+:::
+
+<img src="/img/diagram.png" alt="How it fits" />
+
+<Diagram src="/img/flow.svg" />
+
+```mdx title="example.mdx"
+import Tabs from '@theme/Tabs';
+
+:::note
+Kept exactly.
+:::
+
+<Tabs>  <TabItem value="a">A</TabItem></Tabs>
+```
+
+Use `<Tabs>` to group options.
