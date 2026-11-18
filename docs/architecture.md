@@ -81,6 +81,10 @@ from the auth seam and pass it down.
   token sent to the visitor, and to the complete reply; NULL for replies
   written before migration 0022, and for a paused reply they are the first
   request's).
+  For assistant replies to visitors, also outcome (`answered` | `partial` |
+  `declined` | `off_topic` | `wants_human`, or NULL when not reviewed) and
+  outcome_confidence (0-1, NULL when the reviewer cannot give one; nothing
+  reads it yet). See "Answer review".
 - `message_traces` — org_id, message_id, detail JSON, created_at, updated_at;
   one row per assistant reply to a visitor, keyed (org_id, message_id) and
   deleted with its message. See "Answer traces".
@@ -92,6 +96,9 @@ from the auth seam and pass it down.
   must-not-contain, or must-decline).
 - `test_runs` — id, version_id, started_at, results JSON, passed.
 - `usage_daily` — org_id, assistant_id, day, messages, tokens_in, tokens_out, cost_micros.
+- `org_provider_settings` — org_id, the stored provider choices (see "Provider
+  settings") and review_answers (the "Review answers" switch; NULL is the
+  default, on).
 - `gap_dismissals` — org_id, assistant_id, question_key, dismissed_at. A dismissed gap
   group is hidden until the question is asked again after `dismissed_at`.
 
@@ -177,7 +184,9 @@ The Monitor screens read:
   error, sources with documents that failed to index, reported as soon as the
   failure is recorded, and sources with documents still not indexed 15 minutes
   after they were written, reported separately).
-- Conversations: `filter=unanswered,not_helpful,used_tool`, `days=1|7|30|90`,
+- Conversations: `filter=unanswered,not_helpful,used_tool,could_not_answer,asked_for_person,off_topic`
+  (the last three read the answer review's outcome: `declined`,
+  `wants_human` and `off_topic`, retrieval misses included), `days=1|7|30|90`,
   `q=` (case-insensitive text in any message) and `question=` (a grouped
   question: conversations where a visitor asked it, matched by its key; what
   question links in Overview and Reports open), with `askedFrom=` and
@@ -192,7 +201,13 @@ The Monitor screens read:
   assistant reply was made (see "Answer traces"); `trace: null` for a reply
   with none, and 404 for a visitor message or a message outside that
   conversation or org.
-- Gaps: `status=open` leaves out groups with a written answer newer than the
+- Gaps: a group's questions are those whose reply was reviewed as `declined`
+  (a retrieval miss or not), or, with no outcome (older rows, a review not yet
+  run), found nothing above the score floor (`answered = 0`). A reply reviewed
+  as `off_topic` or `wants_human` is not a content gap and is never listed.
+  Each group carries `noContentTimes` and `declinedTimes` (they add up to `times`), shown
+  as "No content found" and "Had content, could not answer" (the second
+  usually means the content is unclear). `status=open` leaves out groups with a written answer newer than the
   group's latest ask (asked again after it, a group is open again, as after a
   dismissal). Overview's open gaps and Reports' "Most often unanswered" leave
   out the same groups, and the asks from before a dismissal (not counted, but
@@ -216,6 +231,92 @@ The Monitor screens read:
 6. If nothing was retrieved above the floor and no tool answered, say so, use the
    owner's fallback text, and mark the message `answered = false` so it shows
    under Gaps.
+7. Once the reply is complete, stored and sent, hand it to the answer review
+   (below), which runs as separate deferred work.
+
+## Answer review
+
+`answered` only says retrieval found content. A model given content can still
+decline ("I could not find that"), so each completed visitor reply is reviewed
+after it is sent, and the outcome is stored on the message: `answered`,
+`partial` (some of it, or hedged), `declined` (does not know, cannot help, or
+the fallback), `off_topic` (not about this site's subject) or `wants_human`
+(asked for a person, a call back, or to complain).
+
+- **Where it runs.** `ctx.waitUntil`, as its own promise, registered after the
+  `done` event and the trace write; the answer's stream closes without waiting
+  for it. Not the Queue: one short call per answer needs no durable retry, the
+  open engine's only queue is the ingest queue (whose consumer is built for
+  documents), and the visitor is never waiting either way. Each attempt has a
+  10-second timeout (`REVIEW_TIMEOUT_MS`); a failure or timeout is retried
+  once, an unusable label is not. For a reply with content, a failed or
+  skipped review leaves the outcome NULL and changes nothing else (a
+  retrieval miss differs, below).
+- **What is reviewed.** Completed replies to visitors (`POST /v1/chat`),
+  including a paused reply once its continuation completes (never while
+  paused). "Try it" previews and test runs are not reviewed.
+- **Retrieval misses.** A reply that is the fixed fallback text because nothing
+  cleared the floor is reviewed too, with the same frame (the question and the
+  fallback reply): the question alone tells an off-topic question or a request
+  for a person from a real content gap. Only `declined`, `off_topic` or
+  `wants_human` is accepted (`MISS_OUTCOMES`); any other label (a fallback
+  reply cannot have answered, even partly), no label, a failure, a timeout,
+  the spend cap being reached, or "Review answers" off stores `declined`
+  (with no model call in the last two), so a miss is never left empty and
+  never counts as answered. Cost, cap, timeout and retry are as for any
+  review. `answered` stays 0 whatever the outcome.
+- **The reviewer.** One small interface, `AnswerReviewer` in
+  `chat/review.ts`: question and reply in, `{ outcome, confidence }` out
+  (`confidence` 0-1, or null when the backend cannot give one; stored as
+  `outcome_confidence`). Callers (the answer path, Gaps, the reports) depend on
+  the interface only. Its one implementation is a call to the fast tier of the
+  organisation's configured answering provider (`ANTHROPIC_MODELS.fast`,
+  `OPENAI_MODELS.fast`; on OpenRouter, which has no tiers, the configured
+  model), with the same key, through the normal provider layer. It cannot
+  give a confidence. There is no per-assistant reviewer prompt and no model
+  picker.
+- **Untrusted input.** The reviewer's system prompt is a fixed frame
+  (`REVIEW_FRAME`). The question and the reply travel in the user turn as data,
+  each between start and end lines carrying a random tag per call, so text
+  inside them cannot close its block. The output is parsed strictly: the whole
+  reply, less surrounding whitespace, must be one of the five labels; anything
+  else is stored as NULL.
+- **Cost.** The call's tokens and cost are recorded through `UsageSink` like
+  any model use (`messages: 0`), so they count toward `usage_daily` and the
+  daily spend cap. Before each attempt the review asks `Limits` with
+  `{ kind: "review" }` and is skipped when the cap is reached (the open
+  `basicLimits` applies only the spend cap to it, no rate limit). At most 16
+  output tokens; the reply is cut to its first 6000 characters.
+- **Metering.** The usage counter a host bills on (`messages`) does not change.
+  When an outcome is stored, the seam also receives an event that counts
+  nothing (`messages`, tokens and cost all 0) and carries
+  `review: { messageId, outcome, confidence }`, so a host can apply its own
+  rule later. The open `usageDaily` writes nothing for such an event.
+- **Answered share** (Overview and Reports): over the range's replies less
+  those reviewed as `off_topic` (an assistant that rightly refuses a question
+  about something else has not failed), a reviewed reply counts 1 for
+  `answered`, one half for `partial` and 0 for `declined` and `wants_human`;
+  a reply with no outcome counts as before (1 when retrieval found content).
+  Both screens' hint says off-topic questions are not counted. The
+  thumbs-down share and the reply count still count every reply. Old data
+  reads exactly as it did.
+- **Gaps** and Reports' "Most often unanswered" list questions with a reply
+  reviewed as `declined`, or unreviewed with no content found; never
+  `off_topic` or `wants_human` (see "Admin API").
+- **Conversations** shows the outcome as a badge on each reviewed assistant
+  reply ("Answered", "Partly answered", "Could not answer", "Off topic",
+  "Asked for a person"); a retrieval miss reviewed as `declined` keeps its
+  "Unanswered" badge. A reply that Gaps would list offers "Write an answer
+  for this"; one reviewed as `off_topic` or `wants_human` does not. The
+  "Could not answer", "Asked for a person" and "Off topic" filters read the
+  outcome, so "Asked for a person" finds a visitor who asked for one even
+  when retrieval missed.
+- **Switch.** Settings → Providers → "Review answers", per organisation, on by
+  default (`reviewAnswers` on `PUT /api/admin/providers`; `null` restores the
+  default). Off means no model call and no outcome for a reply with content;
+  a retrieval miss is still stored as `declined` (with its outcome event), so
+  Gaps, the answered share and the filters read as they did before review
+  existed.
 
 ## Answer traces
 
@@ -275,6 +376,11 @@ were recorded for this answer."
 - A trace adds no visitor or owner text to what is stored: ids, scores,
   timings, a model id and a key source. It is read only by the signed-in
   owner of the org (`/api/admin/*`, org from the auth seam).
+- The answer review sends the visitor's question and the assistant's reply,
+  and nothing else (no conversation history, sources, page or visitor id), to
+  the same provider that produced the answer, with the same key: the fast
+  tier of the organisation's configured answering provider. It stores only
+  the label (and a confidence when one is given), never the reviewer's text.
 - There is no export of conversations today. Whatever export or deletion path
   is added for messages must cover `message_traces` with them.
 
@@ -698,8 +804,12 @@ The cloud layer replaces these and nothing else:
   `managed` is true, the admin hides key-entry fields unless `ownKeysAllowed`
   is also true.
 - `UsageSink` — receives usage events. The open build writes `usage_daily`.
+  An event may carry `review` (a reviewed answer's outcome, on an event that
+  counts nothing; see "Answer review").
 - `Limits` — answers "may this org do this?". The open build enforces only the
-  per-assistant spend cap and rate limits.
+  per-assistant spend cap and rate limits. `{ kind: "review" }` asks whether
+  an answer review may spend; an implementation must answer it (the open one
+  applies the spend cap only).
 
 `packages/engine` exports `createApp(seams)` and the open seam implementations
 (`passwordAuth`, `PasswordAuthEnv`, `SINGLE_ORG_ID`, `secretKeys`, `SecretKeyEnv`,

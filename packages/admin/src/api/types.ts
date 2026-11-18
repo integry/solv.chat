@@ -1,4 +1,5 @@
 import type {
+  AnswerOutcome,
   OverviewAttention,
   OverviewPeriod,
   OverviewSetup,
@@ -10,6 +11,7 @@ import type {
 
 // Overview and Reports shapes are declared once, in core, beside the engine's.
 export type {
+  AnswerOutcome,
   OverviewAttention,
   OverviewPeriod,
   OverviewSetup,
@@ -127,6 +129,8 @@ export interface ConversationTurn {
   citations: Citation[];
   toolCalls?: ConversationToolCall[] | null;
   answered: boolean;
+  /** For a reply, what the answer review decided; null or absent when it was not reviewed. */
+  outcome?: AnswerOutcome | null;
   createdAt: number;
   feedback: ConversationFeedback[];
   answerDocumentId: string | null;
@@ -202,6 +206,10 @@ export interface GapSummary {
   question: string;
   displayQuestion: string;
   times: number;
+  /** Asks where no content was found. */
+  noContentTimes?: number;
+  /** Asks where content was found but the reply still could not answer. */
+  declinedTimes?: number;
   lastAsked: number;
   exampleMessageId: string;
   handled: boolean;
@@ -356,6 +364,8 @@ export interface ProviderSettingsView {
     llmTier: ResolvedSetting<LlmTier>;
     llmModel: ResolvedSetting<string | null>;
     embeddingsProvider: ResolvedSetting<EmbeddingsProviderName>;
+    /** "Review answers"; absent from an engine without answer review. */
+    reviewAnswers?: ResolvedSetting<boolean>;
   };
   keysManaged: boolean;
   /** With managed keys: whether the owner may still enter their own. */

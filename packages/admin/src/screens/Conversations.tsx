@@ -29,12 +29,23 @@ const SEARCH_DELAY_MS = 300;
 const SEARCH_PENDING_RETRY_MS = 1000;
 const LIST_PATH = "/admin/conversations";
 
-type FlagKey = "unanswered" | "not_helpful" | "used_tool";
+type FlagKey =
+  | "unanswered"
+  | "not_helpful"
+  | "used_tool"
+  | "could_not_answer"
+  | "asked_for_person"
+  | "off_topic";
 
 const FLAGS: Array<{ key: FlagKey; label: string }> = [
   { key: "unanswered", label: "Unanswered" },
   { key: "not_helpful", label: "Marked not helpful" },
   { key: "used_tool", label: "Used a tool" },
+  // These read the answer review's outcome, so they find reviewed replies
+  // only (retrieval misses included: they are reviewed too).
+  { key: "could_not_answer", label: "Could not answer" },
+  { key: "asked_for_person", label: "Asked for a person" },
+  { key: "off_topic", label: "Off topic" },
 ];
 
 const DATE_OPTIONS = [

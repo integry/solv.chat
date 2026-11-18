@@ -101,7 +101,7 @@ export function Overview({ assistantId }: OverviewProps) {
             <StatCard
               label="Answered share"
               value={formatPercent(current.answeredShare)}
-              explanation="Share of answers your assistant could give from your content."
+              explanation="Share of answers your assistant could give from your content. Off-topic questions are not counted."
               change={
                 period
                   ? shareChange(current.answeredShare, previous.answeredShare, days)

@@ -283,7 +283,10 @@ export function Reports({ assistantId }: ReportsProps) {
             <section className="source-card stat-card" aria-label="Answered share">
               <div className="stat-label">Answered share</div>
               <div className="stat-value">{formatPercent(report.answeredShare)}</div>
-              <p className="muted">Share of answers your assistant could give from your content.</p>
+              <p className="muted">
+                Share of answers your assistant could give from your content. Off-topic questions
+                are not counted.
+              </p>
             </section>
             <section className="source-card stat-card" aria-label="Marked not helpful">
               <div className="stat-label">Marked not helpful</div>

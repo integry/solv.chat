@@ -5,6 +5,17 @@ import type { UsageSink } from "../types.js";
 export function usageDaily(db: D1Database): UsageSink {
   return {
     async record(event) {
+      // An event that counts nothing (the outcome of an answer review) is
+      // extra data for a host; there is nothing to add to usage_daily.
+      if (
+        event.messages === 0 &&
+        event.tokensIn === 0 &&
+        event.tokensOut === 0 &&
+        event.costMicros === 0 &&
+        !event.costUnknown
+      ) {
+        return;
+      }
       const day = utcDay(event.at);
       await db
         .prepare(

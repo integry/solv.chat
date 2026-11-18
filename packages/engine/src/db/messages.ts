@@ -1,3 +1,4 @@
+import { type AnswerOutcome, isAnswerOutcome } from "@solvchat/core";
 import { prepare, prepareInsert, safeJsonArray } from "./sql.js";
 
 export type MessageRole = "user" | "assistant";
@@ -23,6 +24,8 @@ interface Row {
   reply_to: string | null;
   first_token_ms: number | null;
   total_ms: number | null;
+  outcome: string | null;
+  outcome_confidence: number | null;
 }
 
 export interface MessageRow {
@@ -44,6 +47,10 @@ export interface MessageRow {
   firstTokenMs: number | null;
   /** For an assistant reply, milliseconds from the request to the complete reply; null before 0022. */
   totalMs: number | null;
+  /** For an assistant reply, what the answer review decided; null when it was not reviewed. */
+  outcome: AnswerOutcome | null;
+  /** The reviewer's confidence, 0 to 1, when its backend gives one. Nothing reads it yet. */
+  outcomeConfidence: number | null;
 }
 
 export interface PendingReplyRow extends MessageRow {
@@ -84,6 +91,14 @@ export interface GapGroupRow {
   /** The newest question in the group, as the visitor typed it. */
   displayQuestion: string;
   times: number;
+  /**
+   * Of `times`: asks where retrieval found nothing above the floor ("no
+   * content found"), and asks where it found content but the reviewed reply
+   * still declined ("had content, still could not answer"). They add up to
+   * `times`.
+   */
+  noContentTimes: number;
+  declinedTimes: number;
   lastAsked: number;
   exampleMessageId: string;
   documentId: string | null;
@@ -135,10 +150,19 @@ const SEARCH_FILL_BATCH = 200;
 const SEARCH_FILL_ROUNDS = 10;
 
 const COLUMNS =
-  "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, first_token_ms, total_ms";
+  "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, first_token_ms, total_ms, outcome, outcome_confidence";
 
 const QUALIFIED_COLUMNS =
-  "m.id, m.org_id, m.conversation_id, m.role, m.content, m.citations, m.tool_calls, m.tokens_in, m.tokens_out, m.cost_micros, m.answered, m.created_at, m.reply_to, m.first_token_ms, m.total_ms";
+  "m.id, m.org_id, m.conversation_id, m.role, m.content, m.citations, m.tool_calls, m.tokens_in, m.tokens_out, m.cost_micros, m.answered, m.created_at, m.reply_to, m.first_token_ms, m.total_ms, m.outcome, m.outcome_confidence";
+
+/**
+ * A reply Gaps lists, on alias `a`: the answer review stored `declined`
+ * (a retrieval miss, or a reply that had content and still did not answer).
+ * A miss reviewed as `off_topic` or `wants_human` is not a content gap and is
+ * left out. Unreviewed replies (older rows, a review still to run) are read
+ * as before: by `answered` alone.
+ */
+export const GAP_REPLY = "(a.outcome = 'declined' OR (a.outcome IS NULL AND a.answered = 0))";
 
 /**
  * Unanswered replies joined to the question each one answers, through the
@@ -154,6 +178,7 @@ const GAP_ROWS = `
          q.created_at AS asked_at,
          q.rowid AS question_rowid,
          q.question_key AS question_key,
+         a.answered AS had_content,
          (SELECT ga.document_id
             FROM gap_answers ga
            WHERE ga.org_id = a.org_id AND ga.message_id IN (q.id, a.id)
@@ -178,7 +203,7 @@ const GAP_ROWS = `
    WHERE a.org_id = ?1
      AND c.assistant_id = ?2
      AND a.role = 'assistant'
-     AND a.answered = 0
+     AND ${GAP_REPLY}
      AND q.question_key IS NOT NULL
      AND q.question_key <> ''`;
 
@@ -193,6 +218,7 @@ const GAP_ROWS = `
  */
 const GAP_GROUPS = `
   SELECT question_key, question_content, asked_at, question_id, times,
+         no_content_times, declined_times,
          CASE WHEN group_answered_at >= asked_at THEN group_document_id END AS group_document_id
     FROM (
       SELECT question_key, question_content, asked_at, question_id, dismissed,
@@ -201,6 +227,10 @@ const GAP_GROUPS = `
                ORDER BY dismissed ASC, asked_at DESC, question_rowid DESC
              ) AS rn,
              SUM(CASE WHEN dismissed THEN 0 ELSE 1 END) OVER (PARTITION BY question_key) AS times,
+             SUM(CASE WHEN dismissed OR had_content THEN 0 ELSE 1 END)
+               OVER (PARTITION BY question_key) AS no_content_times,
+             SUM(CASE WHEN dismissed OR NOT had_content THEN 0 ELSE 1 END)
+               OVER (PARTITION BY question_key) AS declined_times,
              MAX(answered_at) OVER (PARTITION BY question_key) AS group_answered_at,
              FIRST_VALUE(document_id) OVER (
                PARTITION BY question_key
@@ -229,6 +259,8 @@ const map = (row: Row): MessageRow => ({
   replyTo: row.reply_to,
   firstTokenMs: row.first_token_ms ?? null,
   totalMs: row.total_ms ?? null,
+  outcome: isAnswerOutcome(row.outcome) ? row.outcome : null,
+  outcomeConfidence: row.outcome_confidence ?? null,
 });
 
 interface PendingRow extends Row {
@@ -589,7 +621,29 @@ export function messagesFor(db: D1Database, orgId: string) {
         replyTo,
         firstTokenMs: input.role === "assistant" ? (input.firstTokenMs ?? null) : null,
         totalMs: input.role === "assistant" ? (input.totalMs ?? null) : null,
+        outcome: null,
+        outcomeConfidence: null,
       };
+    },
+
+    /**
+     * Stores the answer review's decision on an assistant reply. Written once:
+     * a reply that already has an outcome keeps it. False when nothing was
+     * written (no such reply in this org, a visitor message, or already set).
+     */
+    async setOutcome(
+      id: string,
+      outcome: AnswerOutcome,
+      confidence: number | null,
+    ): Promise<boolean> {
+      const res = await prepare(
+        db,
+        `UPDATE messages SET outcome = ?3, outcome_confidence = ?4
+          WHERE org_id = ?1 AND id = ?2 AND role = 'assistant' AND outcome IS NULL`,
+      )
+        .bind(orgId, id, outcome, confidence)
+        .run();
+      return (res.meta.changes ?? 0) > 0;
     },
 
     async markAnswered(id: string, answered: boolean): Promise<boolean> {
@@ -624,7 +678,8 @@ export function messagesFor(db: D1Database, orgId: string) {
         prepare(
           db,
           `WITH ${GAP_GROUP_CTES}
-           SELECT question_key, question_content, asked_at, question_id, times, group_document_id
+           SELECT question_key, question_content, asked_at, question_id, times,
+                  no_content_times, declined_times, group_document_id
              FROM gap_group
             WHERE (?5 = 0 OR group_document_id IS NULL)
             ORDER BY times DESC, asked_at DESC, question_id DESC
@@ -644,12 +699,16 @@ export function messagesFor(db: D1Database, orgId: string) {
           asked_at: number;
           question_id: string;
           times: number;
+          no_content_times: number;
+          declined_times: number;
           group_document_id: string | null;
         }>
       ).map((r) => ({
         question: r.question_key,
         displayQuestion: r.question_content.trim(),
         times: r.times,
+        noContentTimes: r.no_content_times,
+        declinedTimes: r.declined_times,
         lastAsked: r.asked_at,
         exampleMessageId: r.question_id,
         documentId: r.group_document_id,

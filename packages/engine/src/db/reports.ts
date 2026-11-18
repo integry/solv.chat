@@ -1,4 +1,4 @@
-import { GAP_GROUP_CTES } from "./messages.js";
+import { GAP_GROUP_CTES, GAP_REPLY } from "./messages.js";
 import { prepare } from "./sql.js";
 
 /** Row caps. A report is a screen, not an export of everything. */
@@ -88,17 +88,33 @@ export function reportsFor(db: D1Database, orgId: string) {
      * down — one query, so the three shares cannot be read from three
      * different instants.
      *
+     * `answered` is a weighted count. A reviewed reply counts by its outcome:
+     * `answered` 1, `partial` one half (it gave something, so counting it as
+     * a miss would undersell it, and as a full answer would hide the hedge),
+     * `declined` and `wants_human` 0. An `off_topic` reply is left out of
+     * the share altogether (`answerable`, its denominator): an assistant that
+     * rightly refuses a question about something else has not failed. A
+     * reply with no outcome (before review existed, review switched off, or a
+     * review that failed) counts as before: 1 when retrieval found content.
+     * So old data reads exactly as it did. `replies` still counts every reply
+     * (it is the thumbs-down share's denominator and the count shown).
+     *
      * The thumbs-down count is `EXISTS`, not a join: a reply with three `down`
      * rows is one unhappy visitor's answer, not three.
      */
     async replyShares(
       assistantId: string,
       range: ReportRange,
-    ): Promise<{ replies: number; answered: number; thumbsDown: number }> {
+    ): Promise<{ replies: number; answerable: number; answered: number; thumbsDown: number }> {
       const row = await prepare(
         db,
         `SELECT COUNT(*) AS replies,
-                COALESCE(SUM(CASE WHEN m.answered = 1 THEN 1 ELSE 0 END), 0) AS answered,
+                COALESCE(SUM(CASE WHEN m.outcome = 'off_topic' THEN 0 ELSE 1 END), 0) AS answerable,
+                COALESCE(SUM(CASE
+                  WHEN m.outcome IS NULL THEN CASE WHEN m.answered = 1 THEN 1.0 ELSE 0.0 END
+                  WHEN m.outcome = 'answered' THEN 1.0
+                  WHEN m.outcome = 'partial' THEN 0.5
+                  ELSE 0.0 END), 0) AS answered,
                 COALESCE(SUM(CASE WHEN EXISTS (
                   SELECT 1 FROM feedback f
                    WHERE f.org_id = m.org_id AND f.message_id = m.id AND f.value = 'down'
@@ -109,9 +125,10 @@ export function reportsFor(db: D1Database, orgId: string) {
             AND m.created_at >= ?3 AND m.created_at <= ?4`,
       )
         .bind(orgId, assistantId, range.fromMs, range.toMs)
-        .first<{ replies: number; answered: number; thumbs_down: number }>();
+        .first<{ replies: number; answerable: number; answered: number; thumbs_down: number }>();
       return {
         replies: row?.replies ?? 0,
+        answerable: row?.answerable ?? 0,
         answered: row?.answered ?? 0,
         thumbsDown: row?.thumbs_down ?? 0,
       };
@@ -229,7 +246,9 @@ export function reportsFor(db: D1Database, orgId: string) {
     /**
      * Most asked questions, grouped by the normalised key the chat pipeline
      * stores. `unansweredOnly: true` gives the gaps list: questions with an
-     * unanswered reply, left out as the Gaps screen leaves them out (asked
+     * unanswered reply (reviewed as declined, or unreviewed with no content
+     * found; not off topic or asking for a person), left out as the Gaps
+     * screen leaves them out (asked
      * before the group was dismissed, or a group with a written answer newer
      * than its latest ask), so each row is one the Gaps screen lists.
      */
@@ -254,8 +273,9 @@ export function reportsFor(db: D1Database, orgId: string) {
         ? `WITH ${GAP_GROUP_CTES}
            ${select} ${asked}
             AND EXISTS (
-              SELECT 1 FROM messages r
-               WHERE r.org_id = m.org_id AND r.reply_to = m.id AND r.answered = 0
+              SELECT 1 FROM messages a
+               WHERE a.org_id = m.org_id AND a.reply_to = m.id AND a.role = 'assistant'
+                 AND ${GAP_REPLY}
             )
             AND NOT EXISTS (
               SELECT 1 FROM gap_dismissals gd

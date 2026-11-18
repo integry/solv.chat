@@ -14,6 +14,7 @@ import { type Embedder, embeddingCostMicros, type Retriever } from "../providers
 import type { LlmMessage, LlmProvider, LlmToolResult, ToolCall } from "../providers/types.js";
 import type { UsageSink } from "../seams/types.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
+import type { ReviewJob } from "./review.js";
 import {
   MAX_TOOL_CALLS_PER_CONVERSATION,
   resumeToolLoop,
@@ -61,6 +62,18 @@ export interface AnswerDeps {
    * trace is written (previews and test runs store no message to keep one on).
    */
   trace?: AnswerTraceContext | undefined;
+  /**
+   * Answer review. Absent, nothing is reviewed or stored: this is a preview
+   * or a test run. (With "Review answers" off the hook is still given: it
+   * stores `declined` on a retrieval miss and reviews nothing.) `schedule` must not wait for the review:
+   * it is handed each completed visitor reply after its `done` event and
+   * trace, and runs as deferred work that cannot reach the visitor.
+   */
+  review?: AnswerReviewHook | undefined;
+}
+
+export interface AnswerReviewHook {
+  schedule(job: ReviewJob): void;
 }
 
 export interface AnswerTraceContext {
@@ -271,6 +284,21 @@ async function saveTrace(
   }
 }
 
+/**
+ * Hands a stored, completed reply to the answer review. Scheduling only:
+ * the review runs as deferred work and nothing it does reaches this answer.
+ */
+function scheduleReview(deps: AnswerDeps, job: ReviewJob): void {
+  if (!deps.review) return;
+  try {
+    deps.review.schedule(job);
+  } catch (err) {
+    console.error("chat: answer review not scheduled", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 function stopFor(stopReason: string | undefined): TraceStop {
   return stopReason === "length" ? "length" : "complete";
 }
@@ -393,6 +421,14 @@ export async function* answerMessage(
         { kind: "answer", candidates, timing, modelCalled: false, stop: "complete" },
         clock,
       );
+      scheduleReview(deps, {
+        orgId: input.orgId,
+        assistantId: input.assistantId,
+        messageId,
+        question: input.message,
+        reply: input.behaviour.fallbackText,
+        retrievalMiss: true,
+      });
     }
     return;
   }
@@ -590,6 +626,14 @@ export async function* answerMessage(
       { kind: "answer", candidates, timing, modelCalled: true, stop: stopFor(stopReason) },
       clock,
     );
+    scheduleReview(deps, {
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      messageId,
+      question: input.message,
+      reply: text,
+      retrievalMiss: false,
+    });
   }
 }
 
@@ -968,6 +1012,16 @@ export async function* answerWithActionResults(
       { kind: "resume", candidates, timing, modelCalled: true, stop: stopFor(stopReason) },
       clock,
     );
+    // Reviewed once complete, never while paused: a paused reply is not the
+    // answer yet.
+    scheduleReview(deps, {
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      messageId: pendingReply.id,
+      question: questionMsg.content,
+      reply: text,
+      retrievalMiss: false,
+    });
   } finally {
     if (!completed) {
       try {

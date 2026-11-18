@@ -67,7 +67,9 @@ export async function periodFigures(
     replies: shares.replies,
     // Zero rather than null on an empty range: the screen shows a number with
     // a plain sentence, and a dash makes an owner wonder if it is broken.
-    answeredShare: shares.replies === 0 ? 0 : shares.answered / shares.replies,
+    // Off-topic replies are not in the answered share's denominator: see
+    // `replyShares`.
+    answeredShare: shares.answerable === 0 ? 0 : shares.answered / shares.answerable,
     thumbsDownShare: shares.replies === 0 ? 0 : shares.thumbsDown / shares.replies,
     costMicros,
   };
