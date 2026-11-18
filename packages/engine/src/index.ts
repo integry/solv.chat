@@ -15,6 +15,16 @@ export {
   MAX_TURNS,
   SAFETY_FRAME,
 } from "./chat/prompt.js";
+export {
+  type AnswerReviewer,
+  buildReviewRequest,
+  type ModelReviewerDeps,
+  modelReviewer,
+  parseReviewLabel,
+  REVIEW_FRAME,
+  type ReviewInput,
+  type ReviewResult,
+} from "./chat/review.js";
 export type { ChatRouteOverrides } from "./chat/route.js";
 export {
   MAX_TOOL_CALLS_PER_CONVERSATION,
@@ -103,6 +113,7 @@ export {
   type Limits,
   type LlmProviderName,
   type Principal,
+  type ReviewOutcomeEvent,
   type ScopeClaim,
   type Seams,
   StoredKeyError,

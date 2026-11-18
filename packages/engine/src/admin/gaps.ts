@@ -7,6 +7,10 @@ export interface GapSummary {
   question: string;
   displayQuestion: string;
   times: number;
+  /** Asks where no content was found above the score floor. */
+  noContentTimes: number;
+  /** Asks where content was found but the reviewed reply still declined (the content may be unclear). */
+  declinedTimes: number;
   lastAsked: number;
   exampleMessageId: string;
   handled: boolean;
@@ -34,8 +38,10 @@ export function readGapsOpenOnly(url: URL): boolean {
 
 /**
  * The unanswered questions. `answered = 0` is written by the chat pipeline when
- * nothing cleared the score floor, so this screen is a direct read of that
- * decision rather than a second heuristic that could disagree with it.
+ * nothing cleared the score floor, and `outcome = 'declined'` by the answer
+ * review when the reply had content and still did not answer, so this screen
+ * is a direct read of those decisions rather than a second heuristic that
+ * could disagree with them. Each group says how many of its asks were which.
  *
  * Grouping is by the normalised question text: lowercased and with runs of
  * whitespace collapsed, stored with the question when it is written. Each

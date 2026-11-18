@@ -1,3 +1,5 @@
+import type { AnswerOutcome } from "@solvchat/core";
+
 export interface Principal {
   orgId: string;
   userId: string;
@@ -82,6 +84,23 @@ export interface UsageEvent {
   tokensOut: number;
   costMicros: number;
   costUnknown?: boolean | undefined;
+  /**
+   * Set on the event that reports a reviewed answer's outcome (see "Answer
+   * review" in docs/architecture.md). That event counts nothing: `messages`,
+   * tokens and cost are all 0, as the review's model call reported its own
+   * usage in an event of its own (`messages: 0`). The open `usageDaily`
+   * ignores it, and `messages` (the count a host bills on) is unchanged by
+   * review; a host can read this to apply a rule of its own.
+   */
+  review?: ReviewOutcomeEvent | undefined;
+}
+
+export interface ReviewOutcomeEvent {
+  /** The assistant reply that was reviewed. */
+  messageId: string;
+  outcome: AnswerOutcome;
+  /** 0 to 1, or null when the reviewer cannot give one. */
+  confidence: number | null;
 }
 
 export interface UsageSink {
@@ -96,7 +115,13 @@ export interface UsageSink {
 export type LimitAction =
   | { kind: "chat"; ip: string }
   | { kind: "config"; ip: string }
-  | { kind: "ingest" };
+  | { kind: "ingest" }
+  /**
+   * The answer review that runs after a visitor's answer (no IP: it is the
+   * engine's own deferred work). It spends model budget, so it is refused
+   * once the daily spend cap is reached; it is never rate limited.
+   */
+  | { kind: "review" };
 
 export type LimitDecision = { ok: true } | { ok: false; reason: "spend_cap" | "rate_limit" };
 

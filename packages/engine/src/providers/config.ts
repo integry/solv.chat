@@ -28,6 +28,11 @@ export interface EffectiveProviderSettings {
   llmTier: ResolvedSetting<Tier>;
   llmModel: ResolvedSetting<string | null>;
   embeddingsProvider: ResolvedSetting<EmbeddingsProviderName>;
+  /**
+   * "Review answers" (Settings → Providers): stored, or on by default. There
+   * is no environment variable for it.
+   */
+  reviewAnswers: ResolvedSetting<boolean>;
 }
 
 const DEFAULT_LLM_PROVIDER: LlmProviderName = "anthropic";
@@ -135,7 +140,12 @@ export async function resolveProviderSettings(
     embeddingsProvider = { value: DEFAULT_EMBEDDINGS_PROVIDER, source: "none" };
   }
 
-  return { llmProvider, llmTier, llmModel, embeddingsProvider };
+  const reviewAnswers: ResolvedSetting<boolean> =
+    typeof stored?.reviewAnswers === "boolean"
+      ? { value: stored.reviewAnswers, source: "stored" }
+      : { value: true, source: "none" };
+
+  return { llmProvider, llmTier, llmModel, embeddingsProvider, reviewAnswers };
 }
 
 export async function embedderFor(

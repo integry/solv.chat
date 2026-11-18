@@ -72,6 +72,8 @@ describe("db/messages", () => {
       replyTo: "msg_0",
       firstTokenMs: 340,
       totalMs: 1250,
+      outcome: null,
+      outcomeConfidence: null,
     });
   });
 

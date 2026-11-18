@@ -6,6 +6,8 @@ export interface StoredProviderSettings {
   llmTier: Tier | null;
   llmModel: string | null;
   embeddingsProvider: EmbeddingsProviderName | null;
+  /** The "Review answers" switch; null means the default (on). */
+  reviewAnswers: boolean | null;
   updatedAt: number;
 }
 
@@ -14,6 +16,7 @@ export interface ProviderSettingsPatch {
   llmTier?: Tier | null | undefined;
   llmModel?: string | null | undefined;
   embeddingsProvider?: EmbeddingsProviderName | null | undefined;
+  reviewAnswers?: boolean | null | undefined;
 }
 
 export interface StoredProviderKeyMeta {
@@ -26,6 +29,7 @@ interface SettingsRow {
   llm_tier: Tier | null;
   llm_model: string | null;
   embeddings_provider: EmbeddingsProviderName | null;
+  review_answers: number | null;
   updated_at: number;
 }
 
@@ -40,6 +44,7 @@ function toSettings(row: SettingsRow): StoredProviderSettings {
     llmTier: row.llm_tier,
     llmModel: row.llm_model,
     embeddingsProvider: row.embeddings_provider,
+    reviewAnswers: row.review_answers === null ? null : row.review_answers === 1,
     updatedAt: row.updated_at,
   };
 }
@@ -51,7 +56,7 @@ export async function getProviderSettings(
 ): Promise<StoredProviderSettings | null> {
   const row = await db
     .prepare(
-      `SELECT llm_provider, llm_tier, llm_model, embeddings_provider, updated_at
+      `SELECT llm_provider, llm_tier, llm_model, embeddings_provider, review_answers, updated_at
        FROM org_provider_settings
        WHERE org_id = ?1`,
     )
@@ -89,19 +94,27 @@ export function providerSettingsFor(db: D1Database, orgId: string) {
       const hasLlmTier = patch.llmTier !== undefined ? 1 : 0;
       const hasLlmModel = patch.llmModel !== undefined ? 1 : 0;
       const hasEmbeddingsProvider = patch.embeddingsProvider !== undefined ? 1 : 0;
+      const hasReviewAnswers = patch.reviewAnswers !== undefined ? 1 : 0;
+      const reviewAnswers =
+        patch.reviewAnswers === undefined || patch.reviewAnswers === null
+          ? null
+          : patch.reviewAnswers
+            ? 1
+            : 0;
 
       const row = await db
         .prepare(
           `INSERT INTO org_provider_settings (
-             org_id, llm_provider, llm_tier, llm_model, embeddings_provider, updated_at
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             org_id, llm_provider, llm_tier, llm_model, embeddings_provider, review_answers, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?12, ?6)
            ON CONFLICT(org_id) DO UPDATE SET
              llm_provider = CASE WHEN ?7 = 1 THEN excluded.llm_provider ELSE org_provider_settings.llm_provider END,
              llm_tier = CASE WHEN ?8 = 1 THEN excluded.llm_tier ELSE org_provider_settings.llm_tier END,
              llm_model = CASE WHEN ?9 = 1 THEN excluded.llm_model ELSE org_provider_settings.llm_model END,
              embeddings_provider = CASE WHEN ?10 = 1 THEN excluded.embeddings_provider ELSE org_provider_settings.embeddings_provider END,
+             review_answers = CASE WHEN ?11 = 1 THEN excluded.review_answers ELSE org_provider_settings.review_answers END,
              updated_at = excluded.updated_at
-           RETURNING llm_provider, llm_tier, llm_model, embeddings_provider, updated_at`,
+           RETURNING llm_provider, llm_tier, llm_model, embeddings_provider, review_answers, updated_at`,
         )
         .bind(
           orgId,
@@ -114,6 +127,8 @@ export function providerSettingsFor(db: D1Database, orgId: string) {
           hasLlmTier,
           hasLlmModel,
           hasEmbeddingsProvider,
+          hasReviewAnswers,
+          reviewAnswers,
         )
         .first<SettingsRow>();
       if (!row) {

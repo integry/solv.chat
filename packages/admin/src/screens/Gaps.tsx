@@ -8,6 +8,7 @@ import { EmptyState } from "../ui/EmptyState.js";
 import { ErrorState } from "../ui/ErrorState.js";
 import { PageHeader } from "../ui/PageHeader.js";
 import { Skeleton } from "../ui/Skeleton.js";
+import { StatusBadge } from "../ui/StatusBadge.js";
 import { useToast } from "../ui/Toast.js";
 import { type EntryDraft, EntryEditor } from "./EntryEditor.js";
 import { IDLE_SAVE, type SaveState } from "./saveState.js";
@@ -63,6 +64,35 @@ function readHandedOverAnswer(): AnswerSession | null {
 
 function gapTitle(gap: GapSummary): string {
   return gap.displayQuestion || gap.question;
+}
+
+/**
+ * Why the group's questions were not answered: nothing was found, or content
+ * was found and the reply still could not answer (usually unclear content).
+ * A group with both shows both, with how many times each. Older engines send
+ * neither count, so nothing is shown.
+ */
+function GapReasons({ gap }: { gap: GapSummary }) {
+  const noContent = gap.noContentTimes ?? 0;
+  const declined = gap.declinedTimes ?? 0;
+  const both = noContent > 0 && declined > 0;
+  return (
+    <>
+      {noContent > 0 && (
+        <StatusBadge tone="neutral" title="Your sources have nothing that matches this question.">
+          {both ? `No content found (${noContent})` : "No content found"}
+        </StatusBadge>
+      )}
+      {declined > 0 && (
+        <StatusBadge
+          tone="warning"
+          title="Content was found, but the answer still did not give what was asked. The content may be unclear or incomplete."
+        >
+          {both ? `Had content, could not answer (${declined})` : "Had content, could not answer"}
+        </StatusBadge>
+      )}
+    </>
+  );
 }
 
 export function Gaps({ assistantId }: GapsProps) {
@@ -312,6 +342,7 @@ export function Gaps({ assistantId }: GapsProps) {
                           <span className="badge badge-warn">
                             {gap.times === 1 ? "Asked 1 time" : `Asked ${gap.times} times`}
                           </span>
+                          <GapReasons gap={gap} />
                           <span>
                             Last asked <RelativeTime value={gap.lastAsked} />
                           </span>

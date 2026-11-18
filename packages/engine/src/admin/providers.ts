@@ -18,7 +18,13 @@ const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
 // Source: https://openrouter.ai/docs/api-reference/limits — checked 2026-11-15
 const OPENROUTER_AUTH_KEY_URL = "https://openrouter.ai/api/v1/auth/key";
 
-const ALLOWED_SETTINGS_KEYS = new Set(["llmProvider", "llmTier", "llmModel", "embeddingsProvider"]);
+const ALLOWED_SETTINGS_KEYS = new Set([
+  "llmProvider",
+  "llmTier",
+  "llmModel",
+  "embeddingsProvider",
+  "reviewAnswers",
+]);
 
 export interface ProviderKeyStatus {
   source: SettingSource;
@@ -177,6 +183,14 @@ function readSettingsPatch(body: unknown): ProviderSettingsPatch {
       patch.embeddingsProvider = body.embeddingsProvider;
     } else {
       errors.push('embeddingsProvider: must be "openai", "openrouter", or null');
+    }
+  }
+
+  if (body.reviewAnswers !== undefined) {
+    if (body.reviewAnswers === null || typeof body.reviewAnswers === "boolean") {
+      patch.reviewAnswers = body.reviewAnswers;
+    } else {
+      errors.push("reviewAnswers: must be true, false, or null");
     }
   }
 

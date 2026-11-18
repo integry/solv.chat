@@ -1,4 +1,4 @@
-import { MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
+import { type AnswerOutcome, MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
 import type { TraceDropReason, TracePart } from "../chat/trace.js";
 import type {
   ConversationFilter,
@@ -34,6 +34,8 @@ export interface ConversationTurn {
   citations: Citation[];
   toolCalls: ConversationToolCall[] | null;
   answered: boolean;
+  /** For a reply, what the answer review decided; null when it was not reviewed. */
+  outcome: AnswerOutcome | null;
   createdAt: number;
   feedback: ConversationFeedback[];
   answerDocumentId: string | null;
@@ -86,6 +88,8 @@ const FILTER_FLAGS = {
   unanswered: "unanswered",
   not_helpful: "notHelpful",
   used_tool: "usedTool",
+  could_not_answer: "couldNotAnswer",
+  asked_for_person: "wantsHuman",
 } as const;
 
 /** Date presets the Conversations screen offers. */
@@ -95,7 +99,7 @@ export const CONVERSATION_DAY_OPTIONS = [1, 7, 30, 90] as const;
 const MAX_SEARCH = MAX_CONVERSATION_SEARCH_LENGTH;
 
 /**
- * Reads `?filter=unanswered,not_helpful,used_tool`, `?days=1|7|30|90`,
+ * Reads `?filter=unanswered,not_helpful,used_tool,could_not_answer,asked_for_person`, `?days=1|7|30|90`,
  * `?q=text` and `?question=` (a grouped question, matched by its key, as
  * Reports and Overview count it) from a list request. `?askedFrom=` and
  * `?askedTo=` (inclusive UTC days, `YYYY-MM-DD`) narrow `question` to asks
@@ -250,6 +254,7 @@ export async function getConversation(
       citations: msg.citations,
       toolCalls: msg.role === "assistant" ? mapToolCalls(msg.toolCalls) : null,
       answered: msg.answered,
+      outcome: msg.role === "assistant" ? msg.outcome : null,
       createdAt: msg.createdAt,
       feedback: feedbackByMessage.get(msg.id) ?? [],
       answerDocumentId,

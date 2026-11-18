@@ -17,6 +17,7 @@ import { PageHeader } from "../ui/PageHeader.js";
 import { Skeleton } from "../ui/Skeleton.js";
 import { StatusBadge, type StatusTone } from "../ui/StatusBadge.js";
 import { Notice, useToast } from "../ui/Toast.js";
+import { AnswerReviewSwitch } from "./AnswerReviewSwitch.js";
 
 const PROVIDER_LABELS: Record<LlmProviderName, string> = {
   anthropic: "Anthropic",
@@ -435,6 +436,8 @@ export function Providers() {
 
             {error && !confirmReset && <Notice tone="error">{error}</Notice>}
           </form>
+
+          <AnswerReviewSwitch view={data} onSaved={res.setValue} />
 
           <section className="stack" aria-labelledby="provider-keys-heading">
             <h2 id="provider-keys-heading" className="section-heading">

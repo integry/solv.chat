@@ -3,6 +3,7 @@ import { defaultVersionConfig, parseChatEventLine } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/app.js";
 import { answerMessage } from "../../src/chat/answer.js";
+import { REVIEW_FRAME } from "../../src/chat/review.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { ANTHROPIC_MODELS, costMicros, OPENAI_MODELS } from "../../src/models.js";
 import { anthropicProvider } from "../../src/providers/anthropic.js";
@@ -532,10 +533,20 @@ describe("chat/answer", () => {
 
   it("selects provider and tier from Worker env and falls back to defaults on unrecognised values", async () => {
     const requestedModels: Array<{ url: string; model: string }> = [];
+    const reviewModels: string[] = [];
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
-      requestedModels.push({ url, model: body.model ?? "" });
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        model?: string;
+        system?: string;
+        instructions?: string;
+      };
+      // The answer review runs after each answer, on the fast tier.
+      if ((body.system ?? body.instructions) === REVIEW_FRAME) {
+        reviewModels.push(body.model ?? "");
+      } else {
+        requestedModels.push({ url, model: body.model ?? "" });
+      }
 
       const sse = url.includes("anthropic.com")
         ? [
@@ -597,6 +608,15 @@ describe("chat/answer", () => {
       }
 
       expect(requestedModels.map((r) => r.model)).toEqual(cases.map((c) => c.expectedModel));
+      // Whatever tier answered, the review uses that provider's fast tier.
+      // (This stub's OpenAI stream is not a Responses stream, so those
+      // answers fail and are not reviewed.)
+      expect(reviewModels).toEqual([
+        ANTHROPIC_MODELS.fast.id,
+        ANTHROPIC_MODELS.fast.id,
+        ANTHROPIC_MODELS.fast.id,
+        ANTHROPIC_MODELS.fast.id,
+      ]);
       // Unrecognised values are logged once per variable without echoing the value.
       expect(warnSpy).toHaveBeenCalledTimes(2);
       for (const call of warnSpy.mock.calls) {

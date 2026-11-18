@@ -44,3 +44,27 @@ export interface OverviewAttention {
    */
   notIndexed: Array<{ sourceId: string; label: string; failed: number; waiting: number }>;
 }
+
+/**
+ * What the answer reviewer decided an assistant reply to a visitor did. Stored
+ * on the reply; absent (null) when it was not reviewed.
+ *
+ * - `answered`: gave the information asked for.
+ * - `partial`: gave some of it, or hedged.
+ * - `declined`: said it does not know or cannot help, or gave the fallback.
+ * - `off_topic`: the question was not about the site's subject.
+ * - `wants_human`: the visitor asked for a person, a call back, or to complain.
+ */
+export const ANSWER_OUTCOMES = [
+  "answered",
+  "partial",
+  "declined",
+  "off_topic",
+  "wants_human",
+] as const;
+export type AnswerOutcome = (typeof ANSWER_OUTCOMES)[number];
+
+/** True for exactly the five outcome labels. */
+export function isAnswerOutcome(value: unknown): value is AnswerOutcome {
+  return typeof value === "string" && (ANSWER_OUTCOMES as readonly string[]).includes(value);
+}

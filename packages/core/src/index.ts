@@ -1,10 +1,13 @@
 export { ADMIN_CSP, ADMIN_PREVIEW_CSP } from "./csp.js";
 export { type IdPrefix, isId, newId } from "./ids.js";
-export type {
-  OverviewAttention,
-  OverviewPeriod,
-  OverviewSetup,
-  PeriodFigures,
+export {
+  ANSWER_OUTCOMES,
+  type AnswerOutcome,
+  isAnswerOutcome,
+  type OverviewAttention,
+  type OverviewPeriod,
+  type OverviewSetup,
+  type PeriodFigures,
 } from "./monitor.js";
 export { Errors, fail, ok, type Result } from "./result.js";
 export {

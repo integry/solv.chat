@@ -71,6 +71,7 @@ export function basicLimits(
       // on every public request, and a widget that cannot answer today
       // should say so before the visitor types.
       if (action.kind === "ingest") return { ok: true };
+      // Answer review: the spend cap only, below.
       const cap = await capMicrosFor(orgId, assistantId);
       // 0 means "no cap": an owner who never set one should not be locked out.
       if (cap > 0 && (await todaysSpend(db, orgId, assistantId)) >= cap) {

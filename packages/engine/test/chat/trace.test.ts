@@ -212,8 +212,9 @@ describe("chat/trace", () => {
     const seenKeys: string[] = [];
     const app = appFor(undefined, seenKeys);
     const { done } = await ask(app);
-    // The real provider ran with the key, so it was in reach of the trace.
-    expect(seenKeys).toEqual([MODEL_KEY]);
+    // The real provider ran with the key, so it was in reach of the trace
+    // (the answer, then the answer review with the same key).
+    expect(seenKeys).toEqual([MODEL_KEY, MODEL_KEY]);
 
     const trace = await tenant.traces.get(done.messageId);
     expect(trace?.parts).toHaveLength(1);

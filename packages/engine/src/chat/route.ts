@@ -12,7 +12,12 @@ import {
 import { assistantByPublicKey, assistantForMessage, originAllowedInOrg } from "../db/public.js";
 import { forPublicScope } from "../db/tenant.js";
 import { ANTHROPIC_MODELS, type ModelInfo, OPENAI_MODELS, type Tier } from "../models.js";
-import { embedderFor, type ProviderEnv, resolveProviderSettings } from "../providers/config.js";
+import {
+  type EffectiveProviderSettings,
+  embedderFor,
+  type ProviderEnv,
+  resolveProviderSettings,
+} from "../providers/config.js";
 import { ProviderError } from "../providers/error.js";
 import { llmProviderFor } from "../providers/factory.js";
 import { type Embedder, type Retriever, vectorizeRetriever } from "../providers/retrieval.js";
@@ -25,9 +30,15 @@ import type {
   Seams,
 } from "../seams/types.js";
 import { actionRunnerFor } from "./actionRunner.js";
-import { type AnswerTraceContext, answerMessage, answerWithActionResults } from "./answer.js";
+import {
+  type AnswerReviewHook,
+  type AnswerTraceContext,
+  answerMessage,
+  answerWithActionResults,
+} from "./answer.js";
 import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
 import { mcpRunnerFor } from "./mcpRunner.js";
+import { type AnswerReviewer, modelReviewer, runAnswerReview } from "./review.js";
 import type { ToolRunner } from "./toolLoop.js";
 import type { KeySource } from "./trace.js";
 
@@ -46,6 +57,13 @@ export interface ChatRouteOverrides {
   providerKind?: LlmProviderName | undefined;
   tier?: Tier | undefined;
   fetch?: typeof fetch | undefined;
+  /**
+   * The answer reviewer to use instead of the fast-tier model call; null
+   * reviews nothing. Left out while `provider` is given, nothing is reviewed
+   * either: a substituted provider stands in for the whole provider layer,
+   * and the review must not quietly reach a real one.
+   */
+  reviewer?: AnswerReviewer | null | undefined;
 }
 
 const encoder = new TextEncoder();
@@ -223,6 +241,10 @@ export async function resolveChatProviders(
   retriever: Retriever;
   provider: LlmProvider;
   model: ModelInfo | undefined;
+  /** The settings this was resolved from, read once: the answer review needs them too. */
+  settings: EffectiveProviderSettings;
+  providerKind: LlmProviderName;
+  tier: Tier;
 }> {
   const resolved = await resolveProviderSettings(env.DB, env, orgId);
   const providerKind = overrides?.providerKind ?? resolved.llmProvider.value;
@@ -253,12 +275,73 @@ export async function resolveChatProviders(
       seams.keys,
     ));
 
-  return { embedder, retriever, provider, model };
+  return { embedder, retriever, provider, model, settings: resolved, providerKind, tier };
+}
+
+/**
+ * How the answer review gets its reviewer, or null for none. Built on first
+ * use inside the deferred review, so the visitor's request reads no extra key.
+ * The reviewer is the fast tier of the provider that answered (the same
+ * configured model on OpenRouter, which has no tiers), with the same key.
+ */
+function reviewerSource(params: {
+  seams: Seams;
+  overrides: ChatRouteOverrides | undefined;
+  orgId: string;
+  assistantId: string;
+  providerKind: LlmProviderName;
+  tier: Tier;
+  provider: LlmProvider;
+}): (() => Promise<AnswerReviewer>) | null {
+  const { overrides, seams } = params;
+  if (overrides?.reviewer !== undefined) {
+    const reviewer = overrides.reviewer;
+    return reviewer === null ? null : async () => reviewer;
+  }
+  if (overrides?.provider !== undefined) return null;
+  return async () => {
+    const fastModel =
+      params.providerKind === "anthropic"
+        ? ANTHROPIC_MODELS.fast
+        : params.providerKind === "openai"
+          ? OPENAI_MODELS.fast
+          : undefined;
+    const provider =
+      params.providerKind === "openrouter" || params.tier === "fast"
+        ? params.provider
+        : await llmProviderFor(
+            {
+              orgId: params.orgId,
+              provider: params.providerKind,
+              tier: "fast",
+              fetchImpl: overrides?.fetch,
+            },
+            seams.keys,
+          );
+    return modelReviewer({
+      provider,
+      model: fastModel,
+      // Recorded like any model use, through the seam: it counts toward the
+      // daily spend cap and `usage_daily`, and never as a message.
+      onUsage: (tokensIn, tokensOut, cost) =>
+        seams.usage.record({
+          orgId: params.orgId,
+          assistantId: params.assistantId,
+          at: Date.now(),
+          messages: 0,
+          tokensIn,
+          tokensOut,
+          costMicros: cost ?? 0,
+          ...(cost === null ? { costUnknown: true } : {}),
+        }),
+    });
+  };
 }
 
 async function resolveAnswerDeps(params: {
   env: ChatEnv;
   seams: Seams;
+  ctx: Pick<ExecutionContext, "waitUntil">;
   overrides: ChatRouteOverrides | undefined;
   tenant: ReturnType<typeof forPublicScope>;
   orgId: string;
@@ -270,12 +353,8 @@ async function resolveAnswerDeps(params: {
   preview: boolean;
 }) {
   const { env, seams, overrides } = params;
-  const { embedder, retriever, provider, model } = await resolveChatProviders(
-    env,
-    seams,
-    params.orgId,
-    overrides,
-  );
+  const { embedder, retriever, provider, model, settings, providerKind, tier } =
+    await resolveChatProviders(env, seams, params.orgId, overrides);
 
   const actionRunner = params.preview
     ? null
@@ -305,6 +384,40 @@ async function resolveAnswerDeps(params: {
         keySource: await modelKeySource(params.tenant, seams.keys, provider.name),
       };
 
+  // Previews ("Try it") are not reviewed; test runs do not come through here.
+  const reviewer =
+    params.preview || !settings.reviewAnswers.value
+      ? null
+      : reviewerSource({
+          seams,
+          overrides,
+          orgId: params.orgId,
+          assistantId: params.assistantId,
+          providerKind,
+          tier,
+          provider,
+        });
+  // Deferred work of its own (`waitUntil`), not part of the answer's stream:
+  // the stream closes when the answer is done, and the review runs after.
+  const review: AnswerReviewHook | undefined =
+    reviewer === null
+      ? undefined
+      : {
+          schedule(job) {
+            params.ctx.waitUntil(
+              runAnswerReview(
+                {
+                  messages: params.tenant.messages,
+                  reviewer,
+                  limits: seams.limits,
+                  usage: seams.usage,
+                },
+                job,
+              ),
+            );
+          },
+        };
+
   return {
     tenant: params.tenant,
     embedder,
@@ -314,6 +427,7 @@ async function resolveAnswerDeps(params: {
     usage: seams.usage,
     runners,
     trace,
+    review,
   };
 }
 

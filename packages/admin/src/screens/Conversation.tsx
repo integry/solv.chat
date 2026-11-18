@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import type { ConversationDetail, ConversationTurn } from "../api/types.js";
+import type { AnswerOutcome, ConversationDetail, ConversationTurn } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { useAdminNavigation } from "../routing.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
@@ -8,10 +8,43 @@ import { formatDateTime } from "../ui/format.js";
 import { Icon } from "../ui/Icon.js";
 import { PageHeader } from "../ui/PageHeader.js";
 import { Skeleton } from "../ui/Skeleton.js";
-import { StatusBadge } from "../ui/StatusBadge.js";
+import { StatusBadge, type StatusTone } from "../ui/StatusBadge.js";
 import { AnswerTrace } from "./AnswerTrace.js";
 import { EntryEditor } from "./EntryEditor.js";
 import { TestEditor } from "./TestEditor.js";
+
+/** The answer review's outcome as a badge: short label, longer tooltip. */
+export const OUTCOME_BADGES: Record<
+  AnswerOutcome,
+  { label: string; tone: StatusTone; title: string }
+> = {
+  answered: {
+    label: "Answered",
+    tone: "success",
+    title: "Checked after sending: this reply gave what was asked.",
+  },
+  partial: {
+    label: "Partly answered",
+    tone: "info",
+    title: "Checked after sending: this reply gave some of what was asked, or was unsure.",
+  },
+  declined: {
+    label: "Could not answer",
+    tone: "warning",
+    title:
+      "Checked after sending: content was found, but this reply still said it could not help. The content may be unclear.",
+  },
+  off_topic: {
+    label: "Off topic",
+    tone: "neutral",
+    title: "Checked after sending: the question was not about this site.",
+  },
+  wants_human: {
+    label: "Asked for a person",
+    tone: "info",
+    title: "Checked after sending: the visitor asked for a person, a call back, or to complain.",
+  },
+};
 
 export interface ConversationProps {
   assistantId: string;
@@ -182,7 +215,11 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
           {detail.turns.map((turn, index) => {
             const isUser = turn.role === "user";
             const questionTurn = findQuestionForTurn(index);
-            const isUnanswered = !isUser && !turn.answered;
+            // A reply with content that the review found declined is a gap
+            // too: Gaps lists it, so it offers the same fixes.
+            const isUnanswered = !isUser && (!turn.answered || turn.outcome === "declined");
+            const outcomeBadge =
+              !isUser && turn.answered && turn.outcome ? OUTCOME_BADGES[turn.outcome] : null;
 
             return (
               <li
@@ -194,8 +231,15 @@ export function Conversation({ assistantId, conversationId, onBack }: Conversati
                     <Icon name={isUser ? "chat" : "conversations"} size={14} />
                     {isUser ? "Visitor" : "Assistant"}
                   </span>
-                  {isUnanswered && !turn.answerDocumentId && (
-                    <StatusBadge tone="warning">Unanswered</StatusBadge>
+                  {!isUser && !turn.answered && !turn.answerDocumentId && (
+                    <StatusBadge tone="warning" title="No content was found for this question.">
+                      Unanswered
+                    </StatusBadge>
+                  )}
+                  {outcomeBadge && !(isUnanswered && turn.answerDocumentId) && (
+                    <StatusBadge tone={outcomeBadge.tone} title={outcomeBadge.title}>
+                      {outcomeBadge.label}
+                    </StatusBadge>
                   )}
                   {isUnanswered && turn.answerDocumentId && (
                     <StatusBadge tone="success">Answer written</StatusBadge>

@@ -90,4 +90,21 @@ describe("usageDaily", () => {
       },
     ]);
   });
+
+  it("writes nothing for an event that counts nothing, such as a review outcome", async () => {
+    await usageDaily(env.DB).record({
+      orgId: SINGLE_ORG_ID,
+      assistantId: "ast_1",
+      at: Date.UTC(2026, 0, 10),
+      messages: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costMicros: 0,
+      review: { messageId: "msg_1", outcome: "answered", confidence: null },
+    });
+    const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM usage_daily").first<{
+      n: number;
+    }>();
+    expect(row?.n).toBe(0);
+  });
 });
