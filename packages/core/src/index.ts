@@ -66,12 +66,18 @@ export {
 } from "./schemas/questionLink.js";
 export { isPlainObject } from "./schemas/shared.js";
 export {
+  DEFAULT_SYNC_MAX_REMOVE_PERCENT,
+  DEFAULT_SYNC_RECHECK_DAYS,
   type EntryInput,
   formatEntryMarkdown,
+  MAX_SYNC_RECHECK_DAYS,
   parseEntryInput,
   parseSourceInput,
+  type SitemapSourceSettings,
   type SourceInput,
   type SourceKind,
+  SYNC_SCHEDULES,
+  type SyncSchedule,
 } from "./schemas/source.js";
 export {
   checkTopicName,
@@ -96,6 +102,13 @@ export {
   type WidgetPosition,
 } from "./schemas/versionConfig.js";
 export { parseSseBlock, type ReadSseOptions, readSseBlocks, type SseBlock } from "./sse.js";
+export type {
+  SourceSyncRun,
+  SourceSyncStatus,
+  SyncCounts,
+  SyncErrorCode,
+  SyncOutcome,
+} from "./sync.js";
 export {
   type ConfigChange,
   type ConfigChangeGroup,

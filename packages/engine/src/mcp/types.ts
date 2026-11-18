@@ -1,3 +1,5 @@
+import type { McpConversationContext } from "./context.js";
+
 export type McpAuthKind = "none" | "static_header";
 
 /** Everything the client needs to reach one server. No ids, no org. */
@@ -11,6 +13,11 @@ export interface McpTarget {
    * SOLV_SECRET_KEY: decryption belongs to the one call site that has it.
    */
   headerValue?: string | undefined;
+  /**
+   * Set only when the owner switched "Send conversation context" on for this
+   * server: every request in the session then carries the `Solv-*` headers.
+   */
+  conversationContext?: McpConversationContext | undefined;
 }
 
 export interface McpToolSpec {

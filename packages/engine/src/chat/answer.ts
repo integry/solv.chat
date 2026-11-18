@@ -495,6 +495,9 @@ export async function* answerMessage(
         onToolRound: (ms) => recorder.toolRound(ms),
         signal: deps.signal,
         now: deps.now,
+        // A preview's conversation id is made up for this request and names
+        // no stored row, so it is not passed on to a tool server.
+        ...(input.preview ? {} : { callContext: { conversationId, visitorId: input.visitorId } }),
       },
       request,
     );
@@ -889,6 +892,7 @@ export async function* answerWithActionResults(
           ensureLease: () => ensureLease(),
           onToolRound: (ms) => recorder.toolRound(ms),
           now: deps.now,
+          callContext: { conversationId: conversation.id, visitorId: conversation.visitorId },
         },
         request,
         pendingReply.content,

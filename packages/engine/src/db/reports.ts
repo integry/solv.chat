@@ -33,7 +33,7 @@ export interface ReplyTimingRow {
   replies: number;
   /** Replies in the range that used a page action, counted in nothing else here. */
   pageActionReplies: number;
-  /** Of those, replies with a time to first token (written after migration 0022). */
+  /** Of those, replies with a time to first token (written after migration 0026). */
   timed: number;
   firstTokenMedianMs: number | null;
   firstTokenP90Ms: number | null;

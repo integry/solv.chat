@@ -1,3 +1,5 @@
+import type { SyncErrorCode } from "./sync.js";
+
 /**
  * Shapes the engine's Overview and Reports endpoints send and the admin reads.
  * Declared once here so the two sides cannot drift apart.
@@ -86,6 +88,13 @@ export interface OverviewAttention {
    * recorded, but still not indexed well after their last write).
    */
   notIndexed: Array<{ sourceId: string; label: string; failed: number; waiting: number }>;
+  /**
+   * Sitemap sources whose latest sync failed (including one that ran out of
+   * time), with the reason as a code the admin words. A partial run (some
+   * pages could not be fetched) is not listed. Absent from engines older
+   * than this field.
+   */
+  syncFailed?: Array<{ sourceId: string; label: string; error: SyncErrorCode | null }>;
 }
 
 /**

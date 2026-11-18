@@ -10,6 +10,14 @@
   //   SOLV_ANTHROPIC_KEY
   //   SOLV_OPENAI_KEY
   //   SOLV_OPENROUTER_KEY
+  // Scheduled re-sync of sitemap sources (off unless a source's schedule is
+  // daily or weekly). Hourly: each tick starts at most three due sources, and
+  // a tick with nothing due costs one D1 query. A host running its own cron
+  // calls `app.runDueSyncs(env)` instead.
+  // Source (checked 2026-11-18): https://developers.cloudflare.com/workers/configuration/cron-triggers/
+  "triggers": {
+    "crons": ["17 * * * *"]
+  },
   "vars": {
     "SOLV_LLM_PROVIDER": "anthropic",
     "SOLV_LLM_TIER": "fast"

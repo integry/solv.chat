@@ -18,6 +18,9 @@ export const MAX_BATCH_DOCUMENTS = 100;
 
 export class TooLarge extends Error {}
 
+/** A sync page's run no longer held its source when the document was written; nothing was. */
+export class SyncRunEnded extends Error {}
+
 export interface SourceOptions {
   /**
    * When set, a `sourceId` in the body must name a source of this kind. The
@@ -25,6 +28,12 @@ export interface SourceOptions {
    * must not overwrite or prune hand-written answers or a sitemap import.
    */
   requireKind?: SourceKind | undefined;
+  /**
+   * A scheduled sync's page: each document row is written only while this
+   * run still holds the source, checked in the write itself. Otherwise the
+   * new body is deleted again and `SyncRunEnded` is thrown.
+   */
+  syncRun?: { runId: string; now: () => number } | undefined;
 }
 
 export interface IngestCounts {
@@ -96,12 +105,45 @@ async function tryDeleteObject(
   }
 }
 
+// The same bounds the admin uses for a source's label.
+const MAX_SOURCE_LABEL_LENGTH = 80;
+// The default push source's stored label; the admin shows it as "Your site".
+const DEFAULT_PUSH_LABEL = "Push";
+
+/**
+ * Reads the optional `source` label of a push or prune. A label names its own
+ * push source, so two pushers with different labels never prune each other's
+ * documents; without one, the default push source is used, as before.
+ */
+function readSourceLabel(rawBody: Record<string, unknown>): string | undefined {
+  const raw = rawBody.source;
+  if (raw === undefined || raw === null) return undefined;
+  if (rawBody.sourceId !== undefined && rawBody.sourceId !== null) {
+    throw new BadRequest(["source: give sourceId or source, not both"]);
+  }
+  const label = typeof raw === "string" ? raw.trim() : "";
+  if (label.length === 0 || label.length > MAX_SOURCE_LABEL_LENGTH) {
+    throw new BadRequest([`source: must be 1 to ${MAX_SOURCE_LABEL_LENGTH} characters`]);
+  }
+  if (label.toLowerCase() === DEFAULT_PUSH_LABEL.toLowerCase()) {
+    throw new BadRequest([
+      `source: "${label}" is the default source's name; leave source out to use it`,
+    ]);
+  }
+  return label;
+}
+
 async function findExistingSource(
   tenant: Tenant,
   assistantId: string,
-  sourceId: unknown,
+  rawBody: Record<string, unknown>,
   options: SourceOptions,
 ): Promise<SourceRow | null> {
+  const sourceId = rawBody.sourceId;
+  const label = readSourceLabel(rawBody);
+  if (label !== undefined) {
+    return tenant.sources.getPushByLabel(assistantId, label);
+  }
   if (sourceId !== undefined && sourceId !== null) {
     if (typeof sourceId !== "string" || sourceId.trim() === "") {
       throw new BadRequest(["sourceId: must be a non-empty string"]);
@@ -122,11 +164,20 @@ async function findExistingSource(
 async function resolveOrCreatePushSource(
   tenant: Tenant,
   assistantId: string,
-  sourceId: unknown,
+  rawBody: Record<string, unknown>,
   options: SourceOptions,
 ): Promise<SourceRow> {
-  if (sourceId !== undefined && sourceId !== null) {
-    const existing = await findExistingSource(tenant, assistantId, sourceId, options);
+  const label = readSourceLabel(rawBody);
+  if (label !== undefined) {
+    return tenant.sources.getOrCreatePushByLabel({
+      id: newId("src"),
+      assistantId,
+      label,
+      createdAt: Date.now(),
+    });
+  }
+  if (rawBody.sourceId !== undefined && rawBody.sourceId !== null) {
+    const existing = await findExistingSource(tenant, assistantId, rawBody, options);
     if (existing !== null) return existing;
     throw new NotFound();
   }
@@ -199,12 +250,7 @@ export async function pushDocuments(
     return parsed.value;
   });
 
-  const source = await resolveOrCreatePushSource(
-    deps.tenant,
-    scope.assistantId,
-    rawBody.sourceId,
-    options,
-  );
+  const source = await resolveOrCreatePushSource(deps.tenant, scope.assistantId, rawBody, options);
   const existing = await deps.tenant.documents.existingFor(
     source.id,
     documents.map((doc) => doc.externalId),
@@ -257,7 +303,7 @@ export async function pushDocuments(
     const objectKey = documentObjectKey(scope.orgId, candidateId);
     await deps.docs.put(objectKey, document.markdown);
 
-    const saved = await deps.tenant.documents.upsert({
+    const input = {
       id: candidateId,
       sourceId: source.id,
       externalId: document.externalId,
@@ -266,7 +312,18 @@ export async function pushDocuments(
       contentHash: hash,
       bodyKey: objectKey,
       updatedAt: Date.now(),
-    });
+    };
+    const saved =
+      options.syncRun === undefined
+        ? await deps.tenant.documents.upsert(input)
+        : await deps.tenant.documents.upsertForSync(input, {
+            runId: options.syncRun.runId,
+            now: options.syncRun.now(),
+          });
+    if (saved === null) {
+      await tryDeleteObject(deps.docs, objectKey, candidateId);
+      throw new SyncRunEnded("sync run no longer holds the source");
+    }
 
     await deps.queue.send({
       orgId: scope.orgId,
@@ -292,7 +349,45 @@ export async function pushDocuments(
 }
 
 /**
- * Deletes documents by `externalIds` or prunes everything not in `keep`.
+ * Deletes these documents of one source (cascading chunks) in one D1 batch,
+ * then cleans up their vectors and R2 bodies on a best-effort basis. Returns
+ * how many rows were actually removed.
+ */
+export async function removeSourceDocuments(
+  deps: DeleteDeps,
+  sourceId: string,
+  toDelete: ReadonlyArray<{ id: string; bodyKey: string | null }>,
+): Promise<number> {
+  // One D1 batch for every row, then batched cleanup: a large source or
+  // prune stays within the per-request query and subrequest limits instead
+  // of costing several calls per document.
+  const removed = await deps.tenant.documents.removeMany(toDelete.map((doc) => doc.id));
+
+  const vectorIds = [...removed.values()].flat();
+  if (vectorIds.length > 0) {
+    try {
+      await deps.retriever.remove(vectorIds);
+    } catch (err) {
+      console.warn("ingest delete: best-effort vector cleanup failed", {
+        sourceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const bodyKeys = toDelete
+    .filter((doc) => removed.has(doc.id) && doc.bodyKey !== null)
+    .map((doc) => doc.bodyKey as string);
+  for (let i = 0; i < bodyKeys.length; i += R2_DELETE_KEYS_LIMIT) {
+    await tryDeleteObject(deps.docs, bodyKeys.slice(i, i + R2_DELETE_KEYS_LIMIT), sourceId);
+  }
+  return removed.size;
+}
+
+/**
+ * Deletes documents by `externalIds` or prunes everything not in `keep`,
+ * always within one source: `sourceId`, the push source named by `source`, or
+ * the default push source. Documents of other sources are never touched.
  * Deletes the D1 row first (cascading chunks), then performs best-effort
  * cleanup of vectors and R2 objects.
  */
@@ -324,12 +419,7 @@ export async function deleteDocuments(
     externalIds = [...new Set(rawIds)];
   }
 
-  const source = await findExistingSource(
-    deps.tenant,
-    scope.assistantId,
-    rawBody.sourceId,
-    options,
-  );
+  const source = await findExistingSource(deps.tenant, scope.assistantId, rawBody, options);
   if (source === null) {
     return { written: 0, unchanged: 0, deleted: 0 };
   }
@@ -341,30 +431,7 @@ export async function deleteDocuments(
         )
       : await deps.tenant.documents.getByExternalIds(source.id, externalIds);
 
-  // One D1 batch for every row, then batched cleanup: a large source or
-  // prune stays within the per-request query and subrequest limits instead
-  // of costing several calls per document.
-  const removed = await deps.tenant.documents.removeMany(toDelete.map((doc) => doc.id));
-  const deleted = removed.size;
-
-  const vectorIds = [...removed.values()].flat();
-  if (vectorIds.length > 0) {
-    try {
-      await deps.retriever.remove(vectorIds);
-    } catch (err) {
-      console.warn("ingest delete: best-effort vector cleanup failed", {
-        sourceId: source.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  const bodyKeys = toDelete
-    .filter((doc) => removed.has(doc.id) && doc.bodyKey !== null)
-    .map((doc) => doc.bodyKey as string);
-  for (let i = 0; i < bodyKeys.length; i += R2_DELETE_KEYS_LIMIT) {
-    await tryDeleteObject(deps.docs, bodyKeys.slice(i, i + R2_DELETE_KEYS_LIMIT), source.id);
-  }
+  const deleted = await removeSourceDocuments(deps, source.id, toDelete);
 
   return { written: 0, unchanged: 0, deleted };
 }

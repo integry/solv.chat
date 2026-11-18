@@ -1,10 +1,12 @@
 import { isPlainObject } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
+import { plainPageFetcher } from "../ingest/pageFetcher.js";
+import type { SyncStartDeps } from "../ingest/sync.js";
 import { McpError } from "../mcp/types.js";
 import type { EffectiveProviderSettings } from "../providers/config.js";
 import type { Retriever } from "../providers/retrieval.js";
-import type { KeyProvider, LlmProviderName } from "../seams/types.js";
+import type { KeyProvider, LlmProviderName, PageFetcher } from "../seams/types.js";
 import { writeTheRightAnswer } from "./answers.js";
 import {
   createTest,
@@ -54,6 +56,7 @@ import {
 } from "./providers.js";
 import { parseReportDays, reportFor } from "./reports.js";
 import { importSitemapUrls, previewSitemap } from "./sitemap.js";
+import { getSourceSync, readSyncNowBody, syncSourceNow } from "./sourceSync.js";
 import {
   createSource,
   deleteSource,
@@ -80,6 +83,8 @@ export interface AdminRouteDeps {
   retriever: Pick<Retriever, "remove">;
   publicBaseUrl: string;
   fetchImpl?: typeof fetch | undefined;
+  /** The page-fetcher seam. `createApp` always passes one; absent, the import uses `plainPageFetcher` over `fetchImpl`. */
+  pages?: PageFetcher | undefined;
   costUnit?: "usd" | "credits" | undefined;
   resolveSettings?: (() => Promise<EffectiveProviderSettings>) | undefined;
   checkConfigError?: ((resolved?: EffectiveProviderSettings) => Promise<string | null>) | undefined;
@@ -93,6 +98,8 @@ export interface AdminRouteDeps {
   secretKey?: string | undefined;
   /** Lazily resolves provider/embedder/seams dependencies when running answer tests. */
   resolveRunDeps?: (() => Promise<RunDeps>) | undefined;
+  /** What "Sync now" needs to start a run; `createApp` always passes it. */
+  syncStart?: SyncStartDeps | undefined;
 }
 
 function mcpDeps(deps: AdminRouteDeps): McpDeps {
@@ -303,7 +310,7 @@ async function assistantRoutes(
           ...(typeof body.sourceId === "string" ? { sourceId: body.sourceId } : {}),
           urls: Array.isArray(body.urls) ? (body.urls as string[]) : [],
         },
-        deps.fetchImpl,
+        deps.pages ?? plainPageFetcher({ fetch: deps.fetchImpl }),
       );
       return Response.json(result, { status: 201 });
     }
@@ -454,6 +461,24 @@ async function sourceRoutes(
     const sub = segments[2];
     if (sub === "documents" && method === "GET") {
       return Response.json(await listSourceDocuments(tenant, sourceId, readPagingParams(url)));
+    }
+    if (sub === "sync" && method === "GET") {
+      return Response.json({ sync: await getSourceSync(tenant, sourceId) });
+    }
+    if (sub === "sync" && method === "POST") {
+      if (!deps.syncStart) throw new NotFound();
+      return Response.json(
+        {
+          sync: await syncSourceNow(
+            deps.syncStart,
+            tenant,
+            deps.orgId,
+            sourceId,
+            await readSyncNowBody(request),
+          ),
+        },
+        { status: 202 },
+      );
     }
     if (sub === "entries" && method === "POST") {
       const source = await tenant.sources.get(sourceId);
@@ -656,13 +681,26 @@ export async function adminRoutes(
     // leak an internal message into an owner's screen.
     if (error instanceof NotFound) return Response.json({ error: "Not found." }, { status: 404 });
     if (error instanceof BadRequest) {
-      return Response.json({ error: "That is not valid.", fields: error.errors }, { status: 400 });
+      return Response.json(
+        {
+          error: "That is not valid.",
+          fields: error.errors,
+          ...(error.code !== undefined ? { code: error.code } : {}),
+        },
+        { status: 400 },
+      );
     }
     if (error instanceof TooLarge) {
       return Response.json({ error: error.message }, { status: 413 });
     }
     if (error instanceof Conflict) {
-      return Response.json({ error: error.message || "Please try again." }, { status: 409 });
+      return Response.json(
+        {
+          error: error.message || "Please try again.",
+          ...(error.code !== undefined ? { code: error.code } : {}),
+        },
+        { status: 409 },
+      );
     }
     if (error instanceof McpError) {
       // The server the owner pointed us at failed, not this request. The

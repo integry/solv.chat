@@ -97,6 +97,7 @@ export async function overviewFor(
     gaps,
     notIndexed,
     responseTime,
+    syncs,
   ] = await Promise.all([
     tenant.messages.topQuestionsFor(assistantId, 5),
     tenant.usage.summaryFor(assistantId, today),
@@ -112,7 +113,16 @@ export async function overviewFor(
     tenant.messages.gapGroups(assistantId, { limit: 1, offset: 0, openOnly: true }),
     tenant.sources.notIndexed(assistantId, at - NOT_INDEXED_AFTER_MS),
     responseTimePeriod(tenant, assistantId, OVERVIEW_DAYS, at),
+    tenant.sync.listForAssistant(assistantId, at),
   ]);
+  // A run that ran out of time reads as failed too; a partial run (some pages
+  // could not be fetched) is shown on Sources only.
+  const syncFailed = sources.flatMap((source) => {
+    const run = source.kind === "sitemap" ? syncs.get(source.id) : undefined;
+    return run?.outcome === "failed"
+      ? [{ sourceId: source.id, label: source.label, error: run.error }]
+      : [];
+  });
 
   const byDay = new Map(perDay.map((row) => [row.day, row.questions]));
   const daily = Array.from({ length: OVERVIEW_DAYS }, (_, i) => {
@@ -152,7 +162,7 @@ export async function overviewFor(
       installed: (milestones?.widgetSeenAt ?? null) !== null || visitorQuestion,
       visitorQuestion,
     },
-    attention: { openGaps: gaps.total, failingTests, notIndexed },
+    attention: { openGaps: gaps.total, failingTests, notIndexed, syncFailed },
     responseTime,
   };
 }

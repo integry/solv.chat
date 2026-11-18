@@ -26,6 +26,7 @@ function makeServer(overrides: Partial<McpServerSummary> = {}): McpServerSummary
     headerName: null,
     hasSecret: false,
     enabled: true,
+    sendConversationContext: false,
     createdAt: 1_700_000_000_000,
     toolCount: 1,
     allowedCount: 0,
@@ -55,6 +56,8 @@ interface FakeServerOptions {
   nextAddRefreshError?: string;
   /** How many server-list GETs fail before one succeeds. */
   failServersLoad?: number;
+  /** The next server PATCH fails with this status and body. */
+  nextServerPatchError?: { status: number; body: unknown };
   onRequest?: (method: string, path: string) => Promise<void> | void;
 }
 
@@ -65,6 +68,7 @@ function installFakeServer(options: FakeServerOptions = {}) {
   let nextRefreshError = options.nextRefreshError;
   let nextAddRefreshError = options.nextAddRefreshError;
   let serverLoadFailures = options.failServersLoad ?? 0;
+  let nextServerPatchError = options.nextServerPatchError;
   const toolsByServer: Record<string, McpToolView[]> = {};
   if (options.toolsByServer) {
     for (const [id, list] of Object.entries(options.toolsByServer)) {
@@ -139,6 +143,11 @@ function installFakeServer(options: FakeServerOptions = {}) {
       const serverId = serverPatchMatch[1];
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       patches.push({ path, body });
+      if (nextServerPatchError) {
+        const err = nextServerPatchError;
+        nextServerPatchError = undefined;
+        return Response.json(err.body, { status: err.status });
+      }
       servers = servers.map((s) => {
         if (s.id !== serverId) return s;
         const hasSecret =
@@ -152,6 +161,9 @@ function installFakeServer(options: FakeServerOptions = {}) {
           ...(typeof body.label === "string" ? { label: body.label } : {}),
           ...(typeof body.url === "string" ? { url: body.url } : {}),
           ...(typeof body.enabled === "boolean" ? { enabled: body.enabled } : {}),
+          ...(typeof body.sendConversationContext === "boolean"
+            ? { sendConversationContext: body.sendConversationContext }
+            : {}),
           ...(body.authKind === "none" || body.authKind === "static_header"
             ? { authKind: body.authKind }
             : {}),
@@ -759,6 +771,84 @@ describe("Tools screen", () => {
       expect(actions).toBeTruthy();
       expect(actions?.querySelectorAll("button")).toHaveLength(4);
     }
+  });
+
+  it("shows Send conversation context on each server, off by default, and saves it at once", async () => {
+    const fake = installFakeServer({
+      servers: [
+        makeServer({ id: "mcp_1", label: "Order lookup" }),
+        makeServer({ id: "mcp_2", label: "Stock", url: "https://stock.example.com/mcp" }),
+      ],
+    });
+    const { container } = render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Tools" }));
+    await screen.findByText("Stock");
+
+    const cards = Array.from(container.querySelectorAll("ul.source-list > li.source-card"));
+    expect(cards).toHaveLength(2);
+    for (const card of cards) {
+      const toggle = within(card as HTMLElement).getByRole("switch", {
+        name: "Send conversation context",
+      });
+      expect((toggle as HTMLInputElement).checked).toBe(false);
+      // What is sent, why an owner would turn it on, and what it lets the
+      // receiving server do with it.
+      expect(toggle.getAttribute("aria-describedby")).toBeTruthy();
+      const hint = container.querySelector(`#${toggle.getAttribute("aria-describedby")}`);
+      expect(hint?.textContent).toMatch(/conversation, visitor and assistant ids/);
+      expect(hint?.textContent).toMatch(/never messages/);
+      expect(hint?.textContent).toMatch(/tell visitors apart/);
+      expect(hint?.textContent?.replace(/\s+/g, " ")).toContain(
+        "These ids let that server link one visitor's conversations, so turn this on only for a server you run or trust.",
+      );
+    }
+
+    const first = cards[0] as HTMLElement;
+    fireEvent.click(within(first).getByRole("switch", { name: "Send conversation context" }));
+    await waitFor(() =>
+      expect(
+        (
+          within(first).getByRole("switch", {
+            name: "Send conversation context",
+          }) as HTMLInputElement
+        ).checked,
+      ).toBe(true),
+    );
+    expect(fake.patches).toEqual([
+      { path: "/api/admin/mcp-servers/mcp_1", body: { sendConversationContext: true } },
+    ]);
+    // The other server is untouched.
+    expect(
+      (
+        within(cards[1] as HTMLElement).getByRole("switch", {
+          name: "Send conversation context",
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false);
+  });
+
+  it("shows the engine's message when Send conversation context cannot be saved", async () => {
+    installFakeServer({
+      servers: [makeServer({ authKind: "static_header", headerName: "Solv-Visitor-Id" })],
+      nextServerPatchError: {
+        status: 400,
+        body: {
+          error:
+            "headerName: Solv-Conversation-Id, Solv-Visitor-Id, Solv-Assistant-Id are sent by solv.chat itself",
+          errors: [
+            "headerName: Solv-Conversation-Id, Solv-Visitor-Id, Solv-Assistant-Id are sent by solv.chat itself",
+          ],
+        },
+      },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Tools" }));
+    fireEvent.click(await screen.findByRole("switch", { name: "Send conversation context" }));
+    expect(await screen.findByText(/are sent by solv\.chat itself/)).toBeTruthy();
+    expect(
+      (screen.getByRole("switch", { name: "Send conversation context" }) as HTMLInputElement)
+        .checked,
+    ).toBe(false);
   });
 
   it("explains what a tool server is when there are none, with an example", async () => {

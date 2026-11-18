@@ -50,11 +50,20 @@ export const PAUSE_FOR_CLIENT: ToolRunResult = {
   pause: true,
 };
 
+/**
+ * Which conversation a call is made for. Both ids are absent for an owner's
+ * preview or an answer test, which store no conversation row.
+ */
+export interface ToolCallContext {
+  conversationId?: string | undefined;
+  visitorId?: string | undefined;
+}
+
 /** What a tool source provides: the definitions and a way to run one. */
 export interface ToolRunner {
   readonly kind: "mcp" | "action";
   readonly definitions: readonly ToolDefinition[];
-  run(call: ToolCall, signal: AbortSignal): Promise<ToolRunResult>;
+  run(call: ToolCall, signal: AbortSignal, context?: ToolCallContext): Promise<ToolRunResult>;
 }
 
 /** What is stored on the message; never the result body. */
@@ -109,6 +118,8 @@ export interface ToolLoopDeps {
   onToolRound?: ((ms: number) => void) | undefined;
   signal?: AbortSignal | undefined;
   now?: (() => number) | undefined;
+  /** Passed to every runner call; see `ToolCallContext`. */
+  callContext?: ToolCallContext | undefined;
 }
 
 export interface PendingToolTurn {
@@ -167,11 +178,14 @@ async function runWithDeadline(
   runner: ToolRunner,
   call: ToolCall,
   signal: AbortSignal,
+  context: ToolCallContext | undefined,
 ): Promise<ToolRunResult> {
   if (signal.aborted) {
     throw new Error("Tool deadline exceeded");
   }
-  const runPromise = Promise.resolve().then(() => runner.run(call, signal));
+  const runPromise = Promise.resolve().then(() =>
+    context === undefined ? runner.run(call, signal) : runner.run(call, signal, context),
+  );
   // Prevent unhandled rejection if the deadline fires first and the runner rejects later.
   runPromise.catch(() => {});
 
@@ -460,7 +474,7 @@ async function* runLoopFrom(
             // answer is still worth finishing.
             outcome = { content: `No tool named ${call.name} is available.`, isError: true };
           } else {
-            outcome = await runWithDeadline(runner, call, controller.signal);
+            outcome = await runWithDeadline(runner, call, controller.signal, deps.callContext);
           }
         } catch {
           // Nothing from the failure is forwarded: a server's error body can

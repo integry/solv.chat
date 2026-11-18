@@ -8,6 +8,7 @@ import { messagesFor } from "./messages.js";
 import { providerSettingsFor } from "./providerSettings.js";
 import { reportsFor } from "./reports.js";
 import { sourcesFor } from "./sources.js";
+import { syncFor } from "./sync.js";
 import { testsFor } from "./tests.js";
 import { topicsFor } from "./topics.js";
 import { tracesFor } from "./traces.js";
@@ -39,6 +40,7 @@ export interface Tenant {
   readonly usage: ReturnType<typeof usageFor>;
   readonly reports: ReturnType<typeof reportsFor>;
   readonly topics: ReturnType<typeof topicsFor>;
+  readonly sync: ReturnType<typeof syncFor>;
 }
 
 /**
@@ -69,6 +71,14 @@ export const forPublicScope = (db: D1Database, scope: PublicScope): Tenant =>
 export const forQueuedIngest = (db: D1Database, resolvedOrgId: string): Tenant =>
   build(db, resolvedOrgId);
 
+/**
+ * Builds a `Tenant` for one scheduled sync run, from the org the auth seam
+ * returned (`resolveOrg`, `queued_ingest`) for an org read from a `sources`
+ * row the engine wrote. Never from a request.
+ */
+export const forScheduledSync = (db: D1Database, resolvedOrgId: string): Tenant =>
+  build(db, resolvedOrgId);
+
 function build(db: D1Database, orgId: string): Tenant {
   // Handlers reach tables only through a `Tenant`, and the builders above take
   // an org from the auth seam (a principal, an ingest or public scope, or the
@@ -92,5 +102,6 @@ function build(db: D1Database, orgId: string): Tenant {
     usage: usageFor(db, orgId),
     reports: reportsFor(db, orgId),
     topics: topicsFor(db, orgId),
+    sync: syncFor(db, orgId),
   };
 }

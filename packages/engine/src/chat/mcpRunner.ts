@@ -3,7 +3,7 @@ import { callTool } from "../mcp/client.js";
 import { McpError, type McpTarget } from "../mcp/types.js";
 import type { ToolDefinition } from "../providers/types.js";
 import { openSecret } from "../security/secretBox.js";
-import type { ToolRunner, ToolRunResult } from "./toolLoop.js";
+import type { ToolCallContext, ToolRunner, ToolRunResult } from "./toolLoop.js";
 
 // Both Anthropic and OpenAI restrict tool names to 1..64 characters matching ^[a-zA-Z0-9_-]+$.
 // Sources (checked 2026-11-15):
@@ -95,7 +95,7 @@ export async function mcpRunnerFor(
   return {
     kind: "mcp",
     definitions,
-    async run(call, signal): Promise<ToolRunResult> {
+    async run(call, signal, context?: ToolCallContext): Promise<ToolRunResult> {
       const entry = aliasTable.get(call.name);
       if (!entry) {
         return { content: `No tool named ${call.name} is available.`, isError: true };
@@ -114,6 +114,18 @@ export async function mcpRunnerFor(
                 // specification says "decrypted only inside the Worker at call
                 // time", and a runner that kept it would widen that window.
                 headerValue: await openCredential(deps, serverId),
+              }
+            : {}),
+          // Only when the owner switched it on for this server. The ids come
+          // from the loop (the stored conversation), never from the model's
+          // call or anything the visitor typed.
+          ...(row.sendConversationContext
+            ? {
+                conversationContext: {
+                  assistantId: row.assistantId,
+                  conversationId: context?.conversationId,
+                  visitorId: context?.visitorId,
+                },
               }
             : {}),
         };

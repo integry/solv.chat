@@ -469,6 +469,36 @@ describe("Monitor screens", () => {
       expect(block.textContent).toContain("The OpenAI key must be entered again.");
     });
 
+    it("reports a sitemap source whose last sync failed, with the reason in plain words", async () => {
+      installServer({
+        overview: overview({
+          attention: {
+            openGaps: 0,
+            failingTests: 0,
+            notIndexed: [],
+            syncFailed: [{ sourceId: "src_2", label: "Help site", error: "sitemap_unavailable" }],
+          },
+        }),
+      });
+      await open("/admin/overview");
+
+      const block = await screen.findByRole("region", { name: "Needs attention" });
+      const link = within(block).getByRole("link", { name: "Help site: the last sync failed" });
+      expect(link.getAttribute("href")).toBe(`/admin/sources?assistant=${ASSISTANT.id}`);
+      expect(block.textContent).toContain(
+        "Help site: the last sync failed. The sitemap could not be read. Check that its address still works.",
+      );
+    });
+
+    it("lists nothing for sync when an older engine sends no sync failures", async () => {
+      installServer({
+        overview: overview({ attention: { openGaps: 0, failingTests: 0, notIndexed: [] } }),
+      });
+      await open("/admin/overview");
+      await screen.findByRole("region", { name: "Getting started" });
+      expect(screen.queryByRole("region", { name: "Needs attention" })).toBeNull();
+    });
+
     it("points at no screen the host has hidden", async () => {
       installServer({
         overview: overview({

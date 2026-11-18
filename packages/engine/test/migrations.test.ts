@@ -22,6 +22,10 @@ const EXPECTED_TABLES = [
   "gap_answers",
   "assistant_origins",
   "message_traces",
+  "source_syncs",
+  "source_sync_pages",
+  "source_sync_attempts",
+  "sync_org_refusals",
 ];
 
 describe("migrations", () => {
@@ -397,17 +401,151 @@ describe("migrations", () => {
     expect(await lastMessageAt()).toEqual({ cnv_a: 100, cnv_b: 70 });
   });
 
+  it("upgrades push sources sharing a label through 0022 without losing any", async () => {
+    const orgId = "org_00000000000000000000";
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0022_"));
+    const queries = migration?.queries ?? [];
+    expect(queries.length).toBe(2);
+    const source = (id: string, assistant: string, kind: string, label: string, at: number) =>
+      env.DB.prepare(
+        "INSERT INTO sources (id, org_id, assistant_id, kind, label, is_default, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+      ).bind(id, orgId, assistant, kind, label, at);
+    const doc = (id: string, sourceId: string) =>
+      env.DB.prepare(
+        "INSERT INTO documents (id, org_id, source_id, external_id, url, title, content_hash, updated_at) VALUES (?1, ?2, ?3, 'page', 'https://a.test/p', 'P', 'h', 1)",
+      ).bind(id, orgId, sourceId);
+
+    // The state before 0022: its index did not exist yet.
+    await env.DB.prepare("DROP INDEX sources_push_label").run();
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'A', 'pk_1', 1), ('ast_2', ?1, 'B', 'pk_2', 1)",
+        ).bind(orgId),
+        source("src_c", "ast_1", "push", "Docs", 300),
+        source("src_b", "ast_1", "push", "Docs", 100),
+        source("src_a", "ast_1", "push", "Docs", 100),
+        source("src_d", "ast_1", "push", "Blog", 100),
+        source("src_e", "ast_2", "push", "Docs", 500),
+        source("src_f", "ast_1", "sitemap", "Docs", 50),
+        // Labels that already read like the replacements for src_b and src_h.
+        source("src_h", "ast_2", "push", "Docs", 600),
+        source("src_i", "ast_2", "push", "Docs (src_h)", 50),
+        source("src_j", "ast_2", "push", "Docs (src_h) (src_i)", 40),
+        source("src_k", "ast_1", "push", "Docs (src_b)", 50),
+        doc("doc_a", "src_a"),
+        doc("doc_b", "src_b"),
+        doc("doc_c", "src_c"),
+        doc("doc_k", "src_k"),
+      ]);
+    } finally {
+      for (const sql of queries) await env.DB.prepare(sql).run();
+    }
+
+    const sources = await env.DB.prepare(
+      "SELECT id, label FROM sources WHERE org_id = ?1 ORDER BY id",
+    )
+      .bind(orgId)
+      .all<{ id: string; label: string }>();
+    expect(Object.fromEntries(sources.results.map((r) => [r.id, r.label]))).toEqual({
+      // The oldest keeps the label (ties broken by id); the rest stay, renamed.
+      src_a: "Docs",
+      src_b: "Docs (src_b)",
+      src_c: "Docs (src_c)",
+      src_d: "Blog",
+      // Another assistant and another kind are not duplicates.
+      src_e: "Docs",
+      src_f: "Docs",
+      // A label equal to a replacement is renamed too, and so on down the chain.
+      src_h: "Docs (src_h)",
+      src_i: "Docs (src_h) (src_i)",
+      src_j: "Docs (src_h) (src_i) (src_j)",
+      src_k: "Docs (src_b) (src_k)",
+    });
+    const docs = await env.DB.prepare(
+      "SELECT id, source_id FROM documents WHERE org_id = ?1 ORDER BY id",
+    )
+      .bind(orgId)
+      .all<{ id: string; source_id: string }>();
+    expect(docs.results).toEqual([
+      { id: "doc_a", source_id: "src_a" },
+      { id: "doc_b", source_id: "src_b" },
+      { id: "doc_c", source_id: "src_c" },
+      { id: "doc_k", source_id: "src_k" },
+    ]);
+    // The index is in place afterwards.
+    await expect(source("src_g", "ast_1", "push", "Docs", 900).run()).rejects.toThrow();
+  });
+
   it("uses unique, sequential numeric prefixes for every migration", () => {
     const names = env.TEST_MIGRATIONS.map((m) => m.name);
     const prefixes = names.map((name) => {
       const match = /^(\d{4})_/.exec(name);
       expect(match, `Migration ${name} must start with a 4-digit prefix`).not.toBeNull();
-      return match?.[1] ?? "";
+      return Number(match?.[1] ?? "");
     });
 
     expect(new Set(prefixes).size).toBe(prefixes.length);
     for (let i = 0; i < prefixes.length; i++) {
-      expect(Number(prefixes[i])).toBe(i + 1);
+      expect(prefixes[i]).toBe(i + 1);
     }
+  });
+
+  it("leaves every MCP server stored before 0025 with conversation context off", async () => {
+    const orgId = "org_00000000000000000000";
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0025_"));
+    expect(migration?.queries.length).toBe(1);
+
+    // The 0025 statement run against a table shaped as mcp_servers was before
+    // it, holding rows written then.
+    await env.DB.batch([
+      env.DB.prepare("DROP TABLE IF EXISTS mcp_servers_before_0025"),
+      env.DB.prepare(
+        `CREATE TABLE mcp_servers_before_0025 (
+           id TEXT PRIMARY KEY, org_id TEXT NOT NULL, assistant_id TEXT NOT NULL,
+           label TEXT NOT NULL, url TEXT NOT NULL, auth_kind TEXT NOT NULL,
+           secret_ciphertext TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+           created_at INTEGER NOT NULL, header_name TEXT)`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO mcp_servers_before_0025 (id, org_id, assistant_id, label, url, auth_kind, enabled, created_at)
+         VALUES ('mcp_old_1', ?1, 'ast_1', 'Old', 'https://a.example/mcp', 'none', 1, 1),
+                ('mcp_old_2', ?1, 'ast_1', 'Off', 'https://b.example/mcp', 'none', 0, 2)`,
+      ).bind(orgId),
+    ]);
+    for (const sql of migration?.queries ?? []) {
+      expect(sql).toMatch(/ALTER TABLE mcp_servers ADD COLUMN/);
+      await env.DB.prepare(sql.replace(/\bmcp_servers\b/, "mcp_servers_before_0025")).run();
+    }
+    const migrated = await env.DB.prepare(
+      "SELECT id, enabled, send_conversation_context FROM mcp_servers_before_0025 ORDER BY id",
+    ).all<{ id: string; enabled: number; send_conversation_context: number }>();
+    expect(migrated.results).toEqual([
+      { id: "mcp_old_1", enabled: 1, send_conversation_context: 0 },
+      { id: "mcp_old_2", enabled: 0, send_conversation_context: 0 },
+    ]);
+    await expect(
+      env.DB.prepare(
+        "UPDATE mcp_servers_before_0025 SET send_conversation_context = 2 WHERE id = 'mcp_old_1'",
+      ).run(),
+    ).rejects.toThrow();
+    await env.DB.prepare("DROP TABLE mcp_servers_before_0025").run();
+
+    // The real table: a row written the way an older Worker writes it is off.
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'Site', 'pk_1', 1)",
+      ).bind(orgId),
+      env.DB.prepare(
+        `INSERT INTO mcp_servers (id, org_id, assistant_id, label, url, auth_kind, secret_ciphertext, enabled, created_at)
+         VALUES ('mcp_1', ?1, 'ast_1', 'Tools', 'https://a.example/mcp', 'none', NULL, 1, 1)`,
+      ).bind(orgId),
+    ]);
+    const row = await env.DB.prepare(
+      "SELECT send_conversation_context FROM mcp_servers WHERE org_id = ?1 AND id = 'mcp_1'",
+    )
+      .bind(orgId)
+      .first<{ send_conversation_context: number }>();
+    expect(row?.send_conversation_context).toBe(0);
   });
 });

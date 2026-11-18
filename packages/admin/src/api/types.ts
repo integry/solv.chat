@@ -5,6 +5,7 @@ import type {
   OverviewSetup,
   ResponseTimePeriod,
   SourceKind,
+  SourceSyncStatus,
   TestExpectation,
   TopicItem,
   TopicsReport,
@@ -66,6 +67,8 @@ export interface SourceSummary {
   retryingCount?: number;
   /** Why (one of the failed documents), as a code the admin words. */
   indexError?: IndexErrorCode | null;
+  /** A sitemap source's sync schedule and latest run. Absent for other kinds and older engines. */
+  sync?: SourceSyncStatus;
 }
 
 export type IndexErrorCode = "too_long" | "missing_body" | "embedding_failed";
@@ -305,6 +308,11 @@ export interface McpServerSummary {
   headerName: string | null;
   hasSecret: boolean;
   enabled: boolean;
+  /**
+   * "Send conversation context". Optional so a host serving an older engine,
+   * whose response lacks it, reads it as off.
+   */
+  sendConversationContext?: boolean;
   createdAt: number;
   toolCount: number;
   allowedCount: number;

@@ -5,11 +5,12 @@ export interface FrontMatter {
   title?: string;
 }
 
-const MARKDOWN_EXT_RE = /\.(md|markdown)$/i;
+const MARKDOWN_EXT_RE = /\.(md|markdown|mdx)$/i;
+const FRONT_MATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const IGNORED_DIRS = new Set([".git", "node_modules"]);
 
 /**
- * Recursively collects `.md` and `.markdown` file paths under `dir`, sorted
+ * Recursively collects `.md`, `.markdown` and `.mdx` file paths under `dir`, sorted
  * lexicographically so batches are deterministic across runs.
  */
 export async function markdownFiles(dir: string): Promise<string[]> {
@@ -185,24 +186,25 @@ function readBlockScalar(header: string, lines: string[]): string | undefined {
 }
 
 /**
- * Reads the top-level `title:` scalar of a YAML front matter block.
+ * Reads a top-level string scalar (`title:`, `slug:`, ...) of a YAML front
+ * matter block.
  *
- * The CLI promises no runtime dependencies, and `title` is the only key it
- * uses, so this reads that one key instead of shipping a YAML parser: plain,
- * single- and double-quoted (one or more lines) and `|`/`>` block scalars.
- * Anything it cannot read as a string yields `undefined`, so the caller falls
- * back to the first heading.
+ * The CLI promises no runtime dependencies and reads only a few string keys,
+ * so this reads one key instead of shipping a YAML parser: plain, single- and
+ * double-quoted (one or more lines) and `|`/`>` block scalars. Anything it
+ * cannot read as a string yields `undefined`, so the caller falls back.
  */
-export function readFrontMatterTitle(block: string): string | undefined {
+export function readFrontMatterString(block: string, key: string): string | undefined {
+  const keyRe = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[ \t]*:(?:[ \t]|$)`);
   const lines = block.split(/\r?\n/);
-  const start = lines.findIndex((line) => /^title[ \t]*:(?:[ \t]|$)/.test(line));
+  const start = lines.findIndex((line) => keyRe.test(line));
   if (start === -1) return undefined;
-  if (lines.slice(start + 1).some((line) => /^title[ \t]*:(?:[ \t]|$)/.test(line))) {
+  if (lines.slice(start + 1).some((line) => keyRe.test(line))) {
     // A duplicate key is an error in YAML; do not guess which one was meant.
     return undefined;
   }
 
-  const first = (lines[start] as string).replace(/^title[ \t]*:/, "").trim();
+  const first = (lines[start] as string).slice((lines[start] as string).indexOf(":") + 1).trim();
   // Continuation lines belong to the value while they are indented or blank.
   const rest: string[] = [];
   for (const line of lines.slice(start + 1)) {
@@ -238,19 +240,30 @@ export function readFrontMatterTitle(block: string): string | undefined {
   return value;
 }
 
+/** Reads the top-level `title:` of a front matter block; see {@link readFrontMatterString}. */
+export function readFrontMatterTitle(block: string): string | undefined {
+  return readFrontMatterString(block, "title");
+}
+
+/** Returns the raw YAML front matter block and the body after it (`block` is null when absent). */
+export function frontMatterBlock(raw: string): { block: string | null; body: string } {
+  const match = FRONT_MATTER_RE.exec(raw);
+  if (!match) return { block: null, body: raw };
+  return { block: match[1] ?? "", body: raw.slice(match[0].length) };
+}
+
 /**
  * Splits optional YAML front matter (`--- ... ---`) at the start of a Markdown
  * file, extracting `title` when present.
  */
 export function splitFrontMatter(raw: string): { frontMatter: FrontMatter; body: string } {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(raw);
-  if (!match) {
+  const { block, body } = frontMatterBlock(raw);
+  if (block === null) {
     return { frontMatter: {}, body: raw };
   }
 
-  const body = raw.slice(match[0].length);
   const frontMatter: FrontMatter = {};
-  const title = readFrontMatterTitle(match[1] ?? "")?.trim();
+  const title = readFrontMatterTitle(block)?.trim();
   if (title !== undefined && title.length > 0) {
     frontMatter.title = title;
   }

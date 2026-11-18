@@ -2,7 +2,6 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import { newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  htmlToTitleAndMarkdown,
   importSitemapUrls,
   MAX_IMPORT_URLS,
   MAX_REDIRECTS,
@@ -10,12 +9,16 @@ import {
   previewSitemap,
   UnsafeUrlError,
 } from "../../src/admin/sitemap.js";
+import { createApp } from "../../src/app.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { runIngestBatch } from "../../src/ingest/consumer.js";
 import type { IngestQueueMessage } from "../../src/ingest/documents.js";
+import { htmlToTitleAndMarkdown } from "../../src/ingest/htmlToMarkdown.js";
+import { plainPageFetcher } from "../../src/ingest/pageFetcher.js";
+import type { PageFetcher } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
-import { acceptQueuedOrg, createTestApp, TEST_ORG_ID } from "../helpers/app.js";
+import { acceptQueuedOrg, createTestApp, fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
 
 const ORG_A = TEST_ORG_ID;
 const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -179,10 +182,12 @@ describe("admin sitemap preview and import", () => {
         { tenant, docs: env.DOCS, queue: makeQueue() },
         { orgId: ORG_A, assistantId },
         { urls },
-        async () => {
-          fetches++;
-          return new Response("x");
-        },
+        plainPageFetcher({
+          fetch: async () => {
+            fetches++;
+            return new Response("x");
+          },
+        }),
       ),
     ).rejects.toThrow(/at most 5 URLs per request/);
     expect(fetches).toBe(0);
@@ -208,7 +213,7 @@ describe("admin sitemap preview and import", () => {
       { tenant, docs: env.DOCS, queue },
       { orgId: ORG_A, assistantId },
       { sitemapUrl: "https://docs.example.com/sitemap.xml", urls: chosen },
-      fetchImpl,
+      plainPageFetcher({ fetch: fetchImpl }),
     );
 
     expect(fetchedUrls).toEqual(chosen);
@@ -293,8 +298,7 @@ describe("admin sitemap preview and import", () => {
         { tenant, docs: env.DOCS, queue },
         { orgId: ORG_A, assistantId },
         { urls: ["https://docs.example.com/stalled"] },
-        stalledImportFetch,
-        { timeoutMs: 25 },
+        plainPageFetcher({ fetch: stalledImportFetch, timeoutMs: 25 }),
       ),
     ).rejects.toThrow(UnsafeUrlError);
     expect(importCancelled).toBe(true);
@@ -321,7 +325,7 @@ describe("admin sitemap preview and import", () => {
       { tenant, docs: env.DOCS, queue },
       { orgId: ORG_A, assistantId },
       { sitemapUrl: "https://docs.example.com/sitemap.xml", urls: [shortUrl, longUrl] },
-      fetchImpl,
+      plainPageFetcher({ fetch: fetchImpl }),
     );
     expect(first.written).toBe(2);
     expect(first.total).toBe(2);
@@ -339,7 +343,7 @@ describe("admin sitemap preview and import", () => {
       { tenant, docs: env.DOCS, queue },
       { orgId: ORG_A, assistantId },
       { sourceId: first.source.id, urls: [shortUrl, longUrl] },
-      fetchImpl,
+      plainPageFetcher({ fetch: fetchImpl }),
     );
     expect(second.total).toBe(2);
     const docsAfter = await tenant.documents.listBySource(first.source.id);
@@ -446,7 +450,7 @@ describe("admin sitemap preview and import", () => {
           sitemapUrl: "https://docs.example.com/sitemap.xml",
           urls: chosen,
         },
-        fetchImpl,
+        plainPageFetcher({ fetch: fetchImpl }),
       ),
     ).rejects.toThrow("queue send failed");
 
@@ -460,7 +464,7 @@ describe("admin sitemap preview and import", () => {
         sitemapUrl: "https://docs.example.com/sitemap.xml",
         urls: chosen,
       },
-      fetchImpl,
+      plainPageFetcher({ fetch: fetchImpl }),
     );
 
     expect(retried.source.id).toBe(createdSource.id);
@@ -560,11 +564,136 @@ describe("admin sitemap preview and import", () => {
         { tenant, docs: env.DOCS, queue },
         { orgId: ORG_A, assistantId },
         { urls: ["https://v6loop.example.com/page"] },
-        fetchImpl,
-        { resolveHost: async () => ["::1"] },
+        plainPageFetcher({ fetch: fetchImpl, resolveHost: async () => ["::1"] }),
       ),
     ).rejects.toThrow(UnsafeUrlError);
     expect(fetchCalled).toBe(false);
+  });
+});
+
+describe("sitemap import through the page-fetcher seam", () => {
+  beforeEach(async () => {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM chunks"),
+      env.DB.prepare("DELETE FROM documents"),
+      env.DB.prepare("DELETE FROM sources"),
+      env.DB.prepare("DELETE FROM assistant_versions"),
+      env.DB.prepare("DELETE FROM assistants"),
+    ]);
+  });
+
+  async function postImport(
+    app: ReturnType<typeof createApp>,
+    assistantId: string,
+    urls: string[],
+  ) {
+    const ctx = createExecutionContext();
+    // A local queue: a real send is delivered after the test, into whichever
+    // test file's storage is current by then.
+    const queue = makeQueue();
+    const res = await app.fetch(
+      new Request(`https://example.com/api/admin/assistants/${assistantId}/sitemap-import`, {
+        method: "POST",
+        headers: { Origin: "https://example.com", "Content-Type": "application/json" },
+        body: JSON.stringify({ urls }),
+      }),
+      { ...env, INGEST_QUEUE: queue as unknown as Queue },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(queue.sent.length).toBe(urls.length);
+    return res;
+  }
+
+  it("skips a non-HTML page and writes a page with no text as its title, as before", async () => {
+    const assistantId = await seedAssistant(ORG_A);
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith(".pdf")) {
+        return new Response("%PDF-1.7", { headers: { "content-type": "application/pdf" } });
+      }
+      if (url.endsWith("/empty")) {
+        return new Response("<title>Coming soon</title><script>x()</script>", {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return new Response("<title>Guide</title><p>Read me.</p>", {
+        headers: { "content-type": "text/html" },
+      });
+    };
+
+    const result = await importSitemapUrls(
+      { tenant, docs: env.DOCS, queue: makeQueue() },
+      { orgId: ORG_A, assistantId },
+      {
+        urls: [
+          "https://docs.example.com/guide",
+          "https://docs.example.com/manual.pdf",
+          "https://docs.example.com/empty",
+        ],
+      },
+      plainPageFetcher({ fetch: fetchImpl }),
+    );
+
+    expect(result).toMatchObject({ written: 2, unchanged: 0, total: 2, skipped: 1 });
+    const docs = await tenant.documents.listBySource(result.source.id);
+    expect(docs.map((d) => d.title).sort()).toEqual(["Coming soon", "Guide"]);
+    const empty = docs.find((d) => d.title === "Coming soon");
+    const stored = await env.DOCS.get(empty?.bodyKey ?? "");
+    expect(await stored?.text()).toBe("# Coming soon");
+  });
+
+  it("uses the host's page fetcher when createApp is given one", async () => {
+    const assistantId = await seedAssistant(ORG_A);
+    const asked: string[] = [];
+    const pages: PageFetcher = {
+      async fetchPage(url) {
+        asked.push(url);
+        return {
+          kind: "page",
+          finalUrl: url,
+          status: 200,
+          title: "Rendered",
+          markdown: "Rendered by the host.",
+          etag: null,
+          lastModified: null,
+          notModified: false,
+        };
+      },
+    };
+    const app = createApp(fakeSeams({ pages }), {
+      fetch: async () => {
+        throw new Error("the default fetcher must not run");
+      },
+    });
+
+    const res = await postImport(app, assistantId, ["https://docs.example.com/spa"]);
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ written: 1, total: 1, skipped: 0 });
+    expect(asked).toEqual(["https://docs.example.com/spa"]);
+  });
+
+  it("falls back to the plain fetcher when the host passes no page fetcher", async () => {
+    const assistantId = await seedAssistant(ORG_A);
+    const fetched: string[] = [];
+    const seams = fakeSeams();
+    expect(seams.pages).toBeUndefined();
+    const app = createApp(seams, {
+      fetch: async (input) => {
+        fetched.push(
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+        );
+        return new Response("<title>Plain</title><p>Fetched.</p>", {
+          headers: { "content-type": "text/html" },
+        });
+      },
+    });
+
+    const res = await postImport(app, assistantId, ["https://docs.example.com/plain"]);
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ written: 1, total: 1, skipped: 0 });
+    expect(fetched).toEqual(["https://docs.example.com/plain"]);
   });
 });
 

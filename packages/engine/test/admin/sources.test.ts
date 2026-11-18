@@ -169,6 +169,50 @@ describe("admin sources API", () => {
     expect(afterList.sources).toHaveLength(0);
   });
 
+  it("keeps a sitemap source's other settings when one is changed, and refuses an unknown schedule", async () => {
+    const app = appForOrg(ORG_A);
+    const assistantId = await createAssistant(app);
+    const createRes = await call(app, "POST", `/api/admin/assistants/${assistantId}/sources`, {
+      kind: "sitemap",
+      label: "Docs",
+      settings: { url: "https://docs.example.com/sitemap.xml" },
+    });
+    expect(createRes.status).toBe(201);
+    const { source } = (await createRes.json()) as {
+      source: { id: string; settings: Record<string, unknown> };
+    };
+    // No schedule unless one is set, so the source is not synced.
+    expect(source.settings).toEqual({ url: "https://docs.example.com/sitemap.xml" });
+
+    const scheduled = await call(app, "PATCH", `/api/admin/sources/${source.id}`, {
+      settings: { sync: "weekly", maxRemovePercent: 30 },
+    });
+    expect(scheduled.status).toBe(200);
+    expect(((await scheduled.json()) as { source: { settings: unknown } }).source.settings).toEqual(
+      {
+        url: "https://docs.example.com/sitemap.xml",
+        sync: "weekly",
+        maxRemovePercent: 30,
+      },
+    );
+
+    const relabelled = await call(app, "PATCH", `/api/admin/sources/${source.id}`, {
+      settings: { url: "https://docs.example.com/other.xml" },
+    });
+    expect(
+      ((await relabelled.json()) as { source: { settings: unknown } }).source.settings,
+    ).toEqual({
+      url: "https://docs.example.com/other.xml",
+      sync: "weekly",
+      maxRemovePercent: 30,
+    });
+
+    const bad = await call(app, "PATCH", `/api/admin/sources/${source.id}`, {
+      settings: { sync: "hourly" },
+    });
+    expect(bad.status).toBe(400);
+  });
+
   it("refuses creating, editing, or deleting a push source by hand", async () => {
     const app = appForOrg(ORG_A);
     const assistantId = await createAssistant(app);

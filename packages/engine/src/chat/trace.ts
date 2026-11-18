@@ -21,7 +21,7 @@ export const MAX_TRACE_PARTS = 8;
  * fullest trace the engine can write (8 parts of 20 candidates) is about
  * 20 KiB, and a typical one (one part, `TOP_K` candidates) under 1 KiB;
  * anything larger is cut down by `boundTrace` before it is written, and
- * migration 0022 refuses a longer row as a backstop.
+ * migration 0026 refuses a longer row as a backstop.
  */
 export const MAX_TRACE_BYTES = 32 * 1024;
 /** Scores are kept to four decimal places: enough to rank, and a third of the bytes. */

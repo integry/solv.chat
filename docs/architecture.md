@@ -58,11 +58,31 @@ from the auth seam and pass it down.
   published version, and inserts a fresh draft with the same config; rollback
   republishes an archived version.
 - `sources` — id, assistant_id, kind (`push` | `sitemap` | `entry`), label, settings.
+  A sitemap source's settings are `url` (the sitemap), `sync` (`off` | `daily` |
+  `weekly`; left out means `off`), `maxRemovePercent` (1–100, default 50) and
+  `recheckDays` (1–365, default 7); see "Scheduled sitemap sync".
 - `documents` — id, source_id, external_id, url, title, content_hash, updated_at,
   indexed_hash (the content last made searchable), index_error and
   index_error_hash (a short code saying why the content with that hash could
   not be indexed: `too_long`, `missing_body` or `embedding_failed`; never a
-  provider message).
+  provider message), and for sitemap sync: etag, last_modified and
+  sitemap_lastmod (validators from the last check) and sync_checked_at (when
+  a check last succeeded).
+- `source_syncs` — org_id, source_id, run_id, lease_until (set while a run
+  holds the source), started_at, finished_at, outcome (`running` |
+  `succeeded` | `partial` | `failed`), counts (added, updated, unchanged,
+  removed, failed, deferred, withheld: removals a run refused by the wipe
+  guard would have made) and error
+  (a short code). One row per source: the current or latest run.
+- `source_sync_pages` — org_id, run_id, source_id, url, lastmod, state
+  (`pending` | `added` | `updated` | `unchanged` | `failed`): the pages one run
+  queued. Deleted when the source's next run starts.
+- `source_sync_attempts` — org_id, source_id, url, attempted_at: when a run
+  last queued each page of the source, new or already a document, whatever
+  came of it. Kept across runs; a page no longer listed is forgotten by the
+  next run that reads the whole sitemap.
+- `sync_org_refusals` — org_id, refused_at: when the auth seam last refused
+  the org at a scheduler tick (see "Scheduled sitemap sync").
 - `chunks` — id, document_id, ordinal, text, heading_path. Vectors live in Vectorize
   keyed by chunk id, with `org_id` and `assistant_id` as metadata filters.
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
@@ -79,7 +99,7 @@ from the auth seam and pass it down.
   with no results instead of searching), and for assistant replies
   first_token_ms and total_ms (milliseconds from the request to the first
   token sent to the visitor, and to the complete reply; NULL for replies
-  written before migration 0022, and for a paused reply they are the first
+  written before migration 0026, and for a paused reply they are the first
   request's).
   For assistant replies to visitors, also outcome (`answered` | `partial` |
   `declined` | `off_topic` | `wants_human`, or NULL when not reviewed) and
@@ -95,7 +115,8 @@ from the auth seam and pass it down.
   deleted with its message. See "Answer traces".
 - `feedback` — message_id, value (`up` | `down`), note.
 - `mcp_servers` — id, assistant_id, label, url, auth_kind (`none` | `static_header`),
-  secret_ciphertext, enabled.
+  header_name, secret_ciphertext, enabled, send_conversation_context (default 0;
+  see "Conversation context headers").
 - `mcp_tools` — server_id, name, description, input_schema, allowed (default false).
 - `tests` — id, assistant_id, question, expectation (must-cite URL, must-contain,
   must-not-contain, or must-decline).
@@ -139,10 +160,26 @@ that fails one gets a plain error event and costs nothing.
   documents (external id, url, title, Markdown). Unchanged `content_hash` is a no-op.
 - `DELETE /v1/ingest/:assistantId/documents` — by external id, or everything not in
   the pushed set (`prune`).
+- Both work on one push source: `sourceId`, the push source named by `source` (a
+  label, 1 to 80 characters, created on first push; one per label per assistant),
+  or the assistant's default push source when neither is given. A prune never
+  touches another source, so two pushers with different `source` labels cannot
+  delete each other's documents.
 - `GET /v1/ingest/:assistantId/config` — bearer ingest key. Returns the current
   draft config.
 - `PUT /v1/ingest/:assistantId/config` — bearer ingest key. Validates and updates
   the draft config only (never publishes, rolls back, or reads history).
+- `GET` / `PUT /v1/ingest/:assistantId/mcp-servers` — bearer ingest key. Reads
+  or turns off "Send conversation context" on the assistant's MCP servers. `GET`
+  returns `{ servers: [{ id, label, origin, sendConversationContext }] }`: the
+  origin of each url only, never its path or query, a header name or a
+  credential. `PUT` takes
+  `{ servers: [{ url, sendConversationContext }], dryRun? }`, matches existing
+  servers by url, refuses a url with no server, refuses `true` for a server
+  whose setting is off (only a signed-in admin can turn it on), and changes
+  nothing unless every entry is valid; servers it does not list keep their
+  setting. With `dryRun: true` it validates and returns the would-be `changed`
+  count without writing.
 
 Ingest writes the document row, enqueues it, and a Queue consumer chunks, embeds
 and upserts vectors. Until the consumer commits, the new content is not
@@ -152,15 +189,137 @@ consumer recorded an error for the current hash (every failed attempt records
 one; a later success or a new push makes it stale), and "Ready" otherwise, and
 it re-checks every few seconds while anything is indexing or has a failure
 the Queue retries (every code but `too_long`), so a retry that succeeds turns
-the row Ready. There is no crawler in v1: content is pushed (CLI, GitHub
-Action), imported once from a sitemap, or written by hand as an entry.
+the row Ready. Content is pushed (CLI, GitHub Action), imported from a sitemap
+(once, or again on a schedule; see "Scheduled sitemap sync"), or written by
+hand as an entry. There is no crawler that follows links: only the pages a
+sitemap lists are ever fetched.
 
-Sitemap import validates every URL and redirect hop as `https:` and checks
-the hostname via DNS-over-HTTPS before fetching, refusing private, loopback, or
-link-local addresses. Because Workers `fetch` resolves the hostname separately
-from that pre-check, a host that changes its DNS answer between the check and
-the fetch is not caught; that is an accepted limitation for an action only the
-signed-in owner can trigger.
+Sitemap import fetches each chosen page through the `PageFetcher` seam (see
+"Extension seams"). The open build's fetcher validates every URL and redirect
+hop as `https:` and checks the hostname via DNS-over-HTTPS before fetching,
+refusing private, loopback, or link-local addresses. A page with no text is
+written as its title alone; a response that is not a page or text (a PDF, an
+image) is skipped and counted in the import's `skipped`. Because Workers
+`fetch` resolves the hostname separately from that pre-check, a host that
+changes its DNS answer between the check and the fetch (DNS rebinding) is not
+caught. This is not limited to an action the signed-in owner starts: a
+scheduled sync repeats the sitemap and page fetches unattended on every run,
+against whatever the owner's URLs resolve to at that moment. It stays an
+accepted limitation because the URLs are the owner's own (a sitemap they
+added and the pages it lists), every hop is checked again on every run, and a
+response is only capped, converted and stored as a document. Closing the gap
+would need a fetch that connects to the checked address, which Workers
+`fetch` does not offer.
+
+A host that passes its own `fetch` (`createApp`'s `fetch` option) or its own
+`PageFetcher` seam is responsible for the address checks. With a host `fetch`
+the engine still refuses non-https URLs and literal private addresses, checks
+each redirect hop's URL and caps size and time, but it skips the
+DNS-over-HTTPS lookup, because it cannot know how that `fetch` resolves
+names: refusing hostnames that resolve to private, loopback or link-local
+addresses is then the host's job. A host `PageFetcher` replaces the open
+build's fetcher for pages entirely, so every check for pages (https only,
+each redirect hop, the address check, size cap and timeout) is the host's.
+
+### Scheduled sitemap sync
+
+A sitemap source can stay in step with its sitemap. Its `sync` setting is
+`off` (the default, so sources created before this existed do not change),
+`daily` or `weekly`. A run:
+
+1. Takes the source's lease (`source_syncs.lease_until`, 6 hours) in one
+   statement, so two runs of one source never overlap: a cron firing twice,
+   or a host's cron beside the open one, starts one run. A run still
+   unfinished when its lease ends is reported as `failed` with
+   `interrupted`, and its late queue messages change nothing. That holds for
+   a page already being fetched when the lease ends: the run is checked again
+   after the fetch, and each write a page makes (the document, its
+   validators, the page's state, the run's end) carries the same check in its
+   own statement.
+2. Asks `Limits.checkSync`. A refusal records the run as failed
+   (`limit_refused`) and fetches nothing. The org itself was first passed to
+   `AuthProvider.resolveOrg` (`queued_ingest`); an org it refuses is not read.
+3. Reads the sitemap (the preview's guards and its 2 MiB cap; up to 50,000
+   `<url>` entries with their `<lastmod>`). A sitemap index is not followed:
+   the run fails with `sitemap_index` ("This is a sitemap index; use one of
+   the sitemaps it lists."), and the admin's preview answers 400 with
+   `code: "sitemap_index"` rather than listing the child sitemaps as pages.
+   Entries are read from the same reading of the XML that step 4 checks, so a
+   commented-out `<url>` or `<loc>` is not a listed page.
+4. Guards against a broken sitemap: if it cannot be read (`sitemap_unavailable`),
+   is not one complete, well-formed XML document with a `<urlset>` root
+   (`sitemap_invalid`: cut short, broken XML, bare `<loc>` lists; the admin's
+   preview still reads those), or lists no page (`sitemap_empty`), the run
+   removes nothing, fetches nothing, and is recorded as failed. A sitemap with
+   more than 50,000 entries removes nothing in that run.
+   If the run would remove more than `maxRemovePercent` of the source's
+   documents, it changes nothing: no page is added, updated or removed, and
+   nothing is fetched. It records how many it would have removed
+   (`withheld`) and ends as `failed` with `too_many_removals`. Adding the
+   listed pages while keeping the old documents would grow the source until
+   the same removals passed the share check on a later run with nobody
+   looking, so a wrong sitemap of the same size (a staging host, another
+   section of the site) would replace every real document in two runs.
+   A scheduled run never lifts the guard; it is refused on every run until
+   the owner acts. That includes a whole-site URL change (a trailing slash,
+   a new host) and a very small source (one page of one, two of three).
+   The owner either raises `maxRemovePercent` or uses the admin's "Sync
+   anyway", which sends `POST /api/admin/sources/:id/sync` with
+   `{"allowRemovals": n}`, the number it showed the owner: that run alone
+   lifts the guard as long as it would remove at most `n` documents, and
+   adds, updates and removes in one go; it is refused as usual (with the
+   new number) otherwise. `allowRemovals` is accepted only while the
+   source's latest run ended `too_many_removals`; otherwise the request is
+   answered `409` with `code: "sync_anyway_not_offered"`. The other guards
+   stay.
+5. Removes the source's documents whose URL is no longer listed (that source
+   only; vectors and R2 bodies are cleaned up as for a prune).
+6. Skips pages whose sitemap `<lastmod>` equals the one stored at the last
+   check, without fetching them, once their current content is indexed and
+   while that check (`documents.sync_checked_at`) is less than `recheckDays`
+   old (7 days by default); a document whose indexing failed, or whose last
+   check is older, is checked again with a conditional request. Without the
+   age a page that answered 200 with the wrong content once (a maintenance
+   page while the `<lastmod>` moved) would be pinned by a date that never
+   changes again. The rest are queued in the order a run last
+   queued them (`source_sync_attempts`; never queued first, new pages before
+   documents among those), whether or not they could be fetched then, so pages
+   that keep failing do not keep the others waiting. Up to the per-run page
+   cap (200) and the
+   source's document cap (500 documents); pages over a cap are counted as
+   `deferred` and come up in a later run. Both caps can be lowered per run by
+   `Limits.checkSync` and for every source by `createApp`'s `sync` option.
+7. Each page is one message on the ingest queue (`kind: "sync_page"`). The
+   consumer fetches it through the `PageFetcher` seam with the stored ETag and
+   Last-Modified as `If-None-Match` / `If-Modified-Since`; a 304 is unchanged
+   (and queues the chunk-and-embed message again if its content is not yet
+   indexed), and a fetched page is written through the same path as a push, so an
+   unchanged `content_hash` is a no-op and never re-embedded. A changed page
+   queues the usual chunk-and-embed message. One page per message keeps a
+   consumer batch of four within Workers Free's 50 external subrequests (each
+   page is up to four hops of two DNS-over-HTTPS lookups and a fetch). A page
+   that cannot be fetched or is not a page counts as failed (the run then ends
+   `partial`, with `pages_failed`); a fault in D1 or R2 is retried, and on the
+   third attempt counted as failed.
+8. A page leaves `pending` once, so a retried message is not counted twice;
+   the run finishes, adding up its counts from the pages, when none is
+   pending. Writes are keyed on the document's external id, so nothing is
+   duplicated.
+
+A source is due when its schedule is on, no run holds it, and a full interval
+less 15 minutes has passed since its last run started (so a cron at the same
+minute each day does not miss a day). `app.runDueSyncs(env)` starts up to
+three due sources per call, oldest first by the later of their last run
+start and their org's last refusal by the auth seam: an org refused at one
+tick goes behind every other due source, so however many sources it has, the
+next tick reads past them. The Workers `scheduled` handler
+calls it, and the open build's `wrangler.jsonc` runs it hourly. A host with
+its own cron (every 10 minutes, say) calls `runDueSyncs` instead. Finding due
+sources is the one query without an org filter: a cron has no request and so
+no org, so it reads only org and source ids, and everything after goes
+through the org's `Tenant` once the auth seam has vouched for it. A refusal
+is recorded in `sync_org_refusals` from the seam's own answer, keyed by the
+org; nothing of the org is read.
 
 D1 is the only source of truth for live chunks; readers resolve retrieved vector
 ids through D1, so leftover vectors and R2 objects can accumulate after failures.
@@ -188,7 +347,9 @@ The Monitor screens read:
   attention (open gaps, failed tests in the latest run, the configuration
   error, sources with documents that failed to index, reported as soon as the
   failure is recorded, and sources with documents still not indexed 15 minutes
-  after they were written, reported separately).
+  after they were written, reported separately, and sitemap sources whose
+  latest sync failed or was interrupted, `syncFailed`, with the error code;
+  a `partial` run is shown on Sources only).
 - Conversations: `filter=unanswered,not_helpful,used_tool,could_not_answer,asked_for_person,off_topic`
   (the last three read the answer review's outcome: `declined`,
   `wants_human` and `off_topic`, retrieval misses included), `days=1|7|30|90`,
@@ -208,6 +369,25 @@ The Monitor screens read:
   assistant reply was made (see "Answer traces"); `trace: null` for a reply
   with none, and 404 for a visitor message or a message outside that
   conversation or org.
+- Sources: the list (`GET …/assistants/:id/sources`) gives each sitemap
+  source a `sync` object: `schedule`, `last` (the current or latest run:
+  start and end times, outcome, counts, error code, and while running
+  `progress` as pages handled of pages queued) and `nextSyncAt` (the earliest
+  time the scheduler takes it up again: a full interval less the 15-minute
+  slack after the last run started; already passed means at the next check;
+  null while off or running). `GET /api/admin/sources/:id/sync` returns the
+  same object for one source. `POST /api/admin/sources/:id/sync` ("Sync now")
+  starts a run at once, whatever the schedule, through the same steps as a
+  scheduled one (lease, `Limits.checkSync`, guards, caps; the org is the
+  signed-in principal's), reads the sitemap in the request and answers `202`
+  with the object; a run already holding the source answers `409`; a source
+  that is not a sitemap answers `400`. Its body is optional: none (or `{}`)
+  for Sync now, `{ "allowRemovals": n }` for "Sync anyway" after a
+  `too_many_removals` run (the run's `counts.withheld` is the `n` the admin
+  shows); sent when the latest run did not end `too_many_removals`, it is
+  answered `409` with `code: "sync_anyway_not_offered"`. The schedule is changed with `PATCH /api/admin/sources/:id` and
+  `{ "settings": { "sync": … } }`; `maxRemovePercent` and `recheckDays` the
+  same way.
 - Gaps: a group's questions are those whose reply was reviewed as `declined`
   (a retrieval miss or not), or, with no outcome (older rows, a review not yet
   run), found nothing above the score floor (`answered = 0`). A reply reviewed
@@ -546,6 +726,74 @@ credential. The rules that follow from that:
 - Per-conversation caps on the number of tool calls and on wall time.
 - Server URLs must be https and must not resolve to private or loopback ranges.
 
+### Conversation context headers
+
+Because every call comes from the Worker, a server cannot tell visitors apart,
+so one visitor could use up a budget the server shares between all of them.
+Each server has a "Send conversation context" setting (`sendConversationContext`
+in the admin API and `solv.config.json`, `send_conversation_context` in D1),
+off for existing and new servers. It belongs to the server, not to a version:
+it takes effect when saved and Publish does not gate it. When it is on, every
+request the engine makes to that server for a chat turn (`initialize`,
+`notifications/initialized`, `tools/list` when listed, and `tools/call`)
+carries:
+
+| Header                 | Value                                               |
+| ---------------------- | --------------------------------------------------- |
+| `Solv-Conversation-Id` | the conversation id, when a conversation row exists |
+| `Solv-Visitor-Id`      | the widget's visitor id stored on that conversation |
+| `Solv-Assistant-Id`    | the assistant id                                    |
+
+- Values are existing opaque ids only. An id matching `[A-Za-z0-9_-]{1,128}`
+  that does not start with `h_` (in any case) is sent as is; any other id (the
+  widget's visitor id is any 1 to 128 characters) is sent as `h_` followed by
+  the first 32 hex characters of its SHA-256, never raw. Because a raw id that
+  starts with `h_` is hashed too, a hashed value and a raw id can never be
+  equal: a visitor cannot send another visitor's hashed value as their own id.
+  Nothing else (IP address, page URL, message text) is ever sent in them.
+- The ids come from the stored conversation, never from the model's tool call.
+- The names are fixed. An owner's static auth header may not use any of them
+  (any case): creating or saving such a server is refused with a message
+  naming them, whether or not the setting is on. A row stored before this rule
+  keeps its credential and drops the clashing context header. Turning the
+  setting on for such a row is refused until the header is renamed; disabling
+  it, removing its credential and turning the setting off still work.
+- Requests with no visitor conversation send `Solv-Assistant-Id` only: listing
+  tools when a server is added or refreshed, the admin "Try it" pane, and answer
+  tests run from the admin (Tests, Publish) or `solv test`. Previews and tests
+  store no conversation row, so they never send `Solv-Conversation-Id` or
+  `Solv-Visitor-Id` (the preview's made-up conversation id is not sent). A
+  visitor's chat, including one that resumes after page actions, sends all three.
+- The ids are opaque, but they let a third-party server correlate one visitor's
+  conversations. The admin says so next to the switch ("These ids let that
+  server link one visitor's conversations, so turn this on only for a server
+  you run or trust."), and the setting is for servers the owner controls or
+  trusts.
+- The ingest key (`GET`/`PUT /v1/ingest/:assistantId/mcp-servers`, used by
+  `solv apply`) is a CI credential, so it sees and does less than the admin. A
+  `GET` returns each server's id, label, setting and the origin of its URL
+  only, never the path or query (which may carry a token) or the credential. A
+  `PUT` can turn the setting off but not on: turning it on needs a signed-in
+  admin, and an entry asking for on where a server is off is refused with a
+  message naming that server. An entry asking for on where it already is on is
+  accepted and changes nothing. `dryRun: true` checks a `PUT` and reports what
+  would change without changing it; `solv apply` runs it before writing the
+  draft, the tests or any server, so a refused `mcpServers` entry changes
+  nothing.
+
+#### What a receiving server may rely on
+
+- Trust the headers only on requests that carry the server's static
+  credential. A server with no auth cannot tell the engine's requests from
+  anyone else's, so anyone can forge them.
+- `Solv-Conversation-Id` is issued by the engine; a visitor cannot choose it.
+  A visitor can start any number of conversations, though, so a new id is
+  cheap.
+- `Solv-Visitor-Id` comes from the visitor's browser. It is an unauthenticated
+  hint: a visitor can rotate it or copy someone else's.
+- So keep a per-assistant or global ceiling behind any per-conversation or
+  per-visitor limit.
+
 Phase 2 note on OpenAI: the phase 1 provider called Chat Completions. Per the
 model pages checked on 2026-11-15 (https://developers.openai.com/api/docs/models),
 both `gpt-6.1-sol` and `gpt-6-luna` support tool calling through the Responses
@@ -675,7 +923,7 @@ computed in SQL by one statement per period (`replyTiming` in
 `(org_id, role, created_at)` index and the conversation's key, so the cost
 follows the period's traffic, not the assistant's history; there is no
 rollup. Only visitor answers count; "Try it" and test runs store no message.
-Replies without timings (written before migration 0022) are left out, and
+Replies without timings (written before migration 0026) are left out, and
 when they are more than half of the period's answers the figure has no number
 (`status: "mostly_untimed"`) and the screen says why; `no_answers` is a
 period with no answer at all. Replies that used a page action are left out
@@ -756,6 +1004,14 @@ Install
   an entry source and removes the gap; Conversations' "Write an answer for this"
   opens it on Gaps, filled in), "Dismiss" with undo on Gaps, "Add to tests" on both.
 - Plain words on every control. No model, temperature or chunking settings.
+- Sources gives a sitemap source a Sync column: how often it syncs (Off,
+  Every day, Every week), when it last synced with the outcome and counts or
+  the last error in plain words, when it next syncs, and "Sync now". A
+  running sync shows in Status the way "Indexing…" does, and the list is
+  checked again until it ends. A source's first sync (Sync now or turning a
+  schedule on) asks first, because it brings in every page the sitemap lists,
+  not only the ones chosen at import. Push and entry sources show no Sync
+  column; with none to sync, the column is left out.
 - Leaving a screen (a link, the browser's Back or Forward, or switching
   assistant) with unsaved edits on Behaviour or Widget asks first; "Stay here"
   keeps the screen and puts the address back. A move made while a save is
@@ -860,7 +1116,13 @@ widget and tests. `solv apply` writes the draft with the ingest key
 (`SOLV_INGEST_KEY`); publishing always happens in the admin. `solv push` sends
 content; `solv test` runs the tests. The admin and the file edit the same draft.
 A `tests` array in `solv.config.json` **replaces** the assistant's stored tests
-rather than merging with them.
+rather than merging with them. An `mcpServers` array
+(`[{ "url", "sendConversationContext" }]`) sets "Send conversation context" on
+servers already added in the admin, matched by url; the file cannot add a
+server, because its credential has no place in a repository. Through the ingest
+key it can turn the setting off but not on (see "Conversation context
+headers"), and `solv apply` checks `mcpServers` with a dry run before writing
+anything, so a refused entry leaves the draft, tests and servers unchanged.
 Because an ingest key can change an assistant's draft behaviour as well as its
 content, it must be kept as a secret.
 
@@ -882,21 +1144,63 @@ The cloud layer replaces these and nothing else:
   per-assistant spend cap and rate limits. `{ kind: "review" }` asks whether
   an answer review may spend; an implementation must answer it (the open one
   applies the spend cap only).
+  The optional
+  `checkSync(orgId, assistantId, { sourceId })` is asked before every
+  scheduled sync run and answers `{ ok: true, maxPages?, maxDocuments? }`
+  (caps that can only lower the engine's) or
+  `{ ok: false, reason: "suspended" | "plan_limit" }`. Left out, every run may
+  go ahead, so hosts written before it compile unchanged. A host keeps a
+  suspended org from syncing by refusing here (or in `resolveOrg`).
+- `PageFetcher` — turns one https URL into
+  `{ finalUrl, status, markdown, title, etag, lastModified, notModified }`.
+  `fetchPage(url, { etag, lastModified })` sends those validators as
+  `If-None-Match` / `If-Modified-Since`; a 304 comes back as
+  `kind: "not_modified"`. A response that is not HTML, Markdown or plain text,
+  or a page whose extraction leaves no text, comes back as
+  `kind: "no_content"` (`reason: "not_html" | "empty"`) and is never indexed as
+  an empty document. An implementation throws when it refuses or cannot fetch
+  a page, and must keep the open build's protections on every request and
+  redirect hop: https only, no private, loopback or link-local address, a size
+  cap and a timeout. The engine does not wrap a host's fetcher in its own
+  checks, so those are the host's responsibility, on scheduled syncs as much
+  as on an owner's import. The type uses no Cloudflare types, so a host can implement
+  it over a REST API (a headless browser, say). The open build's
+  `plainPageFetcher` uses Workers `fetch` and the HTML-to-Markdown extraction
+  the sitemap import has always used (10 s, 1 MiB, 3 redirects). The field is
+  optional: when a host passes none, `createApp` applies `plainPageFetcher`, so
+  `createApp` itself imports it from `src/ingest/` rather than `seams/open/`.
+
+`createApp(seams, options)` returns `fetch`, `queue`, `scheduled` (the Workers
+cron handler) and `runDueSyncs(env)` (the same work, for a host's own cron).
 
 `packages/engine` exports `createApp(seams)` and the open seam implementations
 (`passwordAuth`, `PasswordAuthEnv`, `SINGLE_ORG_ID`, `secretKeys`, `SecretKeyEnv`,
-`usageDaily`, `basicLimits`, `CapMicrosResolver`, `DEFAULT_DAILY_CAP_MICROS`),
+`usageDaily`, `basicLimits`, `CapMicrosResolver`, `DEFAULT_DAILY_CAP_MICROS`,
+`plainPageFetcher`, `PlainPageFetcherOptions`) and the `PageFetcher` types
+(`PageFetcher`, `PageFetchResult`, `PageContent`, `PageNotModified`,
+`PageNoContent`, `PageValidators`), the sync types (`SyncLimitDecision`,
+`SyncLimitRequest`, `SourceSyncState`, `SyncCounts`, `SyncOutcome`,
+`SyncErrorCode`, `SyncCaps`, `DueSyncsResult`, `RunDueSyncsOptions`) and caps,
 along with `./migrations/*` and `./package.json` so an embedder can apply
 migrations from the installed package:
 
 ```ts
-import { basicLimits, createApp, passwordAuth, secretKeys, usageDaily } from "@solvchat/engine";
+import {
+  basicLimits,
+  createApp,
+  passwordAuth,
+  plainPageFetcher,
+  secretKeys,
+  usageDaily,
+} from "@solvchat/engine";
 
 const app = createApp({
   auth: passwordAuth(env, env.DB),
   keys: secretKeys(env, env.DB),
   usage: usageDaily(env.DB),
   limits: basicLimits(env.DB),
+  // Optional; this is what createApp applies when it is left out.
+  pages: plainPageFetcher(),
 });
 ```
 

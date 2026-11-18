@@ -1,10 +1,17 @@
-// Outbound URL guard for owner-supplied URLs (sitemaps, MCP servers).
+// Outbound URL guard for owner-supplied URLs (sitemaps, pages, MCP servers).
 //
 // Limitation: each hop is pre-checked via DNS-over-HTTPS before calling global
 // `fetch`, which resolves the hostname again independently. A host that changes
 // its DNS answer between the check and the fetch (DNS rebinding) is not caught.
-// That is an accepted limitation on Workers for an action only the signed-in
-// owner can trigger.
+// That is an accepted limitation on Workers, which offers no fetch pinned to
+// the checked address. It is not limited to an action the signed-in owner
+// starts: a scheduled sitemap sync repeats these fetches unattended on every
+// run, and MCP tool calls run when a visitor asks. See docs/architecture.md.
+//
+// The DNS-over-HTTPS check runs only when the fetch is the global one or a
+// `HostResolver` is given. A host that passes its own `fetch` (createApp's
+// `fetch` option) without a resolver, or its own `PageFetcher`, is
+// responsible for refusing private, loopback and link-local addresses itself.
 
 import { BadRequest } from "../admin/errors.js";
 
@@ -297,10 +304,21 @@ export interface FollowOptions {
   body?: string | undefined;
   /** Extra request headers, such as an MCP server's static credential. */
   headers?: Record<string, string> | undefined;
+  /**
+   * Returns a 304 response instead of refusing it. Only a conditional request
+   * (one sending `if-none-match` or `if-modified-since`) should set this.
+   */
+  allowNotModified?: boolean | undefined;
 }
 
 export interface FetchCappedOptions extends FollowOptions {
   maxBytes: number;
+  /**
+   * Called with the final response before its body is read. Returning true
+   * cancels the body unread, so a caller can refuse a content type without
+   * downloading it. A 304 body is never read.
+   */
+  skipBody?: ((response: Response) => boolean) | undefined;
 }
 
 function linkAbortSignal(signal?: AbortSignal): {
@@ -415,6 +433,15 @@ export async function followCheckingEachHop(
   fetchImpl: typeof fetch,
   options: FollowOptions,
 ): Promise<Response> {
+  return (await followToFinalUrl(target, fetchImpl, options)).response;
+}
+
+/** As `followCheckingEachHop`, and also returns the URL of the last hop. */
+export async function followToFinalUrl(
+  target: URL,
+  fetchImpl: typeof fetch,
+  options: FollowOptions,
+): Promise<{ response: Response; finalUrl: URL }> {
   const { controller, cleanup } = linkAbortSignal(options.signal);
   const timer = options.signal
     ? undefined
@@ -467,12 +494,16 @@ export async function followCheckingEachHop(
         continue;
       }
 
+      if (response.status === 304 && options.allowNotModified === true) {
+        return { response, finalUrl: current };
+      }
+
       if (!response.ok) {
         await response.body?.cancel().catch(() => {});
         throw new UnsafeUrlError(`upstream returned HTTP ${response.status}`);
       }
 
-      return response;
+      return { response, finalUrl: current };
     }
   } catch (err) {
     if (err instanceof UnsafeUrlError) throw err;
@@ -564,17 +595,21 @@ export async function fetchCapped(
   target: URL,
   fetchImpl: typeof fetch,
   options: FetchCappedOptions,
-): Promise<{ response: Response; body: string }> {
+): Promise<{ response: Response; body: string; finalUrl: URL }> {
   const { controller, cleanup } = linkAbortSignal(options.signal);
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
 
   try {
-    const response = await followCheckingEachHop(target, fetchImpl, {
+    const { response, finalUrl } = await followToFinalUrl(target, fetchImpl, {
       ...options,
       signal: controller.signal,
     });
+    if (response.status === 304 || options.skipBody?.(response) === true) {
+      await response.body?.cancel().catch(() => {});
+      return { response, body: "", finalUrl };
+    }
     const body = await readCapped(response, options.maxBytes, controller.signal);
-    return { response, body };
+    return { response, body, finalUrl };
   } finally {
     clearTimeout(timer);
     cleanup();

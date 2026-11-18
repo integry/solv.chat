@@ -43,9 +43,9 @@ export interface MessageRow {
   createdAt: number;
   /** For an assistant reply, the visitor message it answers. */
   replyTo: string | null;
-  /** For an assistant reply, milliseconds until its first token reached the visitor; null before 0022 or with no text. */
+  /** For an assistant reply, milliseconds until its first token reached the visitor; null before 0026 or with no text. */
   firstTokenMs: number | null;
-  /** For an assistant reply, milliseconds from the request to the complete reply; null before 0022. */
+  /** For an assistant reply, milliseconds from the request to the complete reply; null before 0026. */
   totalMs: number | null;
   /** For an assistant reply, what the answer review decided; null when it was not reviewed. */
   outcome: AnswerOutcome | null;
