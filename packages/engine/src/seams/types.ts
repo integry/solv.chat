@@ -104,9 +104,78 @@ export interface Limits {
   check(orgId: string, assistantId: string, action: LimitAction): Promise<LimitDecision>;
 }
 
+/**
+ * Validators from an earlier fetch of the same URL. Sent as `If-None-Match`
+ * and `If-Modified-Since`; a server that still has that version answers 304.
+ */
+export interface PageValidators {
+  etag?: string | null | undefined;
+  lastModified?: string | null | undefined;
+}
+
+interface PageFetchFields {
+  /** The URL that answered, after redirects. */
+  finalUrl: string;
+  /** The HTTP status of that answer. */
+  status: number;
+  /** Validators to send next time; null when the server sent none. */
+  etag: string | null;
+  lastModified: string | null;
+}
+
+/** The page changed (or no validators were sent) and has text to index. */
+export interface PageContent extends PageFetchFields {
+  kind: "page";
+  notModified: false;
+  title: string;
+  /** Never empty: a page with no text is a `PageNoContent` instead. */
+  markdown: string;
+}
+
+/** The server answered 304: the copy fetched with these validators is current. */
+export interface PageNotModified extends PageFetchFields {
+  kind: "not_modified";
+  notModified: true;
+  title: null;
+  markdown: null;
+}
+
+/**
+ * Nothing to index. `not_html` is a response that is not a web page or text
+ * (a PDF, an image, JSON); its body is not read. `empty` is a page whose
+ * extraction left no text; `title` is what the page would have been called.
+ * Neither should be indexed as a document.
+ */
+export interface PageNoContent extends PageFetchFields {
+  kind: "no_content";
+  notModified: false;
+  reason: "not_html" | "empty";
+  /** The response's `content-type`, or null when it had none. */
+  contentType: string | null;
+  title: string | null;
+  markdown: null;
+}
+
+export type PageFetchResult = PageContent | PageNotModified | PageNoContent;
+
+/**
+ * Turns one https URL into Markdown. The open build's `plainPageFetcher` uses
+ * Workers `fetch`; a host may render pages some other way (a headless browser
+ * behind a REST API, say). An implementation must refuse, by throwing, any URL
+ * or redirect hop that is not https or that resolves to a private, loopback or
+ * link-local address, and must cap the response size and the time spent. A
+ * thrown error means the page could not be fetched; its message must not
+ * carry secrets.
+ */
+export interface PageFetcher {
+  fetchPage(url: string, validators?: PageValidators): Promise<PageFetchResult>;
+}
+
 export interface Seams {
   auth: AuthProvider;
   keys: KeyProvider;
   usage: UsageSink;
   limits: Limits;
+  /** Optional so hosts written before this seam keep working: `createApp` applies `plainPageFetcher`. */
+  pages?: PageFetcher | undefined;
 }
