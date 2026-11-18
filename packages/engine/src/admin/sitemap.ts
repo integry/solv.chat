@@ -86,6 +86,86 @@ export interface SitemapEntries {
   truncated: boolean;
   /** True for a sitemap index, which lists other sitemaps rather than pages. */
   isIndex: boolean;
+  /**
+   * True only for a complete, well-formed XML document whose root is
+   * `<urlset>`. A body cut short, broken XML, or a list of bare `<loc>`
+   * elements is false: its entries may be read, but they cannot be trusted
+   * to say which pages left the sitemap.
+   */
+  wellFormed: boolean;
+}
+
+// Element names as the sitemap protocol writes them; a prefixed name is
+// accepted as XML but the root must be the plain `urlset` the extractor reads.
+const XML_NAME = "[A-Za-z_][\\w.:-]*";
+const XML_TAG_RE = new RegExp(
+  `<(/)?(${XML_NAME})((?:\\s+${XML_NAME}\\s*=\\s*(?:"[^"<]*"|'[^'<]*'))*)\\s*(/)?>`,
+  "y",
+);
+// An `&` that does not start a named or numeric character reference.
+const BARE_AMPERSAND_RE = /&(?![A-Za-z_][\w.-]*;|#[0-9]+;|#x[0-9A-Fa-f]+;)/;
+
+/**
+ * True when `xml` is one complete, well-formed XML document whose root is
+ * `<urlset>`: every element closed in order, attributes quoted, no stray `<`
+ * or `&`, nothing but comments, processing instructions and whitespace
+ * outside the root. Not a validating parser: it checks what a sync needs to
+ * know, that the body was not cut short or broken before its last entry.
+ * A DOCTYPE is refused; the sitemap protocol has no use for one.
+ * Source: https://www.sitemaps.org/protocol.html — checked 2026-11-18
+ */
+export function isWellFormedUrlset(xml: string): boolean {
+  const n = xml.length;
+  let i = xml.charCodeAt(0) === 0xfeff ? 1 : 0;
+  const open: string[] = [];
+  let rootSeen = false;
+  let rootClosed = false;
+  while (i < n) {
+    const lt = xml.indexOf("<", i);
+    const textEnd = lt === -1 ? n : lt;
+    if (textEnd > i) {
+      const text = xml.slice(i, textEnd);
+      if (open.length === 0 ? /\S/.test(text) : BARE_AMPERSAND_RE.test(text)) return false;
+      i = textEnd;
+      if (lt === -1) break;
+    }
+    if (xml.startsWith("<!--", i)) {
+      const end = xml.indexOf("-->", i + 4);
+      if (end === -1) return false;
+      i = end + 3;
+      continue;
+    }
+    if (xml.startsWith("<![CDATA[", i)) {
+      const end = xml.indexOf("]]>", i + 9);
+      if (open.length === 0 || end === -1) return false;
+      i = end + 3;
+      continue;
+    }
+    if (xml.startsWith("<?", i)) {
+      const end = xml.indexOf("?>", i + 2);
+      if (end === -1) return false;
+      i = end + 2;
+      continue;
+    }
+    XML_TAG_RE.lastIndex = i;
+    const tag = XML_TAG_RE.exec(xml);
+    if (tag === null) return false;
+    const [whole, closing, name = "", attributes = "", selfClosing] = tag;
+    if (BARE_AMPERSAND_RE.test(attributes)) return false;
+    if (closing !== undefined) {
+      if (attributes !== "" || selfClosing !== undefined || open.pop() !== name) return false;
+      if (open.length === 0) rootClosed = true;
+    } else {
+      if (open.length === 0) {
+        if (rootSeen || name !== "urlset") return false;
+        rootSeen = true;
+      }
+      if (selfClosing === undefined) open.push(name);
+      else if (open.length === 0) rootClosed = true;
+    }
+    i += whole.length;
+  }
+  return rootSeen && rootClosed && open.length === 0;
 }
 
 /**
@@ -124,7 +204,7 @@ export function extractSitemapEntries(xml: string, maxUrls: number): SitemapEntr
       if (!add(safeLoc(locValue(match[1] ?? "")), null)) break;
     }
   }
-  return { entries, truncated, isIndex };
+  return { entries, truncated, isIndex, wellFormed: !isIndex && isWellFormedUrlset(xml) };
 }
 
 /** Fetches a sitemap under the same guards and caps as the preview. */

@@ -1,4 +1,5 @@
 import { prepare, prepareInsert } from "./sql.js";
+import { type SyncRunFence, syncRunHolds } from "./sync.js";
 
 interface DocumentDbRow {
   id: string;
@@ -160,6 +161,47 @@ const placeholdersFrom = (count: number, first: number): string =>
 
 /** Tenant-scoped data access for `documents` and `chunks`. */
 export function documentsFor(db: D1Database, orgId: string) {
+  async function upsertRow(
+    input: UpsertDocumentInput,
+    fence: SyncRunFence | undefined,
+  ): Promise<DocumentRow | null> {
+    const values =
+      fence === undefined
+        ? "VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+        : `SELECT ?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9 WHERE ${syncRunHolds("?1", "?3", "?10", "?11")}`;
+    const statement = prepareInsert(
+      db,
+      `INSERT INTO documents (
+         id, org_id, source_id, external_id, url, title, content_hash, body_key, updated_at
+       )
+       ${values}
+       ON CONFLICT(org_id, source_id, external_id) DO UPDATE SET
+         url = excluded.url,
+         title = excluded.title,
+         content_hash = excluded.content_hash,
+         body_key = excluded.body_key,
+         updated_at = excluded.updated_at
+       RETURNING ${DOC_COLUMNS}`,
+    );
+    const params = [
+      orgId,
+      input.id,
+      input.sourceId,
+      input.externalId,
+      input.url,
+      input.title,
+      input.contentHash,
+      input.bodyKey ?? null,
+      input.updatedAt,
+    ];
+    const saved = await (fence === undefined
+      ? statement.bind(...params)
+      : statement.bind(...params, fence.runId, fence.now)
+    ).first<DocumentDbRow>();
+
+    return saved ? mapDocument(saved) : null;
+  }
+
   return {
     async listBySource(sourceId: string): Promise<DocumentRow[]> {
       const res = await prepare(
@@ -326,16 +368,22 @@ export function documentsFor(db: D1Database, orgId: string) {
       return row ? { id: row.id, etag: row.etag, lastModified: row.last_modified } : null;
     },
 
-    /** Stores what a sync learned about a page; false when the document does not exist. */
+    /**
+     * Stores what a sync learned about a page, only while `fence`'s run still
+     * holds the source; false when the document does not exist or the run
+     * no longer holds it.
+     */
     async recordSyncCheck(
       sourceId: string,
       externalId: string,
       check: DocumentSyncCheck,
+      fence: SyncRunFence,
     ): Promise<boolean> {
       const res = await prepare(
         db,
         `UPDATE documents SET etag = ?4, last_modified = ?5, sitemap_lastmod = ?6, sync_checked_at = ?7
-          WHERE org_id = ?1 AND source_id = ?2 AND external_id = ?3`,
+          WHERE org_id = ?1 AND source_id = ?2 AND external_id = ?3
+            AND ${syncRunHolds("?1", "?2", "?8", "?9")}`,
       )
         .bind(
           orgId,
@@ -345,43 +393,28 @@ export function documentsFor(db: D1Database, orgId: string) {
           check.lastModified,
           check.sitemapLastmod,
           check.checkedAt,
+          fence.runId,
+          fence.now,
         )
         .run();
       return (res.meta.changes ?? 0) > 0;
     },
 
     async upsert(input: UpsertDocumentInput): Promise<DocumentRow> {
-      const saved = await prepareInsert(
-        db,
-        `INSERT INTO documents (
-           id, org_id, source_id, external_id, url, title, content_hash, body_key, updated_at
-         )
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-         ON CONFLICT(org_id, source_id, external_id) DO UPDATE SET
-           url = excluded.url,
-           title = excluded.title,
-           content_hash = excluded.content_hash,
-           body_key = excluded.body_key,
-           updated_at = excluded.updated_at
-         RETURNING ${DOC_COLUMNS}`,
-      )
-        .bind(
-          orgId,
-          input.id,
-          input.sourceId,
-          input.externalId,
-          input.url,
-          input.title,
-          input.contentHash,
-          input.bodyKey ?? null,
-          input.updatedAt,
-        )
-        .first<DocumentDbRow>();
+      const saved = await upsertRow(input, undefined);
+      if (!saved) throw new Error(`failed to upsert document ${input.externalId}`);
+      return saved;
+    },
 
-      if (!saved) {
-        throw new Error(`failed to upsert document ${input.externalId}`);
-      }
-      return mapDocument(saved);
+    /**
+     * As `upsert`, for a sync page: nothing is written unless `fence`'s run
+     * still holds the source, checked in the same statement; null then.
+     */
+    async upsertForSync(
+      input: UpsertDocumentInput,
+      fence: SyncRunFence,
+    ): Promise<DocumentRow | null> {
+      return upsertRow(input, fence);
     },
 
     async updateMetadata(

@@ -89,8 +89,8 @@ SOLV_INGEST_KEY=<the key> npx solv push ./content \
 A source imported from a sitemap can be read again on a schedule: set its `sync` setting to `"daily"` or `"weekly"` (it is `"off"` by default, so nothing changes until you turn it on). Each run reads the sitemap again, adds pages that are new, re-fetches pages that may have changed, and removes documents whose page is no longer in the sitemap. Only the pages the sitemap lists are fetched; links are not followed.
 
 - **Cheap when nothing changed**: a page whose sitemap `<lastmod>` is the same as last time is not fetched; other pages are asked for with `If-None-Match` / `If-Modified-Since`, and a page whose text has not changed is never embedded again.
-- **Safe against a broken sitemap**: if the sitemap cannot be loaded, lists no pages, or would remove more than half of the source's documents (the `maxRemovePercent` setting, default `50`), the run removes nothing and is recorded as failed.
-- **Caps**: at most 200 pages are fetched per run and a source holds at most 500 documents; the rest are counted as deferred and come up in later runs.
+- **Safe against a broken sitemap**: if the sitemap cannot be loaded, is cut short or is not valid XML, lists no pages, or would remove more than half of the source's documents (the `maxRemovePercent` setting, default `50`), the run removes nothing and is recorded as failed.
+- **Caps**: at most 200 pages are fetched per run and a source holds at most 500 documents; the rest are counted as deferred and come up in later runs, ahead of pages that were tried more recently, even if those failed.
 - Each source records when its last run started and finished, the outcome, the counts (added, updated, unchanged, removed, failed, deferred) and the last error.
 
 The schedule is driven by the cron trigger in `packages/engine/wrangler.jsonc` (`"triggers": { "crons": ["17 * * * *"] }`, hourly; each tick starts at most three due sources). It is deployed with `wrangler deploy`; Workers Free allows 5 cron triggers per account. A daily source runs about once a day, at the first tick a day after its previous run.

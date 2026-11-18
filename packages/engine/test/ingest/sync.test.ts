@@ -1,10 +1,14 @@
 import { createExecutionContext, createScheduledController, env } from "cloudflare:test";
 import { newId } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
-import { extractSitemapEntries } from "../../src/admin/sitemap.js";
+import { extractSitemapEntries, isWellFormedUrlset } from "../../src/admin/sitemap.js";
 import { createApp } from "../../src/app.js";
 import { forScheduledSync } from "../../src/db/tenant.js";
-import type { IngestQueueMessage } from "../../src/ingest/documents.js";
+import {
+  type IngestQueueMessage,
+  pushDocuments,
+  SyncRunEnded,
+} from "../../src/ingest/documents.js";
 import {
   processSyncPage,
   runDueSyncs,
@@ -35,6 +39,8 @@ interface Site {
   /** Page bodies by path; `etag` is derived from the body. */
   pages: Record<string, string>;
   sitemapStatus?: number;
+  /** Served as the sitemap instead of one built from `sitemap`. */
+  sitemapBody?: string;
 }
 
 function sitemapXml(entries: Record<string, string | null>): string {
@@ -55,7 +61,7 @@ function harness(site: Site) {
     if (site.sitemapStatus !== undefined && site.sitemapStatus !== 200) {
       return new Response("nope", { status: site.sitemapStatus });
     }
-    return new Response(sitemapXml(site.sitemap), {
+    return new Response(site.sitemapBody ?? sitemapXml(site.sitemap), {
       headers: { "content-type": "application/xml" },
     });
   };
@@ -120,7 +126,7 @@ function harness(site: Site) {
   });
 
   /** Delivers every queued page message, as the consumer would. */
-  async function drain(orgId = ORG) {
+  async function drain(orgId = ORG, fetcher: PageFetcher = pages) {
     const tenant = forScheduledSync(env.DB, orgId);
     while (pageMessages.length > 0) {
       const batch = pageMessages.splice(0, 4).map((body) => fakeMessage(body));
@@ -129,7 +135,7 @@ function harness(site: Site) {
         orgId,
         docs: env.DOCS,
         queue,
-        pages,
+        pages: fetcher,
         now: () => now,
       });
     }
@@ -224,6 +230,8 @@ describe("scheduled sitemap sync", () => {
   beforeEach(async () => {
     await env.DB.batch([
       env.DB.prepare("DELETE FROM source_sync_pages"),
+      env.DB.prepare("DELETE FROM source_sync_attempts"),
+      env.DB.prepare("DELETE FROM sync_org_refusals"),
       env.DB.prepare("DELETE FROM source_syncs"),
       env.DB.prepare("DELETE FROM chunks"),
       env.DB.prepare("DELETE FROM documents"),
@@ -387,6 +395,39 @@ describe("scheduled sitemap sync", () => {
       expect(await state(sourceId)).toMatchObject({ outcome: "succeeded", counts: { removed: 2 } });
     });
 
+    it("removes nothing when the sitemap is cut short, broken XML, or not a urlset", async () => {
+      const { h, sourceId } = await seeded(fourPages());
+      const two = `<url><loc>${page("a")}</loc></url><url><loc>${page("b")}</loc></url>`;
+      const ns = `xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"`;
+      const broken = [
+        // Ends inside a third entry, with no closing </urlset>.
+        `<?xml version="1.0"?><urlset ${ns}>${two}<url><loc>${page("c")}`,
+        `<urlset ${ns}>${two}`,
+        `<urlset ${ns}>${two}<url><loc>${page("c")}</url></loc></urlset>`,
+        `<urlset ${ns}>${two}</urlset><url><loc>${page("c")}</loc></url>`,
+        `<urlset ${ns}>${two}<url><loc>${page("c")}?a=1&b</loc></url></urlset>`,
+        `<pages>${two}</pages>`,
+        two,
+      ];
+      for (const body of broken) {
+        h.site.sitemapBody = body;
+        await syncOnce(h, sourceId);
+        expect(await docUrls(sourceId), body).toHaveLength(4);
+        expect(await state(sourceId), body).toMatchObject({
+          outcome: "failed",
+          error: "sitemap_invalid",
+          counts: { removed: 0 },
+        });
+      }
+      expect(h.pageFetches).toEqual([]);
+
+      // The same two entries in a complete document remove the other two.
+      h.site.sitemapBody = `<?xml version="1.0"?><urlset ${ns}>${two}</urlset>`;
+      await syncOnce(h, sourceId);
+      expect(await docUrls(sourceId)).toEqual([page("a"), page("b")]);
+      expect(await state(sourceId)).toMatchObject({ outcome: "succeeded", counts: { removed: 2 } });
+    });
+
     it("uses the source's own maxRemovePercent", async () => {
       const { h, sourceId } = await seeded(fourPages(), {
         url: SITEMAP,
@@ -418,6 +459,61 @@ describe("scheduled sitemap sync", () => {
     await run({ maxDocuments: 3 });
     expect(await docUrls(sourceId)).toHaveLength(3);
     expect((await state(sourceId))?.counts).toMatchObject({ added: 1, deferred: 2 });
+  });
+
+  it("gives deferred new pages their turn when the pages before them keep failing", async () => {
+    const h = harness({
+      sitemap: { bad1: null, bad2: null, good: null },
+      pages: { good: "Good." },
+    });
+    const sourceId = await seedSource(await seedAssistant());
+    const run = () =>
+      startSourceSync({ ...h.deps(), caps: { maxPages: 2 } }, ORG, sourceId).then(() => h.drain());
+
+    await run();
+    expect(await docUrls(sourceId)).toEqual([]);
+    expect((await state(sourceId))?.counts).toMatchObject({ failed: 2, deferred: 1 });
+
+    h.advance(SYNC_INTERVAL_MS.daily);
+    h.pageFetches.length = 0;
+    await run();
+    expect(h.pageFetches.map((f) => f.url)).toEqual([page("good"), page("bad1")]);
+    expect(await docUrls(sourceId)).toEqual([page("good")]);
+    expect((await state(sourceId))?.counts).toMatchObject({ added: 1, failed: 1, deferred: 1 });
+
+    // A page no longer listed is forgotten once the whole sitemap was read.
+    delete h.site.sitemap.bad2;
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await run();
+    const attempts = await forScheduledSync(env.DB, ORG).sync.attempts(sourceId);
+    expect([...attempts.keys()].sort()).toEqual([page("bad1"), page("good")]);
+  });
+
+  it("gives deferred documents their turn when the documents before them keep failing", async () => {
+    const h = harness({
+      sitemap: { a: null, b: null, c: null },
+      pages: { a: "A.", b: "B.", c: "C." },
+    });
+    const sourceId = await seedSource(await seedAssistant());
+    await syncOnce(h, sourceId);
+    const run = () =>
+      startSourceSync({ ...h.deps(), caps: { maxPages: 2 } }, ORG, sourceId).then(() => h.drain());
+
+    delete h.site.pages.a;
+    delete h.site.pages.b;
+    h.site.pages.c = "C, changed.";
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await run();
+    expect((await state(sourceId))?.counts).toMatchObject({ failed: 2, updated: 0, deferred: 1 });
+
+    h.advance(SYNC_INTERVAL_MS.daily);
+    h.pageFetches.length = 0;
+    await run();
+    expect(h.pageFetches[0]?.url).toBe(page("c"));
+    expect((await state(sourceId))?.counts).toMatchObject({ updated: 1, failed: 1, deferred: 1 });
+    const docs = await forScheduledSync(env.DB, ORG).documents.listBySource(sourceId);
+    const c = docs.find((d) => d.url === page("c"));
+    expect(await (await env.DOCS.get(c?.bodyKey ?? ""))?.text()).toBe("C, changed.");
   });
 
   it("lets the Limits seam lower the caps but not raise them", async () => {
@@ -474,6 +570,43 @@ describe("scheduled sitemap sync", () => {
     expect(await state(sourceId, OTHER_ORG)).toBeNull();
   });
 
+  it("reads past an org the auth seam refuses, however many due sources it has", async () => {
+    const h = harness({ sitemap: { a: null }, pages: { a: "A." } });
+    const allowed = await seedSource(await seedAssistant());
+    await syncOnce(h, allowed);
+    h.advance(SYNC_INTERVAL_MS.daily);
+
+    // More due sources than one tick reads, all never synced, so all ahead
+    // of `allowed` in the oldest-first order.
+    const otherAssistant = await seedAssistant(OTHER_ORG);
+    const refused: string[] = [];
+    for (let i = 0; i < 31; i++) {
+      refused.push(await seedSource(otherAssistant, undefined, OTHER_ORG));
+    }
+    let refusing = true;
+    const asked: string[] = [];
+    const deps: SyncSchedulerDeps = {
+      ...h.deps(),
+      maxSources: 1,
+      resolveOrg: async (orgId) => {
+        asked.push(orgId);
+        return refusing && orgId === OTHER_ORG ? null : orgId;
+      },
+    };
+
+    expect(await runDueSyncs(deps)).toEqual({ started: [], refusedOrgs: 1 });
+    expect(await runDueSyncs(deps)).toEqual({ started: [allowed], refusedOrgs: 0 });
+    expect(asked).toEqual([OTHER_ORG, ORG]);
+    for (const id of refused) expect(await state(id, OTHER_ORG)).toBeNull();
+
+    // Once the org is allowed again, its sources come up in later ticks.
+    refusing = false;
+    h.advance(60_000);
+    const { started } = await runDueSyncs(deps);
+    expect(started).toHaveLength(1);
+    expect(refused).toContain(started[0]);
+  });
+
   it("does not start a second run while one holds the source", async () => {
     const h = harness({ sitemap: { a: null, b: null }, pages: { a: "A.", b: "B." } });
     const sourceId = await seedSource(await seedAssistant());
@@ -508,6 +641,113 @@ describe("scheduled sitemap sync", () => {
     await h.drain();
     expect(h.pageFetches).toEqual([]);
     expect(await docUrls(sourceId)).toEqual([]);
+  });
+
+  describe("a run whose lease ends while a page is being fetched", () => {
+    /** A fetch during which the clock moves `ms` on. */
+    const slowPages = (h: ReturnType<typeof harness>, ms: number): PageFetcher => ({
+      async fetchPage(url, validators) {
+        h.advance(ms);
+        return h.pages.fetchPage(url, validators);
+      },
+    });
+    const bodies = async (documentId: string) =>
+      (await env.DOCS.list({ prefix: `org/${ORG}/doc/${documentId}/` })).objects.length;
+
+    it("writes no new page and leaves the run interrupted", async () => {
+      const h = harness({ sitemap: { a: null }, pages: { a: "A." } });
+      const sourceId = await seedSource(await seedAssistant());
+      await startSourceSync(h.deps(), ORG, sourceId);
+      h.advance(SYNC_LEASE_MS - 1_000);
+      await h.drain(ORG, slowPages(h, 2_000));
+      expect(h.pageFetches).toHaveLength(1);
+      expect(await docUrls(sourceId)).toEqual([]);
+      expect(h.ingestMessages).toEqual([]);
+      expect(await forScheduledSync(env.DB, ORG).sync.get(sourceId, h.now)).toMatchObject({
+        outcome: "failed",
+        error: "interrupted",
+        finishedAt: null,
+      });
+    });
+
+    it("changes neither an existing page nor its validators", async () => {
+      const h = harness({ sitemap: { a: null, b: null }, pages: { a: "Old A.", b: "B." } });
+      const sourceId = await seedSource(await seedAssistant());
+      await syncOnce(h, sourceId);
+      const tenant = forScheduledSync(env.DB, ORG);
+      const before = await tenant.documents.listForSync(sourceId);
+      h.ingestMessages.length = 0;
+
+      h.site.pages.a = "New A!";
+      h.advance(SYNC_INTERVAL_MS.daily);
+      await startSourceSync(h.deps(), ORG, sourceId);
+      h.advance(SYNC_LEASE_MS - 1_000);
+      await h.drain(ORG, slowPages(h, 2_000));
+
+      expect(h.ingestMessages).toEqual([]);
+      expect(await tenant.documents.listForSync(sourceId)).toEqual(before);
+      const a = (await tenant.documents.listBySource(sourceId)).find((d) => d.url === page("a"));
+      expect(await (await env.DOCS.get(a?.bodyKey ?? ""))?.text()).toBe("Old A.");
+      expect(await tenant.sync.get(sourceId, h.now)).toMatchObject({ error: "interrupted" });
+    });
+
+    it("fences each write itself, for a lease that ends after the check", async () => {
+      const h = harness({ sitemap: { a: null }, pages: { a: "Old A." } });
+      const assistantId = await seedAssistant();
+      const sourceId = await seedSource(assistantId);
+      await syncOnce(h, sourceId);
+      const tenant = forScheduledSync(env.DB, ORG);
+      const [doc] = await tenant.documents.listForSync(sourceId);
+      if (!doc) throw new Error("no document");
+
+      h.advance(SYNC_INTERVAL_MS.daily);
+      const started = await startSourceSync(h.deps(), ORG, sourceId);
+      if (started.status !== "queued") throw new Error("not queued");
+      const { runId } = started;
+      const ended = h.now + SYNC_LEASE_MS;
+      const write = (at: number) =>
+        pushDocuments(
+          { tenant, docs: env.DOCS, queue: h.queue },
+          { orgId: ORG, assistantId },
+          {
+            sourceId,
+            documents: [{ externalId: doc.externalId, url: doc.url, title: "a", markdown: "New!" }],
+          },
+          { syncRun: { runId, now: () => at } },
+        );
+
+      h.ingestMessages.length = 0;
+      await expect(write(ended)).rejects.toBeInstanceOf(SyncRunEnded);
+      expect(await tenant.documents.listForSync(sourceId)).toEqual([doc]);
+      expect(await bodies(doc.id)).toBe(1);
+      expect(h.ingestMessages).toEqual([]);
+      const check = { etag: "x", lastModified: null, sitemapLastmod: null, checkedAt: ended };
+      expect(
+        await tenant.documents.recordSyncCheck(sourceId, doc.externalId, check, {
+          runId,
+          now: ended,
+        }),
+      ).toBe(false);
+      expect(await tenant.sync.completePage(sourceId, runId, page("a"), "updated", ended)).toBe(
+        false,
+      );
+      expect(await tenant.sync.get(sourceId, ended)).toMatchObject({ error: "interrupted" });
+      expect(await tenant.sync.pendingPage(sourceId, runId, page("a"), ended - 1)).not.toBeNull();
+
+      // The same writes go through while the run still holds the source.
+      await write(ended - 1);
+      expect(h.ingestMessages).toHaveLength(1);
+      expect(
+        await tenant.documents.recordSyncCheck(sourceId, doc.externalId, check, {
+          runId,
+          now: ended - 1,
+        }),
+      ).toBe(true);
+      expect(await tenant.sync.completePage(sourceId, runId, page("a"), "updated", ended - 1)).toBe(
+        true,
+      );
+      expect(await tenant.sync.get(sourceId, ended - 1)).toMatchObject({ outcome: "succeeded" });
+    });
   });
 
   it("counts a retried page message once and writes no duplicate document", async () => {
@@ -664,6 +904,7 @@ describe("extractSitemapEntries", () => {
       ],
       truncated: false,
       isIndex: false,
+      wellFormed: true,
     });
     expect(extractSitemapEntries(xml, 2)).toMatchObject({ truncated: true });
     expect(
@@ -672,5 +913,44 @@ describe("extractSitemapEntries", () => {
         10,
       ),
     ).toMatchObject({ isIndex: true });
+  });
+});
+
+describe("isWellFormedUrlset", () => {
+  const ns = `xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"`;
+  const entry = "<url><loc>https://a.example.com/x?a=1&amp;b=2</loc></url>";
+
+  it("accepts complete urlset documents", () => {
+    for (const xml of [
+      `<urlset>${entry}</urlset>`,
+      `\uFEFF<?xml version="1.0" encoding="UTF-8"?>\n<!-- made by hand -->\n<urlset ${ns}>${entry}</urlset>\n`,
+      `<urlset ${ns} xmlns:image='http://www.google.com/schemas/sitemap-image/1.1'><url><loc><![CDATA[https://a.example.com/<y>]]></loc><image:image><image:loc>https://a.example.com/i.png</image:loc></image:image></url></urlset>`,
+      `<urlset ${ns}/>`,
+      `<urlset><url ><loc>https://a.example.com/&#233;&#xE9;</loc></url ></urlset>`,
+    ]) {
+      expect(isWellFormedUrlset(xml), xml).toBe(true);
+    }
+  });
+
+  it("refuses a body cut short, broken XML, and other roots", () => {
+    for (const xml of [
+      "",
+      `<urlset ${ns}>${entry}`,
+      `<urlset>${entry}<url><loc>https://a.example.com/y`,
+      `<urlset>${entry}<url><loc>https://a.example.com/y</url></loc></urlset>`,
+      `<urlset>${entry}</urlset>${entry}`,
+      `<urlset>${entry}</urlset>trailing`,
+      `<urlset>${entry}<!-- unfinished`,
+      `<urlset><url><loc>https://a.example.com/?a=1&b=2</loc></url></urlset>`,
+      `<urlset><url><loc>a < b</loc></url></urlset>`,
+      `<urlset a=unquoted>${entry}</urlset>`,
+      `<!DOCTYPE urlset><urlset>${entry}</urlset>`,
+      `<sitemapindex><sitemap><loc>https://a.example.com/s.xml</loc></sitemap></sitemapindex>`,
+      `<sm:urlset>${entry}</sm:urlset>`,
+      entry,
+      "<loc>https://a.example.com/x</loc>",
+    ]) {
+      expect(isWellFormedUrlset(xml), xml).toBe(false);
+    }
   });
 });

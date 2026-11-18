@@ -66,7 +66,8 @@ from the auth seam and pass it down.
   index_error_hash (a short code saying why the content with that hash could
   not be indexed: `too_long`, `missing_body` or `embedding_failed`; never a
   provider message), and for sitemap sync: etag, last_modified and
-  sitemap_lastmod (validators from the last check) and sync_checked_at.
+  sitemap_lastmod (validators from the last check) and sync_checked_at (when
+  a check last succeeded).
 - `source_syncs` — org_id, source_id, run_id, lease_until (set while a run
   holds the source), started_at, finished_at, outcome (`running` |
   `succeeded` | `partial` | `failed`), counts (added, updated, unchanged,
@@ -75,6 +76,12 @@ from the auth seam and pass it down.
 - `source_sync_pages` — org_id, run_id, source_id, url, lastmod, state
   (`pending` | `added` | `updated` | `unchanged` | `failed`): the pages one run
   queued. Deleted when the source's next run starts.
+- `source_sync_attempts` — org_id, source_id, url, attempted_at: when a run
+  last queued each page of the source, new or already a document, whatever
+  came of it. Kept across runs; a page no longer listed is forgotten by the
+  next run that reads the whole sitemap.
+- `sync_org_refusals` — org_id, refused_at: when the auth seam last refused
+  the org at a scheduler tick (see "Scheduled sitemap sync").
 - `chunks` — id, document_id, ordinal, text, heading_path. Vectors live in Vectorize
   keyed by chunk id, with `org_id` and `assistant_id` as metadata filters.
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
@@ -170,22 +177,32 @@ A sitemap source can stay in step with its sitemap. Its `sync` setting is
    statement, so two runs of one source never overlap: a cron firing twice,
    or a host's cron beside the open one, starts one run. A run still
    unfinished when its lease ends is reported as `failed` with
-   `interrupted`, and its late queue messages change nothing.
+   `interrupted`, and its late queue messages change nothing. That holds for
+   a page already being fetched when the lease ends: the run is checked again
+   after the fetch, and each write a page makes (the document, its
+   validators, the page's state, the run's end) carries the same check in its
+   own statement.
 2. Asks `Limits.checkSync`. A refusal records the run as failed
    (`limit_refused`) and fetches nothing. The org itself was first passed to
    `AuthProvider.resolveOrg` (`queued_ingest`); an org it refuses is not read.
 3. Reads the sitemap (the preview's guards and its 2 MiB cap; up to 50,000
    `<url>` entries with their `<lastmod>`; a sitemap index is not followed).
 4. Guards against a broken sitemap: if it cannot be read (`sitemap_unavailable`),
-   lists no page (`sitemap_empty`), or would remove more than
+   is not one complete, well-formed XML document with a `<urlset>` root
+   (`sitemap_invalid`: cut short, broken XML, bare `<loc>` lists; the admin's
+   preview still reads those), lists no page (`sitemap_empty`), or would
+   remove more than
    `maxRemovePercent` of the source's documents (`too_many_removals`), the run
    removes nothing, fetches nothing, and is recorded as failed. A sitemap with
    more than 50,000 entries removes nothing in that run.
 5. Removes the source's documents whose URL is no longer listed (that source
    only; vectors and R2 bodies are cleaned up as for a prune).
 6. Skips pages whose sitemap `<lastmod>` equals the one stored at the last
-   check, without fetching them. The rest are queued, new pages first, then
-   the ones checked longest ago, up to the per-run page cap (200) and the
+   check, without fetching them. The rest are queued in the order a run last
+   queued them (`source_sync_attempts`; never queued first, new pages before
+   documents among those), whether or not they could be fetched then, so pages
+   that keep failing do not keep the others waiting. Up to the per-run page
+   cap (200) and the
    source's document cap (500 documents); pages over a cap are counted as
    `deferred` and come up in a later run. Both caps can be lowered per run by
    `Limits.checkSync` and for every source by `createApp`'s `sync` option.
@@ -208,12 +225,17 @@ A sitemap source can stay in step with its sitemap. Its `sync` setting is
 A source is due when its schedule is on, no run holds it, and a full interval
 less 15 minutes has passed since its last run started (so a cron at the same
 minute each day does not miss a day). `app.runDueSyncs(env)` starts up to
-three due sources per call, oldest first; the Workers `scheduled` handler
+three due sources per call, oldest first by the later of their last run
+start and their org's last refusal by the auth seam: an org refused at one
+tick goes behind every other due source, so however many sources it has, the
+next tick reads past them. The Workers `scheduled` handler
 calls it, and the open build's `wrangler.jsonc` runs it hourly. A host with
 its own cron (every 10 minutes, say) calls `runDueSyncs` instead. Finding due
 sources is the one query without an org filter: a cron has no request and so
 no org, so it reads only org and source ids, and everything after goes
-through the org's `Tenant` once the auth seam has vouched for it.
+through the org's `Tenant` once the auth seam has vouched for it. A refusal
+is recorded in `sync_org_refusals` from the seam's own answer, keyed by the
+org; nothing of the org is read.
 
 D1 is the only source of truth for live chunks; readers resolve retrieved vector
 ids through D1, so leftover vectors and R2 objects can accumulate after failures.

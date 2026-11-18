@@ -47,10 +47,33 @@ CREATE TABLE source_sync_pages (
 
 CREATE INDEX source_sync_pages_source ON source_sync_pages(org_id, source_id);
 
+-- When a run last queued each page of a source, new or already a document,
+-- whatever came of it. A capped run takes the pages queued longest ago (never
+-- queued first), so pages that keep failing cannot keep later ones waiting.
+-- Kept across runs, unlike `source_sync_pages`; a page no longer listed is
+-- forgotten by the next run that reads the whole sitemap.
+CREATE TABLE source_sync_attempts (
+  org_id TEXT NOT NULL REFERENCES orgs(id),
+  source_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  attempted_at INTEGER NOT NULL,
+  PRIMARY KEY (org_id, source_id, url),
+  FOREIGN KEY (org_id, source_id) REFERENCES sources(org_id, id) ON DELETE CASCADE
+);
+
+-- When the auth seam last refused an org at a scheduler tick. Due sources are
+-- taken oldest first by the later of their last run start and this, so an
+-- org refused now goes behind every other due source and the next tick reads
+-- past it. Written from the scheduler's own answer, never from the org's data.
+CREATE TABLE sync_org_refusals (
+  org_id TEXT PRIMARY KEY REFERENCES orgs(id),
+  refused_at INTEGER NOT NULL
+);
+
 -- Validators from the last time a sync checked the page, so the next run can
 -- skip it on an unchanged sitemap <lastmod> or ask with If-None-Match /
--- If-Modified-Since. `sync_checked_at` orders pages so a capped run starts
--- with the ones checked longest ago.
+-- If-Modified-Since. `sync_checked_at` is when a check last succeeded; the
+-- order of capped runs comes from `source_sync_attempts`.
 ALTER TABLE documents ADD COLUMN etag TEXT;
 ALTER TABLE documents ADD COLUMN last_modified TEXT;
 ALTER TABLE documents ADD COLUMN sitemap_lastmod TEXT;

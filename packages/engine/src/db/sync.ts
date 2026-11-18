@@ -8,6 +8,9 @@ export type SyncOutcome = "running" | "succeeded" | "partial" | "failed";
  * and a remote server's own text never reaches the database.
  *
  * - `sitemap_unavailable`: the sitemap could not be fetched or was refused.
+ * - `sitemap_invalid`: the sitemap was not a complete, well-formed `<urlset>`
+ *   (cut short, broken XML, or another kind of document), so its list of
+ *   pages cannot be trusted to say which pages left it.
  * - `sitemap_empty`: the sitemap listed no usable page.
  * - `too_many_removals`: the run would have removed more than the allowed share.
  * - `limit_refused`: the Limits seam refused the run (a suspended org, a plan).
@@ -16,6 +19,7 @@ export type SyncOutcome = "running" | "succeeded" | "partial" | "failed";
  */
 export type SyncErrorCode =
   | "sitemap_unavailable"
+  | "sitemap_invalid"
   | "sitemap_empty"
   | "too_many_removals"
   | "limit_refused"
@@ -78,6 +82,7 @@ const OUTCOMES: ReadonlySet<string> = new Set<SyncOutcome>([
 ]);
 const ERROR_CODES: ReadonlySet<string> = new Set<SyncErrorCode>([
   "sitemap_unavailable",
+  "sitemap_invalid",
   "sitemap_empty",
   "too_many_removals",
   "limit_refused",
@@ -90,6 +95,25 @@ const ERROR_CODES: ReadonlySet<string> = new Set<SyncErrorCode>([
 // Source: https://developers.cloudflare.com/d1/platform/limits/ — checked 2026-11-18
 // ("Maximum SQL statement length: 100,000 bytes (100 KB)").
 const PAGES_PER_INSERT = 20;
+
+/**
+ * True while run `run` is the source's current run, unfinished, with its
+ * lease not yet ended at `now`. Every write a page message makes carries
+ * this in the same statement, so a run whose lease ran out while a page was
+ * being fetched changes nothing, even if its check passed before the fetch.
+ * The arguments are SQL parameter references such as `?1`.
+ */
+export function syncRunHolds(org: string, source: string, run: string, now: string): string {
+  return `EXISTS (SELECT 1 FROM source_syncs f
+                   WHERE f.org_id = ${org} AND f.source_id = ${source} AND f.run_id = ${run}
+                     AND f.finished_at IS NULL AND f.lease_until > ${now})`;
+}
+
+/** The run a page message belongs to, checked at `now` when it writes. */
+export interface SyncRunFence {
+  runId: string;
+  now: number;
+}
 
 const pageCount = (state: SyncPageState): string =>
   `(SELECT COUNT(*) FROM source_sync_pages p
@@ -212,16 +236,58 @@ export function syncFor(db: D1Database, orgId: string) {
         .run();
     },
 
+    /** When a run last queued each page of the source, by URL. */
+    async attempts(sourceId: string): Promise<Map<string, number>> {
+      const res = await prepare(
+        db,
+        "SELECT url, attempted_at FROM source_sync_attempts WHERE org_id = ?1 AND source_id = ?2",
+      )
+        .bind(orgId, sourceId)
+        .all<{ url: string; attempted_at: number }>();
+      return new Map(res.results.map((row) => [row.url, Number(row.attempted_at)]));
+    },
+
+    /** Forgets when pages were last queued, for pages the sitemap no longer lists. */
+    async forgetAttempts(sourceId: string, urls: string[]): Promise<void> {
+      if (urls.length === 0) return;
+      const statements: D1PreparedStatement[] = [];
+      for (let i = 0; i < urls.length; i += PAGES_PER_INSERT) {
+        statements.push(
+          prepare(
+            db,
+            `DELETE FROM source_sync_attempts
+              WHERE org_id = ?1 AND source_id = ?2 AND url IN (SELECT value FROM json_each(?3))`,
+          ).bind(orgId, sourceId, JSON.stringify(urls.slice(i, i + PAGES_PER_INSERT))),
+        );
+      }
+      await db.batch(statements);
+    },
+
+    /**
+     * True while run `runId` still holds the source at `now`: current,
+     * unfinished, lease not ended. A page message checks it again after its
+     * fetch; the writes themselves carry the same condition.
+     */
+    async holds(sourceId: string, runId: string, now: number): Promise<boolean> {
+      const row = await prepare(db, `SELECT ${syncRunHolds("?1", "?2", "?3", "?4")} AS held`)
+        .bind(orgId, sourceId, runId, now)
+        .first<{ held: number }>();
+      return Number(row?.held ?? 0) === 1;
+    },
+
     /**
      * Records the counts known before any page is fetched and the pages
-     * handed to the queue, all `pending`. Call before sending the messages,
-     * so a message never arrives for a page that is not recorded.
+     * handed to the queue, all `pending`, and stamps each page as queued at
+     * `attemptedAt` so the next capped run starts with other pages. Call
+     * before sending the messages, so a message never arrives for a page
+     * that is not recorded.
      */
     async plan(
       sourceId: string,
       runId: string,
       known: Pick<SyncCounts, "unchanged" | "removed" | "deferred">,
       pages: SyncPage[],
+      attemptedAt: number,
     ): Promise<void> {
       const statements: D1PreparedStatement[] = [
         prepare(
@@ -240,6 +306,19 @@ export function syncFor(db: D1Database, orgId: string) {
              WHERE true
              ON CONFLICT(org_id, run_id, url) DO NOTHING`,
           ).bind(orgId, runId, sourceId, JSON.stringify(pages.slice(i, i + PAGES_PER_INSERT))),
+          prepareInsert(
+            db,
+            `INSERT INTO source_sync_attempts (org_id, source_id, url, attempted_at)
+             SELECT ?1, ?2, json_extract(value, '$.url'), ?4
+               FROM json_each(?3)
+             WHERE true
+             ON CONFLICT(org_id, source_id, url) DO UPDATE SET attempted_at = excluded.attempted_at`,
+          ).bind(
+            orgId,
+            sourceId,
+            JSON.stringify(pages.slice(i, i + PAGES_PER_INSERT)),
+            attemptedAt,
+          ),
         );
       }
       await db.batch(statements);
@@ -274,6 +353,10 @@ export function syncFor(db: D1Database, orgId: string) {
      * run in the same D1 batch: the counts are added up once, from the pages,
      * so a retried message cannot count a page twice. Returns true when this
      * call finished the run.
+     *
+     * Both statements require the run to still hold the source at `now`: a
+     * run whose lease ran out stays interrupted, and its last page cannot
+     * turn it into `succeeded`.
      */
     async completePage(
       sourceId: string,
@@ -286,8 +369,9 @@ export function syncFor(db: D1Database, orgId: string) {
         prepare(
           db,
           `UPDATE source_sync_pages SET state = ?4
-            WHERE org_id = ?1 AND run_id = ?2 AND url = ?3 AND state = 'pending'`,
-        ).bind(orgId, runId, url, state),
+            WHERE org_id = ?1 AND run_id = ?2 AND url = ?3 AND state = 'pending'
+              AND ${syncRunHolds("?1", "?6", "?2", "?5")}`,
+        ).bind(orgId, runId, url, state, now, sourceId),
         prepare(
           db,
           `UPDATE source_syncs
@@ -299,6 +383,7 @@ export function syncFor(db: D1Database, orgId: string) {
                   outcome = CASE WHEN ${pageCount("failed")} > 0 THEN 'partial' ELSE 'succeeded' END,
                   error = CASE WHEN ${pageCount("failed")} > 0 THEN 'pages_failed' ELSE NULL END
             WHERE org_id = ?1 AND source_id = ?2 AND run_id = ?3 AND finished_at IS NULL
+              AND lease_until > ?4
               AND NOT EXISTS (SELECT 1 FROM source_sync_pages
                                WHERE org_id = ?1 AND run_id = ?3 AND state = 'pending')`,
         ).bind(orgId, sourceId, runId, now),
@@ -316,7 +401,10 @@ export interface DueSource {
 
 /**
  * Sitemap sources whose schedule says a run is due and that no run holds,
- * oldest first, across every org. The one statement in the engine without an
+ * across every org, oldest first by the later of their last run start and
+ * their org's last refusal by the auth seam (`recordSyncRefusal`): a refused
+ * org goes behind every other due source, so a tick never reads the same
+ * refused sources again while others wait. The one statement in the engine without an
  * org filter, and on purpose: a cron has no request and so no org. It reads
  * only ids; the caller passes each org to `AuthProvider.resolveOrg` (as for a
  * queued ingest message) and does everything else through that org's
@@ -335,14 +423,30 @@ export async function dueSitemapSources(
                       CASE WHEN json_valid(settings) THEN json_extract(settings, '$.sync') END AS sync
                  FROM sources WHERE kind = 'sitemap') s
          LEFT JOIN source_syncs y ON y.org_id = s.org_id AND y.source_id = s.id
+         LEFT JOIN sync_org_refusals r ON r.org_id = s.org_id
         WHERE s.sync IN ('daily', 'weekly')
           AND (y.lease_until IS NULL OR y.lease_until <= ?1)
           AND (y.started_at IS NULL
                OR y.started_at <= ?1 - CASE s.sync WHEN 'daily' THEN ?2 ELSE ?3 END)
-        ORDER BY COALESCE(y.started_at, 0) ASC, s.id ASC
+        ORDER BY MAX(COALESCE(y.started_at, 0), COALESCE(r.refused_at, 0)) ASC, s.id ASC
         LIMIT ?4`,
     )
     .bind(options.now, options.dailyMs, options.weeklyMs, options.limit)
     .all<{ org_id: string; id: string }>();
   return res.results.map((row) => ({ claimedOrgId: row.org_id, sourceId: row.id }));
+}
+
+/**
+ * Records that the auth seam refused `orgId` at `now`, so the next ticks take
+ * other due sources first (see `dueSitemapSources`). Keyed by the org; it
+ * stores the scheduler's own answer and reads nothing of the org.
+ */
+export async function recordSyncRefusal(db: D1Database, orgId: string, now: number): Promise<void> {
+  await prepareInsert(
+    db,
+    `INSERT INTO sync_org_refusals (org_id, refused_at) VALUES (?1, ?2)
+     ON CONFLICT(org_id) DO UPDATE SET refused_at = excluded.refused_at`,
+  )
+    .bind(orgId, now)
+    .run();
 }

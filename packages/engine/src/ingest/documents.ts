@@ -18,6 +18,9 @@ export const MAX_BATCH_DOCUMENTS = 100;
 
 export class TooLarge extends Error {}
 
+/** A sync page's run no longer held its source when the document was written; nothing was. */
+export class SyncRunEnded extends Error {}
+
 export interface SourceOptions {
   /**
    * When set, a `sourceId` in the body must name a source of this kind. The
@@ -25,6 +28,12 @@ export interface SourceOptions {
    * must not overwrite or prune hand-written answers or a sitemap import.
    */
   requireKind?: SourceKind | undefined;
+  /**
+   * A scheduled sync's page: each document row is written only while this
+   * run still holds the source, checked in the write itself. Otherwise the
+   * new body is deleted again and `SyncRunEnded` is thrown.
+   */
+  syncRun?: { runId: string; now: () => number } | undefined;
 }
 
 export interface IngestCounts {
@@ -257,7 +266,7 @@ export async function pushDocuments(
     const objectKey = documentObjectKey(scope.orgId, candidateId);
     await deps.docs.put(objectKey, document.markdown);
 
-    const saved = await deps.tenant.documents.upsert({
+    const input = {
       id: candidateId,
       sourceId: source.id,
       externalId: document.externalId,
@@ -266,7 +275,18 @@ export async function pushDocuments(
       contentHash: hash,
       bodyKey: objectKey,
       updatedAt: Date.now(),
-    });
+    };
+    const saved =
+      options.syncRun === undefined
+        ? await deps.tenant.documents.upsert(input)
+        : await deps.tenant.documents.upsertForSync(input, {
+            runId: options.syncRun.runId,
+            now: options.syncRun.now(),
+          });
+    if (saved === null) {
+      await tryDeleteObject(deps.docs, objectKey, candidateId);
+      throw new SyncRunEnded("sync run no longer holds the source");
+    }
 
     await deps.queue.send({
       orgId: scope.orgId,

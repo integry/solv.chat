@@ -23,6 +23,8 @@ const EXPECTED_TABLES = [
   "assistant_origins",
   "source_syncs",
   "source_sync_pages",
+  "source_sync_attempts",
+  "sync_org_refusals",
 ];
 
 describe("migrations", () => {

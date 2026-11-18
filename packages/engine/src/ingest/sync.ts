@@ -7,7 +7,12 @@ import {
   type SitemapEntry,
 } from "../admin/sitemap.js";
 import type { DocumentSyncRow } from "../db/documents.js";
-import { dueSitemapSources, type SyncPage, type SyncPageState } from "../db/sync.js";
+import {
+  dueSitemapSources,
+  recordSyncRefusal,
+  type SyncPage,
+  type SyncPageState,
+} from "../db/sync.js";
 import { forScheduledSync, type Tenant } from "../db/tenant.js";
 import type { Retriever } from "../providers/retrieval.js";
 import type { Limits, PageFetcher, SyncLimitDecision } from "../seams/types.js";
@@ -17,6 +22,7 @@ import {
   type PushDeps,
   pushDocuments,
   removeSourceDocuments,
+  SyncRunEnded,
   TooLarge,
 } from "./documents.js";
 
@@ -36,7 +42,8 @@ export const SYNC_DUE_SLACK_MS = 15 * 60 * 1000;
 // reported as interrupted and the next run may start. Ours.
 export const SYNC_LEASE_MS = 6 * HOUR_MS;
 // Pages fetched in one run. A larger sitemap is worked through over several
-// runs, the pages checked longest ago first. Ours.
+// runs, the pages queued longest ago first (never queued before all others),
+// whether or not they could be fetched then. Ours.
 export const DEFAULT_SYNC_MAX_PAGES = 200;
 // Documents one sitemap source may hold, the same as the most pages the
 // admin's sitemap preview lists. Ours.
@@ -178,14 +185,17 @@ interface Plan {
 }
 
 /**
- * Decides what one run does, from the sitemap and the source's documents:
- * what to remove, what to skip on an unchanged `<lastmod>`, and which pages
- * to fetch (new pages first, then the ones checked longest ago), within the
- * caps. Pages left out are counted as deferred.
+ * Decides what one run does, from the sitemap, the source's documents and
+ * when each page was last queued: what to remove, what to skip on an
+ * unchanged `<lastmod>`, and which pages to fetch, within the caps. Pages are
+ * taken queued-longest-ago first (never queued first, new pages before
+ * documents among those), so a page that failed last time goes behind the
+ * ones that waited. Pages left out are counted as deferred.
  */
 function planRun(
   entries: SitemapEntry[],
   documents: DocumentSyncRow[],
+  attempts: ReadonlyMap<string, number>,
   options: { removeAllowed: boolean; maxPages: number; maxDocuments: number },
 ): Plan {
   const listed = new Set(entries.map((entry) => entry.url));
@@ -193,28 +203,38 @@ function planRun(
   const removed = options.removeAllowed ? documents.filter((doc) => !listed.has(doc.url)) : [];
 
   let unchanged = 0;
-  const added: SyncPage[] = [];
-  const checks: Array<{ page: SyncPage; checkedAt: number }> = [];
+  const added: Array<{ page: SyncPage; isNew: boolean; attemptedAt: number }> = [];
+  const checks: typeof added = [];
   for (const entry of entries) {
     const doc = byUrl.get(entry.url);
+    const candidate = {
+      page: { url: entry.url, lastmod: entry.lastmod },
+      isNew: doc === undefined,
+      attemptedAt: attempts.get(entry.url) ?? 0,
+    };
     if (doc === undefined) {
-      added.push({ url: entry.url, lastmod: entry.lastmod });
+      added.push(candidate);
     } else if (entry.lastmod !== null && doc.sitemapLastmod === entry.lastmod) {
       unchanged++;
     } else {
-      checks.push({
-        page: { url: entry.url, lastmod: entry.lastmod },
-        checkedAt: doc.syncCheckedAt ?? 0,
-      });
+      checks.push(candidate);
     }
   }
-  checks.sort((a, b) => a.checkedAt - b.checkedAt);
+  // A stable sort: among pages queued at the same time, new pages come
+  // first, then in sitemap order.
+  const candidates = [...added, ...checks].sort((a, b) => a.attemptedAt - b.attemptedAt);
 
-  const room = Math.max(0, options.maxDocuments - (documents.length - removed.length));
-  const addable = added.slice(0, room);
-  const queue = [...addable, ...checks.map((c) => c.page)];
-  const pages = queue.slice(0, options.maxPages);
-  const deferred = added.length - addable.length + (queue.length - pages.length);
+  let room = Math.max(0, options.maxDocuments - (documents.length - removed.length));
+  const pages: SyncPage[] = [];
+  let deferred = 0;
+  for (const candidate of candidates) {
+    if (pages.length >= options.maxPages || (candidate.isNew && room === 0)) {
+      deferred++;
+      continue;
+    }
+    if (candidate.isNew) room--;
+    pages.push(candidate.page);
+  }
   return { removed, unchanged, deferred, pages };
 }
 
@@ -224,9 +244,10 @@ function planRun(
  * reads the sitemap, removes documents whose URL left it (unless the guard
  * trips), and queues one message per page to fetch.
  *
- * The guard: a sitemap that cannot be read, lists no page, or would remove
- * more than the source's `maxRemovePercent` (default 50%) of its documents
- * removes nothing, fetches nothing, and records the run as failed.
+ * The guard: a sitemap that cannot be read, is not a complete, well-formed
+ * `<urlset>`, lists no page, or would remove more than the source's
+ * `maxRemovePercent` (default 50%) of its documents removes nothing, fetches
+ * nothing, and records the run as failed.
  */
 export async function startSourceSync(
   deps: SyncSchedulerDeps,
@@ -244,7 +265,12 @@ export async function startSourceSync(
     return { status: "busy" };
   }
   const fail = async (
-    error: "sitemap_unavailable" | "sitemap_empty" | "too_many_removals" | "limit_refused",
+    error:
+      | "sitemap_unavailable"
+      | "sitemap_invalid"
+      | "sitemap_empty"
+      | "too_many_removals"
+      | "limit_refused",
   ): Promise<SyncStartResult> => {
     await tenant.sync.finish(source.id, runId, now(), { outcome: "failed", error });
     return { status: "finished", runId };
@@ -271,11 +297,19 @@ export async function startSourceSync(
     // The reason may quote the remote server; only the code is stored.
     return fail("sitemap_unavailable");
   }
-  const { entries, truncated, isIndex } = extractSitemapEntries(xml, MAX_SYNC_SITEMAP_URLS);
-  if (entries.length === 0 || isIndex) return fail("sitemap_empty");
+  const { entries, truncated, isIndex, wellFormed } = extractSitemapEntries(
+    xml,
+    MAX_SYNC_SITEMAP_URLS,
+  );
+  if (isIndex) return fail("sitemap_empty");
+  // A body that ended early or is broken XML may have lost its last entries;
+  // reading it would remove their documents. The preview stays lenient.
+  if (!wellFormed) return fail("sitemap_invalid");
+  if (entries.length === 0) return fail("sitemap_empty");
 
   const documents = await tenant.documents.listForSync(source.id);
-  const plan = planRun(entries, documents, {
+  const attempts = await tenant.sync.attempts(source.id);
+  const plan = planRun(entries, documents, attempts, {
     // A sitemap read only in part says nothing about the pages after the cut.
     removeAllowed: !truncated,
     maxPages,
@@ -294,6 +328,14 @@ export async function startSourceSync(
           plan.removed,
         )
       : 0;
+  if (!truncated) {
+    // Pages no longer listed need no place in the order.
+    const listed = new Set(entries.map((entry) => entry.url));
+    await tenant.sync.forgetAttempts(
+      source.id,
+      [...attempts.keys()].filter((url) => !listed.has(url)),
+    );
+  }
   const known = { unchanged: plan.unchanged, removed, deferred: plan.deferred };
 
   if (plan.pages.length === 0) {
@@ -306,7 +348,7 @@ export async function startSourceSync(
   }
 
   // Recorded before sending, so every message finds its page.
-  await tenant.sync.plan(source.id, runId, known, plan.pages);
+  await tenant.sync.plan(source.id, runId, known, plan.pages, startedAt);
   await sendPageMessages(
     deps.queue,
     plan.pages.map((page) => ({
@@ -332,8 +374,9 @@ export interface DueSyncsResult {
  * run holding them, and a full interval (less `SYNC_DUE_SLACK_MS`) since the
  * last run started. At most `maxSources` per call, oldest first; call it from
  * a cron. Each org is passed to the auth seam first, and an org it refuses is
- * skipped without reading anything of it. Safe to call twice at once: the
- * lease lets only one run per source start.
+ * skipped without reading anything of it; the refusal is recorded so that
+ * the next calls take every other due source before asking about it again.
+ * Safe to call twice at once: the lease lets only one run per source start.
  */
 export async function runDueSyncs(deps: SyncSchedulerDeps): Promise<DueSyncsResult> {
   const now = (deps.now ?? Date.now)();
@@ -353,7 +396,16 @@ export async function runDueSyncs(deps: SyncSchedulerDeps): Promise<DueSyncsResu
     if (orgId === undefined) {
       orgId = await deps.resolveOrg(candidate.claimedOrgId);
       vouched.set(candidate.claimedOrgId, orgId);
-      if (orgId === null) result.refusedOrgs++;
+      if (orgId === null) {
+        result.refusedOrgs++;
+        try {
+          await recordSyncRefusal(deps.db, candidate.claimedOrgId, now);
+        } catch (err) {
+          console.warn("sync: could not record a refused org", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     }
     if (orgId === null) continue;
     try {
@@ -387,7 +439,10 @@ export interface SyncPageDeps {
  * the validators stored last time, writes it through `pushDocuments` (whose
  * unchanged `content_hash` is a no-op, so nothing is re-embedded), stores the
  * new validators, and marks the page done. A message for a run that is no
- * longer current, or a page already handled, does nothing.
+ * longer current, or a page already handled, does nothing. So does one whose
+ * run's lease ran out while the page was being fetched: the run is checked
+ * again after the fetch, and every write (the document, its validators, the
+ * page's state and the run's end) carries the same check itself.
  *
  * Throws only for a fault worth retrying (D1, R2, the queue); a page that
  * cannot be fetched or is not a page is recorded as failed.
@@ -408,6 +463,7 @@ export async function processSyncPage(
     await tenant.sync.completePage(source.id, message.runId, page.url, state, now());
     return state;
   };
+  const fence = () => ({ runId: message.runId, now: now() });
 
   try {
     const externalId = await hashUrlExternalId(page.url);
@@ -422,17 +478,24 @@ export async function processSyncPage(
       // Refused, timed out or unreachable: the next run tries again.
       return complete("failed");
     }
+    // The fetch may have outlasted the run's lease.
+    if (!(await tenant.sync.holds(source.id, message.runId, now()))) return null;
 
     let title: string;
     let markdown: string;
     if (fetched.kind === "not_modified") {
       if (prev === null) return complete("failed");
-      await tenant.documents.recordSyncCheck(source.id, externalId, {
-        etag: fetched.etag,
-        lastModified: fetched.lastModified,
-        sitemapLastmod: page.lastmod,
-        checkedAt: now(),
-      });
+      await tenant.documents.recordSyncCheck(
+        source.id,
+        externalId,
+        {
+          etag: fetched.etag,
+          lastModified: fetched.lastModified,
+          sitemapLastmod: page.lastmod,
+          checkedAt: now(),
+        },
+        fence(),
+      );
       return complete("unchanged");
     }
     if (fetched.kind === "page") {
@@ -452,17 +515,24 @@ export async function processSyncPage(
         { tenant, docs: deps.docs, queue: deps.queue },
         { orgId: deps.orgId, assistantId: source.assistantId },
         { sourceId: source.id, documents: [{ externalId, url: page.url, title, markdown }] },
+        { syncRun: { runId: message.runId, now } },
       );
     } catch (err) {
+      if (err instanceof SyncRunEnded) return null;
       if (err instanceof BadRequest || err instanceof TooLarge) return complete("failed");
       throw err;
     }
-    await tenant.documents.recordSyncCheck(source.id, externalId, {
-      etag: fetched.etag,
-      lastModified: fetched.lastModified,
-      sitemapLastmod: page.lastmod,
-      checkedAt: now(),
-    });
+    await tenant.documents.recordSyncCheck(
+      source.id,
+      externalId,
+      {
+        etag: fetched.etag,
+        lastModified: fetched.lastModified,
+        sitemapLastmod: page.lastmod,
+        checkedAt: now(),
+      },
+      fence(),
+    );
     if (counts.written === 0) return complete("unchanged");
     return complete(prev === null ? "added" : "updated");
   } catch (err) {
