@@ -12,7 +12,9 @@ export type IdPrefix =
   | "mcp"
   | "tst"
   // test_runs. Distinct from `tst` so a run id in a log is unambiguous.
-  | "run";
+  | "run"
+  // topics (questions' topics, per assistant).
+  | "top";
 
 const ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
 const BODY_LENGTH = 20;

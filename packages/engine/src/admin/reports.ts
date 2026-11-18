@@ -1,5 +1,15 @@
-import type { PeriodFigures, ResponseTimeFigures, ResponseTimePeriod } from "@solvchat/core";
-import type { QuestionCount, ReportRange, SourceCitationCount } from "../db/reports.js";
+import type {
+  PeriodFigures,
+  ResponseTimeFigures,
+  ResponseTimePeriod,
+  TopicsReport,
+} from "@solvchat/core";
+import type {
+  GapQuestionCount,
+  QuestionCount,
+  ReportRange,
+  SourceCitationCount,
+} from "../db/reports.js";
 import type { Tenant } from "../db/tenant.js";
 import { DAY_MS, utcDay } from "../util/time.js";
 import { BadRequest, NotFound } from "./errors.js";
@@ -14,7 +24,8 @@ export type ReportDays = (typeof REPORT_DAY_OPTIONS)[number];
 export interface AssistantReport extends PeriodFigures {
   days: ReportDays;
   topQuestions: QuestionCount[];
-  topGaps: QuestionCount[];
+  topGaps: GapQuestionCount[];
+  topics: TopicsReport;
   topSources: SourceCitationCount[];
   uncitedSources: Array<{ url: string; title: string }>;
   uncitedTotal: number;
@@ -142,20 +153,26 @@ export async function reportFor(
   // In parallel, as the Overview screen already does, so the figures are one
   // consistent read rather than sequential ones. The headline figures come
   // from the same function as Overview's, so the two screens cannot drift.
-  const [figures, topQuestions, topGaps, topSources, uncited, responseTime] = await Promise.all([
-    periodFigures(tenant, assistantId, range),
-    tenant.reports.topQuestions(assistantId, range, { unansweredOnly: false }),
-    tenant.reports.topQuestions(assistantId, range, { unansweredOnly: true }),
-    tenant.reports.topSources(assistantId, range),
-    tenant.reports.uncitedSources(assistantId, range),
-    responseTimePeriod(tenant, assistantId, days, clock),
-  ]);
+  const [figures, topQuestions, topGaps, topSources, uncited, responseTime, topicRows, settings] =
+    await Promise.all([
+      periodFigures(tenant, assistantId, range),
+      tenant.reports.topQuestions(assistantId, range, { unansweredOnly: false }),
+      tenant.reports.topGaps(assistantId, range),
+      tenant.reports.topSources(assistantId, range),
+      tenant.reports.uncitedSources(assistantId, range),
+      responseTimePeriod(tenant, assistantId, days, clock),
+      tenant.reports.topicCounts(assistantId, range),
+      tenant.providerSettings.get(),
+    ]);
 
   return {
     days,
     ...figures,
     topQuestions,
     topGaps,
+    // Topics are named by the answer review: with "Review answers" off (on
+    // unless switched off) none is assigned, and the screen says so.
+    topics: { reviewAnswers: settings?.reviewAnswers !== false, rows: topicRows },
     topSources,
     uncitedSources: uncited.documents,
     uncitedTotal: uncited.total,

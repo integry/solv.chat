@@ -50,13 +50,15 @@ interface SeenRequest {
  * `ANSWER_TEXT`, and answers a review request (the fixed review frame) with
  * `label`.
  */
-function anthropicFetch(seen: SeenRequest[], label = "answered"): typeof fetch {
+function anthropicFetch(seen: SeenRequest[], label = "answered", topic = "Billing"): typeof fetch {
   return async (_input, init) => {
     const raw = String(init?.body ?? "{}");
     const body = JSON.parse(raw) as { model: string; system: string };
     seen.push({ model: body.model, system: body.system, body: raw });
     const review = body.system === REVIEW_FRAME;
-    const [tokensIn, tokensOut, text] = review ? [90, 1, label] : [400, 20, ANSWER_TEXT];
+    const [tokensIn, tokensOut, text] = review
+      ? [90, 1, `outcome: ${label}\ntopic: ${topic}`]
+      : [400, 20, ANSWER_TEXT];
     const sse = [
       `event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":${tokensIn}}}}\n\n`,
       `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text } })}\n\n`,
@@ -78,6 +80,7 @@ describe("chat: answer review on the answer path", () => {
       env.DB.prepare("DELETE FROM usage_daily"),
       env.DB.prepare("DELETE FROM message_traces"),
       env.DB.prepare("DELETE FROM messages"),
+      env.DB.prepare("DELETE FROM topics"),
       env.DB.prepare("DELETE FROM conversations"),
       env.DB.prepare("DELETE FROM chunks"),
       env.DB.prepare("DELETE FROM documents"),
@@ -435,5 +438,63 @@ describe("chat: answer review on the answer path", () => {
   it("reviews nothing when a test substitutes the provider without a reviewer", async () => {
     const { reply } = await ask(appWith({ provider }));
     expect(reply?.outcome).toBeNull();
+  });
+
+  async function questionTopic(replyId: string | undefined): Promise<string | null> {
+    const row = await env.DB.prepare(
+      `SELECT t.name AS name FROM messages a
+         JOIN messages q ON q.org_id = a.org_id AND q.id = a.reply_to
+         LEFT JOIN topics t ON t.id = q.topic_id
+        WHERE a.org_id = ?1 AND a.id = ?2`,
+    )
+      .bind(TEST_ORG_ID, replyId ?? "")
+      .first<{ name: string | null }>();
+    return row?.name ?? null;
+  }
+
+  it("tags the visitor's question with the topic the same review call names", async () => {
+    const seen: SeenRequest[] = [];
+    const { reply } = await ask(appWith({ fetch: anthropicFetch(seen, "answered", "Invoices") }));
+    expect(reply?.outcome).toBe("answered");
+    expect(await questionTopic(reply?.id)).toBe("Invoices");
+    // One review call, not two.
+    expect(seen.filter((r) => r.system === REVIEW_FRAME)).toHaveLength(1);
+
+    // The next review is shown the list and picks from it.
+    const second = await ask(appWith({ fetch: anthropicFetch(seen, "partial", "invoices") }));
+    expect(seen.at(-1)?.body).toContain("Invoices");
+    expect(await questionTopic(second.reply?.id)).toBe("Invoices");
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM topics WHERE org_id = ?1")
+      .bind(TEST_ORG_ID)
+      .first<{ n: number }>();
+    expect(count?.n).toBe(1);
+  });
+
+  it("tags a retrieval miss's question too", async () => {
+    const { reply } = await ask(
+      appWith({ fetch: anthropicFetch([], "off_topic", "Weather") }),
+      MISS_QUESTION,
+    );
+    expect(reply?.outcome).toBe("off_topic");
+    expect(await questionTopic(reply?.id)).toBe("Weather");
+  });
+
+  it("assigns no topic when Review answers is off", async () => {
+    await tenant.providerSettings.upsert({ reviewAnswers: false });
+    const seen: SeenRequest[] = [];
+    const { reply } = await ask(appWith({ fetch: anthropicFetch(seen) }));
+    const miss = await ask(appWith({ fetch: anthropicFetch(seen) }), MISS_QUESTION);
+    expect(seen.filter((r) => r.system === REVIEW_FRAME)).toHaveLength(0);
+    expect(await questionTopic(reply?.id)).toBeNull();
+    expect(miss.reply?.outcome).toBe("declined");
+    expect(await questionTopic(miss.reply?.id)).toBeNull();
+  });
+
+  it("stores Other for a topic that would capture personal data", async () => {
+    const { reply } = await ask(
+      appWith({ fetch: anthropicFetch([], "wants_human", "Call 0161 496 0000") }),
+    );
+    expect(reply?.outcome).toBe("wants_human");
+    expect(await questionTopic(reply?.id)).toBe("Other");
   });
 });

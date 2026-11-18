@@ -109,6 +109,7 @@ describe("admin reports API", () => {
       costMicros: 0,
       topQuestions: [],
       topGaps: [],
+      topics: { reviewAnswers: true, rows: [] },
       topSources: [],
       uncitedSources: [],
       uncitedTotal: 0,
@@ -316,7 +317,7 @@ describe("admin reports API", () => {
       { question: "pricing?", count: 2 },
       { question: "refunds?", count: 1 },
     ]);
-    expect(report.topGaps).toEqual([{ question: "refunds?", count: 1 }]);
+    expect(report.topGaps).toEqual([{ question: "refunds?", count: 1, topic: null }]);
     expect(report.topSources).toEqual([
       { url: "https://docs.example.com/pricing", title: "Pricing", count: 2 },
       { url: "https://docs.example.com/sso", title: "SSO", count: 1 },

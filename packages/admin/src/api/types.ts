@@ -6,6 +6,8 @@ import type {
   ResponseTimePeriod,
   SourceKind,
   TestExpectation,
+  TopicItem,
+  TopicsReport,
   VersionConfig,
 } from "@solvchat/core";
 
@@ -19,6 +21,9 @@ export type {
   ResponseTimeFigures,
   ResponseTimePeriod,
   ResponseTimeStatus,
+  TopicItem,
+  TopicReportRow,
+  TopicsReport,
 } from "@solvchat/core";
 
 export interface Assistant {
@@ -228,6 +233,18 @@ export interface TopQuestion {
   count: number;
 }
 
+/** A "Most often unanswered" row, with the topic of its latest tagged ask. */
+export interface TopGap extends TopQuestion {
+  /** Absent from an engine older than topics. */
+  topic?: { id: string; name: string } | null;
+}
+
+/** `GET …/topics`: the assistant's topics and the "Review answers" switch. */
+export interface TopicsList {
+  topics: TopicItem[];
+  reviewAnswers: boolean;
+}
+
 export interface SourceCitationCount {
   url: string;
   title: string;
@@ -244,7 +261,9 @@ export interface AssistantReport {
   thumbsDownShare: number;
   costMicros: number;
   topQuestions: TopQuestion[];
-  topGaps: TopQuestion[];
+  topGaps: TopGap[];
+  /** Optional so a report from an engine older than topics still renders. */
+  topics?: TopicsReport;
   topSources: SourceCitationCount[];
   uncitedSources: Array<{ url: string; title: string }>;
   uncitedTotal: number;

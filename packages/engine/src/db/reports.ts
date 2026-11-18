@@ -1,3 +1,4 @@
+import { MAX_TOPICS_PER_ASSISTANT, type TopicReportRow } from "@solvchat/core";
 import { GAP_GROUP_CTES, GAP_REPLY } from "./messages.js";
 import { prepare } from "./sql.js";
 
@@ -16,6 +17,11 @@ export interface ReportRange {
 export interface QuestionCount {
   question: string;
   count: number;
+}
+
+/** A gap group with the topic of its latest tagged ask in the range, for "Most often unanswered". */
+export interface GapQuestionCount extends QuestionCount {
+  topic: { id: string; name: string } | null;
 }
 
 /**
@@ -67,7 +73,7 @@ export interface SourceCitationCount {
  * Worker.
  */
 export function reportsFor(db: D1Database, orgId: string) {
-  return {
+  const reports = {
     /** Visitor messages in the range. */
     async questionCount(assistantId: string, range: ReportRange): Promise<number> {
       const row = await prepare(
@@ -293,6 +299,86 @@ export function reportsFor(db: D1Database, orgId: string) {
     },
 
     /**
+     * "Most often unanswered" with each group's topic: the topic of the
+     * group's latest tagged ask in the range (asks of one question are
+     * normally tagged alike; after a merge or a delete they may differ), or
+     * null when none of them has one.
+     */
+    async topGaps(
+      assistantId: string,
+      range: ReportRange,
+      limit: number = REPORT_TOP_LIMIT,
+    ): Promise<GapQuestionCount[]> {
+      const gaps = await reports.topQuestions(assistantId, range, { unansweredOnly: true, limit });
+      if (gaps.length === 0) return [];
+      // One lookup for every listed group, bounded by the list's length.
+      const res = await prepare(
+        db,
+        `SELECT key, topic_id, name FROM (
+           SELECT m.question_key AS key, t.id AS topic_id, t.name AS name,
+                  ROW_NUMBER() OVER (PARTITION BY m.question_key
+                                     ORDER BY m.created_at DESC, m.rowid DESC) AS n
+             FROM messages m
+             JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+             JOIN topics t ON t.id = m.topic_id AND t.org_id = m.org_id
+                          AND t.assistant_id = c.assistant_id
+            WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'user'
+              AND m.created_at >= ?3 AND m.created_at <= ?4
+              AND m.topic_id IS NOT NULL
+              AND m.question_key IN (SELECT value FROM json_each(?5))
+         ) WHERE n = 1`,
+      )
+        .bind(
+          orgId,
+          assistantId,
+          range.fromMs,
+          range.toMs,
+          JSON.stringify(gaps.map((g) => g.question)),
+        )
+        .all<{ key: string; topic_id: string; name: string }>();
+      const byKey = new Map(res.results.map((r) => [r.key, { id: r.topic_id, name: r.name }]));
+      return gaps.map((g) => ({ ...g, topic: byKey.get(g.question) ?? null }));
+    },
+
+    /**
+     * The Topics list: per topic, the period's visitor questions with it and
+     * how many of those could not be answered (the reply reviewed as
+     * `declined`, or unreviewed with no content found, as Gaps counts one),
+     * most asked first. Read through `messages_org_topic`; at most every
+     * topic of the assistant (`MAX_TOPICS_PER_ASSISTANT` and "Other").
+     */
+    async topicCounts(assistantId: string, range: ReportRange): Promise<TopicReportRow[]> {
+      const res = await prepare(
+        db,
+        `SELECT t.id AS id, t.name AS name, COUNT(*) AS questions,
+                COALESCE(SUM(CASE WHEN EXISTS (
+                  SELECT 1 FROM messages a
+                   WHERE a.org_id = m.org_id AND a.reply_to = m.id AND a.role = 'assistant'
+                     AND ${GAP_REPLY}
+                ) THEN 1 ELSE 0 END), 0) AS unanswered
+           FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+           JOIN topics t ON t.id = m.topic_id AND t.org_id = m.org_id
+                        AND t.assistant_id = c.assistant_id
+          WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'user'
+            AND m.topic_id IS NOT NULL
+            AND m.created_at >= ?3 AND m.created_at <= ?4
+          GROUP BY t.id, t.name
+          ORDER BY questions DESC, t.name COLLATE NOCASE ASC, t.id ASC
+          LIMIT ?5`,
+      )
+        .bind(orgId, assistantId, range.fromMs, range.toMs, MAX_TOPICS_PER_ASSISTANT + 1)
+        .all<{ id: string; name: string; questions: number; unanswered: number }>();
+      return res.results.map((row) => ({
+        id: row.id,
+        name: row.name,
+        questions: row.questions,
+        unanswered: row.unanswered,
+        unansweredShare: row.questions === 0 ? 0 : row.unanswered / row.questions,
+      }));
+    },
+
+    /**
      * Most cited pages. `citations` is a JSON array on each reply, so the count
      * comes from `json_each`; grouping by `(message_id, url)` means a reply
      * that cited one page twice counts once, whatever the pipeline does in
@@ -380,4 +466,5 @@ export function reportsFor(db: D1Database, orgId: string) {
       };
     },
   };
+  return reports;
 }

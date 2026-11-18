@@ -61,9 +61,14 @@ export interface ConversationFilter {
    */
   question?: string;
   /**
-   * With `question`: only asks of it made at or after / at or before these
-   * milliseconds (the period a Reports count is for). Unlike `since`, these
-   * bound when the question was asked, not when its conversation started.
+   * A topic's id: only conversations where a visitor asked a question with
+   * that topic (the ones Reports' Topics list counts).
+   */
+  topic?: string;
+  /**
+   * With `question` or `topic`: only asks made at or after / at or before
+   * these milliseconds (the period a Reports count is for). Unlike `since`,
+   * these bound when the question was asked, not when its conversation started.
    */
   askedFrom?: number;
   askedTo?: number;
@@ -191,6 +196,12 @@ export function conversationsFor(db: D1Database, orgId: string) {
                    OR (length(?9) >= ${QUESTION_LINK_LENGTH}
                        AND substr(k.question_key, 1, length(?9)) = ?9))
          ))
+         AND (?17 = '' OR EXISTS (
+           SELECT 1 FROM messages p
+            WHERE p.org_id = c.org_id AND p.conversation_id = c.id
+              AND p.role = 'user' AND p.topic_id = ?17
+              AND p.created_at >= ?10 AND p.created_at <= ?11
+         ))
          AND (?7 = '' OR EXISTS (
            SELECT 1 FROM messages s
             WHERE s.org_id = c.org_id AND s.conversation_id = c.id
@@ -213,6 +224,8 @@ export function conversationsFor(db: D1Database, orgId: string) {
         filter.wantsHuman ? 1 : 0,
         filter.offTopic ? 1 : 0,
       ];
+      // ?15 and ?16 are the page's limit and offset; the topic comes after.
+      const topicParam = filter.topic ?? "";
       const [rowsRes, countRow] = await Promise.all([
         prepare(
           db,
@@ -233,10 +246,10 @@ export function conversationsFor(db: D1Database, orgId: string) {
             ORDER BY c.last_message_at DESC, c.id DESC
             LIMIT ?15 OFFSET ?16`,
         )
-          .bind(...params, options.limit, options.offset)
+          .bind(...params, options.limit, options.offset, topicParam)
           .all<SummaryRow>(),
         prepare(db, `SELECT COUNT(*) AS total ${where}`)
-          .bind(...params)
+          .bind(...params, 0, 0, topicParam)
           .first<{ total: number }>(),
       ]);
 

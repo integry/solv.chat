@@ -11,6 +11,9 @@ export {
   type ResponseTimeFigures,
   type ResponseTimePeriod,
   type ResponseTimeStatus,
+  type TopicItem,
+  type TopicReportRow,
+  type TopicsReport,
 } from "./monitor.js";
 export { Errors, fail, ok, type Result } from "./result.js";
 export {
@@ -70,6 +73,17 @@ export {
   type SourceInput,
   type SourceKind,
 } from "./schemas/source.js";
+export {
+  checkTopicName,
+  cleanTopicName,
+  MAX_TOPICS_PER_ASSISTANT,
+  OTHER_TOPIC,
+  OTHER_TOPIC_KEY,
+  TOPIC_MAX_WORDS,
+  TOPIC_NAME_MAX_LENGTH,
+  type TopicNameProblem,
+  topicKey,
+} from "./schemas/topic.js";
 export {
   type ActionsConfig,
   type BehaviourConfig,

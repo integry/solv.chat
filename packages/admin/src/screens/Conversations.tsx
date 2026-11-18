@@ -1,6 +1,6 @@
 import { isQuestionLinkStart, toConversationSearch } from "@solvchat/core";
 import { useEffect, useId, useState } from "react";
-import type { ConversationSummary, ConversationsPage } from "../api/types.js";
+import type { ConversationSummary, ConversationsPage, TopicsList } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import {
   navigateTo,
@@ -83,12 +83,22 @@ interface ListView {
   days: string;
   /** A grouped question from Reports or Overview: only conversations that asked it. */
   question: string;
+  /** A topic's id, from the topic choice or Reports' Topics list: only conversations that asked about it. */
+  topic: string;
   /**
-   * With `question`, from Reports: the UTC days (`YYYY-MM-DD`) it was asked
-   * in, the report's period. "" when not set. Cleared with the question.
+   * With `question` or `topic`, from Reports: the UTC days (`YYYY-MM-DD`) it
+   * was asked in, the report's period. "" when not set. Cleared with them.
    */
   askedFrom: string;
   askedTo: string;
+}
+
+const TOPIC_ID = /^top_[0-9a-z]{20}$/;
+
+/** A topic id an address names, or "" for anything else. */
+function topicOf(raw: string | null): string {
+  const value = (raw ?? "").trim();
+  return TOPIC_ID.test(value) ? value : "";
 }
 
 const UTC_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -109,14 +119,17 @@ function askedPeriod(from: string, to: string): string {
 
 function viewOf(address: ConversationsAddress): ListView {
   const question = (address.question ?? "").trim();
+  const topic = topicOf(address.topic);
+  // A period only narrows a question or a topic; without one it means nothing.
+  const narrowed = question !== "" || topic !== "";
   return {
     search: toConversationSearch(address.q ?? ""),
     flags: flagsOf(address.filter),
     days: daysOf(address.days),
     question,
-    // A period only narrows a question; without one it means nothing.
-    askedFrom: question === "" ? "" : dayOf(address.askedFrom),
-    askedTo: question === "" ? "" : dayOf(address.askedTo),
+    topic,
+    askedFrom: narrowed ? dayOf(address.askedFrom) : "",
+    askedTo: narrowed ? dayOf(address.askedTo) : "",
   };
 }
 
@@ -128,6 +141,7 @@ function viewQuery(view: ListView): Record<string, string> {
     ...(filter === "" ? {} : { filter }),
     ...(view.days === "" ? {} : { days: view.days }),
     ...(view.question === "" ? {} : { question: view.question }),
+    ...(view.topic === "" ? {} : { topic: view.topic }),
     ...(view.askedFrom === "" ? {} : { askedFrom: view.askedFrom }),
     ...(view.askedTo === "" ? {} : { askedTo: view.askedTo }),
   };
@@ -154,6 +168,7 @@ interface ConversationsAddress {
   filter: string | null;
   days: string | null;
   question: string | null;
+  topic: string | null;
   askedFrom: string | null;
   askedTo: string | null;
 }
@@ -167,6 +182,7 @@ function readAddress(): ConversationsAddress {
     filter: readQueryParam("filter"),
     days: readQueryParam("days"),
     question: readQueryParam("question"),
+    topic: readQueryParam("topic"),
     askedFrom: readQueryParam("askedFrom"),
     askedTo: readQueryParam("askedTo"),
   };
@@ -278,6 +294,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
   const [flags, setFlags] = useState<ReadonlySet<FlagKey>>(initialView.flags);
   const [days, setDays] = useState(initialView.days);
   const [question, setQuestion] = useState(initialView.question);
+  const [topic, setTopic] = useState(initialView.topic);
   const [askedFrom, setAskedFrom] = useState(initialView.askedFrom);
   const [askedTo, setAskedTo] = useState(initialView.askedTo);
   // Back, Forward and links that arrive at the list bring what it shows with
@@ -309,6 +326,10 @@ export function Conversations({ assistantId }: ConversationsProps) {
         setQuestion(arrived.question);
         changed = true;
       }
+      if (arrived.topic !== topic) {
+        setTopic(arrived.topic);
+        changed = true;
+      }
       if (arrived.askedFrom !== askedFrom || arrived.askedTo !== askedTo) {
         setAskedFrom(arrived.askedFrom);
         setAskedTo(arrived.askedTo);
@@ -317,11 +338,16 @@ export function Conversations({ assistantId }: ConversationsProps) {
       if (changed) setOffset(0);
     }
   }
-  const view: ListView = { search, flags, days, question, askedFrom, askedTo };
+  const view: ListView = { search, flags, days, question, topic, askedFrom, askedTo };
   const query = viewQuery(view);
   const queryKey = new URLSearchParams(query).toString();
   const searchId = useId();
   const dateId = useId();
+  const topicId = useId();
+  // Topics are named by the answer review; the choice is offered once there are some.
+  const topicsRes = useResource<TopicsList>(`/api/admin/assistants/${assistantId}/topics`);
+  const topicList = topicsRes.value?.topics ?? [];
+  const topicName = topicList.find((t) => t.id === topic)?.name;
 
   // Typing waits a moment before searching, so each key press is not a request.
   useEffect(() => {
@@ -349,6 +375,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
       filter: values.filter ?? null,
       days: values.days ?? null,
       question: values.question ?? null,
+      topic: values.topic ?? null,
       askedFrom: values.askedFrom ?? null,
       askedTo: values.askedTo ?? null,
     });
@@ -395,7 +422,8 @@ export function Conversations({ assistantId }: ConversationsProps) {
   }
 
   const page = listRes.value;
-  const filtered = flags.size > 0 || days !== "" || search !== "" || question !== "";
+  const filtered =
+    flags.size > 0 || days !== "" || search !== "" || question !== "" || topic !== "";
   const hasPrevious = offset > 0;
   const hasNext = page ? offset + page.limit < page.total : false;
   const updating = listRes.status === "loading" && page !== undefined;
@@ -414,6 +442,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
     setFlags(new Set());
     setDays("");
     setQuestion("");
+    setTopic("");
     setAskedFrom("");
     setAskedTo("");
     setSearchInput("");
@@ -483,7 +512,59 @@ export function Conversations({ assistantId }: ConversationsProps) {
             ))}
           </select>
         </div>
+        {(topicList.length > 0 || topic !== "") && (
+          <div className="field list-topic">
+            <label htmlFor={topicId} className="sr-only">
+              Topic
+            </label>
+            <select
+              id={topicId}
+              className="select"
+              value={topic}
+              onChange={(e) => {
+                setTopic(e.target.value);
+                // The period came with the old choice.
+                if (question === "") {
+                  setAskedFrom("");
+                  setAskedTo("");
+                }
+                setOffset(0);
+              }}
+            >
+              <option value="">Any topic</option>
+              {topicList.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+              {topic !== "" && topicName === undefined && topicsRes.status === "ready" && (
+                <option value={topic}>A removed topic</option>
+              )}
+            </select>
+          </div>
+        )}
       </form>
+
+      {topic !== "" && question === "" && (askedFrom !== "" || askedTo !== "") && (
+        <div className="list-question">
+          <span className="list-question-text">
+            Topic: “{topicName ?? "A removed topic"}”{askedPeriod(askedFrom, askedTo)}
+          </span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            aria-label={`Remove “Topic: ${topicName ?? "A removed topic"}”`}
+            onClick={() => {
+              setTopic("");
+              setAskedFrom("");
+              setAskedTo("");
+              setOffset(0);
+            }}
+          >
+            Remove
+          </button>
+        </div>
+      )}
 
       {question !== "" && (
         <div className="list-question">

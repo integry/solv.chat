@@ -2989,3 +2989,75 @@ a {
     transition: none;
   }
 }
+
+/* ---------- Topics (Reports, Manage topics, Conversations filter) ---------- */
+
+.report-list-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.report-list-heading .btn {
+  flex: none;
+}
+
+.report-question {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A topic row wraps its counts or buttons under the name rather than
+   squeezing the name to a letter per line on a narrow screen. */
+.row-item.topic-row {
+  flex-wrap: wrap;
+}
+
+.row-item.topic-row > :first-child {
+  flex: 1 1 10rem;
+}
+
+.topic-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topic-figures,
+.topic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.topic-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.topic-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.topic-edit input,
+.topic-edit .select {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.topic-edit .field-error,
+.topic-edit-note {
+  flex-basis: 100%;
+}

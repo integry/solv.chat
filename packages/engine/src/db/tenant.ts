@@ -9,6 +9,7 @@ import { providerSettingsFor } from "./providerSettings.js";
 import { reportsFor } from "./reports.js";
 import { sourcesFor } from "./sources.js";
 import { testsFor } from "./tests.js";
+import { topicsFor } from "./topics.js";
 import { tracesFor } from "./traces.js";
 import { usageFor } from "./usage.js";
 import { versionsFor } from "./versions.js";
@@ -37,6 +38,7 @@ export interface Tenant {
   readonly tests: ReturnType<typeof testsFor>;
   readonly usage: ReturnType<typeof usageFor>;
   readonly reports: ReturnType<typeof reportsFor>;
+  readonly topics: ReturnType<typeof topicsFor>;
 }
 
 /**
@@ -89,5 +91,6 @@ function build(db: D1Database, orgId: string): Tenant {
     tests: testsFor(db, orgId),
     usage: usageFor(db, orgId),
     reports: reportsFor(db, orgId),
+    topics: topicsFor(db, orgId),
   };
 }
