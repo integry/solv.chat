@@ -255,6 +255,41 @@ describe("parseSourceInput", () => {
   });
 });
 
+describe("parseSourceInput sync settings", () => {
+  it("keeps a valid schedule and removal limit, and leaves both out when not given", () => {
+    const daily = parseSourceInput({
+      kind: "sitemap",
+      label: "Site",
+      settings: { url: "https://example.com/sitemap.xml", sync: "daily", maxRemovePercent: 20 },
+    });
+    expect(daily).toEqual({
+      ok: true,
+      value: {
+        kind: "sitemap",
+        label: "Site",
+        settings: { url: "https://example.com/sitemap.xml", sync: "daily", maxRemovePercent: 20 },
+      },
+    });
+  });
+
+  it.each([
+    [{ sync: "hourly" }, "settings.sync:"],
+    [{ sync: true }, "settings.sync:"],
+    [{ maxRemovePercent: 0 }, "settings.maxRemovePercent:"],
+    [{ maxRemovePercent: 101 }, "settings.maxRemovePercent:"],
+    [{ maxRemovePercent: 12.5 }, "settings.maxRemovePercent:"],
+    [{ maxRemovePercent: "50" }, "settings.maxRemovePercent:"],
+  ])("refuses %o", (extra, field) => {
+    const result = parseSourceInput({
+      kind: "sitemap",
+      label: "Site",
+      settings: { url: "https://example.com/sitemap.xml", ...extra },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.some((e) => e.startsWith(field))).toBe(true);
+  });
+});
+
 describe("parseDocumentInput", () => {
   it("parses a valid document and drops unknown keys", () => {
     const input = {

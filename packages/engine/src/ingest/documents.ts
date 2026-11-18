@@ -18,6 +18,9 @@ export const MAX_BATCH_DOCUMENTS = 100;
 
 export class TooLarge extends Error {}
 
+/** A sync page's run no longer held its source when the document was written; nothing was. */
+export class SyncRunEnded extends Error {}
+
 export interface SourceOptions {
   /**
    * When set, a `sourceId` in the body must name a source of this kind. The
@@ -25,6 +28,12 @@ export interface SourceOptions {
    * must not overwrite or prune hand-written answers or a sitemap import.
    */
   requireKind?: SourceKind | undefined;
+  /**
+   * A scheduled sync's page: each document row is written only while this
+   * run still holds the source, checked in the write itself. Otherwise the
+   * new body is deleted again and `SyncRunEnded` is thrown.
+   */
+  syncRun?: { runId: string; now: () => number } | undefined;
 }
 
 export interface IngestCounts {
@@ -294,7 +303,7 @@ export async function pushDocuments(
     const objectKey = documentObjectKey(scope.orgId, candidateId);
     await deps.docs.put(objectKey, document.markdown);
 
-    const saved = await deps.tenant.documents.upsert({
+    const input = {
       id: candidateId,
       sourceId: source.id,
       externalId: document.externalId,
@@ -303,7 +312,18 @@ export async function pushDocuments(
       contentHash: hash,
       bodyKey: objectKey,
       updatedAt: Date.now(),
-    });
+    };
+    const saved =
+      options.syncRun === undefined
+        ? await deps.tenant.documents.upsert(input)
+        : await deps.tenant.documents.upsertForSync(input, {
+            runId: options.syncRun.runId,
+            now: options.syncRun.now(),
+          });
+    if (saved === null) {
+      await tryDeleteObject(deps.docs, objectKey, candidateId);
+      throw new SyncRunEnded("sync run no longer holds the source");
+    }
 
     await deps.queue.send({
       orgId: scope.orgId,
@@ -326,6 +346,42 @@ export async function pushDocuments(
   }
 
   return { written, unchanged, deleted: 0 };
+}
+
+/**
+ * Deletes these documents of one source (cascading chunks) in one D1 batch,
+ * then cleans up their vectors and R2 bodies on a best-effort basis. Returns
+ * how many rows were actually removed.
+ */
+export async function removeSourceDocuments(
+  deps: DeleteDeps,
+  sourceId: string,
+  toDelete: ReadonlyArray<{ id: string; bodyKey: string | null }>,
+): Promise<number> {
+  // One D1 batch for every row, then batched cleanup: a large source or
+  // prune stays within the per-request query and subrequest limits instead
+  // of costing several calls per document.
+  const removed = await deps.tenant.documents.removeMany(toDelete.map((doc) => doc.id));
+
+  const vectorIds = [...removed.values()].flat();
+  if (vectorIds.length > 0) {
+    try {
+      await deps.retriever.remove(vectorIds);
+    } catch (err) {
+      console.warn("ingest delete: best-effort vector cleanup failed", {
+        sourceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const bodyKeys = toDelete
+    .filter((doc) => removed.has(doc.id) && doc.bodyKey !== null)
+    .map((doc) => doc.bodyKey as string);
+  for (let i = 0; i < bodyKeys.length; i += R2_DELETE_KEYS_LIMIT) {
+    await tryDeleteObject(deps.docs, bodyKeys.slice(i, i + R2_DELETE_KEYS_LIMIT), sourceId);
+  }
+  return removed.size;
 }
 
 /**
@@ -375,30 +431,7 @@ export async function deleteDocuments(
         )
       : await deps.tenant.documents.getByExternalIds(source.id, externalIds);
 
-  // One D1 batch for every row, then batched cleanup: a large source or
-  // prune stays within the per-request query and subrequest limits instead
-  // of costing several calls per document.
-  const removed = await deps.tenant.documents.removeMany(toDelete.map((doc) => doc.id));
-  const deleted = removed.size;
-
-  const vectorIds = [...removed.values()].flat();
-  if (vectorIds.length > 0) {
-    try {
-      await deps.retriever.remove(vectorIds);
-    } catch (err) {
-      console.warn("ingest delete: best-effort vector cleanup failed", {
-        sourceId: source.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  const bodyKeys = toDelete
-    .filter((doc) => removed.has(doc.id) && doc.bodyKey !== null)
-    .map((doc) => doc.bodyKey as string);
-  for (let i = 0; i < bodyKeys.length; i += R2_DELETE_KEYS_LIMIT) {
-    await tryDeleteObject(deps.docs, bodyKeys.slice(i, i + R2_DELETE_KEYS_LIMIT), source.id);
-  }
+  const deleted = await removeSourceDocuments(deps, source.id, toDelete);
 
   return { written: 0, unchanged: 0, deleted };
 }

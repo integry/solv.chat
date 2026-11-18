@@ -55,10 +55,14 @@ export async function updateSource(
     throw new BadRequest(["body: must be a JSON object"]);
   }
 
+  // Settings are merged into the stored ones, so changing one field (the
+  // sync schedule, say) keeps the others.
   const parsed = parseSourceInput({
     kind: existing.kind,
     label: body.label ?? existing.label,
-    settings: body.settings ?? existing.settings,
+    settings: isPlainObject(body.settings)
+      ? { ...existing.settings, ...body.settings }
+      : (body.settings ?? existing.settings),
   });
   if (!parsed.ok) throw new BadRequest(parsed.errors);
 

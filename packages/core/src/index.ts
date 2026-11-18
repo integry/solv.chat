@@ -57,12 +57,16 @@ export {
 } from "./schemas/questionLink.js";
 export { isPlainObject } from "./schemas/shared.js";
 export {
+  DEFAULT_SYNC_MAX_REMOVE_PERCENT,
   type EntryInput,
   formatEntryMarkdown,
   parseEntryInput,
   parseSourceInput,
+  type SitemapSourceSettings,
   type SourceInput,
   type SourceKind,
+  SYNC_SCHEDULES,
+  type SyncSchedule,
 } from "./schemas/source.js";
 export {
   type ActionsConfig,
