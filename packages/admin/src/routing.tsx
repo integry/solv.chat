@@ -75,7 +75,7 @@ const ORG_SCREENS: ReadonlySet<string> = new Set(["providers"]);
 export function navItemAddress(item: NavItem, assistantId: string | null): string {
   const builtin = NAV_ITEMS.some((builtinItem) => builtinItem.id === item.id);
   if (assistantId === null || !builtin || ORG_SCREENS.has(item.id)) return item.path;
-  return assistantPath(item.path, assistantId);
+  return screenAddress(item.path, { assistant: assistantId });
 }
 
 /** "Set it up" screens: the header offers Publish here. */
@@ -170,16 +170,6 @@ export function navigateTo(path: string): void {
 }
 
 /**
- * The address of one assistant's screen, e.g. its Gaps. It names the
- * assistant, so a link opened in a new tab (where the shell starts from the
- * address) shows that assistant rather than the first one. Organisation-wide
- * screens such as Providers need no assistant.
- */
-export function assistantPath(path: string, assistantId: string): string {
-  return `${path}?${new URLSearchParams({ assistant: assistantId }).toString()}`;
-}
-
-/**
  * The current address with `assistantId` as its assistant. On a built-in
  * screen an open conversation (`id`) belongs to the assistant it was opened
  * under, so it is dropped; the rest of the query (a search, say) stays. With
@@ -212,14 +202,23 @@ export function dropQueryParams(names: readonly string[]): void {
 }
 
 /**
- * Sets one query parameter of the current address (or drops it, for null),
+ * Sets query parameters of the current address (dropping those set to null),
  * without a new history entry. The rest of the query stays.
  */
-export function replaceQueryParam(name: string, value: string | null): void {
+export function replaceQueryParams(values: Readonly<Record<string, string | null>>): void {
   const params = new URLSearchParams(window.location.search);
-  if (value === null ? !params.has(name) : params.get(name) === value) return;
-  if (value === null) params.delete(name);
-  else params.set(name, value);
+  const entries = Object.entries(values);
+  if (
+    entries.every(([name, value]) =>
+      value === null ? !params.has(name) : params.get(name) === value,
+    )
+  ) {
+    return;
+  }
+  for (const [name, value] of entries) {
+    if (value === null) params.delete(name);
+    else params.set(name, value);
+  }
   const query = params.toString();
   const address = query === "" ? window.location.pathname : `${window.location.pathname}?${query}`;
   window.history.replaceState(window.history.state, "", address);
@@ -248,6 +247,12 @@ export function useRoute(
    * Forward that is no longer going ahead moved it. Otherwise does nothing.
    */
   restore: () => void;
+  /**
+   * Corrects the current address in place (no new history entry), e.g. an
+   * assistant the address names that is not in the list. Screens that follow
+   * the address hear about it as they do a move.
+   */
+  replaceAddress: (path: string) => void;
 } {
   const [screen, setScreen] = useState<string | null>(() =>
     matchScreen(window.location.pathname, navItems, defaultScreen),
@@ -337,6 +342,15 @@ export function useRoute(
     [showAddress],
   );
 
+  const replaceAddress = useCallback(
+    (path: string) => {
+      window.history.replaceState(window.history.state, "", path);
+      showAddress();
+      window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+    },
+    [showAddress],
+  );
+
   const shows = useCallback(
     (path: string) => matchScreen(pathOf(path), navItems, defaultScreen) === screenRef.current,
     [navItems, defaultScreen],
@@ -357,13 +371,15 @@ export function useRoute(
     const path = navItems.find((item) => item.id === screenRef.current)?.path;
     if (path) {
       const address =
-        assistantRef.current === null ? path : assistantPath(path, assistantRef.current);
+        assistantRef.current === null
+          ? path
+          : screenAddress(path, { assistant: assistantRef.current });
       window.history.pushState(withHistoryIndex(null, committed + 1), "", address);
       indexRef.current = committed + 1;
     }
   }, [navItems, defaultScreen]);
 
-  return { screen, assistant, navigate, shows, restore };
+  return { screen, assistant, navigate, shows, restore, replaceAddress };
 }
 
 /** How a screen moves to another screen: through the shell, so its checks apply. */

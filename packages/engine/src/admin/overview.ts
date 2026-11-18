@@ -3,13 +3,12 @@ import type { TopQuestionRow } from "../db/messages.js";
 import type { NotIndexedSource } from "../db/sources.js";
 import type { Tenant } from "../db/tenant.js";
 import type { EffectiveProviderSettings } from "../providers/config.js";
-import { utcDay } from "../util/time.js";
+import { DAY_MS, utcDay } from "../util/time.js";
 import { NotFound } from "./errors.js";
 import { type PeriodFigures, periodFigures, rangeFor } from "./reports.js";
 
 /** The Overview's stated period: the last 7 days, against the 7 before. */
 export const OVERVIEW_DAYS = 7;
-const DAY_MS = 86_400_000;
 /**
  * A document still not indexed this long after it was written, with no failure
  * recorded, is reported as waiting. A recorded failure is reported at once.

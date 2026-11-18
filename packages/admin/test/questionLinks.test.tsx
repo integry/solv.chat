@@ -13,9 +13,9 @@ import { findAssistantButton, pickAssistant, selectedAssistantId } from "./suppo
 
 /**
  * A most-asked question in Overview or Reports leads to the conversations that
- * asked it. The link has to work when opened in a new tab (where the shell
- * starts from the address alone), for any assistant, and for a question
- * longer than the conversation search accepts.
+ * asked it, by the grouped question its count is for. The link has to work
+ * when opened in a new tab (where the shell starts from the address alone),
+ * for any assistant, and for a question longer than the search box accepts.
  */
 
 const NOW = Date.UTC(2026, 10, 16, 12, 0, 0);
@@ -81,7 +81,11 @@ function conversationOf(assistantId: string): ConversationSummary {
  * search the way the engine does.
  */
 function installServer(question: string) {
-  const conversationRequests: Array<{ assistantId: string; q: string | null }> = [];
+  const conversationRequests: Array<{
+    assistantId: string;
+    q: string | null;
+    question?: string | null;
+  }> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
@@ -101,7 +105,10 @@ function installServer(question: string) {
       if (resource === "overview") return Response.json(overview(asked));
       if (resource === "report") return Response.json(report(asked));
       const q = url.searchParams.get("q");
-      conversationRequests.push({ assistantId, q });
+      const askedQuestion = url.searchParams.get("question");
+      conversationRequests.push(
+        askedQuestion === null ? { assistantId, q } : { assistantId, q, question: askedQuestion },
+      );
       if (q !== null && q.length > MAX_CONVERSATION_SEARCH_LENGTH) {
         return Response.json(
           { error: `q: must be at most ${MAX_CONVERSATION_SEARCH_LENGTH} characters` },
@@ -166,20 +173,23 @@ describe("question links from Overview and Reports", () => {
         const href = link.getAttribute("href") ?? "";
         const params = new URL(href, "https://example.com").searchParams;
         expect(params.get("assistant")).toBe(SECOND.id);
-        const q = params.get("q") ?? "";
-        expect(q.length).toBeGreaterThan(0);
-        expect(q.length).toBeLessThanOrEqual(MAX_CONVERSATION_SEARCH_LENGTH);
-        // The search keeps the start of the question, so it still finds it.
-        expect(question.startsWith(q)).toBe(true);
+        // The grouped question itself, whole: not a search for its words.
+        expect(params.get("question")).toBe(question);
+        expect(params.has("q")).toBe(false);
 
         conversationRequests.length = 0;
         await openInNewTab(href);
 
         expect(await screen.findByText(`A question asked of ${SECOND.id}`)).toBeTruthy();
         expect(selectedAssistantId()).toBe(SECOND.id);
-        expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe(q);
+        expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe("");
+        expect(screen.getByText(`Asked: “${question.trim()}”`)).toBeTruthy();
         expect(screen.queryByText("Could not load conversations.")).toBeNull();
-        expect(conversationRequests).toContainEqual({ assistantId: SECOND.id, q });
+        expect(conversationRequests).toContainEqual({
+          assistantId: SECOND.id,
+          q: null,
+          question: question.trim(),
+        });
         expect(conversationRequests.some((r) => r.assistantId === FIRST.id)).toBe(false);
       },
     );

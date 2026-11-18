@@ -3,10 +3,9 @@ import { useEffect, useId, useState } from "react";
 import type { ConversationSummary, ConversationsPage } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import {
-  assistantPath,
   navigateTo,
   readQueryParam,
-  replaceQueryParam,
+  replaceQueryParams,
   ScreenLink,
   screenAddress,
   useAdminNavigation,
@@ -45,6 +44,55 @@ const DATE_OPTIONS = [
   { value: "90", label: "Last 90 days" },
 ] as const;
 
+/** The `filter` value for a set of flags, in the order the chips show them. */
+function flagsParam(flags: ReadonlySet<FlagKey>): string {
+  return FLAGS.filter((flag) => flags.has(flag.key))
+    .map((flag) => flag.key)
+    .join(",");
+}
+
+/** The flags an address names; names that are not flags are left out. */
+function flagsOf(raw: string | null): ReadonlySet<FlagKey> {
+  const named = new Set((raw ?? "").split(",").map((part) => part.trim()));
+  return new Set(FLAGS.filter((flag) => named.has(flag.key)).map((flag) => flag.key));
+}
+
+/** The date choice an address names, or "" (any time) for one the list does not offer. */
+function daysOf(raw: string | null): string {
+  return DATE_OPTIONS.some((option) => option.value !== "" && option.value === raw)
+    ? (raw ?? "")
+    : "";
+}
+
+/** What the list shows, as kept in the address. */
+interface ListView {
+  search: string;
+  flags: ReadonlySet<FlagKey>;
+  days: string;
+  /** A grouped question from Reports or Overview: only conversations that asked it. */
+  question: string;
+}
+
+function viewOf(address: ConversationsAddress): ListView {
+  return {
+    search: toConversationSearch(address.q ?? ""),
+    flags: flagsOf(address.filter),
+    days: daysOf(address.days),
+    question: (address.question ?? "").trim(),
+  };
+}
+
+/** The address query for a view; what is not set is left out. */
+function viewQuery(view: ListView): Record<string, string> {
+  const filter = flagsParam(view.flags);
+  return {
+    ...(view.search === "" ? {} : { q: view.search }),
+    ...(filter === "" ? {} : { filter }),
+    ...(view.days === "" ? {} : { days: view.days }),
+    ...(view.question === "" ? {} : { question: view.question }),
+  };
+}
+
 /**
  * A conversation's address names its assistant too, so a shared link opens
  * under the right assistant and switching assistants does not carry it over.
@@ -55,7 +103,7 @@ function conversationQuery(conv: ConversationSummary): Record<string, string> {
 
 /**
  * The address as last arrived at: the first one, then each move, Back and
- * Forward (`popstate`). The screen's own `replaceQueryParam` writes are not
+ * Forward (`popstate`). The screen's own `replaceQueryParams` writes are not
  * moves, so they leave it as it was.
  */
 interface ConversationsAddress {
@@ -63,6 +111,9 @@ interface ConversationsAddress {
   id: string | null;
   assistant: string | null;
   q: string | null;
+  filter: string | null;
+  days: string | null;
+  question: string | null;
 }
 
 function readAddress(): ConversationsAddress {
@@ -71,6 +122,9 @@ function readAddress(): ConversationsAddress {
     id: readQueryParam("id"),
     assistant: readQueryParam("assistant"),
     q: readQueryParam("q"),
+    filter: readQueryParam("filter"),
+    days: readQueryParam("days"),
+    question: readQueryParam("question"),
   };
 }
 
@@ -95,7 +149,11 @@ function useConversationsAddress(assistantId: string): {
   const otherAssistant = address.assistant !== null && address.assistant !== assistantId;
   useEffect(() => {
     if (otherAssistant && address.id !== null) {
-      window.history.replaceState(window.history.state, "", assistantPath(LIST_PATH, assistantId));
+      window.history.replaceState(
+        window.history.state,
+        "",
+        screenAddress(LIST_PATH, { assistant: assistantId }),
+      );
       setAddress(readAddress());
     }
   }, [otherAssistant, address.id, assistantId]);
@@ -168,30 +226,49 @@ export function Conversations({ assistantId }: ConversationsProps) {
   const { openId, address } = useConversationsAddress(assistantId);
   const { shows } = useAdminNavigation();
   const [offset, setOffset] = useState(0);
-  const [searchInput, setSearchInput] = useState(() => toConversationSearch(address.q ?? ""));
+  const [initialView] = useState(() => viewOf(address));
+  const [searchInput, setSearchInput] = useState(initialView.search);
   // What is sent: the box, cut to the length the list accepts. A pasted
   // question longer than that still finds its conversations by its start.
-  const [search, setSearch] = useState(() => toConversationSearch(searchInput));
-  // Back, Forward and links that arrive at the list bring its search with
-  // them: the address is what the screen shows. Followed during render, not
-  // in an effect, so the effect below that writes the search into the address
-  // never sees the arrived address beside the search it replaced. An address
-  // with the search already on show leaves the box as it is (a switch of
-  // assistant mid-typing, say).
+  const [search, setSearch] = useState(initialView.search);
+  const [flags, setFlags] = useState<ReadonlySet<FlagKey>>(initialView.flags);
+  const [days, setDays] = useState(initialView.days);
+  const [question, setQuestion] = useState(initialView.question);
+  // Back, Forward and links that arrive at the list bring what it shows with
+  // them (search, flags, dates, question): the address is what the screen
+  // shows. Followed during render, not in an effect, so the effect below that
+  // writes the view into the address never sees the arrived address beside
+  // the view it replaced. A part already on show is left as it is (the box
+  // mid-typing, on a switch of assistant, say).
   const [followedAddress, setFollowedAddress] = useState(address);
   if (followedAddress !== address) {
     setFollowedAddress(address);
     if (isListAddress(address, assistantId, shows)) {
-      const arrived = toConversationSearch(address.q ?? "");
-      if (arrived !== search) {
-        setSearchInput(arrived);
-        setSearch(arrived);
-        setOffset(0);
+      const arrived = viewOf(address);
+      let changed = false;
+      if (arrived.search !== search) {
+        setSearchInput(arrived.search);
+        setSearch(arrived.search);
+        changed = true;
       }
+      if (flagsParam(arrived.flags) !== flagsParam(flags)) {
+        setFlags(arrived.flags);
+        changed = true;
+      }
+      if (arrived.days !== days) {
+        setDays(arrived.days);
+        changed = true;
+      }
+      if (arrived.question !== question) {
+        setQuestion(arrived.question);
+        changed = true;
+      }
+      if (changed) setOffset(0);
     }
   }
-  const [flags, setFlags] = useState<ReadonlySet<FlagKey>>(new Set());
-  const [days, setDays] = useState("");
+  const view: ListView = { search, flags, days, question };
+  const query = viewQuery(view);
+  const queryKey = new URLSearchParams(query).toString();
   const searchId = useId();
   const dateId = useId();
 
@@ -206,22 +283,29 @@ export function Conversations({ assistantId }: ConversationsProps) {
     return () => clearTimeout(timer);
   }, [searchInput, search]);
 
-  // The search is kept in the address, so a reload, a copied link and an
-  // assistant switch (which keeps the query) show the search on screen, and a
-  // cleared search stays cleared. Only while the list is what the address
-  // shows, at any path the router takes here: a Back waiting for an answer
-  // has moved it to another place.
+  // What the list shows (search, flags, dates, question) is kept in the
+  // address, so a reload, a copied link and an assistant switch (which keeps
+  // the query) show the same list, and a cleared filter stays cleared. Only
+  // while the list is what the address shows, at any path the router takes
+  // here: a Back waiting for an answer has moved it to another place.
   useEffect(() => {
     if (openId !== null || !shows(window.location.pathname)) return;
     const named = readQueryParam("assistant");
     if (named !== null && named !== assistantId) return;
-    replaceQueryParam("q", search === "" ? null : search);
-  }, [search, openId, assistantId, shows]);
+    const values = Object.fromEntries(new URLSearchParams(queryKey));
+    replaceQueryParams({
+      q: values.q ?? null,
+      filter: values.filter ?? null,
+      days: values.days ?? null,
+      question: values.question ?? null,
+    });
+  }, [queryKey, openId, assistantId, shows]);
 
-  const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
-  if (flags.size > 0) params.set("filter", [...flags].join(","));
-  if (days !== "") params.set("days", days);
-  if (search !== "") params.set("q", search);
+  const params = new URLSearchParams({
+    limit: String(PAGE_SIZE),
+    offset: String(offset),
+    ...query,
+  });
   const listRes = useResource<ConversationsPage>(
     `/api/admin/assistants/${assistantId}/conversations?${params.toString()}`,
   );
@@ -249,13 +333,8 @@ export function Conversations({ assistantId }: ConversationsProps) {
         assistantId={assistantId}
         conversationId={openId}
         onBack={() => {
-          // The list comes back with the search it had, in the address too.
-          navigateTo(
-            screenAddress(LIST_PATH, {
-              assistant: assistantId,
-              ...(search === "" ? {} : { q: search }),
-            }),
-          );
+          // The list comes back as it was, in the address too.
+          navigateTo(screenAddress(LIST_PATH, { assistant: assistantId, ...query }));
           listRes.reload();
         }}
       />
@@ -263,7 +342,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
   }
 
   const page = listRes.value;
-  const filtered = flags.size > 0 || days !== "" || search !== "";
+  const filtered = flags.size > 0 || days !== "" || search !== "" || question !== "";
   const hasPrevious = offset > 0;
   const hasNext = page ? offset + page.limit < page.total : false;
   const updating = listRes.status === "loading" && page !== undefined;
@@ -281,6 +360,7 @@ export function Conversations({ assistantId }: ConversationsProps) {
   function clearFilters() {
     setFlags(new Set());
     setDays("");
+    setQuestion("");
     setSearchInput("");
     setSearch("");
     setOffset(0);
@@ -349,6 +429,25 @@ export function Conversations({ assistantId }: ConversationsProps) {
           </select>
         </div>
       </form>
+
+      {question !== "" && (
+        <div className="list-question">
+          <span className="list-question-text" title={question}>
+            Asked: “{question}”
+          </span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            aria-label={`Remove “Asked: ${question}”`}
+            onClick={() => {
+              setQuestion("");
+              setOffset(0);
+            }}
+          >
+            Remove
+          </button>
+        </div>
+      )}
 
       {listRes.status === "error" ? (
         <ErrorState

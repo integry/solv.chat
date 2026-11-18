@@ -5,9 +5,11 @@ import type {
   ConversationSummaryRow,
 } from "../db/conversations.js";
 import type { FeedbackValue } from "../db/feedback.js";
-import type { Citation, MessageRole } from "../db/messages.js";
+import { type Citation, type MessageRole, normalizeQuestionText } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
+import { DAY_MS } from "../util/time.js";
 import { BadRequest, NotFound } from "./errors.js";
+import { MAX_QUESTION_KEY } from "./gaps.js";
 
 export interface ConversationFeedback {
   id: string;
@@ -88,13 +90,13 @@ const FILTER_FLAGS = {
 /** Date presets the Conversations screen offers. */
 export const CONVERSATION_DAY_OPTIONS = [1, 7, 30, 90] as const;
 
-const DAY_MS = 86_400_000;
-// Shared with the admin, whose question links bound their search to it.
+// Shared with the admin, which bounds the search it sends to it.
 const MAX_SEARCH = MAX_CONVERSATION_SEARCH_LENGTH;
 
 /**
- * Reads `?filter=unanswered,not_helpful,used_tool`, `?days=1|7|30|90` and
- * `?q=text` from a list request. Unknown values are refused rather than
+ * Reads `?filter=unanswered,not_helpful,used_tool`, `?days=1|7|30|90`,
+ * `?q=text` and `?question=` (a grouped question, matched by its key, as
+ * Reports and Overview count it) from a list request. Unknown values are refused rather than
  * ignored, so a typo does not silently show every conversation.
  */
 export function readConversationFilter(url: URL, now: number = Date.now()): ConversationFilter {
@@ -126,6 +128,16 @@ export function readConversationFilter(url: URL, now: number = Date.now()): Conv
     errors.push(`q: must be at most ${MAX_SEARCH} characters`);
   } else if (search !== "") {
     filter.search = search;
+  }
+  const rawQuestion = url.searchParams.get("question");
+  if (rawQuestion !== null && rawQuestion.trim() !== "") {
+    // Normalised again, as a dismissal is, so the display text finds its group.
+    const question = normalizeQuestionText(rawQuestion);
+    if (question.length > MAX_QUESTION_KEY) {
+      errors.push(`question: must be at most ${MAX_QUESTION_KEY} characters`);
+    } else {
+      filter.question = question;
+    }
   }
   if (errors.length > 0) throw new BadRequest(errors);
   return filter;

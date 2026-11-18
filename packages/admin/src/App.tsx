@@ -11,10 +11,10 @@ import {
 import {
   type AdminNavigation,
   AdminNavigationContext,
-  assistantPath,
   BUILD_SCREENS,
   type BuiltinScreenId,
   MONITOR_SCREENS,
+  screenAddress,
   useRoute,
   withAssistant,
 } from "./routing.js";
@@ -204,6 +204,7 @@ function AdminShell({
     navigate,
     shows,
     restore,
+    replaceAddress,
   } = useRoute(config.navItems, config.defaultScreen, guardLeave);
   restoreRef.current = restore;
 
@@ -271,7 +272,7 @@ function AdminShell({
       // A Back or Forward is waiting, so the address belongs to another
       // screen: the switch keeps the screen on show, at its own address.
       const path = config.navItems.find((item) => item.id === screen)?.path;
-      if (path) navigate(assistantPath(path, id));
+      if (path) navigate(screenAddress(path, { assistant: id }));
     },
     [navigate, shows, screen, config.navItems, config.extraScreenIds],
   );
@@ -321,7 +322,7 @@ function AdminShell({
   function handleFirstRunCreated(created: CreatedAssistant) {
     handleCreated(created);
     const sources = config.navItems.find((item) => item.id === "sources");
-    if (sources) navigate(assistantPath(sources.path, created.assistant.id));
+    if (sources) navigate(screenAddress(sources.path, { assistant: created.assistant.id }));
   }
 
   async function handleSignOut() {
@@ -347,6 +348,24 @@ function AdminShell({
       ? selectedId
       : (assistants[0]?.id ?? null);
   const selectedAssistant = assistants.find((a) => a.id === effectiveSelectedId) ?? null;
+  // An address naming an assistant that is not in the list shows the first
+  // one instead. Once the list has loaded, the address is corrected to name
+  // the one on show (in place, keeping the rest of the query), so screens
+  // that compare the two, and keep their state in the address, work as usual.
+  // An open conversation (`id`) belonged to the unknown one and is dropped.
+  const listLoaded = assistantsRes.value !== undefined;
+  const unknownAddressAssistant =
+    listLoaded &&
+    addressAssistant !== null &&
+    effectiveSelectedId !== null &&
+    !assistants.some((a) => a.id === addressAssistant);
+  const hostScreen = screen !== null && config.extraScreenIds.has(screen);
+  useEffect(() => {
+    if (!unknownAddressAssistant || effectiveSelectedId === null) return;
+    // A Back or Forward waiting for an answer: the address is another screen's.
+    if (!shows(window.location.pathname)) return;
+    replaceAddress(withAssistant(effectiveSelectedId, { keepQuery: hostScreen }));
+  }, [unknownAddressAssistant, effectiveSelectedId, hostScreen, shows, replaceAddress]);
   const selectedMutation = useAssistantMutation(effectiveSelectedId ?? "");
   const saving = selectedMutation.saving;
   unsavedRef.current = selectedMutation.unsaved;

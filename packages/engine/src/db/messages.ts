@@ -103,9 +103,18 @@ export function normalizeQuestionText(text: string): string {
  * grouped question still finds the messages it was grouped from. The same
  * function folds the stored text and the search, so both sides agree
  * (SQLite's `lower()` only folds ASCII).
+ *
+ * Final sigma "ς" becomes "σ". Lowercasing picks between the two from the
+ * letters around a capital "Σ", so the same letter folds one way at the end
+ * of a search ("ΚΌΣ" gives "κός") and the other inside a stored word
+ * ("κόσμος"): with one form on both sides a prefix still matches. It is the
+ * only lowercase mapping that depends on context. Migration 0020 applies the
+ * same to text folded before this.
  */
 export function searchableText(text: string): string {
-  return collapseWhitespace(text.normalize("NFC").toLowerCase().normalize("NFC"));
+  return collapseWhitespace(
+    text.normalize("NFC").toLowerCase().normalize("NFC").replaceAll("ς", "σ"),
+  );
 }
 
 // Older rows `fillSearchText` folds per call: at most 2 D1 queries a round,
@@ -125,6 +134,7 @@ const QUALIFIED_COLUMNS =
  * Unanswered replies joined to the question each one answers, through the
  * recorded `reply_to` link. `?1` org, `?2` assistant. A question asked before
  * the owner dismissed its group is left out; one asked after shows again.
+ * Each row carries the newest answer written from it, if any, and when.
  */
 const GAP_ROWS = `
   SELECT q.id AS question_id,
@@ -136,7 +146,10 @@ const GAP_ROWS = `
             FROM gap_answers ga
            WHERE ga.org_id = a.org_id AND ga.message_id IN (q.id, a.id)
            ORDER BY ga.created_at DESC
-           LIMIT 1) AS document_id
+           LIMIT 1) AS document_id,
+         (SELECT MAX(ga.created_at)
+            FROM gap_answers ga
+           WHERE ga.org_id = a.org_id AND ga.message_id IN (q.id, a.id)) AS answered_at
     FROM messages a
     JOIN conversations c ON c.id = a.conversation_id AND c.org_id = a.org_id
     JOIN messages q ON q.org_id = a.org_id
@@ -156,6 +169,33 @@ const GAP_ROWS = `
           AND gd.question_key = q.question_key
           AND gd.dismissed_at >= q.created_at
      )`;
+
+/**
+ * One row per gap group, from `gap` (`GAP_ROWS`): its key, how often and when
+ * it was last asked, and the answer document. Like a dismissal, a written
+ * answer only covers the asks before it: a group asked again after its newest
+ * answer is open again, with no document, and counts as open everywhere.
+ */
+const GAP_GROUPS = `
+  SELECT question_key, question_content, asked_at, question_id, times,
+         CASE WHEN group_answered_at >= asked_at THEN group_document_id END AS group_document_id
+    FROM (
+      SELECT question_key, question_content, asked_at, question_id,
+             ROW_NUMBER() OVER (
+               PARTITION BY question_key ORDER BY asked_at DESC, question_rowid DESC
+             ) AS rn,
+             COUNT(*) OVER (PARTITION BY question_key) AS times,
+             MAX(answered_at) OVER (PARTITION BY question_key) AS group_answered_at,
+             FIRST_VALUE(document_id) OVER (
+               PARTITION BY question_key
+               ORDER BY answered_at IS NULL, answered_at DESC, asked_at DESC, question_rowid DESC
+             ) AS group_document_id
+        FROM gap
+    )
+   WHERE rn = 1`;
+
+/** The gap groups CTEs: `gap` rows, then `gap_group` rows. `?1` org, `?2` assistant. */
+export const GAP_GROUP_CTES = `gap AS (${GAP_ROWS}), gap_group AS (${GAP_GROUPS})`;
 
 const map = (row: Row): MessageRow => ({
   id: row.id,
@@ -411,11 +451,7 @@ export function messagesFor(db: D1Database, orgId: string) {
      * Each write also needs `content` to be what was read: an older Worker
      * can rewrite `content` alone between the read and the write, leaving
      * `search_text` NULL, and the fold of the old text must not land then.
-     * Such a row stays NULL and is read again in the next round. A row read
-     * again with the same text it was skipped with has not changed: its text
-     * does not compare equal to itself once read and bound again, so waiting
-     * would leave it NULL for good and every search pending. It is folded
-     * without the comparison.
+     * Such a row stays NULL and is read again in the next round.
      * Each call folds a bounded number of rows: true means none are left,
      * false that some may be.
      */
@@ -428,11 +464,6 @@ export function messagesFor(db: D1Database, orgId: string) {
         db,
         `UPDATE messages SET search_text = ?3
           WHERE org_id = ?1 AND id = ?2 AND search_text IS NULL AND content = ?4`,
-      );
-      const updateUnchecked = prepare(
-        db,
-        `UPDATE messages SET search_text = ?3
-          WHERE org_id = ?1 AND id = ?2 AND search_text IS NULL`,
       );
       const assistantId = options.assistantId;
       const read = () =>
@@ -449,27 +480,17 @@ export function messagesFor(db: D1Database, orgId: string) {
                 WHERE m.org_id = ?1 AND m.search_text IS NULL AND c.assistant_id = ?3
                 LIMIT ?2`,
             ).bind(orgId, batch, assistantId);
-      // The text each skipped row had when it was read.
-      const skippedWith = new Map<string, string>();
       for (let round = 0; round < rounds; round++) {
         const pending = await read().all<{ id: string; content: string }>();
         if (pending.results.length === 0) return true;
         const written = await db.batch(
           pending.results.map((row) =>
-            skippedWith.get(row.id) === row.content
-              ? updateUnchecked.bind(orgId, row.id, searchableText(row.content))
-              : update.bind(orgId, row.id, searchableText(row.content), row.content),
+            update.bind(orgId, row.id, searchableText(row.content), row.content),
           ),
         );
         // A row not written may still be NULL (its text changed since the
         // read), however short this round was: the next round reads again.
-        let skipped = false;
-        written.forEach((res, i) => {
-          const row = pending.results[i];
-          if (row === undefined || (res.meta.changes ?? 0) > 0) return;
-          skipped = true;
-          skippedWith.set(row.id, row.content);
-        });
+        const skipped = written.some((res) => (res.meta.changes ?? 0) === 0);
         if (pending.results.length < batch && !skipped) return true;
       }
       return false;
@@ -580,34 +601,17 @@ export function messagesFor(db: D1Database, orgId: string) {
       const [rows, count] = await db.batch([
         prepare(
           db,
-          `WITH gap AS (${GAP_ROWS}),
-           ranked AS (
-             SELECT question_key, question_content, asked_at, question_id,
-                    ROW_NUMBER() OVER (
-                      PARTITION BY question_key ORDER BY asked_at DESC, question_rowid DESC
-                    ) AS rn,
-                    COUNT(*) OVER (PARTITION BY question_key) AS times,
-                    FIRST_VALUE(document_id) OVER (
-                      PARTITION BY question_key
-                      ORDER BY document_id IS NULL, asked_at DESC, question_rowid DESC
-                    ) AS group_document_id
-               FROM gap
-           )
+          `WITH ${GAP_GROUP_CTES}
            SELECT question_key, question_content, asked_at, question_id, times, group_document_id
-             FROM ranked
-            WHERE rn = 1 AND (?5 = 0 OR group_document_id IS NULL)
+             FROM gap_group
+            WHERE (?5 = 0 OR group_document_id IS NULL)
             ORDER BY times DESC, asked_at DESC, question_id DESC
             LIMIT ?3 OFFSET ?4`,
         ).bind(orgId, assistantId, page.limit, page.offset, openOnly),
         prepare(
           db,
-          `WITH gap AS (${GAP_ROWS}),
-           grouped AS (
-             SELECT question_key, MAX(document_id) AS group_document_id
-               FROM gap
-              GROUP BY question_key
-           )
-           SELECT COUNT(*) AS total FROM grouped WHERE (?3 = 0 OR group_document_id IS NULL)`,
+          `WITH ${GAP_GROUP_CTES}
+           SELECT COUNT(*) AS total FROM gap_group WHERE (?3 = 0 OR group_document_id IS NULL)`,
         ).bind(orgId, assistantId, openOnly),
       ]);
 
@@ -665,7 +669,8 @@ export function messagesFor(db: D1Database, orgId: string) {
         `INSERT INTO gap_answers (org_id, message_id, document_id, created_at)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(org_id, message_id) DO UPDATE SET
-           document_id = excluded.document_id`,
+           document_id = excluded.document_id,
+           created_at = excluded.created_at`,
       )
         .bind(orgId, messageId, documentId, createdAt)
         .run();

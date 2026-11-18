@@ -633,7 +633,7 @@ describe("Monitor screens", () => {
 
       const asked = await screen.findByRole("link", { name: "how do i reset my password?" });
       expect(asked.getAttribute("href")).toBe(
-        `/admin/conversations?q=how+do+i+reset+my+password%3F&assistant=${ASSISTANT.id}`,
+        `/admin/conversations?question=how+do+i+reset+my+password%3F&assistant=${ASSISTANT.id}`,
       );
       const csv = screen.getByRole("button", { name: "Download CSV" });
       const hint = document.getElementById(csv.getAttribute("aria-describedby") ?? "");
@@ -646,9 +646,8 @@ describe("Monitor screens", () => {
 
       fireEvent.click(asked);
       expect(await screen.findByRole("heading", { name: "Conversations", level: 1 })).toBeTruthy();
-      expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe(
-        "how do i reset my password?",
-      );
+      expect(screen.getByText("Asked: “how do i reset my password?”")).toBeTruthy();
+      expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe("");
     });
 
     it("shows a compact empty state for each list with nothing in the period", async () => {
@@ -1091,6 +1090,152 @@ describe("Monitor screens", () => {
       cleanup();
       await open(`${window.location.pathname}${window.location.search}`);
       await waitFor(() => expect(selectedAssistantId()).toBe(OTHER_ASSISTANT.id));
+    });
+
+    it("keeps the flags and dates in the address, so a reload and Back show the same list", async () => {
+      const { calls } = installServer({
+        conversations: (search) => [
+          conversation({
+            firstQuestion: `Shown for ${search.get("filter") ?? "all"} ${search.get("days") ?? "any"}`,
+          }),
+        ],
+      });
+      const params = () => new URLSearchParams(window.location.search);
+      const lastRequest = () => calls.filter((c) => c.path.endsWith("/conversations")).at(-1);
+      const dates = () => screen.getByLabelText("Started") as HTMLSelectElement;
+      const chip = (name: string) => screen.getByRole("button", { name });
+
+      await open(`/admin/conversations?assistant=${ASSISTANT.id}`);
+      await screen.findByRole("link", { name: /Shown for all any/ });
+      fireEvent.click(chip("Used a tool"));
+      fireEvent.click(chip("Unanswered"));
+      fireEvent.change(dates(), { target: { value: "7" } });
+      expect(
+        await screen.findByRole("link", { name: /Shown for unanswered,used_tool 7/ }),
+      ).toBeTruthy();
+      // The chips' order, whatever order they were pressed in.
+      expect(params().get("filter")).toBe("unanswered,used_tool");
+      expect(params().get("days")).toBe("7");
+      expect(params().get("assistant")).toBe(ASSISTANT.id);
+
+      // A reload, or a copied link, shows the same list.
+      cleanup();
+      await open(`${window.location.pathname}${window.location.search}`);
+      expect(
+        await screen.findByRole("link", { name: /Shown for unanswered,used_tool 7/ }),
+      ).toBeTruthy();
+      expect(chip("Unanswered").getAttribute("aria-pressed")).toBe("true");
+      expect(chip("Used a tool").getAttribute("aria-pressed")).toBe("true");
+      expect(chip("Marked not helpful").getAttribute("aria-pressed")).toBe("false");
+      expect(dates().value).toBe("7");
+
+      // Back to the list from a conversation keeps them.
+      fireEvent.click(screen.getByRole("link", { name: /Shown for unanswered,used_tool 7/ }));
+      expect(await screen.findByText("I could not find that.")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Back to conversations" }));
+      expect(
+        await screen.findByRole("link", { name: /Shown for unanswered,used_tool 7/ }),
+      ).toBeTruthy();
+      expect(params().get("filter")).toBe("unanswered,used_tool");
+      expect(params().get("days")).toBe("7");
+
+      // Back and Forward to an entry with other filters bring those back.
+      act(() => {
+        window.history.pushState(
+          null,
+          "",
+          `/admin/conversations?filter=not_helpful&assistant=${ASSISTANT.id}`,
+        );
+        window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+      });
+      expect(await screen.findByRole("link", { name: /Shown for not_helpful any/ })).toBeTruthy();
+      expect(chip("Marked not helpful").getAttribute("aria-pressed")).toBe("true");
+      expect(chip("Unanswered").getAttribute("aria-pressed")).toBe("false");
+      expect(dates().value).toBe("");
+
+      // Cleared filters leave the address too.
+      fireEvent.click(chip("Marked not helpful"));
+      expect(await screen.findByRole("link", { name: /Shown for all any/ })).toBeTruthy();
+      expect(window.location.search).toBe(`?assistant=${ASSISTANT.id}`);
+      expect(lastRequest()?.search.has("filter")).toBe(false);
+    });
+
+    it("ignores flags and dates in an address that the list does not offer", async () => {
+      const { calls } = installServer();
+      await open(`/admin/conversations?filter=spam,unanswered&days=5&assistant=${ASSISTANT.id}`);
+      expect(await screen.findByRole("link", { name: /Do you ship to Spain\?/ })).toBeTruthy();
+      const sent = calls.filter((c) => c.path.endsWith("/conversations"));
+      expect(sent.length).toBeGreaterThan(0);
+      for (const request of sent) {
+        expect(request.search.get("filter")).toBe("unanswered");
+        expect(request.search.has("days")).toBe(false);
+      }
+      expect(screen.queryByText("Could not load conversations.")).toBeNull();
+      await waitFor(() =>
+        expect(window.location.search).toBe(`?filter=unanswered&assistant=${ASSISTANT.id}`),
+      );
+    });
+
+    it("shows the question a link asked for, and drops it on Remove", async () => {
+      const { calls } = installServer({
+        conversations: (search) => [
+          conversation({ firstQuestion: `Asked ${search.get("question") ?? "anything"}` }),
+        ],
+      });
+      await open(`/admin/conversations?question=pricing%3F&assistant=${ASSISTANT.id}`);
+      expect(await screen.findByRole("link", { name: /Asked pricing\?/ })).toBeTruthy();
+      expect(screen.getByText("Asked: “pricing?”")).toBeTruthy();
+      expect((screen.getByLabelText("Search conversations") as HTMLInputElement).value).toBe("");
+
+      fireEvent.click(screen.getByRole("button", { name: "Remove “Asked: pricing?”" }));
+      expect(await screen.findByRole("link", { name: /Asked anything/ })).toBeTruthy();
+      expect(screen.queryByText("Asked: “pricing?”")).toBeNull();
+      expect(window.location.search).toBe(`?assistant=${ASSISTANT.id}`);
+      expect(
+        calls
+          .filter((c) => c.path.endsWith("/conversations"))
+          .at(-1)
+          ?.search.has("question"),
+      ).toBe(false);
+    });
+
+    it("names the assistant on show in an address that named one not in the list", async () => {
+      const { calls } = installServer({
+        conversations: (search) => [
+          conversation({ firstQuestion: `Search ${search.get("q") ?? "none"}` }),
+        ],
+      });
+      await open("/admin/conversations?q=shipping&id=cnv_9&assistant=ast_gone");
+      expect(await screen.findByRole("link", { name: /Search shipping/ })).toBeTruthy();
+      // The rest of the query stays; the conversation of the unknown one does not.
+      await waitFor(() =>
+        expect(Object.fromEntries(new URLSearchParams(window.location.search))).toEqual({
+          q: "shipping",
+          assistant: ASSISTANT.id,
+        }),
+      );
+      expect(calls.some((c) => c.path === "/api/admin/conversations/cnv_9")).toBe(false);
+
+      // The screen keeps its search in the address as usual.
+      fireEvent.change(screen.getByLabelText("Search conversations"), {
+        target: { value: "returns" },
+      });
+      await waitFor(
+        () => expect(new URLSearchParams(window.location.search).get("q")).toBe("returns"),
+        { timeout: 2000 },
+      );
+      expect(await screen.findByRole("link", { name: /Search returns/ })).toBeTruthy();
+
+      // And follows the address on Back and Forward.
+      act(() => {
+        window.history.pushState(
+          null,
+          "",
+          `/admin/conversations?q=spain&assistant=${ASSISTANT.id}`,
+        );
+        window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+      });
+      expect(await screen.findByRole("link", { name: /Search spain/ })).toBeTruthy();
     });
 
     it("starts the list afresh from the sidebar, the address and the box agreeing", async () => {

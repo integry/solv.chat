@@ -66,11 +66,13 @@ from the auth seam and pass it down.
 - `chunks` — id, document_id, ordinal, text, heading_path. Vectors live in Vectorize
   keyed by chunk id, with `org_id` and `assistant_id` as metadata filters.
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
-  the widget's localStorage), started_at, page_url.
+  the widget's localStorage), started_at, page_url, last_message_at (when the
+  newest message was written, `started_at` while there is none; kept by
+  triggers, and the order of the Conversations list).
 - `messages` — id, conversation_id, role, content, citations JSON, tool_calls JSON,
   tokens_in, tokens_out, answered (boolean: did retrieval find support),
-  search_text (content in Unicode lowercase, NFC, whitespace runs collapsed like
-  the question key, for the Conversations search. For rows written before it
+  search_text (content in Unicode lowercase, NFC, final sigma "ς" as "σ",
+  whitespace runs collapsed like the question key, for the Conversations search. For rows written before it
   existed, the migration fills it for ASCII text and the engine folds the rest
   of the searched assistant's messages before it runs a search, a bounded
   share per request; until none are left a search answers `searchPending: true`
@@ -167,12 +169,18 @@ The Monitor screens read:
   error, sources with documents that failed to index, reported as soon as the
   failure is recorded, and sources with documents still not indexed 15 minutes
   after they were written, reported separately).
-- Conversations: `filter=unanswered,not_helpful,used_tool`, `days=1|7|30|90`
-  and `q=` (case-insensitive text in any message); unknown values are refused.
+- Conversations: `filter=unanswered,not_helpful,used_tool`, `days=1|7|30|90`,
+  `q=` (case-insensitive text in any message) and `question=` (a grouped
+  question: conversations where a visitor asked it, matched by its key; what
+  question links in Overview and Reports open); unknown values are refused.
+  The admin keeps all four in the screen's address.
   `searchPending: true` means older messages are still being prepared for
   search: nothing was searched, `searchRemaining` says how many of the
   assistant's messages are left, and the admin asks again until it is false.
-- Gaps: `status=open` leaves out groups with a written answer;
+- Gaps: `status=open` leaves out groups with a written answer newer than the
+  group's latest ask (asked again after it, a group is open again, as after a
+  dismissal). Overview's open gaps and Reports' "Most often unanswered" leave
+  out the same groups, and the asks from before a dismissal;
   `POST …/gaps/dismiss` and `POST …/gaps/restore` take `{ question }`.
 
 ## Answering a message

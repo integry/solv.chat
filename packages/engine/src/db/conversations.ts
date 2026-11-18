@@ -45,6 +45,11 @@ export interface ConversationFilter {
   since?: number;
   /** Text a visitor question or a reply contains, case-insensitive. */
   search?: string;
+  /**
+   * A grouped question's key (`normalizeQuestionText`): only conversations
+   * where a visitor asked it, the ones its count in Reports and Overview counts.
+   */
+  question?: string;
 }
 
 interface SummaryRow {
@@ -58,7 +63,7 @@ interface SummaryRow {
   has_unanswered: number;
   has_not_helpful: number;
   used_tool: number;
-  last_message_at: number | null;
+  last_message_at: number;
 }
 
 export interface CreateConversationInput {
@@ -110,7 +115,9 @@ export function conversationsFor(db: D1Database, orgId: string) {
     /**
      * One page of an assistant's conversations, latest message first (the
      * time each row shows; a conversation with none yet goes by when it
-     * started), so a long-running one moves up as it continues. A search reads
+     * started), so a long-running one moves up as it continues. That time is
+     * stored on the conversation (migration 0021's triggers keep it), so a
+     * page is read in order from an index. A search reads
      * `search_text`, so rows written before it existed are folded first, a
      * bounded share per call (this assistant's messages only, as the search
      * reads no others). While some are left the search is not run (a
@@ -151,6 +158,11 @@ export function conversationsFor(db: D1Database, orgId: string) {
          AND (?4 = 0 OR EXISTS (${NOT_HELPFUL}))
          AND (?5 = 0 OR EXISTS (${USED_TOOL}))
          AND c.started_at >= ?6
+         AND (?9 = '' OR EXISTS (
+           SELECT 1 FROM messages k
+            WHERE k.org_id = c.org_id AND k.conversation_id = c.id
+              AND k.role = 'user' AND k.question_key = ?9
+         ))
          AND (?7 = '' OR EXISTS (
            SELECT 1 FROM messages s
             WHERE s.org_id = c.org_id AND s.conversation_id = c.id
@@ -166,6 +178,7 @@ export function conversationsFor(db: D1Database, orgId: string) {
         filter.since ?? 0,
         searchableText(search),
         search,
+        filter.question ?? "",
       ];
       const [rowsRes, countRow] = await Promise.all([
         prepare(
@@ -179,15 +192,13 @@ export function conversationsFor(db: D1Database, orgId: string) {
                   (SELECT COUNT(*)
                      FROM messages m
                     WHERE m.org_id = ?1 AND m.conversation_id = c.id) AS turn_count,
-                  (SELECT MAX(l.created_at)
-                     FROM messages l
-                    WHERE l.org_id = ?1 AND l.conversation_id = c.id) AS last_message_at,
+                  c.last_message_at,
                   EXISTS(${UNANSWERED}) AS has_unanswered,
                   EXISTS(${NOT_HELPFUL}) AS has_not_helpful,
                   EXISTS(${USED_TOOL}) AS used_tool
              ${where}
-            ORDER BY COALESCE(last_message_at, c.started_at) DESC, c.id DESC
-            LIMIT ?9 OFFSET ?10`,
+            ORDER BY c.last_message_at DESC, c.id DESC
+            LIMIT ?10 OFFSET ?11`,
         )
           .bind(...params, options.limit, options.offset)
           .all<SummaryRow>(),
@@ -208,7 +219,7 @@ export function conversationsFor(db: D1Database, orgId: string) {
           hasUnanswered: r.has_unanswered === 1,
           hasNotHelpful: r.has_not_helpful === 1,
           usedTool: r.used_tool === 1,
-          lastMessageAt: r.last_message_at ?? r.started_at,
+          lastMessageAt: r.last_message_at,
         })),
         total: countRow?.total ?? 0,
         searchPending: false,

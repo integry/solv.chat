@@ -65,7 +65,7 @@ export async function listGaps(
  * code units), so the bound leaves room for that rather than refusing a gap
  * the list shows.
  */
-const MAX_QUESTION_KEY = MAX_CHAT_MESSAGE_LENGTH * 3;
+export const MAX_QUESTION_KEY = MAX_CHAT_MESSAGE_LENGTH * 3;
 
 function readQuestionKey(body: unknown): string {
   if (!isPlainObject(body) || typeof body.question !== "string") {

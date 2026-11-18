@@ -801,6 +801,79 @@ describe("admin Monitor screen APIs", () => {
       }
     });
 
+    it("lists the conversations that asked a grouped question, as many as its count", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      const now = Date.now();
+      const asked = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Pricing?",
+        answered: true,
+        createdAt: now - 4000,
+      });
+      const askedAgain = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "  PRICING?  ",
+        answered: true,
+        createdAt: now - 3000,
+      });
+      // The phrase only in a reply, or inside a longer question: not this question.
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Hello",
+        reply: "Ask me pricing? any time.",
+        answered: true,
+        createdAt: now - 2000,
+      });
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Pricing? For teams",
+        answered: true,
+        createdAt: now - 1000,
+      });
+      // Another assistant's visitor asking the same.
+      const other = await seedAssistant(ORG_A);
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: other,
+        question: "pricing?",
+        answered: true,
+        createdAt: now - 500,
+      });
+
+      const overview = await getJson<{ topQuestions: Array<{ question: string; count: number }> }>(
+        app,
+        `/api/admin/assistants/${ast}/overview`,
+      );
+      const top = overview.topQuestions.find((item) => item.question === "pricing?");
+      expect(top?.count).toBe(2);
+
+      const list = (query: string) =>
+        getJson<ConversationsBody>(app, `/api/admin/assistants/${ast}/conversations${query}`);
+      const byKey = await list(`?question=${encodeURIComponent("pricing?")}`);
+      expect(byKey.total).toBe(top?.count);
+      expect(byKey.conversations.map((c) => c.id)).toEqual([
+        askedAgain.conversationId,
+        asked.conversationId,
+      ]);
+      // The text as a visitor typed it finds the same group.
+      expect((await list(`?question=${encodeURIComponent(" Pricing? ")}`)).total).toBe(2);
+      // It narrows with the other filters.
+      expect((await list("?question=pricing%3F&q=again")).total).toBe(0);
+      // The same words as a search find every conversation with them anywhere.
+      expect((await list("?q=pricing%3F")).total).toBe(4);
+      const tooLong = await call(
+        app,
+        "GET",
+        `/api/admin/assistants/${ast}/conversations?question=${"x".repeat(MAX_CHAT_MESSAGE_LENGTH * 3 + 1)}`,
+      );
+      expect(tooLong.status).toBe(400);
+    });
+
     it("never finds another org's conversations by search", async () => {
       const astA = await seedAssistant(ORG_A);
       const astB = await seedAssistant(ORG_B);
@@ -855,6 +928,123 @@ describe("admin Monitor screen APIs", () => {
       expect(all.total).toBe(2);
       const open = await getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps?status=open`);
       expect(open).toMatchObject({ total: 1, gaps: [{ question: "open?", handled: false }] });
+    });
+
+    it("lists an answered group again once it is asked after the answer, wherever gaps show", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      const first = await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Do you ship?",
+        answered: false,
+        createdAt: Date.now() - 60_000,
+      });
+      const answer = async (fromMessageId: string) => {
+        const res = await call(app, "POST", `/api/admin/assistants/${ast}/answers`, {
+          question: "Do you ship?",
+          answer: "Yes, everywhere.",
+          fromMessageId,
+        });
+        expect(res.status).toBe(201);
+      };
+      const open = () => getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps?status=open`);
+      const all = () => getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps`);
+      const openGaps = async () =>
+        (await getJson<OverviewBody>(app, `/api/admin/assistants/${ast}/overview`)).attention
+          .openGaps;
+      const unanswered = async () =>
+        (
+          await getJson<{ topGaps: Array<{ question: string; count: number }> }>(
+            app,
+            `/api/admin/assistants/${ast}/report?days=7`,
+          )
+        ).topGaps;
+
+      await answer(first.replyId);
+      expect((await open()).total).toBe(0);
+      expect(await openGaps()).toBe(0);
+      expect(await unanswered()).toEqual([]);
+      expect((await all()).gaps).toMatchObject([{ question: "do you ship?", handled: true }]);
+
+      // Asked again after the answer, and still not answered.
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "do you SHIP?",
+        answered: false,
+        createdAt: Date.now() + 5,
+      });
+      expect(await open()).toMatchObject({
+        total: 1,
+        gaps: [{ question: "do you ship?", times: 2, handled: false }],
+      });
+      expect(await openGaps()).toBe(1);
+      expect(await unanswered()).toEqual([{ question: "do you ship?", count: 2 }]);
+      expect((await all()).gaps).toMatchObject([{ question: "do you ship?", handled: false }]);
+
+      // A new answer, even one written from the first ask again, covers both.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await answer(first.replyId);
+      expect((await open()).total).toBe(0);
+      expect(await openGaps()).toBe(0);
+      expect(await unanswered()).toEqual([]);
+    });
+
+    it("leaves dismissed asks out of Reports' unanswered list, as Gaps does", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const app = appForOrg(ORG_A);
+      const now = Date.now();
+      for (const at of [now - 3000, now - 2000]) {
+        await seedTurn({
+          orgId: ORG_A,
+          assistantId: ast,
+          question: "Do you ship?",
+          answered: false,
+          createdAt: at,
+        });
+      }
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Other?",
+        answered: false,
+        createdAt: now - 1000,
+      });
+      const unanswered = async () =>
+        (
+          await getJson<{ topGaps: Array<{ question: string; count: number }> }>(
+            app,
+            `/api/admin/assistants/${ast}/report?days=7`,
+          )
+        ).topGaps;
+      expect(await unanswered()).toEqual([
+        { question: "do you ship?", count: 2 },
+        { question: "other?", count: 1 },
+      ]);
+
+      await call(app, "POST", `/api/admin/assistants/${ast}/gaps/dismiss`, {
+        question: "do you ship?",
+      });
+      expect(await unanswered()).toEqual([{ question: "other?", count: 1 }]);
+
+      // Asked again after the dismissal: back, counting only the new ask.
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question: "Do you ship?",
+        answered: false,
+        createdAt: Date.now() + 5,
+      });
+      expect(await unanswered()).toEqual([
+        { question: "do you ship?", count: 1 },
+        { question: "other?", count: 1 },
+      ]);
+      const gaps = await getJson<GapsBody>(app, `/api/admin/assistants/${ast}/gaps?status=open`);
+      expect(gaps.gaps.map((g) => [g.question, g.times])).toEqual([
+        ["do you ship?", 1],
+        ["other?", 1],
+      ]);
     });
 
     it("dismisses a group until the question is asked again, and undoes", async () => {

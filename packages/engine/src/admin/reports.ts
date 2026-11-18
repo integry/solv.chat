@@ -1,6 +1,6 @@
 import type { QuestionCount, ReportRange, SourceCitationCount } from "../db/reports.js";
 import type { Tenant } from "../db/tenant.js";
-import { utcDay } from "../util/time.js";
+import { DAY_MS, utcDay } from "../util/time.js";
 import { BadRequest, NotFound } from "./errors.js";
 
 /**
@@ -18,8 +18,6 @@ export interface AssistantReport extends PeriodFigures {
   uncitedSources: Array<{ url: string; title: string }>;
   uncitedTotal: number;
 }
-
-const DAY_MS = 86_400_000;
 
 /**
  * The last `days` UTC days, including today.

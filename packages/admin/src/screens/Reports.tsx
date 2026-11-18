@@ -9,9 +9,9 @@ import { ErrorState } from "../ui/ErrorState.js";
 import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
-import { Skeleton } from "../ui/Skeleton.js";
 import { questionConversationsQuery } from "./conversationLinks.js";
 import { formatCost, formatPercent, formatTimes } from "./figures.js";
+import { StatsSkeleton } from "./StatsSkeleton.js";
 
 export interface ReportsProps {
   assistantId: string;
@@ -122,28 +122,6 @@ function PageLink({ url, title }: { url: string; title: string }) {
   );
 }
 
-function ReportSkeleton() {
-  return (
-    <div className="stack" aria-busy="true">
-      <Skeleton label="Loading report…" lines={1} className="skeleton-heading" />
-      <div className="overview-grid overview-grid-4" aria-hidden="true">
-        {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="source-card stat-card">
-            <span className="skeleton-line" style={{ width: "50%" }} />
-            <span className="skeleton-line skeleton-line-lg" style={{ width: "35%" }} />
-            <span className="skeleton-line" />
-          </div>
-        ))}
-      </div>
-      <div className="source-card" aria-hidden="true">
-        <span className="skeleton-line" />
-        <span className="skeleton-line" />
-        <span className="skeleton-line" style={{ width: "60%" }} />
-      </div>
-    </div>
-  );
-}
-
 const RANGE_OPTIONS = RANGES.map((value) => ({ value, label: `${value} days` }));
 
 export function Reports({ assistantId }: ReportsProps) {
@@ -222,7 +200,7 @@ export function Reports({ assistantId }: ReportsProps) {
           onRetry={reportRes.reload}
         />
       ) : !report ? (
-        <ReportSkeleton />
+        <StatsSkeleton label="Loading report…" />
       ) : empty ? (
         <EmptyState
           icon="reports"

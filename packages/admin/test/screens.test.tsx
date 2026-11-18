@@ -331,7 +331,7 @@ describe("admin phase 1 screens", () => {
 
     const topLink = screen.getByRole("link", { name: "how much does it cost?" });
     expect(topLink.getAttribute("href")).toBe(
-      "/admin/conversations?q=how+much+does+it+cost%3F&assistant=ast_1",
+      "/admin/conversations?question=how+much+does+it+cost%3F&assistant=ast_1",
     );
     expect(screen.getByText("7 times")).toBeTruthy();
   });

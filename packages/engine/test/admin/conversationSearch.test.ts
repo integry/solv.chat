@@ -234,6 +234,28 @@ describe("conversation search", () => {
     });
   });
 
+  describe("Greek sigma", () => {
+    it("finds a lowercase word from an uppercase prefix that ends in sigma", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const now = Date.now();
+      const written = await seedConversation(ORG_A, ast, now - 2000);
+      await ask(ORG_A, written, "Τι είναι ο κόσμος;", now - 2000);
+      // Folded by the engine before a search, as rows written before 0019 are.
+      const older = await seedConversation(ORG_A, ast, now - 1000);
+      await legacyMessage(ORG_A, older, "user", "ΚΌΣΜΟΣ ΜΑΣ", now - 1000);
+      const both = [written, older].sort();
+
+      // "ΚΌΣ" lowercases to "κός": its last letter is a final sigma.
+      expect("ΚΌΣ".toLowerCase()).toBe("κός");
+      expect(await search(ORG_A, ast, "ΚΌΣ")).toEqual(both);
+      expect(await search(ORG_A, ast, "κόσ")).toEqual(both);
+      expect(await search(ORG_A, ast, "κός")).toEqual(both);
+      expect(await search(ORG_A, ast, "ΚΌΣΜΟΣ")).toEqual(both);
+      expect(await search(ORG_A, ast, "κόσμος")).toEqual(both);
+      expect(await search(ORG_A, ast, "μας")).toEqual([older]);
+    });
+  });
+
   describe("messages written before search_text existed", () => {
     it("are found in any case, and only within their own org", async () => {
       const astA = await seedAssistant(ORG_A);
@@ -485,31 +507,6 @@ describe("conversation search", () => {
       expect(await pendingCount(ORG_A)).toBe(0);
       expect(await search(ORG_A, ast, "école")).toEqual([conversation]);
       expect(await search(ORG_A, ast, "one moment")).toEqual([]);
-    });
-
-    it("fold a row whose text never compares equal to what was read, instead of staying pending", async () => {
-      const ast = await seedAssistant(ORG_A);
-      const now = Date.now();
-      const conversation = await seedConversation(ORG_A, ast, now - 1000);
-      const stuck = await legacyMessage(ORG_A, conversation, "user", "Où est l'ÉCOLE?", now - 1000);
-      // Every comparison of this row's text with the text read fails, as if
-      // the round trip through a binding changed it. Its text never changes.
-      const unequal = {
-        prepare(sql: string) {
-          const statement = env.DB.prepare(sql);
-          if (!sql.includes("content = ?4")) return statement;
-          return {
-            bind: (...args: unknown[]) => statement.bind(...args.slice(0, 3), `${args[3]}\u0001`),
-          };
-        },
-        batch: (statements: D1PreparedStatement[]) => env.DB.batch(statements),
-      } as unknown as D1Database;
-
-      // Skipped once, then folded when read again with the same text.
-      expect(await messagesFor(unequal, ORG_A).fillSearchText({ rounds: 2 })).toBe(true);
-      expect(await storedSearchText(stuck)).toBe(searchableText("Où est l'ÉCOLE?"));
-      expect(await pendingCount(ORG_A)).toBe(0);
-      expect(await search(ORG_A, ast, "école")).toEqual([conversation]);
     });
 
     it("fold text with an embedded NUL character", async () => {

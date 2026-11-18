@@ -1952,6 +1952,27 @@ a {
   font-size: var(--text-sm);
 }
 
+/* "Asked: …" above the list, from a question link in Overview or Reports. */
+.list-question {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.list-question-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.list-question .btn {
+  flex: none;
+}
+
 .conv-list {
   list-style: none;
   margin: 0;

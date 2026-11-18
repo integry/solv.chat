@@ -5,7 +5,6 @@ import { ScreenLink, useAdminNavigation } from "../routing.js";
 import { ErrorState } from "../ui/ErrorState.js";
 import { formatDate } from "../ui/format.js";
 import { PageHeader } from "../ui/PageHeader.js";
-import { Skeleton } from "../ui/Skeleton.js";
 import { questionConversationsQuery } from "./conversationLinks.js";
 import {
   costChange,
@@ -22,6 +21,7 @@ import {
   StatCard,
   TRY_IT_ANSWERED_EVENT,
 } from "./OverviewParts.js";
+import { StatsSkeleton } from "./StatsSkeleton.js";
 
 export interface OverviewProps {
   assistantId: string;
@@ -36,26 +36,6 @@ const EMPTY_FIGURES: PeriodFigures = {
   thumbsDownShare: 0,
   costMicros: 0,
 };
-
-function OverviewSkeleton() {
-  return (
-    <div className="stack" aria-busy="true">
-      <Skeleton label="Loading overview…" lines={1} className="skeleton-heading" />
-      <div className="overview-grid" aria-hidden="true">
-        {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="source-card stat-card">
-            <span className="skeleton-line" style={{ width: "50%" }} />
-            <span className="skeleton-line skeleton-line-lg" style={{ width: "35%" }} />
-            <span className="skeleton-line" />
-          </div>
-        ))}
-      </div>
-      <div className="source-card" aria-hidden="true">
-        <span className="skeleton-block" />
-      </div>
-    </div>
-  );
-}
 
 export function Overview({ assistantId }: OverviewProps) {
   const overviewRes = useResource<AssistantOverview>(
@@ -100,7 +80,7 @@ export function Overview({ assistantId }: OverviewProps) {
           onRetry={overviewRes.reload}
         />
       ) : !overview ? (
-        <OverviewSkeleton />
+        <StatsSkeleton label="Loading overview…" />
       ) : (
         <div className="stack">
           <NeedsAttention assistantId={assistantId} overview={overview} />

@@ -1,3 +1,4 @@
+import { GAP_GROUP_CTES } from "./messages.js";
 import { prepare } from "./sql.js";
 
 /** Row caps. A report is a screen, not an export of everything. */
@@ -120,38 +121,46 @@ export function reportsFor(db: D1Database, orgId: string) {
 
     /**
      * Most asked questions, grouped by the normalised key the chat pipeline
-     * stores. `unansweredOnly: true` gives the gaps list, so the two share one
-     * statement and cannot drift.
+     * stores. `unansweredOnly: true` gives the gaps list: questions with an
+     * unanswered reply, left out as the Gaps screen leaves them out (asked
+     * before the group was dismissed, or a group with a written answer newer
+     * than its latest ask), so each row is one the Gaps screen lists.
      */
     async topQuestions(
       assistantId: string,
       range: ReportRange,
       options: { unansweredOnly: boolean; limit?: number },
     ): Promise<QuestionCount[]> {
-      const res = await prepare(
-        db,
-        `SELECT m.question_key AS question, COUNT(*) AS count, MAX(m.created_at) AS last_asked
+      const asked = `
            FROM messages m
            JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
           WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'user'
             AND m.created_at >= ?3 AND m.created_at <= ?4
-            AND m.question_key IS NOT NULL AND m.question_key <> ''
-            AND (?5 = 0 OR EXISTS (
-              SELECT 1 FROM messages r
-               WHERE r.org_id = m.org_id AND r.reply_to = m.id AND r.answered = 0
-            ))
+            AND m.question_key IS NOT NULL AND m.question_key <> ''`;
+      const grouped = `
           GROUP BY m.question_key
           ORDER BY count DESC, last_asked DESC
-          LIMIT ?6`,
-      )
-        .bind(
-          orgId,
-          assistantId,
-          range.fromMs,
-          range.toMs,
-          options.unansweredOnly ? 1 : 0,
-          options.limit ?? REPORT_TOP_LIMIT,
-        )
+          LIMIT ?5`;
+      const select =
+        "SELECT m.question_key AS question, COUNT(*) AS count, MAX(m.created_at) AS last_asked";
+      const sql = options.unansweredOnly
+        ? `WITH ${GAP_GROUP_CTES}
+           ${select} ${asked}
+            AND EXISTS (
+              SELECT 1 FROM messages r
+               WHERE r.org_id = m.org_id AND r.reply_to = m.id AND r.answered = 0
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM gap_dismissals gd
+               WHERE gd.org_id = m.org_id AND gd.assistant_id = c.assistant_id
+                 AND gd.question_key = m.question_key AND gd.dismissed_at >= m.created_at
+            )
+            AND m.question_key IN (
+              SELECT question_key FROM gap_group WHERE group_document_id IS NULL
+            ) ${grouped}`
+        : `${select} ${asked} ${grouped}`;
+      const res = await prepare(db, sql)
+        .bind(orgId, assistantId, range.fromMs, range.toMs, options.limit ?? REPORT_TOP_LIMIT)
         .all<{ question: string; count: number }>();
       return res.results.map((row) => ({ question: row.question, count: row.count }));
     },
