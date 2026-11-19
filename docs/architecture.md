@@ -484,8 +484,9 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   stay, marked `truncated`) and written back only if no other write changed
   it since it was read, a claim only while there is still no note. The
   admin's answer trace returns it as `reviewFailure` and says it in plain
-  words under "Answer check" ("Not checked. The check took too long,
-  twice." and so on).
+  words under "Answer check" ("Not checked. It failed after a retry: the
+  last try took too long." and so on: only the last attempt's reason is
+  kept, so the words name that one).
 - **Catch-up.** The Workers `scheduled` handler (the same cron as the
   sitemap sync; `app.runReviewCatchUp(env)` for a host with its own cron)
   reviews, each tick, up to `MAX_REVIEW_CATCH_UP_PER_TICK` (10) visitor
@@ -523,8 +524,15 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   paused). "Try it" previews and test runs are not reviewed.
 - **Retrieval misses.** A reply that is the fixed fallback text because nothing
   cleared the floor is reviewed too, with the same frame (the question and the
-  fallback reply): the question alone tells an off-topic question or a request
-  for a person from a real content gap. Only `declined`, `off_topic` or
+  fallback reply), and the request says the assistant found nothing on the
+  site, so the label is judged from the question and the site's subject, not
+  from the reply: the question alone tells an off-topic question or a request
+  for a person from a real content gap. The frame states the rule: `off_topic`
+  when a visitor could not reasonably expect this site's assistant to answer
+  it (general knowledge, trivia, art, sport, news, another organisation's
+  business), however sensible the question; `declined` when it is about
+  something the site could cover (its business, what it offers, prices,
+  orders, opening hours, policies, people or content), and when unsure. Only `declined`, `off_topic` or
   `wants_human` is accepted (`MISS_OUTCOMES`); any other label (a fallback
   reply cannot have answered, even partly), no label, a failure, a timeout,
   the spend cap being reached, or "Review answers" off stores `declined`
@@ -533,9 +541,15 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   review. `answered` stays 0 whatever the outcome.
 - **The site's subject.** `off_topic` needs to know what the site is about,
   so the request also carries, as tagged data like the rest, the assistant's
-  name, its widget title and up to 20 titles of its content (pages, pushed
+  name, its widget title, the greeting and the persona of its published
+  version (owner-written; the persona already goes to the answering model;
+  the start of each, `REVIEW_MAX_SUBJECT_ABOUT_CHARS`, 400 characters, left
+  out when blank) and up to 20 titles of its content (pages, pushed
   documents, written answers; `REVIEW_MAX_SUBJECT_TITLES`, each cut to 120
-  characters), read in the deferred review. With no content title (a new
+  characters), read in the deferred review. There is no separate "site
+  description" field; the greeting and persona are the owner's own words
+  about the assistant. Nothing about the visitor is added: the question and
+  the reply are the only visitor data the review gets. With no content title (a new
   assistant, say) the subject is unknown: the request says so and that
   off_topic must not be used, and a retrieval miss reviewed as `off_topic`
   anyway is stored as `declined`, so a real content gap is never dropped from

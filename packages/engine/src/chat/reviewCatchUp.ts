@@ -236,6 +236,8 @@ async function reviewClaimed(
         return {
           name: assistant?.name ?? "",
           title: version?.config.widget.title ?? "",
+          greeting: version?.config.behaviour.greeting ?? "",
+          persona: version?.config.behaviour.persona ?? "",
           contentTitles,
         };
       },

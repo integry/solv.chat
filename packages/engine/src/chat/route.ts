@@ -8,6 +8,7 @@ import {
   parseChatRequest,
   parseFeedbackRequest,
   serializeChatEvent,
+  type VersionConfig,
 } from "@solvchat/core";
 import { assistantByPublicKey, assistantForMessage, originAllowedInOrg } from "../db/public.js";
 import { forPublicScope } from "../db/tenant.js";
@@ -161,6 +162,18 @@ function readAssistantKey(body: unknown): string | null {
 interface SiteNames {
   name: string;
   title: string;
+  greeting: string;
+  persona: string;
+}
+
+/** What the answer review is told the site is: owner-written text only. */
+function siteNames(name: string, config: VersionConfig): SiteNames {
+  return {
+    name,
+    title: config.widget.title,
+    greeting: config.behaviour.greeting,
+    persona: config.behaviour.persona,
+  };
 }
 
 interface StreamAnswerParams {
@@ -182,7 +195,7 @@ interface StreamAnswerParams {
   allowedTools: readonly string[];
   /** The version the behaviour and tools came from, for the answer's trace. */
   version: AnswerTraceContext["version"];
-  /** The assistant's name and its widget title, for the answer review's site subject. */
+  /** What the answer review is told about the site (name, widget title, greeting, persona). */
   site: SiteNames;
   conversationId: string | undefined;
   pageUrl: string | undefined;
@@ -415,10 +428,13 @@ async function resolveAnswerDeps(params: {
                 // A review that gives no usable result says why, in the trace.
                 traces: params.tenant.traces,
                 // What the site is about, read in the deferred review: the
-                // names it answers as and some of its content's titles.
+                // names it answers as, the owner's greeting and persona (of
+                // the version that answered) and some of its content's titles.
                 subject: async (assistantId) => ({
                   name: params.site.name,
                   title: params.site.title,
+                  greeting: params.site.greeting,
+                  persona: params.site.persona,
                   contentTitles: await params.tenant.documents.titlesForAssistant(
                     assistantId,
                     REVIEW_MAX_SUBJECT_TITLES,
@@ -612,7 +628,7 @@ export async function adminChatRoute(
     behaviour: version.config.behaviour,
     allowedTools: version.config.allowedTools,
     version: { id: version.id, state: "draft" },
-    site: { name: assistant.name, title: version.config.widget.title },
+    site: siteNames(assistant.name, version.config),
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: true,
@@ -699,7 +715,7 @@ export async function chatRoute(
       behaviour: version.config.behaviour,
       allowedTools: version.config.allowedTools,
       version: { id: version.id, state: "published" },
-      site: { name: assistant.name, title: version.config.widget.title },
+      site: siteNames(assistant.name, version.config),
       conversationId: parsed.value.conversationId ?? "",
       resumeMessageId: parsed.value.resumeMessageId ?? "",
       actionResults: parsed.value.actionResults,
@@ -727,7 +743,7 @@ export async function chatRoute(
     behaviour: version.config.behaviour,
     allowedTools: version.config.allowedTools,
     version: { id: version.id, state: "published" },
-    site: { name: assistant.name, title: version.config.widget.title },
+    site: siteNames(assistant.name, version.config),
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: false,

@@ -275,9 +275,12 @@ describe("How this answer was made", () => {
   });
 
   it.each([
-    ["review_timeout", "The check took too long, twice."],
-    ["review_provider_error", "The AI provider could not do the check, twice."],
-    ["review_unparseable", "The check gave a reply we could not read, twice."],
+    ["review_timeout", "It failed after a retry: the last try took too long."],
+    [
+      "review_provider_error",
+      "It failed after a retry: the AI provider could not do the last try.",
+    ],
+    ["review_unparseable", "It failed after a retry: the last try gave a reply we could not read."],
     ["review_skipped_spend_cap", "Skipped: the daily spend limit was reached."],
     ["review_error", "Something went wrong on our side while checking."],
   ] as const)("says in plain words why the answer was not checked (%s)", async (code, words) => {
@@ -295,7 +298,11 @@ describe("How this answer was made", () => {
     expect(
       await within(details).findByText("No details were recorded for this answer."),
     ).toBeTruthy();
-    expect(within(details).getByText("Not checked. The check took too long, twice.")).toBeTruthy();
+    expect(
+      within(details).getByText(
+        "Not checked. It failed after a retry: the last try took too long.",
+      ),
+    ).toBeTruthy();
   });
 
   it("says nothing about the check when it gave a result", async () => {

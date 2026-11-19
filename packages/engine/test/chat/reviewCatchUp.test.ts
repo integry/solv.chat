@@ -281,6 +281,9 @@ describe("chat: answer review catch-up", () => {
       env.DB.prepare("DELETE FROM messages"),
       env.DB.prepare("DELETE FROM topics"),
       env.DB.prepare("DELETE FROM conversations"),
+      env.DB.prepare("DELETE FROM chunks"),
+      env.DB.prepare("DELETE FROM documents"),
+      env.DB.prepare("DELETE FROM sources"),
       env.DB.prepare("DELETE FROM assistant_versions"),
       env.DB.prepare("DELETE FROM assistants"),
       env.DB.prepare("DELETE FROM org_provider_settings"),
@@ -380,6 +383,48 @@ describe("chat: answer review catch-up", () => {
     const { runCatchUp } = setup({ replies: [ok("wants_human", "Opening hours")] });
     await runCatchUp();
     expect(await outcomeOf(TEST_ORG_ID, turn.replyId)).toBe("wants_human");
+  });
+
+  it("tells the reviewer of a miss what the site is about from the published version", async () => {
+    const tenant = tenantFor(TEST_ORG_ID);
+    const config = defaultVersionConfig();
+    config.behaviour.greeting = "Hello! Ask about our bread and cakes.";
+    config.behaviour.persona = "You answer for Rose Bakery, a family bakery.";
+    // seedAssistant left `ast_1_v2` as the draft; it becomes the published version.
+    await tenant.versions.updateDraft("ast_1", config);
+    await tenant.versions.publishDraft("ast_1", "ast_1_v2", "ast_1_v3", 4000);
+    await tenant.sources.create({
+      id: "src_bakery",
+      assistantId: "ast_1",
+      kind: "push",
+      label: "CLI",
+      settings: {},
+      createdAt: 1000,
+    });
+    await tenant.documents.upsert({
+      id: "doc_hours",
+      sourceId: "src_bakery",
+      externalId: "hours",
+      url: "https://site.example/hours",
+      title: "Opening hours",
+      contentHash: "hash_hours",
+      updatedAt: 1000,
+    });
+    const turn = await seedReply({ answered: false });
+    const { seen, runCatchUp } = setup({ replies: [ok("off_topic", "Mona Lisa painter")] });
+    await runCatchUp();
+    expect(seen).toHaveLength(1);
+    const body = seen[0] ?? "";
+    expect(body).toContain(
+      "The assistant found nothing on the website for this question: the reply is its fixed fallback text.",
+    );
+    expect(body).toContain("name: Docs Bot");
+    expect(body).toContain("greeting: Hello! Ask about our bread and cakes.");
+    expect(body).toContain("description: You answer for Rose Bakery, a family bakery.");
+    expect(body).toContain("Opening hours");
+    expect(await outcomeOf(TEST_ORG_ID, turn.replyId)).toBe("off_topic");
+    // An off-topic miss names no topic.
+    expect(await topicOf(TEST_ORG_ID, turn.questionId)).toBeNull();
   });
 
   it("skips an answer when Review answers is off: no call and no outcome", async () => {

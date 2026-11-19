@@ -198,7 +198,8 @@ describe("chat: answer review on the answer path", () => {
     ]);
 
     // The reviewer is sent the question, the reply and what the site is
-    // about (names and content titles), and no content text or persona.
+    // about (names, the owner's greeting and persona, content titles), and
+    // no content text.
     const review = seen[1];
     expect(review?.system).toBe(REVIEW_FRAME);
     expect(review?.body).toContain(QUESTION);
@@ -206,7 +207,11 @@ describe("chat: answer review on the answer path", () => {
     expect(review?.body).toContain("name: Docs Bot");
     expect(review?.body).toContain("content:\\nBilling");
     expect(review?.body).not.toContain("CHUNK_MARKER");
-    expect(review?.body).not.toContain("PERSONA_MARKER");
+    expect(review?.body).toContain(`description: ${PERSONA}`);
+    // Only a retrieval miss says nothing was found.
+    expect(review?.body).not.toContain(
+      "The assistant found nothing on the website for this question",
+    );
     expect(review?.body).not.toContain("tools");
 
     // The review's call is model use like any other, priced at the fast tier,
@@ -271,6 +276,13 @@ describe("chat: answer review on the answer path", () => {
       expect(seen[0]?.system).toBe(REVIEW_FRAME);
       expect(seen[0]?.body).toContain(MISS_QUESTION);
       expect(seen[0]?.body).toContain(fallback);
+      // Told that nothing was found, and what the site is about in the
+      // owner's own words: the published greeting and persona.
+      expect(seen[0]?.body).toContain(
+        "The assistant found nothing on the website for this question: the reply is its fixed fallback text.",
+      );
+      expect(seen[0]?.body).toContain(`greeting: ${defaultVersionConfig().behaviour.greeting}`);
+      expect(seen[0]?.body).toContain(`description: ${PERSONA}`);
       // Its cost is model use, never a message.
       expect(await usageRow()).toMatchObject({ messages: 1, tokens_in: 90, tokens_out: 1 });
     },
