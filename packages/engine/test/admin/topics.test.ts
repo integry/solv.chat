@@ -222,6 +222,37 @@ describe("topics", () => {
       expect(await tenantFor(ORG_A).topics.get(astA2, a.id)).toBeNull();
     });
 
+    it("clears an off-topic question's topic only while its reply has no other outcome", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const conv = await seedConversation(ORG_A, ast);
+      const topic = await tenantFor(ORG_A).topics.resolve(ast, "Refunds");
+      const pending = await seedExchange(ORG_A, conv, "Capital of Australia?");
+      const offTopic = await seedExchange(ORG_A, conv, "Weather?", { outcome: "off_topic" });
+      const answered = await seedExchange(ORG_A, conv, "Refund?", { outcome: "answered" });
+      const unrelated = await seedExchange(ORG_A, conv, "Refunds again?");
+      for (const q of [pending, offTopic, answered, unrelated]) {
+        await tenantFor(ORG_A).topics.assignToQuestion(q.questionId, topic.id);
+      }
+      const topics = tenantFor(ORG_A).topics;
+
+      // Another org, a reply that is not this question's, or a reply with
+      // another outcome: the topic stays.
+      expect(await tenantFor(ORG_B).topics.clearOffTopic(pending.questionId, pending.replyId)).toBe(
+        false,
+      );
+      expect(await topics.clearOffTopic(pending.questionId, unrelated.replyId)).toBe(false);
+      expect(await topics.clearOffTopic(answered.questionId, answered.replyId)).toBe(false);
+      expect(await topicOf(pending.questionId)).toBe(topic.id);
+      expect(await topicOf(answered.questionId)).toBe(topic.id);
+
+      expect(await topics.clearOffTopic(pending.questionId, pending.replyId)).toBe(true);
+      expect(await topics.clearOffTopic(offTopic.questionId, offTopic.replyId)).toBe(true);
+      expect(await topicOf(pending.questionId)).toBeNull();
+      expect(await topicOf(offTopic.questionId)).toBeNull();
+      expect(await topicOf(unrelated.questionId)).toBe(topic.id);
+      expect(await topics.clearOffTopic(offTopic.questionId, offTopic.replyId)).toBe(false);
+    });
+
     it("tags a question once, and never with another assistant's or org's topic", async () => {
       const astA = await seedAssistant(ORG_A);
       const astA2 = await seedAssistant(ORG_A);

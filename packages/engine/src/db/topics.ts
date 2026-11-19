@@ -143,6 +143,28 @@ export function topicsFor(db: D1Database, orgId: string) {
     },
 
     /**
+     * Takes the topic off a visitor question whose reply `replyId` was
+     * reviewed as `off_topic`, or is being (no outcome yet). A reply with any
+     * other outcome keeps its question's topic. In this org only.
+     */
+    async clearOffTopic(questionId: string, replyId: string): Promise<boolean> {
+      const res = await prepare(
+        db,
+        `UPDATE messages SET topic_id = NULL
+          WHERE org_id = ?1 AND id = ?2 AND role = 'user' AND topic_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM messages a
+               WHERE a.org_id = ?1 AND a.id = ?3 AND a.reply_to = messages.id
+                 AND a.role = 'assistant'
+                 AND (a.outcome IS NULL OR a.outcome = 'off_topic')
+            )`,
+      )
+        .bind(orgId, questionId, replyId)
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
+    /**
      * Renames a topic. `exists` when another topic of the assistant already
      * has that name (merge it instead); a change of case or spacing only is a
      * rename of the same topic. `full` when the topic is "Other" and the new

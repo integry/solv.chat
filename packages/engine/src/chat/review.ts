@@ -198,35 +198,34 @@ const TOPIC_LINE = /^topic: ?(.*)$/i;
 
 /**
  * The two fields, each read on its own: the output, less surrounding
- * whitespace and blank lines, must be at most the two lines `outcome:
- * <label>` then `topic: <name>` (field names in any case). An outcome line
- * whose label is not exactly one of the five is no decision, and a missing
- * or unusable topic line is no topic, but neither costs the other: a topic
- * stands without a label, and a label without a topic. Anything else
- * (another order, a third line, a sentence, a code fence) is neither. A
- * topic that is not a safe name (`cleanTopicName`: markup and control
- * characters stripped, length, words and characters checked, nothing that
- * looks like personal data) becomes "Other".
+ * whitespace and blank lines, must be at most two lines, and each line is
+ * read by itself as `outcome: <label>` or `topic: <name>` (field names in any
+ * case, either order). A field is taken only from a line that is that field,
+ * and only when it appears once; a line that is neither field (a malformed
+ * `topic Refunds`, a sentence) gives nothing but costs the other field
+ * nothing. An outcome whose label is not exactly one of the five is no
+ * decision, and a missing or unusable topic is no topic, so a topic stands
+ * without a label, and a label without a topic. Output with more lines (a
+ * third field, a code fence, prose) is neither. A topic that is not a safe
+ * name (`cleanTopicName`: markup and control characters stripped, length,
+ * words and characters checked, nothing that looks like personal data)
+ * becomes "Other".
  */
 export function parseReviewOutput(text: string): {
   outcome: AnswerOutcome | null;
   topic: string | null;
 } {
-  const none = { outcome: null, topic: null };
   const lines = text
     .trim()
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line !== "");
-  if (lines.length === 0 || lines.length > 2) return none;
-  const outcomeMatch = OUTCOME_LINE.exec(lines[0] ?? "");
-  if (!outcomeMatch) return none;
-  const topicMatch = lines.length === 2 ? TOPIC_LINE.exec(lines[1] ?? "") : null;
-  if (lines.length === 2 && !topicMatch) return none;
-  return {
-    outcome: parseReviewLabel(outcomeMatch[1] ?? ""),
-    topic: topicMatch ? (cleanTopicName(topicMatch[1]) ?? OTHER_TOPIC) : null,
-  };
+  if (lines.length > 2) return { outcome: null, topic: null };
+  const outcomes = lines.flatMap((line) => OUTCOME_LINE.exec(line)?.slice(1, 2) ?? []);
+  const topics = lines.flatMap((line) => TOPIC_LINE.exec(line)?.slice(1, 2) ?? []);
+  const outcome = outcomes.length === 1 ? parseReviewLabel(outcomes[0] ?? "") : null;
+  const topic = topics.length === 1 ? (cleanTopicName(topics[0]) ?? OTHER_TOPIC) : null;
+  return { outcome, topic };
 }
 
 export interface ModelReviewerDeps {
@@ -329,6 +328,11 @@ export interface ReviewTopics {
   /** The topic for a safe name: existing, new while under the cap, else "Other". */
   resolve(assistantId: string, name: string): Promise<TopicItem>;
   assignToQuestion(questionId: string, topicId: string): Promise<boolean>;
+  /**
+   * Takes the topic off the question `replyId` answers, unless that reply
+   * already has an outcome other than `off_topic`. True when one was taken off.
+   */
+  clearOffTopic(questionId: string, replyId: string): Promise<boolean>;
 }
 
 /** What the review needs of the trace store (`tenant.traces`). */
@@ -491,6 +495,21 @@ async function storeTopic(deps: ReviewRunDeps, job: ReviewJob, name: string | nu
 }
 
 /**
+ * Takes any topic off an off-topic question. A live review never tags one,
+ * but an earlier run may have stored the topic and been cut off before the
+ * outcome, and the catch-up then finds the question already tagged. Never
+ * throws: the outcome is written whatever this does.
+ */
+async function clearOffTopicTopic(deps: ReviewRunDeps, job: ReviewJob): Promise<void> {
+  if (deps.topics === undefined || !job.questionId) return;
+  try {
+    await deps.topics.clearOffTopic(job.questionId, job.messageId);
+  } catch (err) {
+    logError("chat: off-topic question topic not cleared", err);
+  }
+}
+
+/**
  * The error's name only. A message may carry text from the provider or, from
  * a reviewer other than the model call, from the visitor; neither is logged.
  */
@@ -543,7 +562,8 @@ function missResult(attempt: AttemptOutcome | null, subject: ReviewSubject | nul
  * (cap reached, timeout, provider error, an unusable label, a failed write)
  * leaves the outcome empty and records its reason code in the answer's
  * trace; a retrieval miss falls back to `declined` (the reason is recorded
- * too). An `off_topic` question gets no topic. Logs carry fixed codes and
+ * too). An `off_topic` question gets no topic, and loses one an earlier,
+ * interrupted run gave it. Logs carry fixed codes and
  * error names only, never the question, the reply or the provider's text.
  */
 export async function runAnswerReview(
@@ -597,6 +617,10 @@ export async function runAnswerReview(
     result.confidence !== null && result.confidence >= 0 && result.confidence <= 1
       ? result.confidence
       : null;
+  // Cleared before the outcome is written: a run cut off in between leaves
+  // an answer with no outcome, which the catch-up reviews again, rather than
+  // an off-topic answer whose question keeps its topic for good.
+  if (outcome === "off_topic") await clearOffTopicTopic(deps, job);
   let stored: boolean;
   try {
     stored = await deps.messages.setOutcome(job.messageId, outcome, confidence);

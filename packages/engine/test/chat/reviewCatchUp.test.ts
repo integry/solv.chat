@@ -255,6 +255,23 @@ describe("chat: answer review catch-up", () => {
     expect(reviewCalls()).toBe(1);
   });
 
+  it("takes the topic an interrupted run stored off a question it then reviews as off topic", async () => {
+    // The live review stored the topic and was cut off before the outcome:
+    // the question is tagged, its answer has no outcome and no note.
+    const turn = await seedReply({});
+    const tenant = tenantFor(TEST_ORG_ID);
+    const topic = await tenant.topics.resolve("ast_1", "Refunds");
+    expect(await tenant.topics.assignToQuestion(turn.questionId, topic.id)).toBe(true);
+    expect(await rawTrace(TEST_ORG_ID, turn.replyId)).toBeNull();
+    const { runCatchUp } = setup({ replies: [ok("off_topic", "Australian capital city")] });
+
+    const run = await runCatchUp();
+    expect(run.results).toEqual([{ status: "stored", outcome: "off_topic" }]);
+    expect(await outcomeOf(TEST_ORG_ID, turn.replyId)).toBe("off_topic");
+    expect(await topicOf(TEST_ORG_ID, turn.questionId)).toBeNull();
+    expect((await tenant.topics.list("ast_1")).map((t) => t.name)).toEqual(["Refunds"]);
+  });
+
   it("attempts an answer at most once: a failed catch-up is not retried by the next tick", async () => {
     const turn = await seedReply({});
     const { reviewCalls, runCatchUp } = setup({ replies: [{ status: 500 }] });

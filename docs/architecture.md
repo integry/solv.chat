@@ -550,11 +550,14 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   (opt-in, needs a provider key, never in CI; exits 1 when an injected case
   is mishandled). The output is parsed
   as two fields, each on its own: the reply, less surrounding whitespace and
-  blank lines, must be at most the two lines `outcome: <label>` then
-  `topic: <name>` (field names in any case). A label that is not exactly one
-  of the five is no outcome (the topic still stands); a missing or refused
-  topic is no topic, or "Other" (the outcome still stands). Anything else (a
-  third line, another order, a sentence, a code fence) is neither.
+  blank lines, must be at most two lines, each read on its own as
+  `outcome: <label>` or `topic: <name>` (field names in any case, either
+  order). A label that is not exactly one of the five is no outcome (the
+  topic still stands); a missing, malformed or refused topic is no topic, or
+  "Other" (the outcome still stands). A line that is neither field gives
+  nothing and costs the other field nothing; a field given twice is not
+  taken. Longer output (a third line, a code fence, prose around the
+  fields) is neither.
 - **Cost.** The call's tokens and cost are recorded through `UsageSink` like
   any model use (`messages: 0`), so they count toward `usage_daily` and the
   daily spend cap. Before each attempt the review asks `Limits` with
@@ -624,7 +627,11 @@ are about.
   these. Migration 0031 cleared the topic of questions tagged before this
   (it keeps every topic: the schema cannot tell an owner-renamed topic from
   one the review named, so one left with no questions stays until the owner
-  deletes it). A question is tagged once; nothing re-tags it.
+  deletes it). When an answer is stored as `off_topic`, its question's topic
+  is cleared first (unless the answer already has another outcome): an
+  earlier run may have stored the topic and been cut off before the outcome,
+  and the catch-up then finds the question tagged. A question is tagged
+  once; nothing re-tags it.
   There is no manual tagging of a message.
 - **The cap.** At most 40 topics per assistant (`MAX_TOPICS_PER_ASSISTANT`),
   not counting "Other", which is always available. When the list is full the

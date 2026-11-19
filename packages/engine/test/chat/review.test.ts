@@ -671,6 +671,7 @@ describe("chat/review: a retrieval miss", () => {
 function memoryTopics(initial: string[] = []) {
   const topics: TopicItem[] = initial.map((name, i) => ({ id: `top_${i}`, name, createdAt: 0 }));
   const assigned: Array<{ questionId: string; topicId: string }> = [];
+  const cleared: Array<{ questionId: string; replyId: string }> = [];
   const store: ReviewTopics = {
     async list() {
       return [...topics];
@@ -691,9 +692,13 @@ function memoryTopics(initial: string[] = []) {
       assigned.push({ questionId, topicId });
       return true;
     },
+    async clearOffTopic(questionId, replyId) {
+      cleared.push({ questionId, replyId });
+      return true;
+    },
   };
   const nameOf = (id: string) => topics.find((t) => t.id === id)?.name;
-  return { store, topics, assigned, nameOf };
+  return { store, topics, assigned, cleared, nameOf };
 }
 
 describe("chat/review: topics", () => {
@@ -717,12 +722,19 @@ describe("chat/review: topics", () => {
       outcome: "answered",
       topic: "Refunds",
     });
+    // Either order: each line is its own field.
+    expect(parseReviewOutput("topic: Refunds\noutcome: answered")).toEqual({
+      outcome: "answered",
+      topic: "Refunds",
+    });
     for (const text of [
+      "",
       "answered",
-      "topic: Refunds\noutcome: answered",
+      "Refunds",
+      "answered\nRefunds",
       "outcome: answered\ntopic: Refunds\nextra: yes",
-      "outcome: answered\nI think so",
       "```\noutcome: answered\ntopic: Refunds\n```",
+      "Here is my review.\noutcome: answered\ntopic: Refunds",
     ]) {
       expect(parseReviewOutput(text), text).toEqual({ outcome: null, topic: null });
     }
@@ -740,6 +752,66 @@ describe("chat/review: topics", () => {
         topic: "Refunds",
       });
     }
+  });
+
+  it("keeps a valid field when its companion line is malformed or missing", () => {
+    // A malformed topic line costs the outcome nothing, and the reverse.
+    for (const text of [
+      "outcome: answered\ntopic Refunds",
+      "outcome: answered\nTopic - Refunds",
+      "outcome: answered\nI think so",
+      "topic Refunds\noutcome: answered",
+    ]) {
+      expect(parseReviewOutput(text), text).toEqual({ outcome: "answered", topic: null });
+    }
+    for (const text of [
+      "topic: Refunds",
+      "outcome answered\ntopic: Refunds",
+      "Outcome = answered\ntopic: Refunds",
+      "topic: Refunds\nanswered",
+    ]) {
+      expect(parseReviewOutput(text), text).toEqual({ outcome: null, topic: "Refunds" });
+    }
+    // A field given twice is ambiguous and taken from neither line, but the
+    // other field still stands.
+    expect(parseReviewOutput("outcome: answered\noutcome: declined")).toEqual({
+      outcome: null,
+      topic: null,
+    });
+    expect(parseReviewOutput("topic: Refunds\ntopic: Prices")).toEqual({
+      outcome: null,
+      topic: null,
+    });
+  });
+
+  it("stores the outcome when the reviewer's topic line is malformed, and the topic when the outcome line is", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { store, assigned } = memoryTopics();
+    const { provider } = scriptedProvider("outcome: answered\ntopic Refunds");
+    const { deps, stored } = runDeps({
+      reviewer: async () => reviewerFrom(provider),
+      topics: store,
+    });
+    expect(await runAnswerReview(deps, TOPIC_JOB)).toEqual({
+      status: "stored",
+      outcome: "answered",
+      failure: undefined,
+    });
+    expect(stored).toEqual([{ id: JOB.messageId, outcome: "answered", confidence: null }]);
+    expect(assigned).toEqual([]);
+
+    const second = memoryTopics();
+    const failing = runDeps({
+      reviewer: async () => reviewerFrom(scriptedProvider("topic: Refunds").provider),
+      topics: second.store,
+    });
+    expect(await runAnswerReview(failing.deps, TOPIC_JOB)).toEqual({
+      status: "failed",
+      failure: "review_unparseable",
+    });
+    expect(failing.stored).toEqual([]);
+    expect(second.nameOf(second.assigned[0]?.topicId ?? "")).toBe("Refunds");
+    warn.mockRestore();
   });
 
   it("turns an unsafe proposed topic into Other", () => {
@@ -1038,6 +1110,7 @@ describe("chat/review: why a review gave nothing, and what still gets stored", (
         throw new Error("d1 down");
       },
       assignToQuestion: async () => true,
+      clearOffTopic: async () => false,
     };
     const a = withNotes({
       reviewer: async () => ({
@@ -1147,6 +1220,58 @@ describe("chat/review: why a review gave nothing, and what still gets stored", (
       expect(assigned).toEqual([]);
       expect(topics.map((t) => t.name)).toEqual(["Refunds"]);
     }
+  });
+
+  it("takes an earlier topic off an off-topic question before storing the outcome", async () => {
+    const SITE: ReviewSubject = { name: "Acme", title: "Ask Acme", contentTitles: ["Refunds"] };
+    const order: string[] = [];
+    const { store, cleared } = memoryTopics(["Refunds"]);
+    const tracked: ReviewTopics = {
+      ...store,
+      async clearOffTopic(questionId, replyId) {
+        order.push("clear");
+        return store.clearOffTopic(questionId, replyId);
+      },
+    };
+    const { deps, stored } = withNotes({
+      reviewer: async () => reviewerFrom(scriptedProvider(out("off_topic")).provider),
+      topics: tracked,
+      subject: async () => SITE,
+    });
+    const setOutcome = deps.messages.setOutcome;
+    deps.messages.setOutcome = async (...args) => {
+      order.push("outcome");
+      return setOutcome(...args);
+    };
+    await runAnswerReview(deps, TOPIC_JOB);
+    expect(cleared).toEqual([{ questionId: "msg_question", replyId: JOB.messageId }]);
+    expect(order).toEqual(["clear", "outcome"]);
+    expect(stored).toEqual([{ id: JOB.messageId, outcome: "off_topic", confidence: null }]);
+  });
+
+  it("still stores off_topic when the topic cannot be cleared, and clears nothing for other outcomes", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store } = memoryTopics(["Refunds"]);
+    const { deps, stored } = withNotes({
+      reviewer: async () => reviewerFrom(scriptedProvider(out("off_topic")).provider),
+      topics: {
+        ...store,
+        async clearOffTopic() {
+          throw new Error("d1 down");
+        },
+      },
+    });
+    await runAnswerReview(deps, TOPIC_JOB);
+    expect(stored).toEqual([{ id: JOB.messageId, outcome: "off_topic", confidence: null }]);
+    error.mockRestore();
+
+    const other = memoryTopics(["Refunds"]);
+    const answered = withNotes({
+      reviewer: async () => reviewerFrom(scriptedProvider(out("answered")).provider),
+      topics: other.store,
+    });
+    await runAnswerReview(answered.deps, TOPIC_JOB);
+    expect(other.cleared).toEqual([]);
   });
 
   it("keeps the topic of a miss called off topic on an unknown subject (stored as declined)", async () => {
