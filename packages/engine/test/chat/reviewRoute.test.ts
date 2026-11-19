@@ -493,11 +493,23 @@ describe("chat: answer review on the answer path", () => {
 
   it("tags a retrieval miss's question too", async () => {
     const { reply } = await ask(
-      appWith({ fetch: anthropicFetch([], "off_topic", "Weather") }),
+      appWith({ fetch: anthropicFetch([], "wants_human", "Opening hours") }),
+      MISS_QUESTION,
+    );
+    expect(reply?.outcome).toBe("wants_human");
+    expect(await questionTopic(reply?.id)).toBe("Opening hours");
+  });
+
+  it("gives an off-topic question no topic, and creates none", async () => {
+    const { reply } = await ask(
+      appWith({ fetch: anthropicFetch([], "off_topic", "Australian capital city") }),
       MISS_QUESTION,
     );
     expect(reply?.outcome).toBe("off_topic");
-    expect(await questionTopic(reply?.id)).toBe("Weather");
+    expect(await questionTopic(reply?.id)).toBeNull();
+    expect((await tenant.topics.list("ast_1")).map((t) => t.name)).not.toContain(
+      "Australian capital city",
+    );
   });
 
   it("assigns no topic when Review answers is off", async () => {

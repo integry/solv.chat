@@ -554,16 +554,18 @@ describe("chat/answer", () => {
         instructions?: string;
       };
       // The answer review runs after each answer, on the fast tier.
-      if ((body.system ?? body.instructions) === REVIEW_FRAME) {
+      const review = (body.system ?? body.instructions) === REVIEW_FRAME;
+      if (review) {
         reviewModels.push(body.model ?? "");
       } else {
         requestedModels.push({ url, model: body.model ?? "" });
       }
+      const text = review ? "outcome: answered\ntopic: Greetings" : "hi";
 
       const sse = url.includes("anthropic.com")
         ? [
             'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10}}}\n\n',
-            'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n',
+            `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text } })}\n\n`,
             'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":5}}\n\n',
             'event: message_stop\ndata: {"type":"message_stop"}\n\n',
           ].join("")

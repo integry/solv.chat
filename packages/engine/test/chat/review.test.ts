@@ -18,11 +18,13 @@ import {
   REVIEW_MAX_SUBJECT_CHARS,
   REVIEW_MAX_SUBJECT_TITLES,
   type ReviewJob,
+  type ReviewResult,
   type ReviewRunDeps,
   type ReviewSubject,
   type ReviewTopics,
   runAnswerReview,
 } from "../../src/chat/review.js";
+import type { TraceReviewNote } from "../../src/chat/trace.js";
 import { ANTHROPIC_MODELS, costMicros } from "../../src/models.js";
 import type { LlmChunk, LlmProvider, LlmRequest } from "../../src/providers/types.js";
 import type { LimitAction, UsageEvent } from "../../src/seams/types.js";
@@ -353,7 +355,10 @@ describe("chat/review: running a review", () => {
     });
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const { deps, stored, checks } = runDeps({ reviewer: async () => ({ review }) });
-    await expect(runAnswerReview(deps, JOB)).resolves.toBeUndefined();
+    await expect(runAnswerReview(deps, JOB)).resolves.toEqual({
+      status: "failed",
+      failure: "review_provider_error",
+    });
     expect(review).toHaveBeenCalledTimes(REVIEW_MAX_ATTEMPTS);
     expect(REVIEW_MAX_ATTEMPTS).toBe(2);
     // The cap is asked before each attempt.
@@ -397,12 +402,17 @@ describe("chat/review: running a review", () => {
     error.mockRestore();
   });
 
-  it("does not retry an unusable label", async () => {
+  it("retries an unusable label once, then gives up with review_unparseable", async () => {
     const { provider, requests } = scriptedProvider("I think it answered");
     const { deps, stored } = runDeps({ reviewer: async () => reviewerFrom(provider) });
-    await runAnswerReview(deps, JOB);
-    expect(requests).toHaveLength(1);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(runAnswerReview(deps, JOB)).resolves.toEqual({
+      status: "failed",
+      failure: "review_unparseable",
+    });
+    expect(requests).toHaveLength(2);
     expect(stored).toEqual([]);
+    warn.mockRestore();
   });
 
   it("keeps a confidence in range and drops one out of range", async () => {
@@ -566,7 +576,11 @@ describe("chat/review: a retrieval miss", () => {
     });
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const { deps, stored } = runDeps({ reviewer: async () => ({ review }) });
-    await expect(runAnswerReview(deps, MISS)).resolves.toBeUndefined();
+    await expect(runAnswerReview(deps, MISS)).resolves.toEqual({
+      status: "stored",
+      outcome: "declined",
+      failure: "review_provider_error",
+    });
     expect(review).toHaveBeenCalledTimes(REVIEW_MAX_ATTEMPTS);
     expect(stored).toEqual([{ id: MISS.messageId, outcome: "declined", confidence: null }]);
     expect(JSON.stringify(error.mock.calls)).not.toContain(MISS.question);
@@ -685,7 +699,7 @@ function memoryTopics(initial: string[] = []) {
 describe("chat/review: topics", () => {
   const TOPIC_JOB: ReviewJob = { ...JOB, questionId: "msg_question" };
 
-  it("parses exactly two fields, outcome then topic", () => {
+  it("parses the two fields, outcome then topic", () => {
     expect(parseReviewOutput("outcome: answered\ntopic: Refunds")).toEqual({
       outcome: "answered",
       topic: "Refunds",
@@ -694,18 +708,37 @@ describe("chat/review: topics", () => {
       outcome: "partial",
       topic: "Opening hours",
     });
+    // Blank lines and the field names' case do not cost a decision.
+    expect(parseReviewOutput("outcome: answered\n\ntopic: Refunds")).toEqual({
+      outcome: "answered",
+      topic: "Refunds",
+    });
+    expect(parseReviewOutput("Outcome: answered\nTopic: Refunds")).toEqual({
+      outcome: "answered",
+      topic: "Refunds",
+    });
     for (const text of [
       "answered",
       "topic: Refunds\noutcome: answered",
-      "outcome: answered",
       "outcome: answered\ntopic: Refunds\nextra: yes",
-      "outcome: answered\n\ntopic: Refunds",
-      "Outcome: answered\nTopic: Refunds",
-      "outcome: Answered\ntopic: Refunds",
-      "outcome: answered.\ntopic: Refunds",
+      "outcome: answered\nI think so",
       "```\noutcome: answered\ntopic: Refunds\n```",
     ]) {
       expect(parseReviewOutput(text), text).toEqual({ outcome: null, topic: null });
+    }
+  });
+
+  it("keeps the outcome when the topic line is missing, and the topic when the label is unusable", () => {
+    expect(parseReviewOutput("outcome: answered")).toEqual({ outcome: "answered", topic: null });
+    expect(parseReviewOutput("outcome: declined\ntopic:")).toEqual({
+      outcome: "declined",
+      topic: "Other",
+    });
+    for (const label of ["Answered", "answered.", "unsure", ""]) {
+      expect(parseReviewOutput(`outcome: ${label}\ntopic: Refunds`), label).toEqual({
+        outcome: null,
+        topic: "Refunds",
+      });
     }
   });
 
@@ -866,5 +899,265 @@ describe("chat/review: topics", () => {
     });
     await runAnswerReview(deps, TOPIC_JOB);
     expect(nameOf(assigned[0]?.topicId ?? "")).toBe("Other");
+  });
+});
+
+describe("chat/review: why a review gave nothing, and what still gets stored", () => {
+  const TOPIC_JOB: ReviewJob = { ...JOB, questionId: "msg_question" };
+  /** Text a provider or a visitor wrote: none of it may reach a trace or a log. */
+  const LEAK = "LEAK_MARKER the provider said no";
+
+  function withNotes(overrides: Partial<ReviewRunDeps> & { reviewer: ReviewRunDeps["reviewer"] }) {
+    const notes: Array<{ messageId: string; note: TraceReviewNote }> = [];
+    const run = runDeps({
+      traces: {
+        async recordReview(messageId, note) {
+          notes.push({ messageId, note });
+        },
+      },
+      ...overrides,
+    });
+    return { ...run, notes };
+  }
+
+  function quietConsole() {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    return {
+      logged: () => JSON.stringify([...warn.mock.calls, ...error.mock.calls]),
+      restore: () => {
+        warn.mockRestore();
+        error.mockRestore();
+      },
+    };
+  }
+
+  it.each([
+    [
+      "review_provider_error",
+      async () => {
+        throw new Error(`${LEAK} ${JOB.question}`);
+      },
+    ],
+    ["review_unparseable", async () => ({ outcome: null, confidence: null })],
+  ] as const)(
+    "records %s once, after one retry, with no provider or visitor text",
+    async (code, review) => {
+      const console = quietConsole();
+      const spy = vi.fn(review);
+      const { deps, stored, notes } = withNotes({ reviewer: async () => ({ review: spy }) });
+      await expect(runAnswerReview(deps, JOB)).resolves.toEqual({
+        status: "failed",
+        failure: code,
+      });
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(stored).toEqual([]);
+      expect(notes).toEqual([{ messageId: JOB.messageId, note: { failed: code } }]);
+      const logged = console.logged();
+      expect(logged).toContain(code);
+      for (const text of ["LEAK_MARKER", JOB.question, JOB.reply]) {
+        expect(logged).not.toContain(text);
+        expect(JSON.stringify(notes)).not.toContain(text);
+      }
+      console.restore();
+    },
+  );
+
+  it("records review_timeout after a reviewer that never answers, twice", async () => {
+    const console = quietConsole();
+    const { deps, notes } = withNotes({
+      reviewer: async () => ({ review: () => new Promise(() => {}) }),
+      timeoutMs: 10,
+    });
+    await expect(runAnswerReview(deps, JOB)).resolves.toEqual({
+      status: "failed",
+      failure: "review_timeout",
+    });
+    expect(notes.map((n) => n.note)).toEqual([{ failed: "review_timeout" }]);
+    console.restore();
+  });
+
+  it("records review_provider_error when no reviewer can be built (no key, say)", async () => {
+    const console = quietConsole();
+    const { deps, notes } = withNotes({
+      reviewer: async () => {
+        throw new Error(LEAK);
+      },
+    });
+    await runAnswerReview(deps, JOB);
+    expect(notes.map((n) => n.note)).toEqual([{ failed: "review_provider_error" }]);
+    expect(console.logged()).not.toContain("LEAK_MARKER");
+    console.restore();
+  });
+
+  it("records review_skipped_spend_cap with no call", async () => {
+    const console = quietConsole();
+    const review = vi.fn(
+      async (): Promise<ReviewResult> => ({ outcome: "answered", confidence: null }),
+    );
+    const { deps, notes } = withNotes({
+      reviewer: async () => ({ review }),
+      limits: { check: async () => ({ ok: false, reason: "spend_cap" }) },
+    });
+    await runAnswerReview(deps, JOB);
+    expect(review).not.toHaveBeenCalled();
+    expect(notes.map((n) => n.note)).toEqual([{ failed: "review_skipped_spend_cap" }]);
+    console.restore();
+  });
+
+  it("records review_error when the outcome cannot be saved, and the topic is still stored", async () => {
+    const console = quietConsole();
+    const { store, assigned } = memoryTopics();
+    const { deps, notes, events } = withNotes({
+      reviewer: async () => ({
+        review: async () => ({ outcome: "answered", confidence: null, topic: "Refunds" }),
+      }),
+      topics: store,
+      messages: {
+        setOutcome: async () => {
+          throw new Error(LEAK);
+        },
+      },
+    });
+    await expect(runAnswerReview(deps, TOPIC_JOB)).resolves.toEqual({
+      status: "failed",
+      failure: "review_error",
+    });
+    expect(assigned).toHaveLength(1);
+    expect(notes.map((n) => n.note)).toEqual([{ failed: "review_error" }]);
+    expect(events.some((e) => e.review !== undefined)).toBe(false);
+    expect(console.logged()).not.toContain("LEAK_MARKER");
+    console.restore();
+  });
+
+  it("stores the outcome when the topic is refused or its write fails", async () => {
+    const console = quietConsole();
+    const failing: ReviewTopics = {
+      list: async () => [],
+      resolve: async () => {
+        throw new Error("d1 down");
+      },
+      assignToQuestion: async () => true,
+    };
+    const a = withNotes({
+      reviewer: async () => ({
+        review: async () => ({ outcome: "partial", confidence: null, topic: "Refunds" }),
+      }),
+      topics: failing,
+    });
+    await runAnswerReview(a.deps, TOPIC_JOB);
+    expect(a.stored).toEqual([{ id: JOB.messageId, outcome: "partial", confidence: null }]);
+    expect(a.notes).toEqual([]);
+
+    // A name that would capture personal data becomes Other; the outcome stands.
+    const { store, assigned, nameOf } = memoryTopics();
+    const b = withNotes({
+      reviewer: async () =>
+        reviewerFrom(scriptedProvider(out("answered", "jane@example.com")).provider),
+      topics: store,
+    });
+    await runAnswerReview(b.deps, TOPIC_JOB);
+    expect(b.stored).toEqual([{ id: JOB.messageId, outcome: "answered", confidence: null }]);
+    expect(nameOf(assigned[0]?.topicId ?? "")).toBe("Other");
+    // The model's output with no topic line at all keeps the outcome too.
+    const c = withNotes({
+      reviewer: async () => reviewerFrom(scriptedProvider("outcome: declined").provider),
+      topics: memoryTopics().store,
+    });
+    await runAnswerReview(c.deps, TOPIC_JOB);
+    expect(c.stored).toEqual([{ id: JOB.messageId, outcome: "declined", confidence: null }]);
+    console.restore();
+  });
+
+  it("stores the topic when the label is unusable twice", async () => {
+    const console = quietConsole();
+    const { store, assigned, nameOf } = memoryTopics();
+    const { provider, requests } = scriptedProvider("outcome: maybe\ntopic: Refunds");
+    const { deps, stored, notes } = withNotes({
+      reviewer: async () => reviewerFrom(provider),
+      topics: store,
+    });
+    await runAnswerReview(deps, TOPIC_JOB);
+    expect(requests).toHaveLength(2);
+    expect(stored).toEqual([]);
+    expect(nameOf(assigned[0]?.topicId ?? "")).toBe("Refunds");
+    expect(notes.map((n) => n.note)).toEqual([{ failed: "review_unparseable" }]);
+    console.restore();
+  });
+
+  it("records nothing when the retry succeeds, and meters each call", async () => {
+    let calls = 0;
+    const { provider } = scriptedProvider(() => {
+      calls += 1;
+      return calls === 1 ? "not a label" : out("answered");
+    });
+    const usage: UsageEvent[] = [];
+    const { deps, stored, notes, events } = withNotes({
+      reviewer: async () => reviewerFrom(provider, usage),
+    });
+    await expect(runAnswerReview(deps, JOB)).resolves.toEqual({
+      status: "stored",
+      outcome: "answered",
+    });
+    expect(stored).toHaveLength(1);
+    expect(notes).toEqual([]);
+    // One usage event per call actually made, and one outcome event.
+    expect(usage).toHaveLength(2);
+    expect(events.filter((e) => e.review !== undefined)).toHaveLength(1);
+  });
+
+  it("marks the catch-up's notes as its own", async () => {
+    const console = quietConsole();
+    const { deps, notes } = withNotes({
+      reviewer: async () => ({ review: async () => ({ outcome: null, confidence: null }) }),
+      catchUp: true,
+    });
+    await runAnswerReview(deps, JOB);
+    expect(notes.map((n) => n.note)).toEqual([{ failed: "review_unparseable", catchUp: true }]);
+    console.restore();
+  });
+
+  it("stores declined for a miss whose review failed, and says why", async () => {
+    const console = quietConsole();
+    const { deps, stored, notes } = withNotes({
+      reviewer: async () => ({
+        review: async () => {
+          throw new Error("down");
+        },
+      }),
+    });
+    await runAnswerReview(deps, { ...JOB, retrievalMiss: true });
+    expect(stored).toEqual([{ id: JOB.messageId, outcome: "declined", confidence: null }]);
+    expect(notes.map((n) => n.note)).toEqual([{ failed: "review_provider_error" }]);
+    console.restore();
+  });
+
+  it("gives an off-topic question no topic and creates none", async () => {
+    const SITE: ReviewSubject = { name: "Acme", title: "Ask Acme", contentTitles: ["Refunds"] };
+    for (const job of [TOPIC_JOB, { ...TOPIC_JOB, retrievalMiss: true }]) {
+      const { store, topics, assigned } = memoryTopics(["Refunds"]);
+      const { provider } = scriptedProvider(out("off_topic", "Australian capital city"));
+      const { deps, stored } = withNotes({
+        reviewer: async () => reviewerFrom(provider),
+        topics: store,
+        subject: async () => SITE,
+      });
+      await runAnswerReview(deps, job);
+      expect(stored).toEqual([{ id: JOB.messageId, outcome: "off_topic", confidence: null }]);
+      expect(assigned).toEqual([]);
+      expect(topics.map((t) => t.name)).toEqual(["Refunds"]);
+    }
+  });
+
+  it("keeps the topic of a miss called off topic on an unknown subject (stored as declined)", async () => {
+    const { store, assigned, nameOf } = memoryTopics();
+    const { provider } = scriptedProvider(out("off_topic", "Opening hours"));
+    const { deps, stored } = withNotes({
+      reviewer: async () => reviewerFrom(provider),
+      topics: store,
+    });
+    await runAnswerReview(deps, { ...TOPIC_JOB, retrievalMiss: true });
+    expect(stored[0]?.outcome).toBe("declined");
+    expect(nameOf(assigned[0]?.topicId ?? "")).toBe("Opening hours");
   });
 });

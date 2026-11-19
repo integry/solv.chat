@@ -4,6 +4,7 @@ import type {
   OverviewPeriod,
   OverviewSetup,
   ResponseTimePeriod,
+  ReviewFailure,
   SourceKind,
   SourceSyncStatus,
   TestExpectation,
@@ -90,7 +91,12 @@ export interface ConversationSummary {
   pageUrl: string;
   firstQuestion: string | null;
   turnCount: number;
+  /** A reply found nothing, and was not reviewed as off topic or asking for a person. */
   hasUnanswered: boolean;
+  /** A reply the answer check found off topic (what the "Off topic" filter finds). */
+  hasOffTopic?: boolean;
+  /** A visitor asked for a person (what the "Asked for a person" filter finds). */
+  hasAskedForPerson?: boolean;
   hasNotHelpful?: boolean;
   usedTool?: boolean;
   lastMessageAt?: number;
@@ -199,6 +205,8 @@ export interface AnswerTrace {
   totalMs: number | null;
   /** Null when no details were recorded (answers from before traces existed). */
   trace: { parts: AnswerTracePart[]; truncated: boolean } | null;
+  /** Why the answer check gave no result, as a fixed code; null or absent when it did. */
+  reviewFailure?: ReviewFailure | null;
 }
 
 export interface ConversationDetail {

@@ -549,4 +549,77 @@ describe("migrations", () => {
       .first<{ send_conversation_context: number }>();
     expect(row?.send_conversation_context).toBe(0);
   });
+
+  it("clears the topic of every question answered off topic through 0031, keeping every topic", async () => {
+    const orgA = "org_00000000000000000000";
+    const orgB = "org_bbbbbbbbbbbbbbbbbbbb";
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0031_"));
+    expect(migration?.queries.length).toBe(1);
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM topics"),
+      env.DB.prepare("INSERT OR IGNORE INTO orgs (id, name) VALUES (?1, 'B')").bind(orgB),
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_1', ?1, 'A', 'pk_1', 1)",
+      ).bind(orgA),
+      env.DB.prepare(
+        "INSERT INTO assistants (id, org_id, name, public_key, created_at) VALUES ('ast_b', ?1, 'B', 'pk_b', 1)",
+      ).bind(orgB),
+      env.DB.prepare(
+        `INSERT INTO topics (id, org_id, assistant_id, name, name_key, created_at) VALUES
+           ('top_cap', ?1, 'ast_1', 'Australian capital city', 'australian capital city', 1),
+           ('top_ref', ?1, 'ast_1', 'Refunds', 'refunds', 1)`,
+      ).bind(orgA),
+      env.DB.prepare(
+        `INSERT INTO topics (id, org_id, assistant_id, name, name_key, created_at) VALUES
+           ('top_b', ?1, 'ast_b', 'Weather', 'weather', 1)`,
+      ).bind(orgB),
+      env.DB.prepare(
+        "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES ('cnv_a', ?1, 'ast_1', 'v', 1, '')",
+      ).bind(orgA),
+      env.DB.prepare(
+        "INSERT INTO conversations (id, org_id, assistant_id, visitor_id, started_at, page_url) VALUES ('cnv_b', ?1, 'ast_b', 'v', 1, '')",
+      ).bind(orgB),
+    ]);
+    const turn = (
+      org: string,
+      conversation: string,
+      q: string,
+      topic: string,
+      outcome: string | null,
+    ) => [
+      env.DB.prepare(
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, answered, created_at, topic_id)
+         VALUES (?1, ?2, ?3, 'user', 'Q', '[]', 1, 1, ?4)`,
+      ).bind(q, org, conversation, topic),
+      env.DB.prepare(
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, answered, created_at, reply_to, outcome)
+         VALUES (?1, ?2, ?3, 'assistant', 'A', '[]', 0, 2, ?4, ?5)`,
+      ).bind(`${q}_r`, org, conversation, q, outcome),
+    ];
+    await env.DB.batch([
+      ...turn(orgA, "cnv_a", "msg_off", "top_cap", "off_topic"),
+      ...turn(orgA, "cnv_a", "msg_ok", "top_ref", "answered"),
+      ...turn(orgA, "cnv_a", "msg_person", "top_ref", "wants_human"),
+      ...turn(orgA, "cnv_a", "msg_unreviewed", "top_ref", null),
+      ...turn(orgB, "cnv_b", "msg_b_off", "top_b", "off_topic"),
+    ]);
+
+    for (const sql of migration?.queries ?? []) await env.DB.prepare(sql).run();
+
+    const topics = await env.DB.prepare(
+      "SELECT id, topic_id FROM messages WHERE role = 'user' ORDER BY id",
+    ).all<{ id: string; topic_id: string | null }>();
+    expect(Object.fromEntries(topics.results.map((r) => [r.id, r.topic_id]))).toEqual({
+      msg_b_off: null,
+      msg_off: null,
+      msg_ok: "top_ref",
+      msg_person: "top_ref",
+      msg_unreviewed: "top_ref",
+    });
+    // The schema cannot tell an owner-renamed topic from one the review named,
+    // so every topic is kept, even one left with no questions.
+    const kept = await env.DB.prepare("SELECT id FROM topics ORDER BY id").all<{ id: string }>();
+    expect(kept.results.map((r) => r.id)).toEqual(["top_b", "top_cap", "top_ref"]);
+    await env.DB.prepare("DELETE FROM topics").run();
+  });
 });

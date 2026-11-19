@@ -261,9 +261,16 @@ function ConversationRow({ conv }: { conv: ConversationSummary }) {
           <RelativeTime value={conv.lastMessageAt ?? conv.startedAt} />
           <span aria-hidden="true">·</span>
           <span>{messages}</span>
-          {(conv.hasUnanswered || conv.hasNotHelpful || conv.usedTool) && (
+          {(conv.hasUnanswered ||
+            conv.hasOffTopic ||
+            conv.hasAskedForPerson ||
+            conv.hasNotHelpful ||
+            conv.usedTool) && (
             <span className="conv-badges">
               {conv.hasUnanswered && <StatusBadge tone="warning">Unanswered</StatusBadge>}
+              {/* The outcome's own words, as the filters name it: not a gap. */}
+              {conv.hasOffTopic && <StatusBadge tone="neutral">Off topic</StatusBadge>}
+              {conv.hasAskedForPerson && <StatusBadge tone="info">Asked for a person</StatusBadge>}
               {conv.hasNotHelpful && <StatusBadge tone="danger">Marked not helpful</StatusBadge>}
               {conv.usedTool && <StatusBadge tone="info">Used a tool</StatusBadge>}
             </span>

@@ -866,3 +866,47 @@ export function messagesFor(db: D1Database, orgId: string) {
     },
   };
 }
+
+/** An answer the review catch-up may take: its org as stored (to be vouched for) and its id. */
+export interface ReviewCatchUpCandidate {
+  claimedOrgId: string;
+  messageId: string;
+}
+
+/**
+ * Visitor replies written in `[from, to]` that still have no outcome and no
+ * review note on their trace (no recorded failure, not taken by the
+ * catch-up), oldest first. Complete replies only: a reply still waiting for
+ * page actions (`resume_context` set) is not the answer yet. "Try it" and
+ * test-run answers store no message, so they are never here.
+ *
+ * Across orgs, like `dueSitemapSources`: this is the scheduler's own
+ * discovery. Every row's org is checked with the auth seam before anything is
+ * read or written for it, and that work goes through a `Tenant`. Each org is
+ * read through its own `(org_id, role, created_at)` index range.
+ */
+export async function reviewCatchUpCandidates(
+  db: D1Database,
+  options: { from: number; to: number; limit: number },
+): Promise<ReviewCatchUpCandidate[]> {
+  const res = await db
+    .prepare(
+      `SELECT m.org_id AS org_id, m.id AS id
+         FROM orgs o
+         JOIN messages m ON m.org_id = o.id AND m.role = 'assistant'
+                        AND m.created_at >= ?1 AND m.created_at <= ?2
+         LEFT JOIN message_traces t ON t.org_id = m.org_id AND t.message_id = m.id
+        WHERE m.outcome IS NULL
+          AND m.reply_to IS NOT NULL
+          AND m.resume_context IS NULL
+          AND (t.detail IS NULL
+               OR CASE WHEN json_valid(t.detail)
+                       THEN json_extract(t.detail, '$.review') IS NULL
+                       ELSE 0 END)
+        ORDER BY m.created_at ASC, m.id ASC
+        LIMIT ?3`,
+    )
+    .bind(options.from, options.to, options.limit)
+    .all<{ org_id: string; id: string }>();
+  return res.results.map((row) => ({ claimedOrgId: row.org_id, messageId: row.id }));
+}

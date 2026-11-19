@@ -80,6 +80,14 @@ export const forQueuedIngest = (db: D1Database, resolvedOrgId: string): Tenant =
 export const forScheduledSync = (db: D1Database, resolvedOrgId: string): Tenant =>
   build(db, resolvedOrgId);
 
+/**
+ * Builds a `Tenant` for the scheduled answer-review catch-up, from the org the
+ * auth seam returned (`resolveOrg`, `queued_ingest`) for an org read from a
+ * `messages` row the engine wrote. Never from a request.
+ */
+export const forScheduledReview = (db: D1Database, resolvedOrgId: string): Tenant =>
+  build(db, resolvedOrgId);
+
 function build(db: D1Database, orgId: string): Tenant {
   // Handlers reach tables only through a `Tenant`, and the builders above take
   // an org from the auth seam (a principal, an ingest or public scope, or the

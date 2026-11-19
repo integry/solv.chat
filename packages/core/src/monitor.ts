@@ -126,6 +126,33 @@ export function isAnswerOutcome(value: unknown): value is AnswerOutcome {
   return typeof value === "string" && (ANSWER_OUTCOMES as readonly string[]).includes(value);
 }
 
+/**
+ * Why an answer review gave no usable result, recorded in the answer's trace
+ * once its attempts are used up. Fixed codes only: never the provider's
+ * response text or anything the visitor wrote.
+ *
+ * - `review_timeout`: the model did not reply in time.
+ * - `review_provider_error`: the provider refused or failed the call (or no
+ *   reviewer could be built, a missing key say).
+ * - `review_unparseable`: the reply was not one of the five labels.
+ * - `review_skipped_spend_cap`: the daily spend limit was reached first.
+ * - `review_error`: something on our side failed (the spend limit could not
+ *   be read, or the result could not be saved).
+ */
+export const REVIEW_FAILURES = [
+  "review_timeout",
+  "review_provider_error",
+  "review_unparseable",
+  "review_skipped_spend_cap",
+  "review_error",
+] as const;
+export type ReviewFailure = (typeof REVIEW_FAILURES)[number];
+
+/** True for exactly the review failure codes. */
+export function isReviewFailure(value: unknown): value is ReviewFailure {
+  return typeof value === "string" && (REVIEW_FAILURES as readonly string[]).includes(value);
+}
+
 /** One of an assistant's topics, as the topic list and the Conversations filter read it. */
 export interface TopicItem {
   id: string;

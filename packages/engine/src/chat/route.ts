@@ -273,15 +273,20 @@ export async function resolveChatProviders(
  * use inside the deferred review, so the visitor's request reads no extra key.
  * The reviewer is the fast tier of the provider that answered (the same
  * configured model on OpenRouter, which has no tiers), with the same key.
+ * The scheduled catch-up gives no answering provider: one is built the same
+ * way, from the org's settings.
  */
-function reviewerSource(params: {
+export function reviewerSource(params: {
   seams: Seams;
   overrides: ChatRouteOverrides | undefined;
   orgId: string;
   assistantId: string;
   providerKind: LlmProviderName;
   tier: Tier;
-  provider: LlmProvider;
+  /** The provider that answered; absent in the catch-up. */
+  provider?: LlmProvider | undefined;
+  /** The configured model (OpenRouter's only model), when no provider is given. */
+  configuredModel?: string | undefined;
 }): (() => Promise<AnswerReviewer>) | null {
   const { overrides, seams } = params;
   if (overrides?.reviewer !== undefined) {
@@ -297,13 +302,15 @@ function reviewerSource(params: {
           ? OPENAI_MODELS.fast
           : undefined;
     const provider =
-      params.providerKind === "openrouter" || params.tier === "fast"
+      params.provider !== undefined &&
+      (params.providerKind === "openrouter" || params.tier === "fast")
         ? params.provider
         : await llmProviderFor(
             {
               orgId: params.orgId,
               provider: params.providerKind,
               tier: "fast",
+              model: params.providerKind === "openrouter" ? params.configuredModel : undefined,
               fetchImpl: overrides?.fetch,
             },
             seams.keys,
@@ -312,7 +319,9 @@ function reviewerSource(params: {
       provider,
       model: fastModel,
       // Recorded like any model use, through the seam: it counts toward the
-      // daily spend cap and `usage_daily`, and never as a message.
+      // daily spend cap and `usage_daily`, and never as a message. One event
+      // per call that reported usage (each provider reports once per call),
+      // so a retry and a catch-up call are metered like the first.
       onUsage: (tokensIn, tokensOut, cost) =>
         seams.usage.record({
           orgId: params.orgId,
@@ -403,6 +412,8 @@ async function resolveAnswerDeps(params: {
               {
                 messages: params.tenant.messages,
                 topics: params.tenant.topics,
+                // A review that gives no usable result says why, in the trace.
+                traces: params.tenant.traces,
                 // What the site is about, read in the deferred review: the
                 // names it answers as and some of its content's titles.
                 subject: async (assistantId) => ({

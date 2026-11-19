@@ -3,7 +3,9 @@ import {
   type PreviewTraceSource,
   parseStoredTrace,
   type StoredTrace,
+  TRACE_VERSION,
   type TracePart,
+  type TraceReviewNote,
 } from "../chat/trace.js";
 import { prepare, prepareInsert } from "./sql.js";
 
@@ -162,6 +164,47 @@ export function tracesFor(db: D1Database, orgId: string) {
      */
     async put(messageId: string, part: TracePart, now: number): Promise<void> {
       await write(messageId, boundTrace({ v: 1, parts: [part] }), now);
+    },
+
+    /**
+     * Records the answer review's note on a message's trace: why it gave no
+     * usable result (a fixed code), and whether the catch-up took it. Written
+     * into the stored JSON, keeping the rest; a message whose trace write
+     * failed gets a trace with the note alone. `boundTrace` keeps room for it.
+     */
+    async recordReview(messageId: string, note: TraceReviewNote, now: number): Promise<void> {
+      await prepareInsert(
+        db,
+        `INSERT INTO message_traces (org_id, message_id, detail, created_at, updated_at)
+           VALUES (?1, ?2, json_object('v', ${TRACE_VERSION}, 'parts', json('[]'), 'review', json(?3)), ?4, ?4)
+           ON CONFLICT(org_id, message_id) DO UPDATE SET
+             detail = json_set(message_traces.detail, '$.review', json(?3)),
+             updated_at = excluded.updated_at`,
+      )
+        .bind(orgId, messageId, JSON.stringify(note), now)
+        .run();
+    },
+
+    /**
+     * Takes a message for the review catch-up, once: true only for the call
+     * that wrote the claim, on a trace with no review note yet. A message
+     * whose live review recorded a failure, or that the catch-up already
+     * took, is refused.
+     */
+    async claimReviewCatchUp(messageId: string, now: number): Promise<boolean> {
+      const note = JSON.stringify({ catchUp: true } satisfies TraceReviewNote);
+      const res = await prepareInsert(
+        db,
+        `INSERT INTO message_traces (org_id, message_id, detail, created_at, updated_at)
+           VALUES (?1, ?2, json_object('v', ${TRACE_VERSION}, 'parts', json('[]'), 'review', json(?3)), ?4, ?4)
+           ON CONFLICT(org_id, message_id) DO UPDATE SET
+             detail = json_set(message_traces.detail, '$.review', json(?3)),
+             updated_at = excluded.updated_at
+           WHERE json_extract(message_traces.detail, '$.review') IS NULL`,
+      )
+        .bind(orgId, messageId, note, now)
+        .run();
+      return (res.meta.changes ?? 0) > 0;
     },
 
     /**

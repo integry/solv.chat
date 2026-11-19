@@ -327,10 +327,12 @@ three due sources per call, oldest first by the later of their last run
 start and their org's last refusal by the auth seam: an org refused at one
 tick goes behind every other due source, so however many sources it has, the
 next tick reads past them. The Workers `scheduled` handler
-calls it, and the open build's `wrangler.jsonc` runs it hourly. A host with
+calls it (with the answer-review catch-up, "Answer review"; one failing does
+not stop the other), and the open build's `wrangler.jsonc` runs it hourly. A host with
 its own cron (every 10 minutes, say) calls `runDueSyncs` instead. Finding due
-sources is the one query without an org filter: a cron has no request and so
-no org, so it reads only org and source ids, and everything after goes
+sources (and the catch-up's replies, `reviewCatchUpCandidates`, read org by
+org through the `orgs` table) is a query without an org filter: a cron has
+no request and so no org, so it reads only org and source ids, and everything after goes
 through the org's `Tenant` once the auth seam has vouched for it. A refusal
 is recorded in `sync_org_refusals` from the seam's own answer, keyed by the
 org; nothing of the org is read.
@@ -382,7 +384,9 @@ The Monitor screens read:
 - Conversation: `GET …/conversations/:id/messages/:messageId/trace` is how one
   assistant reply was made (see "Answer traces"); `trace: null` for a reply
   with none, and 404 for a visitor message or a message outside that
-  conversation or org. `GET …/assistants/:id/preview-traces/:traceId` is the
+  conversation or org; `reviewFailure` is the answer review's reason code
+  when it gave no result (null otherwise, and always for a preview).
+  `GET …/assistants/:id/preview-traces/:traceId` is the
   same view for a "Try it" answer (the id its `done` event carried) or a test
   run's answer (`traceId` on its result), with `source` `try_it` or
   `test_run` (`visitor` on the first); 404 for any other id, assistant or org.
@@ -457,10 +461,41 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   for it. Not the Queue: one short call per answer needs no durable retry, the
   open engine's only queue is the ingest queue (whose consumer is built for
   documents), and the visitor is never waiting either way. Each attempt has a
-  10-second timeout (`REVIEW_TIMEOUT_MS`); a failure or timeout is retried
-  once, an unusable label is not. For a reply with content, a failed or
-  skipped review leaves the outcome NULL and changes nothing else (a
-  retrieval miss differs, below).
+  10-second timeout (`REVIEW_TIMEOUT_MS`); a failure, a timeout or an
+  unusable label is retried once. For a reply with content, a failed or
+  skipped review leaves the outcome NULL (a retrieval miss differs, below)
+  and records why in the answer's trace; deferred work that is cut off
+  records nothing, and the scheduled catch-up (below) takes it up.
+- **Why a review gave nothing.** Once its attempts are used up, the reason is
+  stored on the answer's trace (`message_traces.detail`, `review.failed`) as
+  a fixed code (`REVIEW_FAILURES` in `@solvchat/core`): `review_timeout`,
+  `review_provider_error` (the provider refused or failed the call, or no
+  reviewer could be built, a missing key say), `review_unparseable` (no
+  label in the reply), `review_skipped_spend_cap`, or `review_error` (the
+  spend limit could not be read, or the outcome not saved). Never the
+  provider's response text or anything the visitor wrote, in the trace or
+  in a log line: logs carry the code and error names only. The reason is
+  recorded for a retrieval miss too, though its `declined` is still stored.
+  A message whose own trace write failed gets a trace holding only the note
+  (`parts` empty); `boundTrace` leaves room for the note
+  (`TRACE_REVIEW_RESERVE_BYTES`). The admin's answer trace returns it as
+  `reviewFailure` and says it in plain words under "Answer check" ("Not
+  checked. The check took too long, twice." and so on).
+- **Catch-up.** The Workers `scheduled` handler (the same cron as the
+  sitemap sync; `app.runReviewCatchUp(env)` for a host with its own cron)
+  reviews, each tick, up to `MAX_REVIEW_CATCH_UP_PER_TICK` (10) visitor
+  replies written in the last 24 hours (`REVIEW_CATCH_UP_WINDOW_MS`) and at
+  least 5 minutes ago (`REVIEW_CATCH_UP_MIN_AGE_MS`, so it never races the
+  live review) that are complete (not paused), have no outcome and no review
+  note on their trace, oldest first. Each org is checked with the auth seam
+  first (`queued_ingest`, as a scheduled sync's is). Before anything is spent
+  the reply is claimed on its trace (`review.catchUp`, a conditional write),
+  so each is attempted at most once by the catch-up, even with two ticks at
+  once or a tick cut off. It is then reviewed exactly as the live path does
+  it: the same spend cap (`Limits`, `{ kind: "review" }`), key, provider and
+  "Review answers" switch (off: no call; only a retrieval miss is stored, as
+  `declined`), retry and reason codes, topic rules and metering. "Try it"
+  and test-run answers store no message, so they are never taken.
 - **What is reviewed.** Completed replies to visitors (`POST /v1/chat`),
   including a paused reply once its continuation completes (never while
   paused). "Try it" previews and test runs are not reviewed.
@@ -508,21 +543,31 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   `scripts/review-eval.mjs` runs the set against the real fast-tier model
   (opt-in, needs a provider key, never in CI; exits 1 when an injected case
   is mishandled). The output is parsed
-  strictly as two fields: the whole reply, less surrounding whitespace, must
-  be exactly the two lines `outcome: <label>` and `topic: <name>`, the label
-  one of the five; anything else is stored as NULL, with no topic.
+  as two fields, each on its own: the reply, less surrounding whitespace and
+  blank lines, must be at most the two lines `outcome: <label>` then
+  `topic: <name>` (field names in any case). A label that is not exactly one
+  of the five is no outcome (the topic still stands); a missing or refused
+  topic is no topic, or "Other" (the outcome still stands). Anything else (a
+  third line, another order, a sentence, a code fence) is neither.
 - **Cost.** The call's tokens and cost are recorded through `UsageSink` like
   any model use (`messages: 0`), so they count toward `usage_daily` and the
   daily spend cap. Before each attempt the review asks `Limits` with
   `{ kind: "review" }` and is skipped when the cap is reached (the open
-  `basicLimits` applies only the spend cap to it, no rate limit). At most 64
+  `basicLimits` applies only the spend cap to it, no rate limit); a check
+  that fails is not retried. At most 64
   output tokens (the label and a topic of at most 40 characters in any
   script); the reply is cut to its first 6000 characters.
 - **Metering.** The usage counter a host bills on (`messages`) does not change.
-  When an outcome is stored, the seam also receives an event that counts
+  Each reviewer call that the provider reports usage for (every call that
+  reached it: each provider reports once per call) is one usage event, so a
+  retry and a catch-up call are metered like the first; the answered-message
+  event (`messages: 1`) is never sent again. When an outcome is stored, the
+  seam also receives an event that counts
   nothing (`messages`, tokens and cost all 0) and carries
   `review: { messageId, outcome, confidence }`, so a host can apply its own
-  rule later. The open `usageDaily` writes nothing for such an event.
+  rule later. The open `usageDaily` writes nothing for such an event. It is
+  sent once per message: a second write of an outcome (the catch-up after a
+  live review that did store one) changes nothing and sends nothing.
 - **Answered share** (Overview and Reports): over the range's replies less
   those reviewed as `off_topic` (an assistant that rightly refuses a question
   about something else has not failed), a reviewed reply counts 1 for
@@ -538,7 +583,11 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
 - **Conversations** shows the outcome as a badge on each reviewed assistant
   reply ("Answered", "Partly answered", "Could not answer", "Off topic",
   "Asked for a person"); a retrieval miss reviewed as `declined` keeps its
-  "Unanswered" badge. A reply that Gaps would list offers "Write an answer
+  "Unanswered" badge. The list badges a conversation the same way
+  (`hasUnanswered`, `hasOffTopic`, `hasAskedForPerson`): "Unanswered" for a
+  miss that is unreviewed or `declined`, and "Off topic" or "Asked for a
+  person" for a reply with that outcome, as the filters of those names find
+  it, never "Unanswered" for it. A reply that Gaps would list offers "Write an answer
   for this"; one reviewed as `off_topic` or `wants_human` does not. The
   "Could not answer", "Asked for a person" and "Off topic" filters read the
   outcome, so "Asked for a person" finds a visitor who asked for one even
@@ -563,7 +612,13 @@ are about.
   message), not the reply: it describes what was asked, the Topics list
   counts questions, and the Conversations filter finds where it was asked. A
   retrieval miss's question gets one too (its topic stands even when its label
-  is replaced by `declined`). A question is tagged once; nothing re-tags it.
+  is replaced by `declined`). An `off_topic` question gets no topic and never
+  creates one: it is not about the site, so it would only fill the Topics
+  list and the topic filter; the "Off topic" filter is how the owner finds
+  these. Migration 0031 cleared the topic of questions tagged before this
+  (it keeps every topic: the schema cannot tell an owner-renamed topic from
+  one the review named, so one left with no questions stays until the owner
+  deletes it). A question is tagged once; nothing re-tags it.
   There is no manual tagging of a message.
 - **The cap.** At most 40 topics per assistant (`MAX_TOPICS_PER_ASSISTANT`),
   not counting "Other", which is always available. When the list is full the
@@ -626,6 +681,10 @@ the trace reads.
   only on a paused reply whose continuation failed.
 - A paused reply's continuations are appended as further parts (at most 8 per
   message: the first answer and the newest resumes).
+
+The answer review adds its note to the same document when it gave no
+result: a fixed reason code and whether the catch-up took the answer (see
+"Answer review"), never text.
 
 The trace holds references, never copies: no prompt, question, chunk text,
 tool or action output. It is written after the reply is complete and sent, in

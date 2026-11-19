@@ -1,5 +1,6 @@
 import { adminAsset } from "./admin/assets.js";
 import { adminRoutes } from "./admin/router.js";
+import { type ReviewCatchUpResult, runReviewCatchUp } from "./chat/reviewCatchUp.js";
 import {
   adminChatRoute,
   type ChatRouteOverrides,
@@ -68,7 +69,11 @@ export interface Env extends ProviderEnv {
 export interface App {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response>;
   queue(batch: MessageBatch<unknown>, env: Env, ctx: ExecutionContext): Promise<void>;
-  /** The Workers cron handler: starts the sitemap syncs that are due. */
+  /**
+   * The Workers cron handler: starts the sitemap syncs that are due, and
+   * reviews a few answers the live answer review left with no outcome
+   * (`runReviewCatchUp`). One failing does not stop the other.
+   */
   scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void>;
   /**
    * The same work as `scheduled`, for a host that runs its own cron: picks
@@ -76,6 +81,19 @@ export interface App {
    * often (every 10 minutes, say) and from more than one place at once.
    */
   runDueSyncs(env: Env, options?: RunDueSyncsOptions): Promise<DueSyncsResult>;
+  /**
+   * The answer-review catch-up `scheduled` runs, for a host that runs its own
+   * cron: reviews, once each, up to `maxAnswers` visitor replies from the last
+   * 24 hours that have no outcome and no recorded review failure. Safe to call
+   * from more than one place at once.
+   */
+  runReviewCatchUp(env: Env, options?: RunReviewCatchUpOptions): Promise<ReviewCatchUpResult>;
+}
+
+export interface RunReviewCatchUpOptions {
+  /** Replies reviewed per call; defaults to `MAX_REVIEW_CATCH_UP_PER_TICK`. */
+  maxAnswers?: number | undefined;
+  now?: (() => number) | undefined;
 }
 
 export interface RunDueSyncsOptions {
@@ -102,6 +120,15 @@ export function createApp(seams: Seams, options?: AppOptions): App {
   const resolveQueuedOrg = (orgId: string) =>
     seams.auth.resolveOrg({ kind: "queued_ingest", orgId });
 
+  const reviewCatchUp = (env: Env, runOptions?: RunReviewCatchUpOptions) =>
+    runReviewCatchUp({
+      db: env.DB,
+      env,
+      seams,
+      overrides: chatOverrides,
+      maxAnswers: runOptions?.maxAnswers,
+      now: runOptions?.now,
+    });
   const dueSyncs = (env: Env, runOptions?: RunDueSyncsOptions) =>
     runDueSyncs({
       db: env.DB,
@@ -120,9 +147,17 @@ export function createApp(seams: Seams, options?: AppOptions): App {
     async scheduled(controller, env, ctx) {
       void controller;
       void ctx;
-      await dueSyncs(env);
+      // Both run every tick; one failing must not cost the other its turn.
+      const [syncs, reviews] = await Promise.allSettled([dueSyncs(env), reviewCatchUp(env)]);
+      if (reviews.status === "rejected") {
+        console.error("chat: review catch-up did not run", {
+          error: reviews.reason instanceof Error ? reviews.reason.name : typeof reviews.reason,
+        });
+      }
+      if (syncs.status === "rejected") throw syncs.reason;
     },
     runDueSyncs: dueSyncs,
+    runReviewCatchUp: reviewCatchUp,
     async fetch(request, env, ctx) {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") {
