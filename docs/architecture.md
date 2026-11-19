@@ -484,10 +484,13 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
 - **Catch-up.** The Workers `scheduled` handler (the same cron as the
   sitemap sync; `app.runReviewCatchUp(env)` for a host with its own cron)
   reviews, each tick, up to `MAX_REVIEW_CATCH_UP_PER_TICK` (10) visitor
-  replies written in the last 24 hours (`REVIEW_CATCH_UP_WINDOW_MS`) and at
-  least 5 minutes ago (`REVIEW_CATCH_UP_MIN_AGE_MS`, so it never races the
-  live review) that are complete (not paused), have no outcome and no review
-  note on their trace, oldest first. Each org is checked with the auth seam
+  replies first written in the last 24 hours (`REVIEW_CATCH_UP_WINDOW_MS`)
+  and completed at least 5 minutes ago (`REVIEW_CATCH_UP_MIN_AGE_MS`, so it
+  never races the live review) that are complete (not paused), have no
+  outcome and no review note on their trace, oldest first. A reply that
+  paused for page actions counts from the continuation that completed it
+  (`messages.resumed_at`, written in the same update as its text), since that
+  is when its live review starts; any other from when it was written. Each org is checked with the auth seam
   first (`queued_ingest`, as a scheduled sync's is). Replies are read in
   pages of 50, up to `REVIEW_CATCH_UP_MAX_PAGES` (5) a tick; each later page
   leaves out the orgs the seam refused so far and starts past the last row

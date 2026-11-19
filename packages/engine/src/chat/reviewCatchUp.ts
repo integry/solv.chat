@@ -24,9 +24,12 @@ export const MAX_REVIEW_CATCH_UP_PER_TICK = 10;
 /** How far back the catch-up looks. Older replies are left as they are. */
 export const REVIEW_CATCH_UP_WINDOW_MS = 24 * 60 * 60 * 1000;
 /**
- * How old a reply must be before the catch-up takes it. Ours: the live review
- * (two attempts of 10 seconds and a few reads) is long finished by then, so
- * the two never review one reply at the same time.
+ * How long after a reply was completed the catch-up waits before taking it:
+ * after it was written, or, for one that paused for page actions, after the
+ * continuation that completed it (`resumed_at`), which is when its live
+ * review starts. Ours: the live review (two attempts of 10 seconds and a few
+ * reads) is long finished by then, so the two never review one reply at the
+ * same time.
  */
 export const REVIEW_CATCH_UP_MIN_AGE_MS = 5 * 60 * 1000;
 /** Rows read per page: some may belong to an org the auth seam refuses. */

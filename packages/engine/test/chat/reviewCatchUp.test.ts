@@ -372,6 +372,50 @@ describe("chat: answer review catch-up", () => {
     expect(await rawTrace(ORG_B, refused.replyId)).toBeNull();
   });
 
+  it("waits past a page-action continuation's completion, not the reply's first write", async () => {
+    // Paused an hour ago; the visitor's continuation completes it later.
+    const turn = await seedReply({ ageMs: 60 * 60 * 1000, paused: true });
+    const messages = tenantFor(TEST_ORG_ID).messages;
+    const complete = async (at: number) => {
+      expect(
+        await messages.claimPendingReply({
+          conversationId: turn.conversationId,
+          id: turn.replyId,
+          revision: 0,
+          claimToken: "claim_1",
+          now: at,
+          ttlMs: 60_000,
+        }),
+      ).toBe(true);
+      expect(
+        await messages.completeReply({
+          id: turn.replyId,
+          claimToken: "claim_1",
+          revision: 0,
+          content: REPLY,
+          citations: [],
+          toolCalls: [],
+          resumeContext: null,
+          tokensIn: 0,
+          tokensOut: 0,
+          now: at,
+        }),
+      ).toBe(true);
+    };
+    await complete(NOW - REVIEW_CATCH_UP_MIN_AGE_MS + 60_000);
+    const { reviewCalls, app } = setup({ replies: [ok("answered")] });
+
+    // Completed four minutes ago: its live review may still be running.
+    expect((await app.runReviewCatchUp(env, { now: () => NOW })).taken).toBe(0);
+    expect(reviewCalls()).toBe(0);
+    expect(await rawTrace(TEST_ORG_ID, turn.replyId)).toBeNull();
+
+    // Two minutes on, the live review is long over and left nothing: taken.
+    const later = await app.runReviewCatchUp(env, { now: () => NOW + 2 * 60 * 1000 });
+    expect(later.results).toEqual([{ status: "stored", outcome: "answered" }]);
+    expect(reviewCalls()).toBe(1);
+  });
+
   it("pages past a refused org's backlog to reach other orgs' answers", async () => {
     // More refused replies than one page holds, all older than the answer
     // from the org the seam vouches for.
