@@ -58,6 +58,18 @@ To answer with any model on OpenRouter instead, set `SOLV_LLM_PROVIDER` to `"ope
 
 For OpenRouter, the daily spend cap is counted in OpenRouter credits (if OpenRouter omits cost on a response, cost is stored as unknown and the spend cap cannot protect the instance). Tool calling and page actions depend on whether the chosen OpenRouter model supports tools.
 
+### Retrieval score floor (optional)
+
+Content is only given to the model when its similarity to the question is at least the score floor, `0.2` by default. Lower it if questions your content answers get "nothing found"; raise it if replies lean on unrelated pages. Set `SOLV_SCORE_FLOOR` under `vars` in `packages/engine/wrangler.jsonc` to a number from `0` to `0.9`:
+
+```jsonc
+"vars": {
+  "SOLV_SCORE_FLOOR": "0.25"
+}
+```
+
+Any other value (not a number, or out of range) is ignored with a warning in the Worker logs, and the default is used. Each answer's trace shows the floor it used and every candidate's score, which is the way to pick a value. There is no admin setting for it.
+
 ## 3. Build and deploy
 
 From the repository root:

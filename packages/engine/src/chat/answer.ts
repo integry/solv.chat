@@ -15,6 +15,7 @@ import type { LlmMessage, LlmProvider, LlmToolResult, ToolCall } from "../provid
 import type { UsageSink } from "../seams/types.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
 import type { ReviewJob } from "./review.js";
+import { DEFAULT_SCORE_FLOOR, selectChunks } from "./scoreFloor.js";
 import {
   MAX_TOOL_CALLS_PER_CONVERSATION,
   resumeToolLoop,
@@ -35,9 +36,10 @@ import {
 } from "./trace.js";
 
 // A chunk below the floor is noise; including it would make the model answer
-// from unrelated pages, which is worse than admitting the gap. The numbers are
-// ours: the spec says "above a score floor" and stops.
-export const SCORE_FLOOR = 0.3;
+// from unrelated pages, which is worse than admitting the gap. The spec says
+// "above a score floor" and stops; the default and why it is 0.2 are in
+// `scoreFloor.ts`. An instance may override it with `SOLV_SCORE_FLOOR`.
+export const SCORE_FLOOR = DEFAULT_SCORE_FLOOR;
 export const TOP_K = 6;
 /** Lease duration for an active resume claim before a stalled worker's lock expires. */
 export const RESUME_CLAIM_TTL_MS = 60_000;
@@ -50,6 +52,11 @@ export interface AnswerDeps {
   provider: LlmProvider;
   model?: ModelInfo | undefined;
   usage: UsageSink;
+  /**
+   * The retrieval score floor this instance uses (`SOLV_SCORE_FLOOR`, read by
+   * `scoreFloorFrom`). Absent, the default `SCORE_FLOOR`.
+   */
+  scoreFloor?: number | undefined;
   now?: (() => number) | undefined;
   signal?: AbortSignal | undefined;
   /**
@@ -286,6 +293,7 @@ interface TraceTarget {
 async function tracePartFor(
   context: AnswerTraceContext,
   provider: LlmProvider,
+  floor: number,
   facts: TraceFacts,
 ): Promise<TracePart> {
   const keySource = facts.modelCalled
@@ -297,7 +305,7 @@ async function tracePartFor(
     kind: facts.kind,
     version: { ...context.version },
     model: keySource === null ? null : { provider: provider.name, id: provider.model, keySource },
-    retrieval: { floor: SCORE_FLOOR, ms: facts.timing.retrievalMs, candidates: facts.candidates },
+    retrieval: { floor, ms: facts.timing.retrievalMs, candidates: facts.candidates },
     timing: { firstTokenMs: facts.timing.firstTokenMs, totalMs: facts.timing.totalMs },
     tools: { rounds: facts.timing.toolRounds, ms: facts.timing.toolMs },
     stop: facts.stop,
@@ -322,7 +330,7 @@ async function saveTrace(
   // A preview without a target has nowhere to keep it; a visitor reply never has one.
   if (target.preview !== (context.preview !== undefined)) return;
   try {
-    const part = await tracePartFor(context, deps.provider, facts);
+    const part = await tracePartFor(context, deps.provider, floorFor(deps), facts);
     if (context.preview !== undefined) {
       await deps.tenant.previewTraces.put({
         id: target.messageId,
@@ -363,6 +371,28 @@ function scheduleReview(deps: AnswerDeps, job: ReviewJob): void {
   }
 }
 
+/** The floor this answer uses: the instance's, or the default. */
+function floorFor(deps: Pick<AnswerDeps, "scoreFloor">): number {
+  return deps.scoreFloor ?? SCORE_FLOOR;
+}
+
+/**
+ * The resolved chunks that reach the model (see `selectChunks`) and every
+ * hit as a trace candidate, both against the floor this answer uses.
+ */
+function keptChunks(
+  deps: Pick<AnswerDeps, "scoreFloor">,
+  hits: readonly { chunkId: string; score: number }[],
+  resolved: ResolvedChunk[],
+): { chunks: ResolvedChunk[]; candidates: TraceCandidate[] } {
+  const floor = floorFor(deps);
+  const chunks = selectChunks(resolved, floor);
+  return {
+    chunks,
+    candidates: traceCandidates(hits, floor, resolved, new Set(chunks.map((c) => c.chunkId))),
+  };
+}
+
 function stopFor(stopReason: string | undefined): TraceStop {
   return stopReason === "length" ? "length" : "complete";
 }
@@ -371,7 +401,8 @@ function stopFor(stopReason: string | undefined): TraceStop {
  * Embeds the question, queries the retriever and resolves the hits through
  * D1, timed as one retrieval step. Every hit is resolved, those under the
  * floor too, so the trace can name their documents; only the chunks at or
- * above the floor reach the model.
+ * above the floor (and, within a small margin under it, more chunks of a
+ * document already kept) reach the model.
  */
 async function retrieve(
   deps: AnswerDeps,
@@ -400,10 +431,7 @@ async function retrieve(
       ...(deps.signal ? { signal: deps.signal } : {}),
     });
     const resolved = await resolveChunks(deps.tenant, input.assistantId, hits);
-    return {
-      chunks: resolved.filter((chunk) => chunk.score >= SCORE_FLOOR),
-      candidates: traceCandidates(hits, SCORE_FLOOR, resolved),
-    };
+    return keptChunks(deps, hits, resolved);
   });
 }
 
@@ -901,10 +929,7 @@ export async function* answerWithActionResults(
         topK: TOP_K,
       });
       const resolved = await resolveChunks(deps.tenant, input.assistantId, hits);
-      return {
-        chunks: resolved.filter((chunk) => chunk.score >= SCORE_FLOOR),
-        candidates: traceCandidates(hits, SCORE_FLOOR, resolved),
-      };
+      return keptChunks(deps, hits, resolved);
     });
 
     const request = buildPrompt({

@@ -39,10 +39,11 @@ import {
   REVIEW_MAX_SUBJECT_TITLES,
   runAnswerReview,
 } from "./review.js";
+import { type ScoreFloorEnv, scoreFloorFrom } from "./scoreFloor.js";
 import type { ToolRunner } from "./toolLoop.js";
 import { modelKeySource } from "./trace.js";
 
-export interface ChatEnv extends ProviderEnv {
+export interface ChatEnv extends ProviderEnv, ScoreFloorEnv {
   DB: D1Database;
   VECTORS: VectorizeIndex;
   /** Opens stored MCP credentials at call time. */
@@ -248,6 +249,8 @@ export async function resolveChatProviders(
   settings: EffectiveProviderSettings;
   providerKind: LlmProviderName;
   tier: Tier;
+  /** The retrieval score floor, `SOLV_SCORE_FLOOR` or the default. */
+  scoreFloor: number;
 }> {
   const resolved = await resolveProviderSettings(env.DB, env, orgId);
   const providerKind = overrides?.providerKind ?? resolved.llmProvider.value;
@@ -278,7 +281,16 @@ export async function resolveChatProviders(
       seams.keys,
     ));
 
-  return { embedder, retriever, provider, model, settings: resolved, providerKind, tier };
+  return {
+    embedder,
+    retriever,
+    provider,
+    model,
+    settings: resolved,
+    providerKind,
+    tier,
+    scoreFloor: scoreFloorFrom(env),
+  };
 }
 
 /**
@@ -366,7 +378,7 @@ async function resolveAnswerDeps(params: {
   preview: boolean;
 }) {
   const { env, seams, overrides } = params;
-  const { embedder, retriever, provider, model, settings, providerKind, tier } =
+  const { embedder, retriever, provider, model, settings, providerKind, tier, scoreFloor } =
     await resolveChatProviders(env, seams, params.orgId, overrides);
 
   const actionRunner = params.preview
@@ -457,6 +469,7 @@ async function resolveAnswerDeps(params: {
     provider,
     model,
     usage: seams.usage,
+    scoreFloor,
     runners,
     trace,
     review,

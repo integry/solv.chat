@@ -326,12 +326,14 @@ export function answerRecorder(clock: () => number = Date.now): AnswerRecorder {
 /**
  * The candidates retrieval considered, best first: every hit the retriever
  * returned, marked used when it reached the model, or with the reason it did
- * not.
+ * not. `kept` names chunks under the floor that were still given to the
+ * model (within the same-document margin); they are marked used.
  */
 export function traceCandidates(
   hits: readonly { chunkId: string; score: number }[],
   floor: number,
   resolved: readonly { chunkId: string; documentId: string }[],
+  kept: ReadonlySet<string> = new Set(),
 ): TraceCandidate[] {
   const byId = new Map(resolved.map((c) => [c.chunkId, c.documentId]));
   return [...hits]
@@ -341,7 +343,7 @@ export function traceCandidates(
       const score = Number.isFinite(hit.score)
         ? Math.round(hit.score * SCORE_PLACES) / SCORE_PLACES
         : 0;
-      if (hit.score < floor) {
+      if (hit.score < floor && !kept.has(hit.chunkId)) {
         return {
           chunkId: hit.chunkId,
           documentId: byId.get(hit.chunkId) ?? null,
