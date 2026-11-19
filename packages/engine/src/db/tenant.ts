@@ -10,6 +10,8 @@ import { reportsFor } from "./reports.js";
 import { sourcesFor } from "./sources.js";
 import { syncFor } from "./sync.js";
 import { testsFor } from "./tests.js";
+import { topicsFor } from "./topics.js";
+import { previewTracesFor, tracesFor } from "./traces.js";
 import { usageFor } from "./usage.js";
 import { versionsFor } from "./versions.js";
 
@@ -30,12 +32,15 @@ export interface Tenant {
   readonly documents: ReturnType<typeof documentsFor>;
   readonly conversations: ReturnType<typeof conversationsFor>;
   readonly messages: ReturnType<typeof messagesFor>;
+  readonly traces: ReturnType<typeof tracesFor>;
+  readonly previewTraces: ReturnType<typeof previewTracesFor>;
   readonly feedback: ReturnType<typeof feedbackFor>;
   readonly mcp: ReturnType<typeof mcpFor>;
   readonly providerSettings: ReturnType<typeof providerSettingsFor>;
   readonly tests: ReturnType<typeof testsFor>;
   readonly usage: ReturnType<typeof usageFor>;
   readonly reports: ReturnType<typeof reportsFor>;
+  readonly topics: ReturnType<typeof topicsFor>;
   readonly sync: ReturnType<typeof syncFor>;
 }
 
@@ -90,12 +95,15 @@ function build(db: D1Database, orgId: string): Tenant {
     documents: documentsFor(db, orgId),
     conversations: conversationsFor(db, orgId),
     messages: messagesFor(db, orgId),
+    traces: tracesFor(db, orgId),
+    previewTraces: previewTracesFor(db, orgId),
     feedback: feedbackFor(db, orgId),
     mcp: mcpFor(db, orgId),
     providerSettings: providerSettingsFor(db, orgId),
     tests: testsFor(db, orgId),
     usage: usageFor(db, orgId),
     reports: reportsFor(db, orgId),
+    topics: topicsFor(db, orgId),
     sync: syncFor(db, orgId),
   };
 }

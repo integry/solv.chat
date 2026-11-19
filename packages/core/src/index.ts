@@ -1,10 +1,19 @@
 export { ADMIN_CSP, ADMIN_PREVIEW_CSP } from "./csp.js";
 export { type IdPrefix, isId, newId } from "./ids.js";
-export type {
-  OverviewAttention,
-  OverviewPeriod,
-  OverviewSetup,
-  PeriodFigures,
+export {
+  ANSWER_OUTCOMES,
+  type AnswerOutcome,
+  isAnswerOutcome,
+  type OverviewAttention,
+  type OverviewPeriod,
+  type OverviewSetup,
+  type PeriodFigures,
+  type ResponseTimeFigures,
+  type ResponseTimePeriod,
+  type ResponseTimeStatus,
+  type TopicItem,
+  type TopicReportRow,
+  type TopicsReport,
 } from "./monitor.js";
 export { Errors, fail, ok, type Result } from "./result.js";
 export {
@@ -71,6 +80,17 @@ export {
   type SyncSchedule,
 } from "./schemas/source.js";
 export {
+  checkTopicName,
+  cleanTopicName,
+  MAX_TOPICS_PER_ASSISTANT,
+  OTHER_TOPIC,
+  OTHER_TOPIC_KEY,
+  TOPIC_MAX_WORDS,
+  TOPIC_NAME_MAX_LENGTH,
+  type TopicNameProblem,
+  topicKey,
+} from "./schemas/topic.js";
+export {
   type ActionsConfig,
   type BehaviourConfig,
   CONFIG_LIMITS,
@@ -89,3 +109,17 @@ export type {
   SyncErrorCode,
   SyncOutcome,
 } from "./sync.js";
+export {
+  type ConfigChange,
+  type ConfigChangeGroup,
+  DIFF_SCREENS,
+  type DiffField,
+  type DiffFieldKind,
+  type DiffScreen,
+  diffVersionConfigs,
+  diffWords,
+  groupChanges,
+  summarizeChanges,
+  VERSION_DIFF_FIELDS,
+  type WordPart,
+} from "./versionDiff.js";

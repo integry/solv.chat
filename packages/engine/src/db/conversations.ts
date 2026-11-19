@@ -40,6 +40,12 @@ export interface ConversationSummaryRow {
 /** Which conversations a list shows. Every set field narrows it further. */
 export interface ConversationFilter {
   unanswered?: boolean;
+  /** A reply the answer review found declined ("Could not answer"). */
+  couldNotAnswer?: boolean;
+  /** A reply where the visitor asked for a person ("Asked for a person"). */
+  wantsHuman?: boolean;
+  /** A reply the answer review found off topic ("Off topic"). */
+  offTopic?: boolean;
   notHelpful?: boolean;
   usedTool?: boolean;
   /** Started at or after this millisecond. */
@@ -55,9 +61,14 @@ export interface ConversationFilter {
    */
   question?: string;
   /**
-   * With `question`: only asks of it made at or after / at or before these
-   * milliseconds (the period a Reports count is for). Unlike `since`, these
-   * bound when the question was asked, not when its conversation started.
+   * A topic's id: only conversations where a visitor asked a question with
+   * that topic (the ones Reports' Topics list counts).
+   */
+  topic?: string;
+  /**
+   * With `question` or `topic`: only asks made at or after / at or before
+   * these milliseconds (the period a Reports count is for). Unlike `since`,
+   * these bound when the question was asked, not when its conversation started.
    */
   askedFrom?: number;
   askedTo?: number;
@@ -102,6 +113,9 @@ const map = (row: Row): ConversationRow => ({
 const UNANSWERED = `SELECT 1 FROM messages u
    WHERE u.org_id = c.org_id AND u.conversation_id = c.id
      AND u.role = 'assistant' AND u.answered = 0`;
+const OUTCOME = `SELECT 1 FROM messages o
+   WHERE o.org_id = c.org_id AND o.conversation_id = c.id
+     AND o.role = 'assistant' AND o.outcome = `;
 const NOT_HELPFUL = `SELECT 1 FROM messages fm
     JOIN feedback f ON f.org_id = fm.org_id AND f.message_id = fm.id
    WHERE fm.org_id = c.org_id AND fm.conversation_id = c.id AND f.value = 'down'`;
@@ -169,6 +183,9 @@ export function conversationsFor(db: D1Database, orgId: string) {
          AND (?3 = 0 OR EXISTS (${UNANSWERED}))
          AND (?4 = 0 OR EXISTS (${NOT_HELPFUL}))
          AND (?5 = 0 OR EXISTS (${USED_TOOL}))
+         AND (?12 = 0 OR EXISTS (${OUTCOME}'declined'))
+         AND (?13 = 0 OR EXISTS (${OUTCOME}'wants_human'))
+         AND (?14 = 0 OR EXISTS (${OUTCOME}'off_topic'))
          AND c.started_at >= ?6
          AND (?9 = '' OR EXISTS (
            SELECT 1 FROM messages k
@@ -178,6 +195,12 @@ export function conversationsFor(db: D1Database, orgId: string) {
               AND (k.question_key = ?9
                    OR (length(?9) >= ${QUESTION_LINK_LENGTH}
                        AND substr(k.question_key, 1, length(?9)) = ?9))
+         ))
+         AND (?17 = '' OR EXISTS (
+           SELECT 1 FROM messages p
+            WHERE p.org_id = c.org_id AND p.conversation_id = c.id
+              AND p.role = 'user' AND p.topic_id = ?17
+              AND p.created_at >= ?10 AND p.created_at <= ?11
          ))
          AND (?7 = '' OR EXISTS (
            SELECT 1 FROM messages s
@@ -197,7 +220,12 @@ export function conversationsFor(db: D1Database, orgId: string) {
         filter.question ?? "",
         filter.askedFrom ?? 0,
         filter.askedTo ?? Number.MAX_SAFE_INTEGER,
+        filter.couldNotAnswer ? 1 : 0,
+        filter.wantsHuman ? 1 : 0,
+        filter.offTopic ? 1 : 0,
       ];
+      // ?15 and ?16 are the page's limit and offset; the topic comes after.
+      const topicParam = filter.topic ?? "";
       const [rowsRes, countRow] = await Promise.all([
         prepare(
           db,
@@ -216,12 +244,12 @@ export function conversationsFor(db: D1Database, orgId: string) {
                   EXISTS(${USED_TOOL}) AS used_tool
              ${where}
             ORDER BY c.last_message_at DESC, c.id DESC
-            LIMIT ?12 OFFSET ?13`,
+            LIMIT ?15 OFFSET ?16`,
         )
-          .bind(...params, options.limit, options.offset)
+          .bind(...params, options.limit, options.offset, topicParam)
           .all<SummaryRow>(),
         prepare(db, `SELECT COUNT(*) AS total ${where}`)
-          .bind(...params)
+          .bind(...params, 0, 0, topicParam)
           .first<{ total: number }>(),
       ]);
 

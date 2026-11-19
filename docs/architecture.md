@@ -96,7 +96,37 @@ from the auth seam and pass it down.
   existed, the migration fills it for ASCII text and the engine folds the rest
   of the searched assistant's messages before it runs a search, a bounded
   share per request; until none are left a search answers `searchPending: true`
-  with no results instead of searching).
+  with no results instead of searching), and for assistant replies
+  first_token_ms and total_ms (milliseconds from the request to the first
+  token sent to the visitor, and to the complete reply; NULL for replies
+  written before migration 0026, and for a paused reply they are the first
+  request's).
+  For assistant replies to visitors, also outcome (`answered` | `partial` |
+  `declined` | `off_topic` | `wants_human`, or NULL when not reviewed) and
+  outcome_confidence (0-1, NULL when the reviewer cannot give one; nothing
+  reads it yet). See "Answer review".
+  For visitor questions, topic_id (the question's topic, or NULL: not
+  reviewed, or its topic was deleted; indexed on its own, so deleting a topic
+  finds its questions without reading every message). See "Topics".
+- `topics` — org_id, assistant_id, id, name, name_key (the name in NFKC
+  lowercase with whitespace collapsed; unique per assistant), created_at.
+  Deleted with the assistant.
+- `message_traces` — org_id, message_id, detail JSON, created_at, updated_at;
+  one row per assistant reply to a visitor, keyed (org_id, message_id) and
+  deleted with its message. See "Answer traces".
+- `preview_traces` — org_id, id (the reply id the preview's `done` event
+  carried), assistant_id, source (`try_it` | `test_run`), run_id and test_id
+  (a test run's), tokens_in, tokens_out, cost_micros, detail JSON (the same
+  shape as `message_traces`), created_at: how a "Try it" or test-run answer
+  was made, since neither stores a message. No report reads it. Deleted with
+  the assistant, and each write keeps only the assistant's newest 200
+  (`MAX_PREVIEW_TRACES`). See "Answer traces".
+- `message_documents` — org_id, message_id, document_id: the documents an
+  assistant reply to a visitor was given to answer from, every kind (pages,
+  pushed documents, written answers), once each; written with the reply (and
+  by a resume, under its claim) and deleted with it. Internal: citations keep
+  only public addresses, and nothing here reaches a visitor. `document_id`
+  has no foreign key, so deleting a document keeps the record. See "Reports".
 - `feedback` — message_id, value (`up` | `down`), note.
 - `mcp_servers` — id, assistant_id, label, url, auth_kind (`none` | `static_header`),
   header_name, secret_ciphertext, enabled, send_conversation_context (default 0;
@@ -106,6 +136,9 @@ from the auth seam and pass it down.
   must-not-contain, or must-decline).
 - `test_runs` — id, version_id, started_at, results JSON, passed.
 - `usage_daily` — org_id, assistant_id, day, messages, tokens_in, tokens_out, cost_micros.
+- `org_provider_settings` — org_id, the stored provider choices (see "Provider
+  settings") and review_answers (the "Review answers" switch; NULL is the
+  default, on).
 - `gap_dismissals` — org_id, assistant_id, question_key, dismissed_at. A dismissed gap
   group is hidden until the question is asked again after `dismissed_at`.
 
@@ -321,7 +354,8 @@ numbers, install snippet.
 The Monitor screens read:
 
 - Overview: the four Reports figures for the last 7 UTC days and the 7 before,
-  questions per day, the getting-started checklist (content added, a question
+  the median time until the answer starts appearing for the same two periods
+  (see "Reports"), questions per day, the getting-started checklist (content added, a question
   tried in "Try it" or a test run, published, widget loaded on an allowed
   origin or a visitor question received, first visitor question) and what needs
   attention (open gaps, failed tests in the latest run, the configuration
@@ -330,17 +364,28 @@ The Monitor screens read:
   after they were written, reported separately, and sitemap sources whose
   latest sync failed or was interrupted, `syncFailed`, with the error code;
   a `partial` run is shown on Sources only).
-- Conversations: `filter=unanswered,not_helpful,used_tool`, `days=1|7|30|90`,
+- Conversations: `filter=unanswered,not_helpful,used_tool,could_not_answer,asked_for_person,off_topic`
+  (the last three read the answer review's outcome: `declined`,
+  `wants_human` and `off_topic`, retrieval misses included), `days=1|7|30|90`,
   `q=` (case-insensitive text in any message) and `question=` (a grouped
   question: conversations where a visitor asked it, matched by its key; what
-  question links in Overview and Reports open), with `askedFrom=` and
-  `askedTo=` (inclusive UTC days, `YYYY-MM-DD`; only with `question=`) keeping
-  the asks made in those days, the period a Reports count is for. `days=` is
+  question links in Overview and Reports open) and `topic=` (a topic id:
+  conversations where a visitor asked a question with that topic; what the
+  Reports Topics list opens), with `askedFrom=` and `askedTo=` (inclusive UTC
+  days, `YYYY-MM-DD`; only with `question=` or `topic=`) keeping the asks made
+  in those days, the period a Reports count is for. `days=` is
   when a conversation started, a separate filter; unknown values are refused.
   The admin keeps all of them in the screen's address.
   `searchPending: true` means older messages are still being prepared for
   search: nothing was searched, `searchRemaining` says how many of the
   assistant's messages are left, and the admin asks again until it is false.
+- Conversation: `GET …/conversations/:id/messages/:messageId/trace` is how one
+  assistant reply was made (see "Answer traces"); `trace: null` for a reply
+  with none, and 404 for a visitor message or a message outside that
+  conversation or org. `GET …/assistants/:id/preview-traces/:traceId` is the
+  same view for a "Try it" answer (the id its `done` event carried) or a test
+  run's answer (`traceId` on its result), with `source` `try_it` or
+  `test_run` (`visitor` on the first); 404 for any other id, assistant or org.
 - Sources: the list (`GET …/assistants/:id/sources`) gives each sitemap
   source a `sync` object: `schedule`, `last` (the current or latest run:
   start and end times, outcome, counts, error code, and while running
@@ -360,13 +405,24 @@ The Monitor screens read:
   answered `409` with `code: "sync_anyway_not_offered"`. The schedule is changed with `PATCH /api/admin/sources/:id` and
   `{ "settings": { "sync": … } }`; `maxRemovePercent` and `recheckDays` the
   same way.
-- Gaps: `status=open` leaves out groups with a written answer newer than the
+- Gaps: a group's questions are those whose reply was reviewed as `declined`
+  (a retrieval miss or not), or, with no outcome (older rows, a review not yet
+  run), found nothing above the score floor (`answered = 0`). A reply reviewed
+  as `off_topic` or `wants_human` is not a content gap and is never listed.
+  Each group carries `noContentTimes` and `declinedTimes` (they add up to `times`), shown
+  as "No content found" and "Had content, could not answer" (the second
+  usually means the content is unclear). `status=open` leaves out groups with a written answer newer than the
   group's latest ask (asked again after it, a group is open again, as after a
   dismissal). Overview's open gaps and Reports' "Most often unanswered" leave
   out the same groups, and the asks from before a dismissal (not counted, but
   an answer written from one still answers its group). Left out,
   `status` lists every group; any other value is refused;
   `POST …/gaps/dismiss` and `POST …/gaps/restore` take `{ question }`.
+- Topics: `GET …/assistants/:id/topics` lists the assistant's topics with
+  `reviewAnswers` (the switch); `PATCH …/topics/:topicId` takes `{ name }`
+  (checked like a proposed name; 409 when another topic has it);
+  `POST …/topics/:topicId/merge` takes `{ into }` (a topic id); `DELETE
+  …/topics/:topicId`. A topic of another assistant or org is 404.
 
 ## Answering a message
 
@@ -378,10 +434,249 @@ The Monitor screens read:
 4. Call the model through the provider interface, streaming. If tools are allowed,
    run the MCP loop: the model asks for a tool, the Worker calls the MCP server,
    the result goes back as untrusted data.
-5. Persist messages, citations, token counts, cost; update `usage_daily`.
+5. Persist messages, citations, token counts, cost and the two timings; update
+   `usage_daily`. After the `done` event, in the same deferred pipeline, write
+   the answer's trace.
 6. If nothing was retrieved above the floor and no tool answered, say so, use the
    owner's fallback text, and mark the message `answered = false` so it shows
    under Gaps.
+7. Once the reply is complete, stored and sent, hand it to the answer review
+   (below), which runs as separate deferred work.
+
+## Answer review
+
+`answered` only says retrieval found content. A model given content can still
+decline ("I could not find that"), so each completed visitor reply is reviewed
+after it is sent, and the outcome is stored on the message: `answered`,
+`partial` (some of it, or hedged), `declined` (does not know, cannot help, or
+the fallback), `off_topic` (not about this site's subject) or `wants_human`
+(asked for a person, a call back, or to complain).
+
+- **Where it runs.** `ctx.waitUntil`, as its own promise, registered after the
+  `done` event and the trace write; the answer's stream closes without waiting
+  for it. Not the Queue: one short call per answer needs no durable retry, the
+  open engine's only queue is the ingest queue (whose consumer is built for
+  documents), and the visitor is never waiting either way. Each attempt has a
+  10-second timeout (`REVIEW_TIMEOUT_MS`); a failure or timeout is retried
+  once, an unusable label is not. For a reply with content, a failed or
+  skipped review leaves the outcome NULL and changes nothing else (a
+  retrieval miss differs, below).
+- **What is reviewed.** Completed replies to visitors (`POST /v1/chat`),
+  including a paused reply once its continuation completes (never while
+  paused). "Try it" previews and test runs are not reviewed.
+- **Retrieval misses.** A reply that is the fixed fallback text because nothing
+  cleared the floor is reviewed too, with the same frame (the question and the
+  fallback reply): the question alone tells an off-topic question or a request
+  for a person from a real content gap. Only `declined`, `off_topic` or
+  `wants_human` is accepted (`MISS_OUTCOMES`); any other label (a fallback
+  reply cannot have answered, even partly), no label, a failure, a timeout,
+  the spend cap being reached, or "Review answers" off stores `declined`
+  (with no model call in the last two), so a miss is never left empty and
+  never counts as answered. Cost, cap, timeout and retry are as for any
+  review. `answered` stays 0 whatever the outcome.
+- **The site's subject.** `off_topic` needs to know what the site is about,
+  so the request also carries, as tagged data like the rest, the assistant's
+  name, its widget title and up to 20 titles of its content (pages, pushed
+  documents, written answers; `REVIEW_MAX_SUBJECT_TITLES`, each cut to 120
+  characters), read in the deferred review. With no content title (a new
+  assistant, say) the subject is unknown: the request says so and that
+  off_topic must not be used, and a retrieval miss reviewed as `off_topic`
+  anyway is stored as `declined`, so a real content gap is never dropped from
+  Gaps on the question and the fixed fallback alone.
+- **The reviewer.** One small interface, `AnswerReviewer` in
+  `chat/review.ts`: question, reply, the site's subject and the assistant's topic names in,
+  `{ outcome, confidence, topic }` out (`topic` is described under "Topics")
+  (`confidence` 0-1, or null when the backend cannot give one; stored as
+  `outcome_confidence`). Callers (the answer path, Gaps, the reports) depend on
+  the interface only. Its one implementation is a call to the fast tier of the
+  organisation's configured answering provider (`ANTHROPIC_MODELS.fast`,
+  `OPENAI_MODELS.fast`; on OpenRouter, which has no tiers, the configured
+  model), with the same key, through the normal provider layer. It cannot
+  give a confidence. There is no per-assistant reviewer prompt and no model
+  picker.
+- **Untrusted input.** The reviewer's system prompt is a fixed frame
+  (`REVIEW_FRAME`). The question and the reply travel in the user turn as data,
+  each between start and end lines carrying a random tag per call, so text
+  inside them cannot close its block; so do the site's subject (owner and
+  site text) and the assistant's topic list, whose names came from a model
+  that read visitor text.
+- **Evaluation.** The unit tests drive the review with scripted reviewers, so
+  they check the rules around it, not how well a model classifies.
+  `test/fixtures/review-eval.json` is a small set of realistic questions and
+  replies, refusals, misses with and without a known subject, and injected
+  instructions; a test checks every case against the rules, and
+  `scripts/review-eval.mjs` runs the set against the real fast-tier model
+  (opt-in, needs a provider key, never in CI; exits 1 when an injected case
+  is mishandled). The output is parsed
+  strictly as two fields: the whole reply, less surrounding whitespace, must
+  be exactly the two lines `outcome: <label>` and `topic: <name>`, the label
+  one of the five; anything else is stored as NULL, with no topic.
+- **Cost.** The call's tokens and cost are recorded through `UsageSink` like
+  any model use (`messages: 0`), so they count toward `usage_daily` and the
+  daily spend cap. Before each attempt the review asks `Limits` with
+  `{ kind: "review" }` and is skipped when the cap is reached (the open
+  `basicLimits` applies only the spend cap to it, no rate limit). At most 64
+  output tokens (the label and a topic of at most 40 characters in any
+  script); the reply is cut to its first 6000 characters.
+- **Metering.** The usage counter a host bills on (`messages`) does not change.
+  When an outcome is stored, the seam also receives an event that counts
+  nothing (`messages`, tokens and cost all 0) and carries
+  `review: { messageId, outcome, confidence }`, so a host can apply its own
+  rule later. The open `usageDaily` writes nothing for such an event.
+- **Answered share** (Overview and Reports): over the range's replies less
+  those reviewed as `off_topic` (an assistant that rightly refuses a question
+  about something else has not failed), a reviewed reply counts 1 for
+  `answered`, one half for `partial` and 0 for `declined` and `wants_human`;
+  a reply with no outcome counts as before (1 when retrieval found content).
+  Both screens' hint says a partial answer counts as half and off-topic
+  questions are not counted. The
+  thumbs-down share and the reply count still count every reply. Old data
+  reads exactly as it did.
+- **Gaps** and Reports' "Most often unanswered" list questions with a reply
+  reviewed as `declined`, or unreviewed with no content found; never
+  `off_topic` or `wants_human` (see "Admin API").
+- **Conversations** shows the outcome as a badge on each reviewed assistant
+  reply ("Answered", "Partly answered", "Could not answer", "Off topic",
+  "Asked for a person"); a retrieval miss reviewed as `declined` keeps its
+  "Unanswered" badge. A reply that Gaps would list offers "Write an answer
+  for this"; one reviewed as `off_topic` or `wants_human` does not. The
+  "Could not answer", "Asked for a person" and "Off topic" filters read the
+  outcome, so "Asked for a person" finds a visitor who asked for one even
+  when retrieval missed.
+- **Switch.** Settings → Providers → "Review answers", per organisation, on by
+  default (`reviewAnswers` on `PUT /api/admin/providers`; `null` restores the
+  default). Off means no model call and no outcome for a reply with content;
+  a retrieval miss is still stored as `declined` (with its outcome event), so
+  Gaps, the answered share and the filters read as they did before review
+  existed.
+
+## Topics
+
+Top questions are grouped by their exact lowercased text, so "when are you
+open" and "opening hours?" are separate rows. Topics group them by what they
+are about.
+
+- **Who names them.** The answer review, in the same call (one call, not
+  two): it is given the assistant's current topic names and must pick one or
+  propose a new short label (2-4 words, at most 40 characters, in the language
+  of the question). The topic is stored on the visitor's question (the `user`
+  message), not the reply: it describes what was asked, the Topics list
+  counts questions, and the Conversations filter finds where it was asked. A
+  retrieval miss's question gets one too (its topic stands even when its label
+  is replaced by `declined`). A question is tagged once; nothing re-tags it.
+  There is no manual tagging of a message.
+- **The cap.** At most 40 topics per assistant (`MAX_TOPICS_PER_ASSISTANT`),
+  not counting "Other", which is always available. When the list is full the
+  request says new topics are not allowed, and the reviewer must pick the
+  closest topic or "Other"; a new name proposed anyway is stored as "Other".
+  The cap is checked inside the insert statement, so two reviews at 39 topics
+  cannot make 41. Renaming "Other" to another name would make it an ordinary
+  topic, so it is refused (409) while there are already 40; that check is in
+  the rename statement too.
+- **Concurrency.** `name_key` is unique per assistant; a new topic is
+  inserted with `ON CONFLICT DO NOTHING` and read back by key, so two reviews
+  proposing the same new topic at once end with one topic.
+- **Untrusted names.** A proposed name is data from a model that read
+  untrusted text (`checkTopicName` in `@solvchat/core`): tags, markup
+  characters, control and format characters are removed; the rest is
+  NFKC-normalised and trimmed, must be 1-40 characters and at most 4 words of
+  letters, marks, digits, spaces and `- ' & / ,`, and must start with a letter
+  or digit (never a spreadsheet formula). Anything that looks like a web or
+  email address, a street address or postcode, or holds a number longer than
+  6 digits (separators ignored) is refused, so a topic never captures personal
+  data. A refused name becomes "Other". An owner's rename passes the same
+  checks and is refused with the reason. Names are rendered as text
+  everywhere, and the CSV guards them like every other field.
+- **Switch.** With "Review answers" off no topic is assigned (no call is
+  made), and the Topics list says why it is empty.
+- **Isolation.** Topics are per assistant and per org: every statement is
+  bound to the org and names the assistant, and a question can only be tagged
+  with a topic of its own conversation's assistant.
+- **Managing.** Reports → "Manage topics" (a small dialog, offered also when
+  the period has nothing to report): rename a topic,
+  merge one into another (all its questions move to it, in one transaction),
+  or delete one (its questions become untagged).
+
+## Answer traces
+
+Every assistant reply to a visitor (`POST /v1/chat`) records how it was made,
+so an owner can tell missing content from a retrieval miss from a model that
+ignored what it was given. A small recorder (`answerRecorder` in
+`chat/trace.ts`) is threaded through the answer path and is the only clock
+the trace reads.
+
+- Retrieval: every candidate the retriever returned (at most 20; `TOP_K` is 6
+  today), best first, with chunk id, document id, similarity score (four
+  decimal places), and whether it was passed to the model or dropped:
+  `below_floor` (under the score floor, which is recorded too) or `not_found`
+  (the vector matched but its chunk is no longer in D1). There is no prompt
+  budget that drops chunks today, so no reason exists for one.
+- The version that answered (its id, and `published` for a visitor, `draft`
+  for "Try it" and a test run).
+- The provider and model id actually called, or none when nothing relevant
+  was found and no model was asked, and where the model key came from:
+  `stored` (Settings → Providers), `environment` (Worker secret) or `managed`
+  (`KeyProvider.managed`). Never any key material.
+- Timing in milliseconds: retrieval (embedding, vector query and D1 lookup),
+  first token sent to the visitor, total; tool rounds run and their total time.
+- Stop reason: `complete`, `length` (the model hit its output limit),
+  `spend_cap`, `error`, or `paused` (waiting for page actions). The open
+  engine refuses an over-cap request before answering and stores no reply for
+  a failed one, so `spend_cap` never appears on its own replies and `error`
+  only on a paused reply whose continuation failed.
+- A paused reply's continuations are appended as further parts (at most 8 per
+  message: the first answer and the newest resumes).
+
+The trace holds references, never copies: no prompt, question, chunk text,
+tool or action output. It is written after the reply is complete and sent, in
+the deferred step that persisted the message; a failed write is logged (the
+error message only) and swallowed, and never delays or fails the answer.
+One message's stored JSON is capped at 32 KiB (`MAX_TRACE_BYTES`): ids are
+clipped and candidates and older resumes dropped to fit, marked `truncated`,
+and the table refuses a longer row.
+
+The key source is read after `done`, in the trace write, so no trace work is
+done before the first token.
+
+"Try it" answers and test-run answers store no message (see "Answer tests"),
+so their traces go to `preview_traces` instead, the same document marked
+with where it came from (`try_it`, or `test_run` with the run and test), with
+the answer's tokens and cost beside it. No report, Gaps or Conversations
+reads that table, so they never count as visitor answers. The Try it pane
+offers "How this answer was made" under each reply, and the Tests screen
+under each result that has one (`traceId`), labelled "The draft (Try it)" or
+"The draft (test run)".
+
+The admin's Conversation screen shows it under each assistant reply as "How
+this answer was made", closed and loaded on first open: the content it was
+given, ranked, with scores and a plain label for what was not used; the
+settings version with a link to History; the model; the three timings; tokens
+and cost. Chunk ids are resolved to the document's current title and text when
+the view is read, and a chunk that no longer exists says "This content has
+since changed or been removed." Replies from before traces say "No details
+were recorded for this answer."
+
+## Privacy and retention
+
+- Conversations and their messages are kept until they are deleted; the open
+  engine has no automatic expiry. Deleting a conversation (or its assistant)
+  deletes its messages, and with them their feedback, linked gap answers and
+  answer traces, by foreign-key cascade.
+- A trace adds no visitor or owner text to what is stored: ids, scores,
+  timings, a model id and a key source. It is read only by the signed-in
+  owner of the org (`/api/admin/*`, org from the auth seam).
+- The answer review sends the visitor's question, the assistant's reply, the
+  assistant's name, widget title and up to 20 content titles, and the
+  assistant's topic names, and nothing else (no conversation history, content
+  text, persona, page or visitor id), to
+  the same provider that produced the answer, with the same key: the fast
+  tier of the organisation's configured answering provider. It stores only
+  the label (and a confidence when one is given) and a checked topic name
+  (see "Topics"), never the rest of the reviewer's text.
+- There is no export of conversations today. Whatever export or deletion path
+  is added for messages must cover `message_traces` with them.
+- `preview_traces` holds the same ids and numbers for the owner's own "Try
+  it" and test-run answers: the newest 200 per assistant, deleted with it.
 
 ## Providers
 
@@ -642,7 +937,9 @@ a question plus one expectation: the answer cites a given URL, contains a
 phrase, does not contain a phrase, or declines (uses the fallback).
 
 - Tests run against the draft, through the same pipeline as "Try it": no
-  conversation is stored and usage is metered.
+  conversation is stored and usage is metered. Each answer's trace is kept in
+  `preview_traces`, marked with the run and test, and its id is on the
+  result (`traceId`; see "Answer traces").
 - Publish runs them first. If any fail, the owner sees which and why, and can
   fix the draft or publish anyway; the choice is recorded on the run.
 - `solv test` runs them from CI with the ingest key and exits non-zero on a
@@ -655,9 +952,57 @@ phrase, does not contain a phrase, or declines (uses the fallback).
 
 The Reports screen answers "is it working?" over a date range the owner picks
 (7, 30 or 90 days): questions asked, share answered, share with a thumbs down,
-cost, the most asked questions, the most frequent unanswered questions, and the
-sources cited most and never. Everything is computed from stored rows; the
-table can be downloaded as CSV. The open engine sends no email; scheduled
+cost, response time, the topics, the most asked questions, the most frequent
+unanswered questions, and the content used most and never. Everything is
+computed from stored rows; the table can be downloaded as CSV.
+
+"Content used most" and "Content never used" count by document id: a reply
+used a document when it was given it to answer from (the same chunks its
+citations come from), recorded in `message_documents`. Written answers count
+as pages do; one is listed by its question, with a link to Sources instead of
+an address (the CSV gives its Sources address and the type "Written answer").
+A reply counts a document once. Only visitor answers count; "Try it" and test
+runs store no message. Replies written before migration 0029 have no record:
+for them the URLs in their citations are matched to the assistant's
+documents, as before, so older periods count pages but not written answers
+(and list a written answer used then as never used). A deleted document is in
+neither list, for any period.
+
+The Topics list is the period's visitor questions grouped by topic, most
+asked first: each topic, its questions, and the share that could not be
+answered (the reply reviewed as `declined`, or unreviewed with no content
+found, as Gaps counts one). Each opens Conversations filtered to the topic
+for the period. "Most often unanswered" shows each question's topic (that of
+its latest tagged ask in the period) as a label. Both are in the CSV.
+
+Response time is three figures over the period, each against the period of
+the same length before it: the median and 90th percentile of the time until
+the answer starts appearing (`first_token_ms`), and the median time until it
+is complete (`total_ms`). Percentiles interpolate linearly between the two
+nearest ranks (a spreadsheet's PERCENTILE.INC; an even count's median is the
+mean of the middle two) and are rounded to whole milliseconds. They are
+computed in SQL by one statement per period (`replyTiming` in
+`db/reports.ts`), over the period's assistant replies found through the
+`(org_id, role, created_at)` index and the conversation's key, so the cost
+follows the period's traffic, not the assistant's history; there is no
+rollup. Only visitor answers count; "Try it" and test runs store no message.
+Replies that found nothing to answer from (the fixed fallback, `answered = 0`,
+sent with no model call) are left out of every figure and the majority rule
+too, and counted on their own (`noContentAnswers`, which the screens state):
+they are near-instant and would pull the medians down for an assistant with
+many misses.
+Replies without timings (written before migration 0026) are left out, and
+when they are more than half of the period's answers the figure has no number
+(`status: "mostly_untimed"`) and the screen says why; `no_answers` is a
+period with no answer at all. Replies that used a page action are left out
+of every figure and the majority rule, and counted on their own
+(`pageActionAnswers`, which the screens state): such a reply is stored when it
+pauses with the first request's timings, which its continuations keep, so its
+total is not the time to the complete answer, and an action-only first
+request has no first token. It is known by a `kind: "action"` entry in its
+stored tool calls (kept after the call resolves) or a completed resume
+(`resume_revision > 0`). A period whose only answers used page actions has no
+number (`page_actions_only`). The open engine sends no email; scheduled
 digests belong to the cloud layer.
 
 ## Widget
@@ -697,6 +1042,37 @@ Install
 - A "Try it" pane is always available and talks to the draft.
 - Draft and Publish: edits change the draft; Publish runs the tests and promotes
   it; History lists versions with rollback.
+- What changed: Publish (the header button and the screens' own) first asks,
+  with "What will change": the saved draft compared with the published version,
+  each changed setting by its on-screen label with what it was and is now,
+  grouped by screen. Long text shows a word-level diff (removed words struck
+  through, added words underlined, both named for screen readers). "Nothing has
+  changed" leaves Publish disabled; with nothing published yet there is nothing
+  to compare. Confirming sends the shown draft's id and revision
+  (`GET …/draft` returns `revision`, the hash test runs use) as `expected` on
+  `POST …/publish`, and only that draft is published: if another tab saved
+  since, the engine answers 409 `draft_changed` (checked before the tests run,
+  again after them, and in the promoting batch), and the admin shows the new
+  comparison and asks again. Each History row has a one-line summary ("3 changes: greeting,
+  tone, accent colour") and expands to its changes: a published version against
+  the one published before it, the draft against the live version. Restore shows
+  the changes from the live version to the one being restored before it asks.
+  The diff is one pure function in `@solvchat/core` (`diffVersionConfigs`)
+  driven by a field table (`VERSION_DIFF_FIELDS`: path, label, screen, kind
+  `text` / `longText` / `list` / `colour` / `boolean` / `secret`); a test walks
+  the version schema and fails for a setting with no entry. A `secret` setting
+  only ever reads "Credential replaced" (or added, removed), never its value;
+  no version setting is one today, as tool credentials live on the tool server.
+  Origins and tool names are shown in full. A list whose kept items change
+  order shows its full old and new order, also when items were added or
+  removed. Publish reads the draft from the draft endpoint, not from History.
+  The versions list is the newest 100 by when each was published (the draft:
+  when it was created), so the published versions in it are one unbroken run
+  and each is compared with the one actually published before it. The draft
+  and the live version are added whenever those are older than that, so the
+  live version is always there to compare with. Tests are stored per assistant, not
+  per version, so they are not part of a version's diff; the daily spend cap,
+  which no screen edits, is grouped under "Spending".
 - Gaps and Conversations offer one-click fixes: "Write an answer" on Gaps (creates
   an entry source and removes the gap; Conversations' "Write an answer for this"
   opens it on Gaps, filled in), "Dismiss" with undo on Gaps, "Add to tests" on both.
@@ -794,7 +1170,7 @@ closed by default on Monitor screens and open elsewhere, remembered per browser
 in `localStorage`; on narrow screens it is a sheet. Its transcript survives
 closing it. The package entry also exports the shared components the screens
 use (page header, empty state, status badge, dialogs, toasts, table, row menu,
-copy button, skeleton) and the date formatters.
+copy button, skeleton, the list of changes between versions) and the date formatters.
 
 With no assistant, every built-in screen except Providers shows one first-run
 state: what an assistant is, the "New assistant" form inline, and the next steps
@@ -835,8 +1211,13 @@ The cloud layer replaces these and nothing else:
   `managed` is true, the admin hides key-entry fields unless `ownKeysAllowed`
   is also true.
 - `UsageSink` — receives usage events. The open build writes `usage_daily`.
+  An event may carry `review` (a reviewed answer's outcome, on an event that
+  counts nothing; see "Answer review").
 - `Limits` — answers "may this org do this?". The open build enforces only the
-  per-assistant spend cap and rate limits. The optional
+  per-assistant spend cap and rate limits. `{ kind: "review" }` asks whether
+  an answer review may spend; an implementation must answer it (the open one
+  applies the spend cap only).
+  The optional
   `checkSync(orgId, assistantId, { sourceId })` is asked before every
   scheduled sync run and answers `{ ok: true, maxPages?, maxDocuments? }`
   (caps that can only lower the engine's) or

@@ -3,13 +3,14 @@ import {
   defaultVersionConfig,
   type OverviewAttention,
   type OverviewSetup,
+  type ResponseTimePeriod,
 } from "@solvchat/core";
 import type { TopQuestionRow } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
 import type { EffectiveProviderSettings } from "../providers/config.js";
 import { DAY_MS, utcDay } from "../util/time.js";
 import { NotFound } from "./errors.js";
-import { periodFigures, rangeFor } from "./reports.js";
+import { periodFigures, rangeFor, responseTimePeriod } from "./reports.js";
 
 /** The Overview's stated period: the last 7 days, against the 7 before. */
 export const OVERVIEW_DAYS = 7;
@@ -38,6 +39,8 @@ export interface AssistantOverview {
   daily: Array<{ day: string; questions: number }>;
   setup: OverviewSetup;
   attention: OverviewAttention;
+  /** Same period and comparison as `period`; the screen shows the median time to first token. */
+  responseTime: ResponseTimePeriod;
 }
 
 /**
@@ -93,6 +96,7 @@ export async function overviewFor(
     latestRun,
     gaps,
     notIndexed,
+    responseTime,
     syncs,
   ] = await Promise.all([
     tenant.messages.topQuestionsFor(assistantId, 5),
@@ -108,6 +112,7 @@ export async function overviewFor(
     tenant.tests.latestRun(assistantId),
     tenant.messages.gapGroups(assistantId, { limit: 1, offset: 0, openOnly: true }),
     tenant.sources.notIndexed(assistantId, at - NOT_INDEXED_AFTER_MS),
+    responseTimePeriod(tenant, assistantId, OVERVIEW_DAYS, at),
     tenant.sync.listForAssistant(assistantId, at),
   ]);
   // A run that ran out of time reads as failed too; a partial run (some pages
@@ -158,5 +163,6 @@ export async function overviewFor(
       visitorQuestion,
     },
     attention: { openGaps: gaps.total, failingTests, notIndexed, syncFailed },
+    responseTime,
   };
 }

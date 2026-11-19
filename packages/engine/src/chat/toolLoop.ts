@@ -6,6 +6,7 @@ import type {
   LlmProvider,
   LlmRequest,
   LlmToolResult,
+  StopReason,
   ToolCall,
   ToolDefinition,
 } from "../providers/types.js";
@@ -113,6 +114,8 @@ export interface ToolLoopDeps {
    * already-reported model usage.
    */
   ensureLease?: (() => Promise<boolean>) | undefined;
+  /** Told about each round of tool calls that ran, with how long the round took. */
+  onToolRound?: ((ms: number) => void) | undefined;
   signal?: AbortSignal | undefined;
   now?: (() => number) | undefined;
   /** Passed to every runner call; see `ToolCallContext`. */
@@ -142,6 +145,8 @@ export interface ToolLoopOutcome {
   continuation?: ToolLoopContinuation | undefined;
   /** True when the loop stopped early because the caller lost its resume lease. */
   abortedByLease?: boolean | undefined;
+  /** Why the last model call ended, when the provider said. */
+  stopReason?: StopReason | undefined;
 }
 
 /** Truncates on a UTF-8 boundary and says so, so the model is not misled. */
@@ -306,6 +311,7 @@ async function* runLoopFrom(
   let toolsOffered = definitions.length > 0;
   let budgetNoticeSent = false;
   let leaseLost = false;
+  let lastStopReason: StopReason | undefined;
   const checkLease = async (): Promise<boolean> => {
     if (leaseLost) return false;
     if (!deps.ensureLease) return true;
@@ -359,6 +365,7 @@ async function* runLoopFrom(
           tokensOut = chunk.tokensOut;
           reportedCostMicros = chunk.costMicros;
           usageReported = true;
+          lastStopReason = chunk.stopReason;
         }
       }
       completed = !leaseLost;
@@ -381,7 +388,7 @@ async function* runLoopFrom(
     }
 
     if (asked.length === 0) {
-      return { text, calls, pending: [] };
+      return { text, calls, pending: [], stopReason: lastStopReason };
     }
 
     // Caps are checked after the model asked, not before: the model is allowed
@@ -400,7 +407,7 @@ async function* runLoopFrom(
     }
 
     if (overIterations || overConversation || overTime) {
-      if (budgetNoticeSent) return { text, calls, pending: [] };
+      if (budgetNoticeSent) return { text, calls, pending: [], stopReason: lastStopReason };
       budgetNoticeSent = true;
       toolsOffered = false;
       const budgetAssistant: LlmMessage = {
@@ -443,6 +450,7 @@ async function* runLoopFrom(
     }
     const results: LlmToolResult[] = [];
     const pending: ToolCall[] = [];
+    const roundStarted = clock();
 
     try {
       for (const call of asked) {
@@ -523,6 +531,7 @@ async function* runLoopFrom(
       if (timer !== undefined) {
         clearTimeout(timer);
       }
+      deps.onToolRound?.(clock() - roundStarted);
     }
 
     if (pending.length > 0) {

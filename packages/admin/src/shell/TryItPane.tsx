@@ -7,6 +7,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import { streamDraftChat } from "../api/chat.js";
 import type { Assistant } from "../api/types.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
+import { AnswerTrace } from "../screens/AnswerTrace.js";
 import { TRY_IT_ANSWERED_EVENT } from "../screens/OverviewParts.js";
 import { Icon } from "../ui/Icon.js";
 
@@ -23,6 +24,8 @@ interface Turn {
   citations?: Citation[];
   error?: string;
   failed?: boolean;
+  /** The reply's id once it is done: how it was made can then be opened. */
+  messageId?: string;
 }
 
 export interface TryItPaneProps {
@@ -209,6 +212,10 @@ export function TryItPane({
           );
         } else if (ev.type === "done") {
           succeeded = true;
+          const messageId = ev.messageId;
+          updateTurns(assistantId, (prev) =>
+            prev.map((t) => (t.id === assistantTurnId ? { ...t, messageId } : t)),
+          );
           if (mountedRef.current) {
             setConversationIds((prev) => ({ ...prev, [assistantId]: ev.conversationId }));
           }
@@ -310,6 +317,9 @@ export function TryItPane({
                       </li>
                     ))}
                 </ul>
+              )}
+              {turn.role === "assistant" && turn.messageId && !turn.failed && (
+                <AnswerTrace assistantId={assistant.id} messageId={turn.messageId} />
               )}
             </div>
           ))

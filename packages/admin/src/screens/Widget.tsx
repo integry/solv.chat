@@ -7,9 +7,15 @@ import {
 } from "@solvchat/core";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, patchJson, putJson } from "../api/client.js";
-import { FailedTestsError, publishAssistant } from "../api/publish.js";
+import {
+  type ConfirmedDraft,
+  DraftChangedError,
+  FailedTestsError,
+  publishAssistant,
+} from "../api/publish.js";
 import type { Assistant, TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { PublishConfirmDialog, usePublishConfirmation } from "../shell/PublishConfirm.js";
 import { useAssistantMutation, useReportUnsavedEdits } from "../shell/useAssistantMutations.js";
 import { CharCount } from "../ui/CharCount.js";
 import { contrastRatio, MIN_TEXT_CONTRAST } from "../ui/color.js";
@@ -113,6 +119,9 @@ export function Widget({ assistantId }: WidgetProps) {
   const [initOriginsKey, setInitOriginsKey] = useState<string | null>(null);
 
   const [showHistory, setShowHistory] = useState(false);
+  const confirmation = usePublishConfirmation(assistantId, (confirmed) => {
+    void handlePublish(false, undefined, confirmed);
+  });
   const [historyTick, setHistoryTick] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -467,7 +476,11 @@ export function Widget({ assistantId }: WidgetProps) {
     });
   }
 
-  async function handlePublish(force = false, runId?: string) {
+  async function handlePublish(
+    force = false,
+    runId?: string,
+    confirmed: ConfirmedDraft | undefined = confirmation.confirmed(),
+  ) {
     // Publishing sends the saved draft, not the form: with unsaved edits the
     // owner would publish something other than what they see.
     if (busy || unsaved) return;
@@ -486,7 +499,7 @@ export function Widget({ assistantId }: WidgetProps) {
     };
     try {
       await mutation.run("publishing", async () => {
-        const res = await publishAssistant(assistantId, force, runId);
+        const res = await publishAssistant(assistantId, force, runId, confirmed);
         publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
         toast.success(`Published (${formatDateTime(res.version.publishedAt ?? Date.now())}).`);
@@ -494,7 +507,11 @@ export function Widget({ assistantId }: WidgetProps) {
         draftRes.reload();
       });
     } catch (err) {
-      if (err instanceof FailedTestsError) {
+      if (err instanceof DraftChangedError) {
+        // Another save got there first: show what will change now.
+        setFailedRun(null);
+        confirmation.reopen(err.message);
+      } else if (err instanceof FailedTestsError) {
         setFailedRun(err.run);
       } else {
         setFormError(err instanceof ApiError ? err.message : "Could not publish.");
@@ -531,7 +548,7 @@ export function Widget({ assistantId }: WidgetProps) {
               className="btn btn-secondary"
               disabled={busy || unsaved}
               aria-describedby={unsaved ? "widget-publish-hint" : undefined}
-              onClick={() => void handlePublish(false)}
+              onClick={() => confirmation.open()}
             >
               {publishing ? "Publishing…" : "Publish"}
             </button>
@@ -764,6 +781,8 @@ export function Widget({ assistantId }: WidgetProps) {
           <WidgetPreview config={previewConfig} />
         </aside>
       </div>
+
+      <PublishConfirmDialog {...confirmation.dialogProps} />
 
       {showHistory && <History assistantId={assistantId} refreshKey={historyTick} />}
     </div>

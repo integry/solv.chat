@@ -8,9 +8,11 @@ import {
 } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getConversation } from "../../src/admin/conversations.js";
+import { responseTimeFigures } from "../../src/admin/reports.js";
 import { createApp } from "../../src/app.js";
 import { RESUME_CLAIM_TTL_MS } from "../../src/chat/answer.js";
 import { SAFETY_FRAME } from "../../src/chat/prompt.js";
+import type { ReviewInput } from "../../src/chat/review.js";
 import { MAX_TOOL_CALLS_PER_CONVERSATION } from "../../src/chat/toolLoop.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { ANTHROPIC_MODELS, costMicros } from "../../src/models.js";
@@ -362,6 +364,152 @@ describe("chat/pageActions", () => {
           isError: false,
         },
       ],
+    });
+
+    // The trace keeps one part per request: the pause, then the resume that
+    // finished it, each with its own round of tool calls. The action result
+    // is not copied into it.
+    const trace = await tenant.traces.get(done1.messageId);
+    expect(trace?.parts.map((p) => [p.kind, p.stop, p.tools.rounds])).toEqual([
+      ["answer", "paused", 1],
+      ["resume", "complete", 0],
+    ]);
+    expect(JSON.stringify(trace)).not.toContain("Ignore previous instructions");
+  });
+
+  it("reviews a resumed reply once, on its whole stored text, never while it is paused", async () => {
+    await publishConfig(true);
+    const reviewed: ReviewInput[] = [];
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder,
+        retriever,
+        provider: scriptedProvider([
+          { text: "Your plan is on the billing page. ", calls: [NAVIGATE_CALL] },
+          { text: "It is open now.", calls: [] },
+        ]),
+        model: ANTHROPIC_MODELS.fast,
+        reviewer: {
+          async review(input) {
+            reviewed.push(input);
+            return { outcome: "answered", confidence: null };
+          },
+        },
+      },
+    });
+
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION],
+    });
+    const done1 = first.find((e) => e.type === "done");
+    if (done1?.type !== "done") throw new Error("expected done event");
+    expect(reviewed).toEqual([]);
+
+    await postChat(app, {
+      conversationId: done1.conversationId,
+      resumeMessageId: done1.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: "opened" }],
+    });
+
+    const stored = await tenant.messages.get(done1.messageId);
+    expect(stored?.content).toBe("Your plan is on the billing page. It is open now.");
+    // The substance came before the page action: the review sees it too.
+    expect(reviewed).toHaveLength(1);
+    expect(reviewed[0]?.reply).toBe(stored?.content);
+    expect(reviewed[0]?.question).toBe("How do I change my plan?");
+    expect(stored?.outcome).toBe("answered");
+  });
+
+  it("leaves answers that used a page action out of Response time, before and after they complete", async () => {
+    await publishConfig(true);
+    const everything = {
+      fromDay: "1970-01-01",
+      toDay: "2999-12-31",
+      fromMs: 0,
+      toMs: Number.MAX_SAFE_INTEGER,
+    };
+    const figures = () => responseTimeFigures(tenant, "ast_1", everything);
+    const appWith = (rounds: ScriptRound[]) =>
+      createApp(fakeSeams(), {
+        chat: {
+          embedder,
+          retriever,
+          provider: scriptedProvider(rounds),
+          model: ANTHROPIC_MODELS.fast,
+        },
+      });
+    const doneOf = (events: ChatEvent[]) => {
+      const done = events.find((e) => e.type === "done");
+      if (done?.type !== "done") throw new Error(`expected done, got ${JSON.stringify(events)}`);
+      return done;
+    };
+    async function pauseThenFinish(text: string, callId: string) {
+      const app = appWith([
+        { text, calls: [{ ...NAVIGATE_CALL, callId }] },
+        { text: "You are on the billing page now.", calls: [] },
+      ]);
+      const paused = doneOf(
+        await postChat(app, {
+          message: "How do I change my plan?",
+          pageActions: [NAVIGATE_ACTION],
+        }),
+      );
+      expect(paused.awaitingActions).toEqual([callId]);
+      const stored = await tenant.messages.get(paused.messageId);
+      return {
+        stored,
+        finish: async () => {
+          const finished = doneOf(
+            await postChat(app, {
+              conversationId: paused.conversationId,
+              resumeMessageId: paused.messageId,
+              actionResults: [{ callId, ok: true, result: "{}" }],
+            }),
+          );
+          expect(finished.awaitingActions).toBeUndefined();
+          expect(finished.messageId).toBe(paused.messageId);
+          return tenant.messages.get(paused.messageId);
+        },
+      };
+    }
+
+    // An action with no text before it: no first token, which is not an old answer.
+    const actionOnly = await pauseThenFinish("", "call_nav_only");
+    expect(actionOnly.stored?.firstTokenMs).toBeNull();
+    expect(await figures()).toMatchObject({
+      status: "page_actions_only",
+      answers: 0,
+      pageActionAnswers: 1,
+      timed: 0,
+    });
+    // Completed, it still has only the first request's timings, and is still left out.
+    const actionOnlyDone = await actionOnly.finish();
+    expect(actionOnlyDone?.content).toBe("You are on the billing page now.");
+    expect(actionOnlyDone?.totalMs).toBe(actionOnly.stored?.totalMs);
+    expect(await figures()).toMatchObject({ status: "page_actions_only", pageActionAnswers: 1 });
+
+    // Text before the pause: it has a first token, and is left out all the same.
+    const textFirst = await pauseThenFinish("Let me open that for you. ", "call_nav_text");
+    expect(textFirst.stored?.firstTokenMs).toEqual(expect.any(Number));
+    expect(await figures()).toMatchObject({ status: "page_actions_only", pageActionAnswers: 2 });
+    await textFirst.finish();
+    expect(await figures()).toMatchObject({ status: "page_actions_only", pageActionAnswers: 2 });
+
+    // An ordinary answer: the figures are its own.
+    const plain = doneOf(
+      await postChat(appWith([{ text: "Open the billing page.", calls: [] }]), {
+        message: "How do I change my plan?",
+      }),
+    );
+    const plainRow = await tenant.messages.get(plain.messageId);
+    expect(await figures()).toMatchObject({
+      status: "measured",
+      answers: 1,
+      pageActionAnswers: 2,
+      timed: 1,
+      firstTokenMedianMs: plainRow?.firstTokenMs,
+      totalMedianMs: plainRow?.totalMs,
     });
   });
 
@@ -998,6 +1146,15 @@ describe("chat/pageActions", () => {
     const conversation = await getConversation(tenant, done1.conversationId);
     const assistantTurn = conversation.turns.find((t) => t.id === done1.messageId);
     expect(assistantTurn?.citations).toEqual(expectedCitations);
+
+    // What the pause and both continuations were given is recorded for
+    // Reports, by document id, once each.
+    const used = await env.DB.prepare(
+      "SELECT document_id FROM message_documents WHERE org_id = ?1 AND message_id = ?2 ORDER BY document_id",
+    )
+      .bind(TEST_ORG_ID, done1.messageId)
+      .all<{ document_id: string }>();
+    expect(used.results.map((r) => r.document_id)).toEqual(["doc_1", "doc_2", "doc_3"]);
   });
 
   it("F5: fences an active resume worker that loses lease ownership before it emits output or records usage", async () => {

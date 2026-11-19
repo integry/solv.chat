@@ -16,6 +16,8 @@ export interface DialogProps {
   describedBy?: string | undefined;
   /** Escape and the backdrop do nothing while true (for example, mid-request). */
   dismissDisabled?: boolean;
+  /** Wider dialog, for content such as a list of changes. */
+  wide?: boolean;
 }
 
 /**
@@ -31,6 +33,7 @@ export function Dialog({
   initialFocus,
   describedBy,
   dismissDisabled = false,
+  wide = false,
 }: DialogProps) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -44,7 +47,7 @@ export function Dialog({
       <div className="dialog-backdrop" aria-hidden="true" onClick={close} />
       <div
         ref={ref}
-        className="dialog"
+        className={wide ? "dialog dialog-wide" : "dialog"}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

@@ -87,7 +87,11 @@ function installServer(
         return Response.json({ versions });
       }
       if (match[2] === "draft" && method === "GET") {
-        return Response.json({ draft: row(id, "draft", state.draft) });
+        // The revision is the config itself here: any save changes it.
+        return Response.json({
+          draft: row(id, "draft", state.draft),
+          revision: JSON.stringify(state.draft),
+        });
       }
       if (match[2] === "draft" && method === "PUT") {
         state.draft = { ...state.draft, ...(body as Partial<Config>) };
@@ -95,6 +99,16 @@ function installServer(
       }
       if (match[2] === "publish" && method === "POST") {
         const force = (body as { force?: boolean } | undefined)?.force === true;
+        const expected = (body as { expected?: { revision?: string } } | undefined)?.expected;
+        if (expected !== undefined && expected.revision !== JSON.stringify(state.draft)) {
+          return Response.json(
+            {
+              error: "The draft changed since you looked at what will change.",
+              code: "draft_changed",
+            },
+            { status: 409 },
+          );
+        }
         if (options.failTests && !force) {
           return Response.json(
             {
@@ -227,6 +241,16 @@ function OrgSwitch(_: HeaderSlotProps) {
       Switch org
     </button>
   );
+}
+
+/** Presses Publish now in the "What will change" dialog once it has loaded. */
+async function confirmPublish() {
+  const dialog = await screen.findByRole("dialog", { name: "Publish your draft?" });
+  const button = within(dialog).getByRole("button", { name: "Publish now" }) as HTMLButtonElement;
+  await waitFor(() => expect(button.disabled).toBe(false));
+  await act(async () => {
+    fireEvent.click(button);
+  });
 }
 
 describe("grouped navigation", () => {
@@ -461,6 +485,7 @@ describe("publish status", () => {
     render(<App />);
     await findAssistantButton();
     fireEvent.click(await within(header()).findByRole("button", { name: "Publish draft" }));
+    await confirmPublish();
 
     const dialog = await screen.findByRole("dialog", { name: "Not published" });
     expect(within(dialog).getByText("What is the refund policy?")).toBeTruthy();
@@ -471,7 +496,12 @@ describe("publish status", () => {
     expect(await within(header()).findByText("Live")).toBeTruthy();
     expect((await screen.findByRole("status")).textContent).toMatch(/Published/);
     const publishes = server.calls.filter((c) => c.path.endsWith("/publish"));
-    expect(publishes.map((c) => c.body)).toEqual([undefined, { force: true, runId: "run_1" }]);
+    // Both carry the draft that was confirmed, so neither can publish another.
+    const expected = { draftId: "ver_draft_ast_1_0", revision: JSON.stringify(CHANGED.draft) };
+    expect(publishes.map((c) => c.body)).toEqual([
+      { expected },
+      { force: true, runId: "run_1", expected },
+    ]);
   });
 
   it("discards unpublished changes after confirming, and the screen reloads", async () => {
@@ -512,6 +542,59 @@ describe("publish status", () => {
   });
 });
 
+describe("Publish when another tab saved while the confirmation was open", () => {
+  it.each([
+    ["header", "/admin/sources"],
+    ["Behaviour screen", "/admin/behaviour"],
+  ] as const)(
+    "from the %s, refuses the draft that was not shown and asks again with the new changes",
+    async (where, route) => {
+      const server = oneAssistant(structuredClone(CHANGED));
+      go(route);
+      render(<App />);
+      await findAssistantButton();
+      await within(header()).findByText("Unpublished changes");
+      const open =
+        where === "header"
+          ? within(header()).getByRole("button", { name: "Publish draft" })
+          : await screen.findByRole("button", { name: "Publish" });
+      await waitFor(() => expect((open as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(open);
+      const dialog = await screen.findByRole("dialog", { name: "Publish your draft?" });
+      await within(dialog).findByText("Hello there");
+
+      // Another tab saves a draft this dialog never showed.
+      const state = server.states.get("ast_1");
+      if (!state) throw new Error("no state");
+      state.draft = configWith("Saved in another tab");
+
+      await confirmPublish();
+      // Not published: the dialog is back, with the draft as it is now.
+      const again = await screen.findByRole("dialog", { name: "Publish your draft?" });
+      expect((await within(again).findByRole("alert")).textContent).toMatch(/draft changed/);
+      await within(again).findByText("Saved in another tab");
+      expect(server.states.get("ast_1")?.published?.behaviour.greeting).toBe("Hi");
+
+      await confirmPublish();
+      await within(header()).findByText("Live");
+      expect(server.states.get("ast_1")?.published?.behaviour.greeting).toBe(
+        "Saved in another tab",
+      );
+      const publishes = server.calls.filter((c) => c.path.endsWith("/publish"));
+      expect(publishes).toHaveLength(2);
+      expect(publishes.map((c) => (c.body as { expected: { revision: string } }).expected)).toEqual(
+        [
+          { draftId: "ver_draft_ast_1_0", revision: JSON.stringify(configWith("Hello there")) },
+          {
+            draftId: "ver_draft_ast_1_0",
+            revision: JSON.stringify(configWith("Saved in another tab")),
+          },
+        ],
+      );
+    },
+  );
+});
+
 describe("header Publish with unsaved edits on the screen", () => {
   it.each([
     ["behaviour", "First thing it says"],
@@ -537,9 +620,8 @@ describe("header Publish with unsaved edits on the screen", () => {
     // Saving lets the header publish again, and it publishes what was saved.
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(publish.disabled).toBe(false));
-    await act(async () => {
-      fireEvent.click(publish);
-    });
+    fireEvent.click(publish);
+    await confirmPublish();
     await within(header()).findByText("Live");
     const published = server.states.get("ast_1")?.published;
     const value =
@@ -557,6 +639,7 @@ describe("header Publish with unsaved edits on the screen", () => {
     const greeting = (await screen.findByLabelText("First thing it says")) as HTMLInputElement;
     await waitFor(() => expect(greeting.value).toBe("Hello there"));
     fireEvent.click(await within(header()).findByRole("button", { name: "Publish draft" }));
+    await confirmPublish();
     const dialog = await screen.findByRole("dialog", { name: "Not published" });
     const anyway = within(dialog).getByRole("button", {
       name: "Publish anyway",
@@ -606,6 +689,7 @@ describe("header Publish with the screen's History open", () => {
 
       await within(header()).findByText("Not published yet");
       fireEvent.click(within(header()).getByRole("button", { name: "Publish draft" }));
+      await confirmPublish();
       await waitFor(() =>
         expect(within(header()).getByRole("button", { name: "Publishing…" })).toBeTruthy(),
       );
@@ -660,6 +744,7 @@ describe("dialogs opened from the narrow-screen drawer", () => {
 
     // The failed-tests dialog from the drawer's Publish behaves the same.
     fireEvent.click(within(drawer).getByRole("button", { name: "Publish draft" }));
+    await confirmPublish();
     const failed = await screen.findByRole("dialog", { name: "Not published" });
     const fix = within(failed).getByRole("button", { name: "Go back and fix it" });
     await waitFor(() => expect((fix as HTMLButtonElement).disabled).toBe(false));

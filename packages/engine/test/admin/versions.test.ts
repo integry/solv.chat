@@ -103,6 +103,74 @@ describe("admin versions API", () => {
     expect(JSON.parse(draft?.config ?? "{}").behaviour.greeting).toBe("Version 1 greeting");
   });
 
+  it("publishes only the draft that was confirmed: a draft saved since is refused with draft_changed", async () => {
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Reviewed greeting" },
+    });
+    // Tab A opens "What will change" and reads the draft with its revision.
+    const shown = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: VersionRow; revision: string };
+    expect(shown.revision).toMatch(/^[0-9a-f]{64}$/);
+
+    // Tab B saves while A's dialog is open.
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Never reviewed" },
+    });
+
+    const refused = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      expected: { draftId: shown.draft.id, revision: shown.revision },
+    });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ code: "draft_changed" });
+    expect((await tableVersions(assistantId)).filter((r) => r.state === "published")).toEqual([]);
+
+    // A reads the comparison again and confirms what is there now.
+    const again = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: VersionRow; revision: string };
+    expect(again.revision).not.toBe(shown.revision);
+    const published = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      expected: { draftId: again.draft.id, revision: again.revision },
+    });
+    expect(published.status).toBe(200);
+    const live = (await tableVersions(assistantId)).find((r) => r.state === "published");
+    expect(JSON.parse(live?.config ?? "{}").behaviour.greeting).toBe("Never reviewed");
+  });
+
+  it("refuses a confirmed draft that was published meanwhile, and a malformed one", async () => {
+    const shown = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: VersionRow; revision: string };
+    // Another tab publishes: the confirmed draft row is no longer the draft.
+    expect((await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`)).status).toBe(
+      200,
+    );
+    const stale = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      expected: { draftId: shown.draft.id, revision: shown.revision },
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ code: "draft_changed" });
+
+    const malformed = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      expected: { draftId: shown.draft.id },
+    });
+    expect(malformed.status).toBe(400);
+  });
+
+  it("binds promotion to the confirmed draft's config, so a save after the check still cannot go live", async () => {
+    const tenant = forPrincipal(env.DB, { orgId: TEST_ORG_ID, userId: "owner", role: "owner" });
+    const confirmed = await tenant.versions.draft(assistantId);
+    if (confirmed === null) throw new Error("expected a draft");
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Saved after the check" },
+    });
+    const error = await publishDraft(tenant, assistantId, confirmed).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(Conflict);
+    expect((error as Conflict).code).toBe("draft_changed");
+    expect((await tableVersions(assistantId)).filter((r) => r.state === "published")).toEqual([]);
+  });
+
   it("a second publish archives the first and history is newest-first", async () => {
     const t0 = Date.now() + 1_000;
     vi.useFakeTimers();
@@ -139,6 +207,107 @@ describe("admin versions API", () => {
     expect(versions[0]?.createdAt).toBe(t0 + 4_000);
     expect(versions[1]?.publishedAt).toBe(t0 + 4_000);
     expect(versions[2]?.id).toBe(pub1.version.id);
+  });
+
+  it("always lists the draft and the live version, even past the history limit", async () => {
+    const pub = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`)
+    ).json()) as { version: VersionRow };
+    const rows = await tableVersions(assistantId);
+    const draftRow = rows.find((r) => r.state === "draft");
+    expect(draftRow).toBeDefined();
+    // 100 newer rows, as repeated restores leave behind: the bounded history
+    // ordered by created_at no longer reaches the draft or the live version.
+    const later = Date.now() + 60_000;
+    await env.DB.batch(
+      Array.from({ length: 100 }, (_, i) =>
+        env.DB.prepare(
+          "INSERT INTO assistant_versions (id, org_id, assistant_id, state, config, created_at, published_at) VALUES (?1, ?2, ?3, 'archived', ?4, ?5, ?5)",
+        ).bind(newId("ver"), TEST_ORG_ID, assistantId, draftRow?.config, later + i),
+      ),
+    );
+
+    const res = await call(app, "GET", `/api/admin/assistants/${assistantId}/versions`);
+    const { versions } = (await res.json()) as { versions: VersionRow[] };
+    expect(versions).toHaveLength(102);
+    expect(versions.slice(0, 100).every((v) => v.state === "archived")).toBe(true);
+    expect(versions.find((v) => v.state === "draft")?.id).toBe(draftRow?.id);
+    expect(versions.find((v) => v.state === "published")?.id).toBe(pub.version.id);
+    // Still newest first, by when each was published (the draft: created).
+    const times = versions.map((v) => v.publishedAt ?? v.createdAt);
+    expect(times).toEqual([...times].sort((a, b) => b - a));
+  });
+
+  it("keeps published versions unbroken when an old draft is published and then replaced past the history limit", async () => {
+    const pub = (await (
+      await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`)
+    ).json()) as { version: VersionRow };
+    const oldDraft = (await tableVersions(assistantId)).find((r) => r.state === "draft");
+    expect(oldDraft).toBeDefined();
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Old draft greeting" },
+    });
+
+    // 100 restores while the draft is kept: each archived the live version
+    // and published a newer row, all created after the draft.
+    const t0 = Date.now() + 60_000;
+    const restoreIds = Array.from({ length: 100 }, () => newId("ver"));
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE assistant_versions SET state = 'archived' WHERE assistant_id = ?1 AND state = 'published'",
+      ).bind(assistantId),
+      ...restoreIds.map((id, i) =>
+        env.DB.prepare(
+          "INSERT INTO assistant_versions (id, org_id, assistant_id, state, config, created_at, published_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        ).bind(
+          id,
+          TEST_ORG_ID,
+          assistantId,
+          i === restoreIds.length - 1 ? "published" : "archived",
+          JSON.stringify({
+            ...JSON.parse(oldDraft?.config ?? "{}"),
+            behaviour: {
+              ...JSON.parse(oldDraft?.config ?? "{}").behaviour,
+              greeting: `Restore ${i}`,
+            },
+          }),
+          t0 + i * 1_000,
+        ),
+      ),
+    ]);
+
+    // Publish the old draft: it keeps its old created_at.
+    vi.useFakeTimers();
+    vi.setSystemTime(t0 + 200_000);
+    const published = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`);
+    expect(published.status).toBe(200);
+    expect(((await published.json()) as { version: VersionRow }).version.id).toBe(oldDraft?.id);
+
+    // Restore a visible archived version: the old draft is now archived.
+    vi.setSystemTime(t0 + 300_000);
+    const restored = await call(
+      app,
+      "POST",
+      `/api/admin/assistants/${assistantId}/versions/${restoreIds[98]}/rollback`,
+    );
+    expect(restored.status).toBe(200);
+    const restoredId = ((await restored.json()) as { version: VersionRow }).version.id;
+    expect((await tableVersions(assistantId)).find((r) => r.id === oldDraft?.id)?.state).toBe(
+      "archived",
+    );
+
+    const res = await call(app, "GET", `/api/admin/assistants/${assistantId}/versions`);
+    const { versions } = (await res.json()) as { versions: VersionRow[] };
+    const listed = versions.filter((v) => v.publishedAt !== null).map((v) => v.id);
+    // The listed publications are exactly the newest ones, with no gap.
+    const all = (await tableVersions(assistantId))
+      .filter((r) => r.published_at !== null)
+      .sort((a, b) => (b.published_at ?? 0) - (a.published_at ?? 0))
+      .map((r) => r.id);
+    expect(listed).toEqual(all.slice(0, listed.length));
+    // The restore is listed right above the old draft it replaced.
+    expect(listed.slice(0, 3)).toEqual([restoredId, oldDraft?.id, restoreIds[99]]);
+    expect(listed).not.toContain(pub.version.id);
   });
 
   it("rollback republishes an archived config without mutating the old row or the draft", async () => {
@@ -686,6 +855,55 @@ describe("publish gate with answer tests", () => {
     expect(rows.filter((r) => r.state === "published")).toHaveLength(0);
     const draft = rows.find((r) => r.state === "draft");
     expect(JSON.parse(draft?.config ?? "{}").behaviour.greeting).toBe("Untested greeting");
+  });
+
+  it("refuses with draft_changed when the confirmed draft is saved over while its tests run", async () => {
+    let signalRunning!: () => void;
+    const testRunning = new Promise<void>((resolve) => {
+      signalRunning = resolve;
+    });
+    let releaseProvider!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const retriever = memoryRetriever();
+    await seedChunk(retriever);
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder: constantEmbedder(),
+        retriever,
+        provider: {
+          name: "anthropic",
+          model: ANTHROPIC_MODELS.fast.id,
+          async *stream() {
+            signalRunning();
+            await gate;
+            yield { kind: "text", text: "Pro costs $29." };
+            yield { kind: "usage", tokensIn: 10, tokensOut: 5 };
+          },
+        },
+      },
+    });
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+    const shown = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: VersionRow; revision: string };
+
+    const publishPromise = call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      expected: { draftId: shown.draft.id, revision: shown.revision },
+    });
+    await testRunning;
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Untested greeting" },
+    });
+    releaseProvider();
+    const publishRes = await publishPromise;
+    expect(publishRes.status).toBe(409);
+    expect(await publishRes.json()).toMatchObject({ code: "draft_changed" });
+    expect((await tableVersions(assistantId)).filter((r) => r.state === "published")).toEqual([]);
   });
 
   it("records published_anyway = 1 on the reviewed run when force: true submits runId", async () => {

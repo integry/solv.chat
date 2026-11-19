@@ -536,6 +536,26 @@ export function documentsFor(db: D1Database, orgId: string) {
       return res.results.map(mapChunk);
     },
 
+    /**
+     * Up to `limit` titles of the assistant's content (pages, pushed documents
+     * and written answers), for the answer review to know what the site is
+     * about. Titles only, never text. Read through `sources_assistant` and
+     * `documents_identity`, and bounded by `limit`.
+     */
+    async titlesForAssistant(assistantId: string, limit: number): Promise<string[]> {
+      const res = await prepare(
+        db,
+        `SELECT d.title AS title
+           FROM sources s
+           JOIN documents d ON d.org_id = s.org_id AND d.source_id = s.id
+          WHERE s.org_id = ?1 AND s.assistant_id = ?2 AND trim(d.title) <> ''
+          LIMIT ?3`,
+      )
+        .bind(orgId, assistantId, limit)
+        .all<{ title: string }>();
+      return res.results.map((row) => row.title);
+    },
+
     async chunksByIds(assistantId: string, chunkIds: string[]): Promise<ResolvedChunkRow[]> {
       if (chunkIds.length === 0) return [];
       const placeholders = chunkIds.map((_, index) => `?${index + 3}`).join(", ");

@@ -54,6 +54,36 @@ describe("basicLimits", () => {
     });
   });
 
+  it("applies the spend cap to answer review, and no rate limit", async () => {
+    vi.useFakeTimers();
+    const now = Date.UTC(2026, 2, 1, 12, 0, 0);
+    vi.setSystemTime(now);
+    const sink = usageDaily(env.DB);
+    const limits = basicLimits(env.DB, async () => 1000);
+
+    for (let i = 0; i < 30; i++) {
+      expect(await limits.check(SINGLE_ORG_ID, "ast_1", { kind: "review" })).toEqual({ ok: true });
+    }
+    const counters = await env.DB.prepare("SELECT COUNT(*) AS n FROM rate_counters").first<{
+      n: number;
+    }>();
+    expect(counters?.n).toBe(0);
+
+    await sink.record({
+      orgId: SINGLE_ORG_ID,
+      assistantId: "ast_1",
+      at: now,
+      messages: 0,
+      tokensIn: 90,
+      tokensOut: 1,
+      costMicros: 1000,
+    });
+    expect(await limits.check(SINGLE_ORG_ID, "ast_1", { kind: "review" })).toEqual({
+      ok: false,
+      reason: "spend_cap",
+    });
+  });
+
   it("enforces per-IP rate limit and resets on a new window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-01T12:00:00Z"));

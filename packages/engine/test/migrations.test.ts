@@ -21,6 +21,8 @@ const EXPECTED_TABLES = [
   "test_runs",
   "gap_answers",
   "assistant_origins",
+  "message_traces",
+  "preview_traces",
   "source_syncs",
   "source_sync_pages",
   "source_sync_attempts",

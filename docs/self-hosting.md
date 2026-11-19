@@ -192,7 +192,7 @@ SOLV_INGEST_KEY=<the key> npx solv test \
 
 ## 8. Reports
 
-Open **Reports** and pick **7**, **30**, or **90** days to see questions asked, share answered, share marked unhelpful (thumbs down), cost, most asked questions, most frequent unanswered questions, and which sources were cited most and never. Click **Download CSV** to save the report on screen.
+Open **Reports** and pick **7**, **30**, or **90** days to see questions asked, share answered, share marked unhelpful (thumbs down), cost, response time (how long visitors waited until the answer started appearing and until it was complete, compared with the period before; Try it, tests and answers that used a page action are not counted), most asked questions, most frequent unanswered questions, and which sources were cited most and never. Click **Download CSV** to save the report on screen.
 
 ## Rotating a secret
 

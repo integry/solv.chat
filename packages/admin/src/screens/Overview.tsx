@@ -9,9 +9,14 @@ import { questionConversationsQuery } from "./conversationLinks.js";
 import {
   costChange,
   countChange,
+  durationChange,
   formatCost,
   formatPercent,
+  formatResponseTime,
   formatTimes,
+  noContentNote,
+  pageActionNote,
+  responseTimeNote,
   shareChange,
 } from "./figures.js";
 import {
@@ -61,6 +66,7 @@ export function Overview({ assistantId }: OverviewProps) {
   const current = period ?? EMPTY_FIGURES;
   const previous = period?.previous ?? EMPTY_FIGURES;
   const unit = overview?.costUnit;
+  const responseTime = overview?.responseTime;
 
   return (
     <div className="screen screen-wide">
@@ -96,7 +102,7 @@ export function Overview({ assistantId }: OverviewProps) {
             <StatCard
               label="Answered share"
               value={formatPercent(current.answeredShare)}
-              explanation="Share of answers your assistant could give from your content."
+              explanation="Share of answers your assistant could give from your content. A partial answer counts as half. Off-topic questions are not counted."
               change={
                 period
                   ? shareChange(current.answeredShare, previous.answeredShare, days)
@@ -134,6 +140,23 @@ export function Overview({ assistantId }: OverviewProps) {
                 </p>
               )}
             </StatCard>
+            {responseTime && (
+              <StatCard
+                label="Time until the answer starts appearing"
+                value={formatResponseTime(responseTime.firstTokenMedianMs, responseTime.status)}
+                explanation={
+                  responseTimeNote(responseTime.status) ??
+                  pageActionNote(responseTime.status, responseTime.pageActionAnswers) ??
+                  noContentNote(responseTime.noContentAnswers) ??
+                  "Typical wait for answers on your site. Try it and tests are not counted."
+                }
+                change={durationChange(
+                  responseTime.firstTokenMedianMs,
+                  responseTime.previous.firstTokenMedianMs,
+                  responseTime.days,
+                )}
+              />
+            )}
           </div>
 
           <div className="overview-columns">
@@ -152,9 +175,9 @@ export function Overview({ assistantId }: OverviewProps) {
               {overview.topQuestions.length === 0 ? (
                 <p className="muted">No questions asked yet.</p>
               ) : (
-                <ul className="history-list">
+                <ul className="row-list">
                   {overview.topQuestions.map((item) => (
-                    <li key={item.question} className="history-item">
+                    <li key={item.question} className="row-item">
                       <ScreenLink
                         to="conversations"
                         query={questionConversationsQuery(assistantId, item.question)}

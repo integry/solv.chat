@@ -49,6 +49,8 @@ describe("db/messages", () => {
       answered: true,
       createdAt: 2000,
       replyTo: "msg_0",
+      firstTokenMs: 340,
+      totalMs: 1250,
     });
 
     expect(created.answered).toBe(true);
@@ -68,6 +70,10 @@ describe("db/messages", () => {
       answered: true,
       createdAt: 2000,
       replyTo: "msg_0",
+      firstTokenMs: 340,
+      totalMs: 1250,
+      outcome: null,
+      outcomeConfidence: null,
     });
   });
 

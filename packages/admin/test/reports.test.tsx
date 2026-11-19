@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
-import type { Assistant, AssistantReport } from "../src/api/types.js";
+import type { Assistant, AssistantReport, ResponseTimePeriod } from "../src/api/types.js";
 
 function makeAssistant(): Assistant {
   return {
@@ -32,9 +32,24 @@ const SEEDED_REPORT: AssistantReport = {
   topSources: [
     { url: "https://docs.example.com/pricing", title: "Pricing", count: 12 },
     { url: "javascript:alert(1)", title: "Unsafe page", count: 2 },
+    {
+      documentId: "doc_answer",
+      kind: "answer",
+      url: "https://engine.example/admin/sources#entry:refunds",
+      title: "How long do refunds take?",
+      count: 6,
+    },
   ],
-  uncitedSources: [{ url: "https://docs.example.com/changelog", title: "Changelog" }],
-  uncitedTotal: 4,
+  uncitedSources: [
+    { url: "https://docs.example.com/changelog", title: "Changelog" },
+    {
+      documentId: "doc_unused_answer",
+      kind: "answer",
+      url: "https://engine.example/admin/sources#entry:hours",
+      title: "When are you open?",
+    },
+  ],
+  uncitedTotal: 5,
 };
 
 function installFakeServer(options?: {
@@ -110,7 +125,9 @@ describe("Reports screen", () => {
     expect(screen.getByText("How many questions visitors asked in this period.")).toBeTruthy();
     expect(screen.getByText("75%")).toBeTruthy();
     expect(
-      screen.getByText("Share of answers your assistant could give from your content."),
+      screen.getByText(
+        "Share of answers your assistant could give from your content. A partial answer counts as half. Off-topic questions are not counted.",
+      ),
     ).toBeTruthy();
     expect(screen.getByText("13%")).toBeTruthy();
     expect(screen.getByText("Share of answers a visitor said did not help.")).toBeTruthy();
@@ -127,6 +144,17 @@ describe("Reports screen", () => {
     expect(screen.getByText("Unsafe page")).toBeTruthy();
     expect(screen.getByText("Changelog")).toBeTruthy();
     expect(screen.getByText("and 3 more")).toBeTruthy();
+
+    // Written answers are listed by their question and open Sources in the
+    // admin, not their stored address.
+    expect(screen.getByRole("region", { name: "Content used most" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Content never used" })).toBeTruthy();
+    expect(screen.queryByText("Pages used most")).toBeNull();
+    const answerLink = screen.getByRole("link", { name: "How long do refunds take?" });
+    expect(answerLink.getAttribute("href")).toBe("/admin/sources?assistant=ast_1");
+    const unusedAnswer = screen.getByRole("link", { name: "When are you open?" });
+    expect(unusedAnswer.getAttribute("href")).toBe("/admin/sources?assistant=ast_1");
+    expect(screen.getAllByText("Written answer")).toHaveLength(2);
   });
 
   it("omits and-N-more when uncitedTotal matches the list length", async () => {
@@ -206,10 +234,16 @@ describe("Reports screen", () => {
       expect(text).toContain(`"'=SUM(A1:A2), ""pricing""?\nDetails","8"`);
       expect(text).toContain("Most often unanswered");
       expect(text).toContain("Do you support SAML?");
-      expect(text).toContain("Pages used most");
-      expect(text).toContain("https://docs.example.com/pricing");
-      expect(text).toContain("Pages never used");
-      expect(text).toContain("Changelog");
+      expect(text).toContain("Content used most");
+      expect(text).toContain(`"Content","Type","Address","Times"`);
+      expect(text).toContain(`"Pricing","Page","https://docs.example.com/pricing","12"`);
+      expect(text).toContain(
+        `"How long do refunds take?","Written answer","https://engine.example/admin/sources#entry:refunds","6"`,
+      );
+      expect(text).toContain("Content never used");
+      expect(text).toContain(`"Changelog","Page","https://docs.example.com/changelog"`);
+      expect(text).toContain(`"When are you open?","Written answer"`);
+      expect(text).not.toContain("Pages used most");
       expect(revoked).toEqual(["blob:report"]);
     } finally {
       URL.createObjectURL = origCreateObjectURL;
@@ -366,7 +400,7 @@ describe("Reports screen", () => {
     }
   });
 
-  it("renders count pills as .badge elements inside .history-item rows", async () => {
+  it("renders count pills as .badge elements inside .row-item rows", async () => {
     installFakeServer({
       report: {
         ...SEEDED_REPORT,
@@ -384,8 +418,220 @@ describe("Reports screen", () => {
     fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
     const pill = await screen.findByText("9 times");
     expect(pill.classList.contains("badge")).toBe(true);
-    expect(pill.closest(".history-item")).toBeTruthy();
-    const badges = container.querySelectorAll(".history-item > .badge");
+    expect(pill.closest(".row-item")).toBeTruthy();
+    const badges = container.querySelectorAll(".row-item > .badge");
     expect(badges.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+const RESPONSE_TIME: ResponseTimePeriod = {
+  days: 30,
+  from: "2026-10-16",
+  to: "2026-11-15",
+  status: "measured",
+  answers: 40,
+  pageActionAnswers: 0,
+  noContentAnswers: 0,
+  timed: 40,
+  firstTokenMedianMs: 820,
+  firstTokenP90Ms: 2_450,
+  totalMedianMs: 6_100,
+  previous: {
+    from: "2026-09-16",
+    to: "2026-10-15",
+    status: "measured",
+    answers: 30,
+    pageActionAnswers: 0,
+    noContentAnswers: 0,
+    timed: 28,
+    firstTokenMedianMs: 1_240,
+    firstTokenP90Ms: 2_430,
+    totalMedianMs: 5_800,
+  },
+};
+
+describe("Reports response time", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    window.history.pushState(null, "", "/admin");
+  });
+
+  it("shows the three waits in plain words, each against the 30 days before", async () => {
+    installFakeServer({ report: { ...SEEDED_REPORT, responseTime: RESPONSE_TIME } });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+
+    const section = await screen.findByRole("region", { name: "Response time" });
+    expect(section.textContent).toContain("Try it and tests are not counted.");
+    expect(section.textContent).not.toMatch(/TTFT|token|percentile/i);
+
+    const starts = screen.getByRole("region", { name: "Answer starts appearing" });
+    expect(starts.textContent).toContain("0.8 s");
+    expect(starts.textContent).toContain("0.4 s faster than the 30 days before");
+    expect(starts.textContent).toContain("Typical time until the answer starts appearing.");
+    // 2.45 s and 2.43 s are compared as shown: "2.5 s" against "2.4 s".
+    const slowest = screen.getByRole("region", { name: "Slowest 1 in 10 start after" });
+    expect(slowest.textContent).toContain("2.5 s");
+    expect(slowest.textContent).toContain("0.1 s slower than the 30 days before");
+    const full = screen.getByRole("region", { name: "Full answer" });
+    expect(full.textContent).toContain("6.1 s");
+    expect(full.textContent).toContain("0.3 s slower than the 30 days before");
+  });
+
+  it("says why there is no number when most answers have no timing", async () => {
+    installFakeServer({
+      report: {
+        ...SEEDED_REPORT,
+        responseTime: {
+          ...RESPONSE_TIME,
+          status: "mostly_untimed",
+          timed: 3,
+          firstTokenMedianMs: null,
+          firstTokenP90Ms: null,
+          totalMedianMs: null,
+          previous: { ...RESPONSE_TIME.previous, status: "no_answers", answers: 0, timed: 0 },
+        },
+      },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+
+    const section = await screen.findByRole("region", { name: "Response time" });
+    expect(section.textContent).toContain(
+      "Most answers in this period are from before answer times were recorded, so a number would mislead.",
+    );
+    const starts = screen.getByRole("region", { name: "Answer starts appearing" });
+    expect(starts.textContent).toContain("Not measured");
+    expect(starts.textContent).not.toMatch(/\d+(\.\d)? s/);
+    expect(starts.textContent).not.toContain("than the 30 days before");
+  });
+
+  it("says answers that used a page action are left out, and why", async () => {
+    installFakeServer({
+      report: { ...SEEDED_REPORT, responseTime: { ...RESPONSE_TIME, pageActionAnswers: 5 } },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+
+    const section = await screen.findByRole("region", { name: "Response time" });
+    expect(section.textContent).toContain(
+      "5 answers that used a page action are not counted, because their time stops at the page action.",
+    );
+    const full = screen.getByRole("region", { name: "Full answer" });
+    expect(full.textContent).toContain("6.1 s");
+  });
+
+  it("says replies that found nothing to answer from are left out, and why", async () => {
+    installFakeServer({
+      report: { ...SEEDED_REPORT, responseTime: { ...RESPONSE_TIME, noContentAnswers: 3 } },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+
+    const section = await screen.findByRole("region", { name: "Response time" });
+    expect(section.textContent).toContain(
+      "3 replies that found nothing in your content are not counted, because they are sent at once without writing an answer.",
+    );
+  });
+
+  it("says every answer used a page action instead of calling them old", async () => {
+    installFakeServer({
+      report: {
+        ...SEEDED_REPORT,
+        responseTime: {
+          ...RESPONSE_TIME,
+          status: "page_actions_only",
+          answers: 0,
+          pageActionAnswers: 4,
+          noContentAnswers: 0,
+          timed: 0,
+          firstTokenMedianMs: null,
+          firstTokenP90Ms: null,
+          totalMedianMs: null,
+        },
+      },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+
+    const section = await screen.findByRole("region", { name: "Response time" });
+    expect(section.textContent).toContain(
+      "Every answer in this period used a page action. Those are not counted, because their time stops at the page action.",
+    );
+    expect(section.textContent).not.toContain("before answer times were recorded");
+    expect(section.textContent).not.toContain("4 answers that used a page action");
+    const full = screen.getByRole("region", { name: "Full answer" });
+    expect(full.textContent).toContain("Not measured");
+    expect(full.textContent).not.toMatch(/\d+(\.\d)? s/);
+  });
+
+  it("notes a previous period with no figure instead of comparing with it", async () => {
+    installFakeServer({
+      report: {
+        ...SEEDED_REPORT,
+        responseTime: {
+          ...RESPONSE_TIME,
+          previous: {
+            ...RESPONSE_TIME.previous,
+            status: "mostly_untimed",
+            firstTokenMedianMs: null,
+            firstTokenP90Ms: null,
+            totalMedianMs: null,
+          },
+        },
+      },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+    const starts = await screen.findByRole("region", { name: "Answer starts appearing" });
+    expect(starts.textContent).toContain("0.8 s");
+    expect(starts.textContent).toContain("No figure for the 30 days before");
+  });
+
+  it("puts the three waits and the period before in the CSV", async () => {
+    installFakeServer({
+      report: {
+        ...SEEDED_REPORT,
+        responseTime: {
+          ...RESPONSE_TIME,
+          previous: {
+            ...RESPONSE_TIME.previous,
+            status: "mostly_untimed",
+            firstTokenMedianMs: null,
+            firstTokenP90Ms: null,
+            totalMedianMs: null,
+          },
+        },
+      },
+    });
+    const blobs: Blob[] = [];
+    const origCreateObjectURL = URL.createObjectURL;
+    const origRevokeObjectURL = URL.revokeObjectURL;
+    URL.createObjectURL = (blob: Blob) => {
+      blobs.push(blob);
+      return "blob:report";
+    };
+    URL.revokeObjectURL = () => {};
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    try {
+      render(<App />);
+      fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Download CSV" }));
+      const text = (await blobs[0]?.text()) ?? "";
+      const lines = text.split("\r\n");
+      const start = lines.indexOf(`"Response time"`);
+      expect(start).toBeGreaterThan(-1);
+      expect(lines.slice(start + 1, start + 5)).toEqual([
+        `"Figure","This period","The 30 days before"`,
+        `"Answer starts appearing","0.8 s","Not measured"`,
+        `"Slowest 1 in 10 start after","2.5 s","Not measured"`,
+        `"Full answer","6.1 s","Not measured"`,
+      ]);
+    } finally {
+      URL.createObjectURL = origCreateObjectURL;
+      URL.revokeObjectURL = origRevokeObjectURL;
+    }
   });
 });

@@ -24,6 +24,54 @@ export interface OverviewPeriod extends PeriodFigures {
   previous: PeriodFigures;
 }
 
+/**
+ * Why a response-time figure has no number: `no_answers` (no answer in the
+ * range), `page_actions_only` (every answer in the range used a page action,
+ * and those are left out), or `mostly_untimed` (most answers in the range were
+ * written before answers were timed, so a number from the few timed ones would
+ * mislead).
+ */
+export type ResponseTimeStatus = "measured" | "no_answers" | "page_actions_only" | "mostly_untimed";
+
+/**
+ * How fast visitor answers came over one range. The three times are whole
+ * milliseconds, and `null` unless `status` is `measured`.
+ */
+export interface ResponseTimeFigures {
+  /** First UTC day of the range, `YYYY-MM-DD`. */
+  from: string;
+  /** Last UTC day of the range, `YYYY-MM-DD`. */
+  to: string;
+  status: ResponseTimeStatus;
+  /** Visitor answers in the range the figures are about: page-action answers are not among them. */
+  answers: number;
+  /**
+   * Visitor answers in the range that used a page action, left out of every
+   * figure: their stored times cover only the request before the page action,
+   * not the rest of the answer written after it.
+   */
+  pageActionAnswers: number;
+  /**
+   * Visitor replies in the range that found nothing to answer from, left out
+   * of every figure: they are the fixed fallback, sent with no model call.
+   */
+  noContentAnswers: number;
+  /** Of those, answers that have timings. */
+  timed: number;
+  /** Median time until the answer starts appearing. */
+  firstTokenMedianMs: number | null;
+  /** 90th percentile of the time until the answer starts appearing. */
+  firstTokenP90Ms: number | null;
+  /** Median time until the answer is complete. */
+  totalMedianMs: number | null;
+}
+
+/** Response time for a period, with the same figures for the period of the same length before it. */
+export interface ResponseTimePeriod extends ResponseTimeFigures {
+  days: number;
+  previous: ResponseTimeFigures;
+}
+
 /** The getting-started checklist, each step read from stored state. */
 export interface OverviewSetup {
   hasContent: boolean;
@@ -52,4 +100,56 @@ export interface OverviewAttention {
    * than this field.
    */
   syncFailed?: Array<{ sourceId: string; label: string; error: SyncErrorCode | null }>;
+}
+
+/**
+ * What the answer reviewer decided an assistant reply to a visitor did. Stored
+ * on the reply; absent (null) when it was not reviewed.
+ *
+ * - `answered`: gave the information asked for.
+ * - `partial`: gave some of it, or hedged.
+ * - `declined`: said it does not know or cannot help, or gave the fallback.
+ * - `off_topic`: the question was not about the site's subject.
+ * - `wants_human`: the visitor asked for a person, a call back, or to complain.
+ */
+export const ANSWER_OUTCOMES = [
+  "answered",
+  "partial",
+  "declined",
+  "off_topic",
+  "wants_human",
+] as const;
+export type AnswerOutcome = (typeof ANSWER_OUTCOMES)[number];
+
+/** True for exactly the five outcome labels. */
+export function isAnswerOutcome(value: unknown): value is AnswerOutcome {
+  return typeof value === "string" && (ANSWER_OUTCOMES as readonly string[]).includes(value);
+}
+
+/** One of an assistant's topics, as the topic list and the Conversations filter read it. */
+export interface TopicItem {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+
+/** One row of Reports' Topics list: a topic's questions in the period. */
+export interface TopicReportRow {
+  id: string;
+  name: string;
+  /** Visitor questions in the period with this topic. */
+  questions: number;
+  /** Of those, questions whose reply could not answer them (as Gaps counts one). */
+  unanswered: number;
+  /** `unanswered / questions`, 0 to 1. */
+  unansweredShare: number;
+}
+
+/**
+ * Reports' Topics list. `reviewAnswers` is the "Review answers" switch: off,
+ * no topic is assigned, and the screen says why the list is empty.
+ */
+export interface TopicsReport {
+  reviewAnswers: boolean;
+  rows: TopicReportRow[];
 }

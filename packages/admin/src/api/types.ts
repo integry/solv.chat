@@ -1,19 +1,30 @@
 import type {
+  AnswerOutcome,
   OverviewAttention,
   OverviewPeriod,
   OverviewSetup,
+  ResponseTimePeriod,
   SourceKind,
   SourceSyncStatus,
   TestExpectation,
+  TopicItem,
+  TopicsReport,
   VersionConfig,
 } from "@solvchat/core";
 
 // Overview and Reports shapes are declared once, in core, beside the engine's.
 export type {
+  AnswerOutcome,
   OverviewAttention,
   OverviewPeriod,
   OverviewSetup,
   PeriodFigures,
+  ResponseTimeFigures,
+  ResponseTimePeriod,
+  ResponseTimeStatus,
+  TopicItem,
+  TopicReportRow,
+  TopicsReport,
 } from "@solvchat/core";
 
 export interface Assistant {
@@ -126,11 +137,68 @@ export interface ConversationTurn {
   citations: Citation[];
   toolCalls?: ConversationToolCall[] | null;
   answered: boolean;
+  /** For a reply, what the answer review decided; null or absent when it was not reviewed. */
+  outcome?: AnswerOutcome | null;
   createdAt: number;
   feedback: ConversationFeedback[];
   answerDocumentId: string | null;
   /** For a reply, the question it answered; null for questions and older rows. */
   replyTo: string | null;
+}
+
+/** Why retrieved content was not given to the model. */
+export type TraceDropReason = "below_floor" | "not_found";
+
+export interface AnswerTraceCandidate {
+  chunkId: string;
+  score: number;
+  used: boolean;
+  dropped?: TraceDropReason;
+  /** The content as it is now; null when it has changed or been removed since. */
+  content: {
+    documentId: string;
+    title: string;
+    url: string;
+    sourceKind: "push" | "sitemap" | "entry";
+    headingPath: string;
+    excerpt: string;
+  } | null;
+}
+
+export interface AnswerTracePart {
+  kind: "answer" | "resume";
+  stop: "complete" | "length" | "spend_cap" | "error" | "paused";
+  version: {
+    id: string;
+    state: "published" | "draft";
+    current: {
+      state: "draft" | "published" | "archived";
+      createdAt: number;
+      publishedAt: number | null;
+    } | null;
+  };
+  model: {
+    provider: "anthropic" | "openai" | "openrouter";
+    id: string;
+    keySource: "stored" | "environment" | "managed";
+  } | null;
+  retrieval: { floor: number; ms: number; candidates: AnswerTraceCandidate[] };
+  timing: { firstTokenMs: number | null; totalMs: number };
+  tools: { rounds: number; ms: number };
+}
+
+/** `GET /api/admin/conversations/:id/messages/:messageId/trace`. */
+export interface AnswerTrace {
+  messageId: string;
+  /** A visitor reply, or a "Try it" or test-run answer (which stores no message). */
+  source: "visitor" | "try_it" | "test_run";
+  tokensIn: number;
+  tokensOut: number;
+  costMicros: number | null;
+  firstTokenMs: number | null;
+  totalMs: number | null;
+  /** Null when no details were recorded (answers from before traces existed). */
+  trace: { parts: AnswerTracePart[]; truncated: boolean } | null;
 }
 
 export interface ConversationDetail {
@@ -148,6 +216,10 @@ export interface GapSummary {
   question: string;
   displayQuestion: string;
   times: number;
+  /** Asks where no content was found. */
+  noContentTimes?: number;
+  /** Asks where content was found but the reply still could not answer. */
+  declinedTimes?: number;
   lastAsked: number;
   exampleMessageId: string;
   handled: boolean;
@@ -166,9 +238,30 @@ export interface TopQuestion {
   count: number;
 }
 
-export interface SourceCitationCount {
+/** A "Most often unanswered" row, with the topic of its latest tagged ask. */
+export interface TopGap extends TopQuestion {
+  /** Absent from an engine older than topics. */
+  topic?: { id: string; name: string } | null;
+}
+
+/** `GET …/topics`: the assistant's topics and the "Review answers" switch. */
+export interface TopicsList {
+  topics: TopicItem[];
+  reviewAnswers: boolean;
+}
+
+/** A document of the assistant's content, as the Reports usage lists give it. */
+export interface ReportContent {
+  /** Optional so a report from an engine older than content usage still renders. */
+  documentId?: string;
+  /** `answer`: written in the admin; its `url` is its place in Sources, not a public address. */
+  kind?: "page" | "answer";
   url: string;
+  /** For a written answer, its question. */
   title: string;
+}
+
+export interface SourceCitationCount extends ReportContent {
   count: number;
 }
 
@@ -182,10 +275,14 @@ export interface AssistantReport {
   thumbsDownShare: number;
   costMicros: number;
   topQuestions: TopQuestion[];
-  topGaps: TopQuestion[];
+  topGaps: TopGap[];
+  /** Optional so a report from an engine older than topics still renders. */
+  topics?: TopicsReport;
   topSources: SourceCitationCount[];
-  uncitedSources: Array<{ url: string; title: string }>;
+  uncitedSources: ReportContent[];
   uncitedTotal: number;
+  /** Optional so a report from an engine older than the figure still renders. */
+  responseTime?: ResponseTimePeriod;
 }
 
 export interface AssistantOverview {
@@ -199,6 +296,7 @@ export interface AssistantOverview {
   daily?: Array<{ day: string; questions: number }>;
   setup?: OverviewSetup;
   attention?: OverviewAttention;
+  responseTime?: ResponseTimePeriod;
 }
 
 export interface InstallInfo {
@@ -249,6 +347,8 @@ export interface TestResult {
   outcome: TestOutcome;
   reason: string;
   excerpt: string;
+  /** How this test's answer was made (`preview-traces/:id`); absent on older runs. */
+  traceId?: string;
 }
 
 export interface AnswerTest {
@@ -304,6 +404,8 @@ export interface ProviderSettingsView {
     llmTier: ResolvedSetting<LlmTier>;
     llmModel: ResolvedSetting<string | null>;
     embeddingsProvider: ResolvedSetting<EmbeddingsProviderName>;
+    /** "Review answers"; absent from an engine without answer review. */
+    reviewAnswers?: ResolvedSetting<boolean>;
   };
   keysManaged: boolean;
   /** With managed keys: whether the owner may still enter their own. */
