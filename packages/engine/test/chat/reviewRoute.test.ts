@@ -197,11 +197,14 @@ describe("chat: answer review on the answer path", () => {
       ANTHROPIC_MODELS.fast.id,
     ]);
 
-    // The reviewer is sent the question and the reply, and nothing else.
+    // The reviewer is sent the question, the reply and what the site is
+    // about (names and content titles), and no content text or persona.
     const review = seen[1];
     expect(review?.system).toBe(REVIEW_FRAME);
     expect(review?.body).toContain(QUESTION);
     expect(review?.body).toContain(ANSWER_TEXT);
+    expect(review?.body).toContain("name: Docs Bot");
+    expect(review?.body).toContain("content:\\nBilling");
     expect(review?.body).not.toContain("CHUNK_MARKER");
     expect(review?.body).not.toContain("PERSONA_MARKER");
     expect(review?.body).not.toContain("tools");
@@ -272,6 +275,24 @@ describe("chat: answer review on the answer path", () => {
       expect(await usageRow()).toMatchObject({ messages: 1, tokens_in: 90, tokens_out: 1 });
     },
   );
+
+  it("stores declined, not off_topic, for a miss on an assistant whose content says nothing yet", async () => {
+    // A new assistant: no content, so the question and the fallback reply
+    // cannot say what the site is about.
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM chunks"),
+      env.DB.prepare("DELETE FROM documents"),
+    ]);
+    const seen: SeenRequest[] = [];
+    const { reply } = await ask(
+      appWith({ fetch: anthropicFetch(seen, "off_topic", "Shipping") }),
+      "Do you ship to Spain?",
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.body).toContain("The website's subject is unknown.");
+    expect(reply?.answered).toBe(false);
+    expect(reply?.outcome).toBe("declined");
+  });
 
   it("stores declined for a miss the model calls answered or partial", async () => {
     for (const label of ["answered", "partial"]) {

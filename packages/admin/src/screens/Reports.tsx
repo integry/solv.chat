@@ -22,6 +22,7 @@ import {
   formatPercent,
   formatResponseTime,
   formatTimes,
+  noContentNote,
   pageActionNote,
   responseTimeNote,
 } from "./figures.js";
@@ -114,6 +115,7 @@ function responseTimeCsv(time: ResponseTimePeriod) {
 function ResponseTime({ time }: { time: ResponseTimePeriod }) {
   const note = responseTimeNote(time.status);
   const excluded = pageActionNote(time.status, time.pageActionAnswers);
+  const noContent = noContentNote(time.noContentAnswers);
   const explanations = {
     firstTokenMedianMs:
       "Typical time until the answer starts appearing. Half the answers started sooner.",
@@ -131,6 +133,7 @@ function ResponseTime({ time }: { time: ResponseTimePeriod }) {
         </p>
         {note && <p className="muted">{note}</p>}
         {excluded && <p className="muted">{excluded}</p>}
+        {noContent && <p className="muted">{noContent}</p>}
       </div>
       <div className="overview-grid overview-grid-3">
         {RESPONSE_FIGURES.map(({ key, label }) => (
@@ -411,8 +414,8 @@ export function Reports({ assistantId }: ReportsProps) {
               <div className="stat-label">Answered share</div>
               <div className="stat-value">{formatPercent(report.answeredShare)}</div>
               <p className="muted">
-                Share of answers your assistant could give from your content. Off-topic questions
-                are not counted.
+                Share of answers your assistant could give from your content. A partial answer
+                counts as half. Off-topic questions are not counted.
               </p>
             </section>
             <section className="source-card stat-card" aria-label="Marked not helpful">

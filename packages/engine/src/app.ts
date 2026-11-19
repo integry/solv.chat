@@ -160,6 +160,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           limits: seams.limits,
           secretKey: env.SOLV_SECRET_KEY ?? "",
           fetchImpl: chatOverrides?.fetch,
+          keys: seams.keys,
         };
       };
       const ingestMatch =

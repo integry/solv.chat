@@ -8,6 +8,7 @@ import { type AnswerDeps, answerMessage, SCORE_FLOOR } from "../../src/chat/answ
 import { SAFETY_FRAME } from "../../src/chat/prompt.js";
 import type { ToolRunner } from "../../src/chat/toolLoop.js";
 import { forPrincipal, type Tenant } from "../../src/db/tenant.js";
+import { MAX_PREVIEW_TRACES } from "../../src/db/traces.js";
 import { ANTHROPIC_MODELS } from "../../src/models.js";
 import type { LlmChunk, LlmProvider } from "../../src/providers/types.js";
 import type { KeyProvider } from "../../src/seams/types.js";
@@ -164,6 +165,9 @@ describe("chat/trace", () => {
   beforeEach(async () => {
     retriever = memoryRetriever();
     await env.DB.batch([
+      env.DB.prepare("DELETE FROM preview_traces"),
+      env.DB.prepare("DELETE FROM test_runs"),
+      env.DB.prepare("DELETE FROM tests"),
       env.DB.prepare("DELETE FROM usage_daily"),
       env.DB.prepare("DELETE FROM org_provider_keys"),
       env.DB.prepare("DELETE FROM feedback"),
@@ -392,6 +396,7 @@ describe("chat/trace", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       messageId: "msg_old",
+      source: "visitor",
       tokensIn: 10,
       tokensOut: 5,
       costMicros: 12,
@@ -450,6 +455,192 @@ describe("chat/trace", () => {
       n: number;
     }>();
     expect(left?.n).toBe(0);
+  });
+
+  describe("Try it and test runs", () => {
+    async function adminFetch(
+      app: ReturnType<typeof createApp>,
+      path: string,
+      init: { method?: string; body?: unknown } = {},
+    ): Promise<Response> {
+      const ctx = createExecutionContext();
+      const res = await app.fetch(
+        new Request(`https://engine.example${path}`, {
+          method: init.method ?? "GET",
+          headers: { "content-type": "application/json", origin: "https://engine.example" },
+          ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+        }),
+        env,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      return res;
+    }
+
+    async function tryIt(app: ReturnType<typeof createApp>) {
+      const res = await adminFetch(app, "/api/admin/chat", {
+        method: "POST",
+        body: { protocol: 1, assistant: "pk_trace_1", visitorId: "owner", message: QUESTION },
+      });
+      const events = parseSse(await res.text());
+      const done = events.find((e) => e.type === "done");
+      if (done?.type !== "done") throw new Error(`expected done, got ${JSON.stringify(events)}`);
+      return done;
+    }
+
+    it("records a Try it answer's trace, marked as one, from the draft, readable by its id", async () => {
+      await seedChunk("chk_hit", "doc_hit", CHUNK_TEXT, QUESTION);
+      const draftId = (await tenant.versions.draft("ast_1"))?.id;
+      const app = appFor();
+      const done = await tryIt(app);
+
+      // Nothing a report reads: no message, no visitor trace.
+      const counts = await env.DB.prepare(
+        "SELECT (SELECT COUNT(*) FROM messages) AS messages, (SELECT COUNT(*) FROM message_traces) AS traces",
+      ).first<{ messages: number; traces: number }>();
+      expect(counts).toEqual({ messages: 0, traces: 0 });
+
+      const res = await adminFetch(
+        app,
+        `/api/admin/assistants/ast_1/preview-traces/${done.messageId}`,
+      );
+      expect(res.status).toBe(200);
+      const view = (await res.json()) as AnswerTraceView;
+      expect(view).toMatchObject({
+        messageId: done.messageId,
+        source: "try_it",
+        tokensIn: 40,
+        tokensOut: 6,
+      });
+      expect(view.trace?.parts[0]).toMatchObject({
+        kind: "answer",
+        version: { id: draftId, state: "draft", current: { state: "draft" } },
+        model: { provider: "anthropic", keySource: "environment" },
+        stop: "complete",
+      });
+      expect(view.trace?.parts[0]?.retrieval.candidates[0]?.content).toMatchObject({
+        documentId: "doc_hit",
+        excerpt: CHUNK_TEXT,
+      });
+      // Ids and numbers only, as for a visitor's trace.
+      const row = await env.DB.prepare("SELECT detail FROM preview_traces").first<{
+        detail: string;
+      }>();
+      for (const marker of [
+        "MODEL_KEY_MARKER",
+        "QUESTION_MARKER",
+        "CHUNK_TEXT_MARKER",
+        "PERSONA_MARKER",
+      ]) {
+        expect(row?.detail).not.toContain(marker);
+      }
+    });
+
+    it("records each test-run answer's trace with its run and test, and puts the id on the result", async () => {
+      await seedChunk("chk_hit", "doc_hit", CHUNK_TEXT, QUESTION);
+      await tenant.tests.create({
+        id: "tst_1",
+        assistantId: "ast_1",
+        question: QUESTION,
+        expectation: { kind: "contains", phrase: "monthly" },
+        createdAt: 1000,
+      });
+      const app = appFor();
+      const res = await adminFetch(app, "/api/admin/assistants/ast_1/test-runs", {
+        method: "POST",
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as {
+        runId: string;
+        results: Array<{ testId: string; outcome: string; traceId?: string }>;
+      };
+      const [result] = body.results;
+      expect(result).toMatchObject({ testId: "tst_1", outcome: "passed" });
+      expect(result?.traceId).toEqual(expect.any(String));
+
+      const row = await tenant.previewTraces.get("ast_1", result?.traceId ?? "");
+      expect(row).toMatchObject({ source: "test_run", runId: body.runId, testId: "tst_1" });
+      const view = (await (
+        await adminFetch(app, `/api/admin/assistants/ast_1/preview-traces/${result?.traceId}`)
+      ).json()) as AnswerTraceView;
+      expect(view.source).toBe("test_run");
+      expect(view.trace?.parts[0]?.version.state).toBe("draft");
+      // The stored run keeps the id, so the Tests screen can open it later.
+      const stored = await tenant.tests.listWithLatestResult("ast_1");
+      expect(stored[0]?.latestResult).toMatchObject({ traceId: result?.traceId });
+      // And it is not a visitor answer anywhere.
+      const figures = await responseTimeFigures(tenant, "ast_1", {
+        fromDay: "1970-01-01",
+        toDay: "2999-12-31",
+        fromMs: 0,
+        toMs: Number.MAX_SAFE_INTEGER,
+      });
+      expect(figures).toMatchObject({ status: "no_answers", answers: 0 });
+    });
+
+    it("keeps preview traces per org and assistant: another org, a visitor reply's id and another assistant find nothing", async () => {
+      await seedChunk("chk_hit", "doc_hit", CHUNK_TEXT, QUESTION);
+      const done = await tryIt(appFor());
+      const visitor = await ask(appFor());
+
+      const appB = createApp(ownerSeams(ORG_B), { chat: { embedder, retriever } });
+      const fromB = await adminFetch(
+        appB,
+        `/api/admin/assistants/ast_1/preview-traces/${done.messageId}`,
+      );
+      expect(fromB.status).toBe(404);
+      expect(await tenantB.previewTraces.get("ast_1", done.messageId)).toBeNull();
+
+      const app = appFor();
+      const visitorId = await adminFetch(
+        app,
+        `/api/admin/assistants/ast_1/preview-traces/${visitor.done.messageId}`,
+      );
+      expect(visitorId.status).toBe(404);
+      const otherAssistant = await adminFetch(
+        app,
+        `/api/admin/assistants/ast_other/preview-traces/${done.messageId}`,
+      );
+      expect(otherAssistant.status).toBe(404);
+    });
+
+    it("keeps only the newest preview traces per assistant, and deletes them with it", async () => {
+      const part = {
+        kind: "answer" as const,
+        version: { id: "ver_x", state: "draft" as const },
+        model: null,
+        retrieval: { floor: SCORE_FLOOR, ms: 1, candidates: [] },
+        timing: { firstTokenMs: 1, totalMs: 2 },
+        tools: { rounds: 0, ms: 0 },
+        stop: "complete" as const,
+      };
+      for (let i = 0; i <= MAX_PREVIEW_TRACES; i++) {
+        await tenant.previewTraces.put({
+          id: `msg_p${String(i).padStart(4, "0")}`,
+          assistantId: "ast_1",
+          source: "try_it",
+          tokensIn: 0,
+          tokensOut: 0,
+          costMicros: 0,
+          part,
+          createdAt: 10_000 + i,
+        });
+      }
+      const count = async () =>
+        (await env.DB.prepare("SELECT COUNT(*) AS n FROM preview_traces").first<{ n: number }>())
+          ?.n;
+      expect(await count()).toBe(MAX_PREVIEW_TRACES);
+      expect(await tenant.previewTraces.get("ast_1", "msg_p0000")).toBeNull();
+      expect(
+        await tenant.previewTraces.get(
+          "ast_1",
+          `msg_p${String(MAX_PREVIEW_TRACES).padStart(4, "0")}`,
+        ),
+      ).not.toBeNull();
+
+      await tenant.assistants.remove("ast_1");
+      expect(await count()).toBe(0);
+    });
   });
 
   describe("on the answer path", () => {
@@ -588,7 +779,7 @@ describe("chat/trace", () => {
       });
     });
 
-    it("writes no trace for a preview", async () => {
+    it("keeps a preview's trace apart from visitor replies only when told where it goes", async () => {
       await seedChunk("chk_hit", "doc_hit", CHUNK_TEXT, QUESTION);
       const provider = scripted([
         async function* () {
@@ -596,11 +787,74 @@ describe("chat/trace", () => {
           yield { kind: "usage", tokensIn: 50, tokensOut: 6, stopReason: "end" };
         },
       ]);
+      // No target: nowhere to keep it, and never on `message_traces`.
       await drain(answerMessage(depsWith(provider), { ...input, preview: true }));
-      const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM message_traces").first<{
-        n: number;
-      }>();
-      expect(left?.n).toBe(0);
+      const marked = await drain(
+        answerMessage(
+          {
+            ...depsWith(provider),
+            trace: {
+              version: { id: "ver_draft", state: "draft" },
+              keySource: "stored",
+              preview: { source: "try_it" },
+            },
+          },
+          { ...input, preview: true },
+        ),
+      );
+      const done = marked.find((e) => e.type === "done");
+      if (done?.type !== "done") throw new Error("expected done");
+      const counts = await env.DB.prepare(
+        `SELECT (SELECT COUNT(*) FROM message_traces) AS visitor,
+                (SELECT COUNT(*) FROM preview_traces) AS preview,
+                (SELECT COUNT(*) FROM messages) AS messages`,
+      ).first<{ visitor: number; preview: number; messages: number }>();
+      expect(counts).toEqual({ visitor: 0, preview: 1, messages: 0 });
+      const row = await tenant.previewTraces.get("ast_1", done.messageId);
+      expect(row).toMatchObject({
+        source: "try_it",
+        runId: null,
+        testId: null,
+        tokensIn: 50,
+        tokensOut: 6,
+      });
+      expect(row?.trace?.parts[0]).toMatchObject({
+        version: { id: "ver_draft", state: "draft" },
+        model: { provider: "anthropic", keySource: "stored" },
+        retrieval: { candidates: [{ chunkId: "chk_hit", used: true }] },
+        stop: "complete",
+      });
+    });
+
+    it("reads the key source only after the reply is sent, and not at all when no model was asked", async () => {
+      await seedChunk("chk_hit", "doc_hit", CHUNK_TEXT, QUESTION);
+      const keySource = vi.fn(async () => "stored" as const);
+      const provider = scripted([
+        async function* () {
+          yield { kind: "text", text: "Invoices go out monthly." };
+          yield { kind: "usage", tokensIn: 50, tokensOut: 6, stopReason: "end" };
+        },
+      ]);
+      const deps: AnswerDeps = {
+        ...depsWith(provider),
+        trace: { version: { id: publishedId, state: "published" }, keySource },
+      };
+      let callsAtDone = -1;
+      let messageId = "";
+      for await (const event of answerMessage(deps, input)) {
+        if (event.type === "token") expect(keySource).not.toHaveBeenCalled();
+        if (event.type === "done") {
+          callsAtDone = keySource.mock.calls.length;
+          messageId = event.messageId;
+        }
+      }
+      expect(callsAtDone).toBe(0);
+      expect(keySource).toHaveBeenCalledTimes(1);
+      expect((await tenant.traces.get(messageId))?.parts[0]?.model?.keySource).toBe("stored");
+
+      keySource.mockClear();
+      await drain(answerMessage(deps, { ...input, message: "zzz nothing matches this" }));
+      expect(keySource).not.toHaveBeenCalled();
     });
 
     it("counts only visitor answers in Response time: a Try it or test-run answer is left out", async () => {
@@ -616,7 +870,20 @@ describe("chat/trace", () => {
         },
       ]);
       await drain(answerMessage(depsWith(provider), { ...input, preview: true }));
-      await drain(answerMessage(depsWith(provider), { ...input, preview: true }));
+      // Marked previews keep a trace, in a table no report reads.
+      await drain(
+        answerMessage(
+          {
+            ...depsWith(provider),
+            trace: {
+              version: { id: "ver_draft", state: "draft" },
+              keySource: "environment",
+              preview: { source: "test_run", runId: "run_1", testId: "tst_1" },
+            },
+          },
+          { ...input, preview: true },
+        ),
+      );
 
       const figures = await responseTimeFigures(tenant, "ast_1", {
         fromDay: "1970-01-01",

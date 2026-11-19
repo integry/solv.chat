@@ -11,11 +11,10 @@ ALTER TABLE messages ADD COLUMN outcome TEXT
 ALTER TABLE messages ADD COLUMN outcome_confidence REAL
   CHECK (outcome_confidence IS NULL OR (outcome_confidence >= 0 AND outcome_confidence <= 1));
 
--- Gaps and the Reports gap list read the replies that were not answered:
--- `answered = 0` (served by messages_unanswered) or `outcome = 'declined'`
--- (served by this one), and the Conversations filters read the outcome too.
--- `created_at` lets the reports' date range use it as well.
-CREATE INDEX messages_org_outcome ON messages(org_id, outcome, created_at);
+-- No index on `outcome`: Gaps, the reports and the Conversations filters
+-- reach a reply through its conversation, its question or the role and time
+-- index, and filter the outcome there (0030 explains, and drops the one this
+-- file first created).
 
 -- The "Review answers" switch (Settings → Providers). NULL means the
 -- default, which is on; 0 switches review off for the whole organisation.

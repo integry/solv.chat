@@ -5,9 +5,9 @@
 --
 -- Per assistant and per org. `name_key` is the name folded for comparison
 -- (Unicode NFKC, lowercase, whitespace runs collapsed; `topicKey` in
--- src/db/topics.ts), unique per assistant: two reviews proposing the same new
--- topic at once both insert with ON CONFLICT DO NOTHING and both read back the
--- one row that won. Deleting the assistant deletes its topics.
+-- @solvchat/core, src/schemas/topic.ts), unique per assistant: two reviews
+-- proposing the same new topic at once both insert with ON CONFLICT DO
+-- NOTHING and both read back the one row that won. Deleting the assistant deletes its topics.
 CREATE TABLE topics (
   id TEXT PRIMARY KEY,
   org_id TEXT NOT NULL REFERENCES orgs(id),

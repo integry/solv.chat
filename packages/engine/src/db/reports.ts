@@ -29,10 +29,15 @@ export interface GapQuestionCount extends QuestionCount {
  * whole milliseconds, NULL (here `null`) when no reply in the range was timed.
  */
 export interface ReplyTimingRow {
-  /** Assistant replies in the range, timed or not, not counting page-action replies. */
+  /** Assistant replies in the range, timed or not, not counting page-action or no-content replies. */
   replies: number;
   /** Replies in the range that used a page action, counted in nothing else here. */
   pageActionReplies: number;
+  /**
+   * Replies in the range that found nothing to answer from: the fixed
+   * fallback, sent with no model call. Counted in nothing else here.
+   */
+  noContentReplies: number;
   /** Of those, replies with a time to first token (written after migration 0026). */
   timed: number;
   firstTokenMedianMs: number | null;
@@ -237,6 +242,12 @@ export function reportsFor(db: D1Database, orgId: string) {
      * timings). Such a reply is known by a `kind: "action"` entry in its
      * stored tool calls, kept once the call is resolved, or by a resume
      * having completed on it (`resume_revision`, raised only by a resume).
+     *
+     * A reply that found nothing to answer from (`answered = 0`: only the
+     * retrieval-miss path writes it) is left out and counted on its own too:
+     * it is the fixed fallback, sent with no model call, so it is nearly
+     * instant and would pull the medians down for an assistant with many
+     * misses.
      */
     async replyTiming(assistantId: string, range: ReportRange): Promise<ReplyTimingRow> {
       const row = await prepare(
@@ -244,12 +255,14 @@ export function reportsFor(db: D1Database, orgId: string) {
         `WITH replies AS MATERIALIZED (
            SELECT m.first_token_ms AS first_ms, m.total_ms AS total_ms,
                   -- A ladder, not OR: the tenancy guard refuses an OR beside the org filter.
-                  CASE WHEN m.resume_revision > 0 THEN 1
+                  -- 0: an answer that is timed; 1: a page action; 2: no content found.
+                  CASE WHEN m.answered = 0 THEN 2
+                       WHEN m.resume_revision > 0 THEN 1
                        WHEN m.tool_calls IS NULL THEN 0
                        WHEN json_valid(m.tool_calls) = 0 THEN 0
                        WHEN EXISTS (SELECT 1 FROM json_each(m.tool_calls)
                                      WHERE json_extract(value, '$.kind') = 'action') THEN 1
-                       ELSE 0 END AS page_action
+                       ELSE 0 END AS kind
              FROM messages m
              JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
             WHERE m.org_id = ?1 AND c.assistant_id = ?2 AND m.role = 'assistant'
@@ -257,14 +270,15 @@ export function reportsFor(db: D1Database, orgId: string) {
          ),
          first_ranked AS MATERIALIZED (
            SELECT first_ms AS v, ROW_NUMBER() OVER (ORDER BY first_ms) - 1 AS i, COUNT(*) OVER () AS n
-             FROM replies WHERE page_action = 0 AND first_ms IS NOT NULL
+             FROM replies WHERE kind = 0 AND first_ms IS NOT NULL
          ),
          total_ranked AS MATERIALIZED (
            SELECT total_ms AS v, ROW_NUMBER() OVER (ORDER BY total_ms) - 1 AS i, COUNT(*) OVER () AS n
-             FROM replies WHERE page_action = 0 AND total_ms IS NOT NULL
+             FROM replies WHERE kind = 0 AND total_ms IS NOT NULL
          )
-         SELECT (SELECT COUNT(*) FROM replies WHERE page_action = 0) AS replies,
-                (SELECT COUNT(*) FROM replies WHERE page_action = 1) AS page_action_replies,
+         SELECT (SELECT COUNT(*) FROM replies WHERE kind = 0) AS replies,
+                (SELECT COUNT(*) FROM replies WHERE kind = 1) AS page_action_replies,
+                (SELECT COUNT(*) FROM replies WHERE kind = 2) AS no_content_replies,
                 (SELECT COUNT(*) FROM first_ranked) AS timed,
                 ${percentileOf("first_ranked", 50)} AS first_p50,
                 ${percentileOf("first_ranked", 90)} AS first_p90,
@@ -274,6 +288,7 @@ export function reportsFor(db: D1Database, orgId: string) {
         .first<{
           replies: number;
           page_action_replies: number;
+          no_content_replies: number;
           timed: number;
           first_p50: number | null;
           first_p90: number | null;
@@ -282,6 +297,7 @@ export function reportsFor(db: D1Database, orgId: string) {
       return {
         replies: row?.replies ?? 0,
         pageActionReplies: row?.page_action_replies ?? 0,
+        noContentReplies: row?.no_content_replies ?? 0,
         timed: row?.timed ?? 0,
         firstTokenMedianMs: row?.first_p50 ?? null,
         firstTokenP90Ms: row?.first_p90 ?? null,

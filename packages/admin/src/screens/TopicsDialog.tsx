@@ -223,6 +223,13 @@ export function TopicsDialog({ assistantId, open, onClose, onChanged }: TopicsDi
     );
   }
 
+  // Every way out (Escape, the corner button, Close) drops a half-done
+  // rename, merge or delete, so reopening starts from the list.
+  function close() {
+    setEditing(null);
+    onClose();
+  }
+
   return (
     <Dialog
       open={open}
@@ -230,12 +237,9 @@ export function TopicsDialog({ assistantId, open, onClose, onChanged }: TopicsDi
       wide
       describedBy={hintId}
       dismissDisabled={busy}
-      onClose={() => {
-        setEditing(null);
-        onClose();
-      }}
+      onClose={close}
       footer={
-        <button type="button" className="btn btn-secondary" onClick={onClose} disabled={busy}>
+        <button type="button" className="btn btn-secondary" onClick={close} disabled={busy}>
           Close
         </button>
       }

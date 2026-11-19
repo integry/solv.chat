@@ -202,6 +202,7 @@ describe("Tests screen", () => {
             outcome: "failed",
             reason: "Did not cite https://example.com/refunds. Cited: nothing.",
             excerpt: "Refunds are handled case by case.",
+            traceId: "msg_trace_2",
           },
         },
       ],
@@ -222,6 +223,11 @@ describe("Tests screen", () => {
     ).toBeTruthy();
     // The answer that failed is quoted next to the reason.
     expect(screen.getByText("Refunds are handled case by case.")).toBeTruthy();
+    // How it was made opens from the result that kept a trace, and only there.
+    const disclosures = screen.getAllByText("How this answer was made");
+    expect(disclosures).toHaveLength(1);
+    const row = disclosures[0]?.closest("tr") as HTMLElement;
+    expect(within(row).getByText("Can I get a refund?")).toBeTruthy();
   });
 
   it("adds each of the four expectations and shows the extra field only when needed", async () => {

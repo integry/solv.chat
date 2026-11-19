@@ -51,6 +51,11 @@ export interface ResponseTimeFigures {
    * not the rest of the answer written after it.
    */
   pageActionAnswers: number;
+  /**
+   * Visitor replies in the range that found nothing to answer from, left out
+   * of every figure: they are the fixed fallback, sent with no model call.
+   */
+  noContentAnswers: number;
   /** Of those, answers that have timings. */
   timed: number;
   /** Median time until the answer starts appearing. */

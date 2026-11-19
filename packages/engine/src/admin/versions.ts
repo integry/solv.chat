@@ -127,11 +127,14 @@ export async function publishDraft(
   if (published === null) {
     const assistant = await tenant.assistants.get(assistantId);
     if (assistant === null) throw new NotFound("assistant");
-    throw new Conflict(
-      expectedDraft
-        ? "The draft changed while tests were running. Please try again."
-        : "This draft was already published. Please try again.",
-    );
+    // `draft_changed` when bound to a draft: the admin then shows the new
+    // comparison before another publish.
+    throw expectedDraft
+      ? new Conflict(
+          "The draft changed before it could be published. Check the changes again, then publish.",
+          "draft_changed",
+        )
+      : new Conflict("This draft was already published. Please try again.");
   }
   return published;
 }

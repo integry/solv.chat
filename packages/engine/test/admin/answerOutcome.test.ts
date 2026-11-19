@@ -32,7 +32,9 @@ async function call(app: ReturnType<typeof createTestApp>, path: string, init?: 
       ...init,
       headers: { "content-type": "application/json", origin: "https://example.com" },
     }),
-    env,
+    // A written answer is queued for indexing; a stub keeps the real
+    // consumer from running (and retrying) after the test has ended.
+    { ...env, INGEST_QUEUE: { async send() {}, async sendBatch() {} } as unknown as Queue },
     ctx,
   );
   await waitOnExecutionContext(ctx);
@@ -306,6 +308,43 @@ describe("answer outcome in the admin", () => {
     ]);
     const overview = await overviewFor(tenantFor(ORG_A), ast, { at: FIXED_NOW });
     expect(overview.attention.openGaps).toBe(2);
+  });
+
+  it("closes a 'had content, could not answer' group when an answer is written from its reply", async () => {
+    const ast = await seedAssistant(ORG_A);
+    // Retrieval found content (answered = 1) and the reply still declined:
+    // Conversations offers "Write an answer for this" on the reply itself.
+    const turn = await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "What is the refund window?",
+      answered: true,
+      outcome: "declined",
+    });
+    const before = await listGaps(tenantFor(ORG_A), ast, { openOnly: true });
+    expect(before.gaps.map((g) => [g.question, g.noContentTimes, g.declinedTimes])).toEqual([
+      ["what is the refund window?", 0, 1],
+    ]);
+
+    const app = appForOrg(ORG_A);
+    const res = await call(app, `/api/admin/assistants/${ast}/answers`, {
+      method: "POST",
+      body: JSON.stringify({
+        question: "What is the refund window?",
+        answer: "30 days from delivery.",
+        fromMessageId: turn.replyId,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const { documentId } = (await res.json()) as { documentId: string };
+
+    const open = await listGaps(tenantFor(ORG_A), ast, { openOnly: true });
+    expect(open.total).toBe(0);
+    const all = await listGaps(tenantFor(ORG_A), ast, { openOnly: false });
+    expect(all.gaps).toHaveLength(1);
+    expect(all.gaps[0]).toMatchObject({ handled: true, documentId });
+    const overview = await overviewFor(tenantFor(ORG_A), ast, { at: FIXED_NOW });
+    expect(overview.attention.openGaps).toBe(0);
   });
 
   it("keeps each org's outcomes to itself", async () => {

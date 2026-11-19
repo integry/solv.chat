@@ -71,7 +71,9 @@ export function installBuildScreensFake(options: BuildScreensFakeOptions = {}) {
         assistant.allowedOrigins = b.allowedOrigins;
         return Response.json({ assistant });
       }
-      if (sub === "draft" && draft && method === "GET") return Response.json({ draft });
+      if (sub === "draft" && draft && method === "GET") {
+        return Response.json({ draft, revision: JSON.stringify(draft.config) });
+      }
       if (sub === "draft" && draft && method === "PUT") {
         const parsed = parseVersionConfig(body, draft.config);
         if (!parsed.ok) {

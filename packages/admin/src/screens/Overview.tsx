@@ -14,6 +14,7 @@ import {
   formatPercent,
   formatResponseTime,
   formatTimes,
+  noContentNote,
   pageActionNote,
   responseTimeNote,
   shareChange,
@@ -101,7 +102,7 @@ export function Overview({ assistantId }: OverviewProps) {
             <StatCard
               label="Answered share"
               value={formatPercent(current.answeredShare)}
-              explanation="Share of answers your assistant could give from your content. Off-topic questions are not counted."
+              explanation="Share of answers your assistant could give from your content. A partial answer counts as half. Off-topic questions are not counted."
               change={
                 period
                   ? shareChange(current.answeredShare, previous.answeredShare, days)
@@ -146,6 +147,7 @@ export function Overview({ assistantId }: OverviewProps) {
                 explanation={
                   responseTimeNote(responseTime.status) ??
                   pageActionNote(responseTime.status, responseTime.pageActionAnswers) ??
+                  noContentNote(responseTime.noContentAnswers) ??
                   "Typical wait for answers on your site. Try it and tests are not counted."
                 }
                 change={durationChange(

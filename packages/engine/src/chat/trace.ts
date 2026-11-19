@@ -1,4 +1,4 @@
-import type { LlmProviderName } from "../seams/types.js";
+import type { KeyProvider, LlmProviderName } from "../seams/types.js";
 
 /**
  * How one assistant answer was made: what retrieval considered, which version
@@ -50,6 +50,32 @@ export interface TraceCandidate {
  * a Worker secret. `managed`: the host supplies it (`KeyProvider.managed`).
  */
 export type KeySource = "stored" | "environment" | "managed";
+
+/**
+ * Where the model key for `provider` comes from, for an answer's trace. Reads
+ * which providers have a stored key (names only, never the sealed value) and
+ * the seam's own flags: a host that manages keys and allows no own key
+ * always supplies it. Called after the reply is sent, from the trace write,
+ * so the visitor never waits on it.
+ */
+export async function modelKeySource(
+  storedKeys: { listKeys(): Promise<readonly { provider: string }[]> },
+  keys: Pick<KeyProvider, "managed" | "ownKeysAllowed">,
+  provider: LlmProviderName,
+): Promise<KeySource> {
+  if (keys.managed === true && keys.ownKeysAllowed !== true) return "managed";
+  const stored = await storedKeys.listKeys();
+  if (stored.some((key) => key.provider === provider)) return "stored";
+  return keys.managed === true ? "managed" : "environment";
+}
+
+/**
+ * Where an answer that stores no message came from. `try_it`: the admin's
+ * "Try it" pane. `test_run`: an answer test. Both answer from the draft and
+ * are kept apart from visitor replies (`preview_traces`), so no report counts
+ * them.
+ */
+export type PreviewTraceSource = "try_it" | "test_run";
 
 /**
  * Why the answer stopped. `paused` means it is waiting for page actions and a

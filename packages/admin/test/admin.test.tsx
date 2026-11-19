@@ -279,7 +279,7 @@ function installFakeServer(options: FakeServerOptions = {}) {
           pendingDraftGet = null;
           await wait;
         }
-        return Response.json({ draft });
+        return Response.json({ draft, revision: JSON.stringify(draft.config) });
       }
       if (method === "PUT") {
         if (pendingDraftSave) {

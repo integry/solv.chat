@@ -108,6 +108,17 @@ export function pageActionNote(status: ResponseTimeStatus, count: number): strin
 }
 
 /**
+ * Says that replies which found nothing to answer from are left out, when
+ * there were some; `null` otherwise.
+ */
+export function noContentNote(count: number): string | null {
+  if (count <= 0) return null;
+  return count === 1
+    ? "1 reply that found nothing in your content is not counted, because it is sent at once without writing an answer."
+    : `${count} replies that found nothing in your content are not counted, because they are sent at once without writing an answer.`;
+}
+
+/**
  * The change in a wait against the previous period, compared as it is shown,
  * so two figures that read the same are "Same". Slower is "up": more time.
  */

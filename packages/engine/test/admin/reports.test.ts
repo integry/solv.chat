@@ -120,6 +120,7 @@ describe("admin reports API", () => {
         status: "no_answers",
         answers: 0,
         pageActionAnswers: 0,
+        noContentAnswers: 0,
         timed: 0,
         firstTokenMedianMs: null,
         firstTokenP90Ms: null,
@@ -130,6 +131,7 @@ describe("admin reports API", () => {
           status: "no_answers",
           answers: 0,
           pageActionAnswers: 0,
+          noContentAnswers: 0,
           timed: 0,
           firstTokenMedianMs: null,
           firstTokenP90Ms: null,
@@ -503,6 +505,7 @@ describe("admin reports API", () => {
         status: "measured",
         answers: 10,
         pageActionAnswers: 0,
+        noContentAnswers: 0,
         timed: 10,
         // Even count: the mean of the 5th and 6th (500 and 600).
         firstTokenMedianMs: 550,
@@ -510,6 +513,48 @@ describe("admin reports API", () => {
         firstTokenP90Ms: 910,
         // Totals are three times the firsts: (1500 + 1800) / 2.
         totalMedianMs: 1650,
+      });
+    });
+
+    it("leaves out replies that found nothing to answer from, and counts them apart", async () => {
+      const ast = await seedAssistant(ORG_A);
+      const conv = await seedConversation(ORG_A, ast);
+      const fallback = (createdAt: number) =>
+        env.DB.prepare(
+          `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, answered, created_at, first_token_ms, total_ms)
+           VALUES (?1, ?2, ?3, 'assistant', 'Sorry, I could not find that.', '[]', 0, ?4, 1, 2)`,
+        ).bind(newId("msg"), ORG_A, conv, createdAt);
+      // Two real answers, and three near-instant fallbacks that would pull the median down.
+      await env.DB.batch([
+        reply(ORG_A, conv, FIXED_NOW, 800, 2000),
+        reply(ORG_A, conv, FIXED_NOW - 1, 1200, 3000),
+        fallback(FIXED_NOW - 2),
+        fallback(FIXED_NOW - 3),
+        fallback(FIXED_NOW - 4),
+      ]);
+      expect(await responseTimeFigures(tenantFor(ORG_A), ast, range7)).toMatchObject({
+        status: "measured",
+        answers: 2,
+        noContentAnswers: 3,
+        timed: 2,
+        firstTokenMedianMs: 1000,
+        totalMedianMs: 2500,
+      });
+
+      // Only fallbacks: nothing to time.
+      const missOnly = await seedAssistant(ORG_A, "Misses");
+      const missConv = await seedConversation(ORG_A, missOnly);
+      await env.DB.prepare(
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, answered, created_at, first_token_ms, total_ms)
+         VALUES (?1, ?2, ?3, 'assistant', 'Sorry.', '[]', 0, ?4, 1, 2)`,
+      )
+        .bind(newId("msg"), ORG_A, missConv, FIXED_NOW)
+        .run();
+      expect(await responseTimeFigures(tenantFor(ORG_A), missOnly, range7)).toMatchObject({
+        status: "no_answers",
+        answers: 0,
+        noContentAnswers: 1,
+        firstTokenMedianMs: null,
       });
     });
 
@@ -565,6 +610,7 @@ describe("admin reports API", () => {
         status: "mostly_untimed",
         answers: 5,
         pageActionAnswers: 0,
+        noContentAnswers: 0,
         timed: 2,
         firstTokenMedianMs: null,
         firstTokenP90Ms: null,
@@ -728,6 +774,7 @@ describe("admin reports API", () => {
         status: "measured",
         answers: 2,
         pageActionAnswers: 4,
+        noContentAnswers: 0,
         timed: 2,
         firstTokenMedianMs: 300,
         firstTokenP90Ms: 380,
@@ -740,6 +787,7 @@ describe("admin reports API", () => {
         status: "measured",
         answers: 3,
         pageActionAnswers: 4,
+        noContentAnswers: 0,
         timed: 2,
       });
     });
@@ -757,6 +805,7 @@ describe("admin reports API", () => {
         status: "page_actions_only",
         answers: 0,
         pageActionAnswers: 2,
+        noContentAnswers: 0,
         timed: 0,
         firstTokenMedianMs: null,
         firstTokenP90Ms: null,

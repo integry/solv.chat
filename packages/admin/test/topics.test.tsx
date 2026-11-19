@@ -281,6 +281,27 @@ describe("Topics", () => {
     await waitFor(() => expect(reportReads()).toBeGreaterThanOrEqual(before + 3));
   });
 
+  it("starts from the list again after Close, with no half-done rename", async () => {
+    installFakeServer();
+    const section = await openReports();
+    fireEvent.click(within(section).getByRole("button", { name: "Manage topics" }));
+    let dialog = await screen.findByRole("dialog", { name: "Manage topics" });
+    await within(dialog).findByText("Opening hours");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rename Opening hours" }));
+    expect(within(dialog).getByLabelText("New name for Opening hours")).toBeTruthy();
+
+    // The footer's Close, not Escape or the corner button.
+    const closes = within(dialog).getAllByRole("button", { name: "Close" });
+    fireEvent.click(closes[closes.length - 1] as HTMLElement);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Manage topics" })).toBeNull());
+
+    fireEvent.click(within(section).getByRole("button", { name: "Manage topics" }));
+    dialog = await screen.findByRole("dialog", { name: "Manage topics" });
+    await within(dialog).findByText("Opening hours");
+    expect(within(dialog).queryByLabelText("New name for Opening hours")).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "Rename Opening hours" })).toBeTruthy();
+  });
+
   it("filters Conversations by topic and keeps the choice in the address", async () => {
     const server = installFakeServer();
     window.history.pushState(null, "", "/admin/conversations?assistant=ast_1");

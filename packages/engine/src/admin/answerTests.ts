@@ -8,13 +8,14 @@ import {
 import { answerMessage } from "../chat/answer.js";
 import { mcpRunnerFor } from "../chat/mcpRunner.js";
 import type { ToolRunner } from "../chat/toolLoop.js";
+import { type KeySource, modelKeySource } from "../chat/trace.js";
 import type { Tenant } from "../db/tenant.js";
 import type { TestRow, TestRunRow, TestWithLatestResult } from "../db/tests.js";
 import type { VersionRow } from "../db/versions.js";
 import type { ModelInfo } from "../models.js";
 import type { Embedder, Retriever } from "../providers/retrieval.js";
 import type { LlmProvider } from "../providers/types.js";
-import type { Limits, UsageSink } from "../seams/types.js";
+import type { KeyProvider, Limits, UsageSink } from "../seams/types.js";
 import { BadRequest, NotFound } from "./errors.js";
 import { configRevision } from "./versions.js";
 
@@ -37,6 +38,12 @@ export interface TestResult {
    * answer: a run holds many, and this is a log, not a transcript.
    */
   excerpt: string;
+  /**
+   * The answer's trace in `preview_traces` ("How this answer was made"),
+   * when the test ran and its trace was written. Absent on older runs and on
+   * a test that did not run.
+   */
+  traceId?: string;
 }
 
 const WALL_TIME_MESSAGE = "The run took too long and stopped early.";
@@ -151,6 +158,11 @@ export interface RunDeps {
   fetchImpl?: typeof fetch | undefined;
   runners?: readonly ToolRunner[] | undefined;
   now?: (() => number) | undefined;
+  /**
+   * The key seam's flags, for the trace's key source. Absent, the source is
+   * read as stored or environment only.
+   */
+  keys?: Pick<KeyProvider, "managed" | "ownKeysAllowed"> | undefined;
 }
 
 /** Lists all tests for an assistant with each test's newest run result. */
@@ -323,6 +335,17 @@ export async function runAnswerTests(
 
   const results: TestResult[] = [];
   let stopped: string | undefined;
+  // Made up front so each test's trace can name the run it belongs to; the
+  // run's row is written once every test has answered.
+  const runId = newId("run");
+  const keys = deps.keys ?? {};
+  // Read once per run, after the first answer that asked a model: every test
+  // uses the same provider and key.
+  let keySource: Promise<KeySource> | undefined;
+  const runKeySource = () => {
+    keySource ??= modelKeySource(deps.tenant.providerSettings, keys, deps.provider.name);
+    return keySource;
+  };
 
   for (let i = 0; i < tests.length; i++) {
     const test = tests[i];
@@ -353,7 +376,12 @@ export async function runAnswerTests(
     const remainingMs = Math.max(0, TEST_RUN_WALL_TIME_MS - elapsedBefore);
     const timer = setTimeout(() => controller.abort(), remainingMs);
 
-    const answer = { text: "", citations: [] as Array<{ url: string }>, usedFallback: false };
+    const answer = {
+      text: "",
+      citations: [] as Array<{ url: string }>,
+      usedFallback: false,
+      traceId: undefined as string | undefined,
+    };
     let errored = false;
     let timedOut = false;
 
@@ -386,6 +414,12 @@ export async function runAnswerTests(
           usage: deps.usage,
           runners,
           signal: controller.signal,
+          // Kept apart from visitor replies, marked as a test run of this run.
+          trace: {
+            version: { id: draft.id, state: "draft" },
+            keySource: runKeySource,
+            preview: { source: "test_run", runId, testId: test.id },
+          },
         },
         {
           orgId: deps.orgId,
@@ -407,6 +441,7 @@ export async function runAnswerTests(
         const event = step.value;
         if (event.type === "token") answer.text += event.text;
         else if (event.type === "citation") answer.citations.push({ url: event.url });
+        else if (event.type === "done") answer.traceId = event.messageId;
         else if (event.type === "error") {
           // A provider failure is not a test failure; the draft was not judged.
           results.push(notRun(test, INFRA_ERROR_MESSAGE));
@@ -453,13 +488,13 @@ export async function runAnswerTests(
       outcome: verdict.passed ? "passed" : "failed",
       reason: verdict.reason,
       excerpt: answer.text.slice(0, EXCERPT_LENGTH),
+      ...(answer.traceId === undefined ? {} : { traceId: answer.traceId }),
     });
   }
 
   // Passed means every test ran and every test passed: a run that stopped
   // early has not shown the draft is good.
   const passed = results.length > 0 && results.every((result) => result.outcome === "passed");
-  const runId = newId("run");
   await deps.tenant.tests.createRun({
     id: runId,
     versionId: draft.id,

@@ -58,7 +58,7 @@ function stubVersions(
     }
     if (path === "/api/admin/assistants/ast_1/draft" && method === "GET") {
       return draft
-        ? Response.json({ draft })
+        ? Response.json({ draft, revision: `rev_${draft.id}` })
         : Response.json({ error: "Not found." }, { status: 404 });
     }
     const rollback = /\/versions\/([^/]+)\/rollback$/.exec(path);
@@ -145,6 +145,25 @@ describe("DiffList", () => {
     await expectNoSeriousA11yViolations();
   });
 
+  it("lists a repeated item once per time it was added, without key clashes", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const change = {
+      path: "behaviour.suggestedQuestions",
+      label: "Suggested questions",
+      screen: "Behaviour",
+      kind: "list",
+      before: [],
+      after: ["Hours?", "Hours?"],
+      added: ["Hours?", "Hours?"],
+      removed: [],
+      reordered: false,
+    } as unknown as ConfigChange;
+    render(<DiffList changes={[change]} />);
+    expect(screen.getAllByText("Hours?", { selector: "li" })).toHaveLength(2);
+    expect(JSON.stringify(error.mock.calls)).not.toContain("same key");
+    error.mockRestore();
+  });
+
   it("says when only the order of a list changed", () => {
     const changes = diffVersionConfigs(
       config((c) => {
@@ -225,7 +244,27 @@ describe("Publish confirmation", () => {
     await expectNoSeriousA11yViolations();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Publish now" }));
-    expect(onConfirm).toHaveBeenCalledTimes(1);
+    // The draft that was shown, so the engine publishes it and nothing else.
+    expect(onConfirm).toHaveBeenCalledWith({ draftId: "ver_draft", revision: "rev_ver_draft" });
+  });
+
+  it("says why it is asking again", async () => {
+    stubVersions([
+      row("ver_draft", "draft", EDITED, null, 1_700_000_200_000),
+      row("ver_pub", "published", LIVE, 1_700_000_100_000),
+    ]);
+    render(
+      <PublishConfirmDialog
+        assistantId="ast_1"
+        open
+        notice="The draft changed since you looked at what will change."
+        onConfirm={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    expect(screen.getByRole("alert").textContent).toBe(
+      "The draft changed since you looked at what will change.",
+    );
   });
 
   it("disables Publish when nothing has changed", async () => {

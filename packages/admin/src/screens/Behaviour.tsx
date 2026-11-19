@@ -1,11 +1,16 @@
 import { type BehaviourConfig, CONFIG_LIMITS } from "@solvchat/core";
 import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { ApiError, putJson } from "../api/client.js";
-import { FailedTestsError, publishAssistant } from "../api/publish.js";
+import {
+  type ConfirmedDraft,
+  DraftChangedError,
+  FailedTestsError,
+  publishAssistant,
+} from "../api/publish.js";
 import type { TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { dropQueryParams, readQueryParam } from "../routing.js";
-import { PublishConfirmDialog } from "../shell/PublishConfirm.js";
+import { PublishConfirmDialog, usePublishConfirmation } from "../shell/PublishConfirm.js";
 import { useAssistantMutation, useReportUnsavedEdits } from "../shell/useAssistantMutations.js";
 import { CharCount } from "../ui/CharCount.js";
 import { ErrorState } from "../ui/ErrorState.js";
@@ -239,7 +244,9 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const [showHistory, setShowHistory] = useState(() => readQueryParam("history") === "open");
   // Read once: the address then says nothing the screen does not show.
   useEffect(() => dropQueryParams(["history"]), []);
-  const [confirmPublish, setConfirmPublish] = useState(false);
+  const confirmation = usePublishConfirmation(assistantId, (confirmed) => {
+    void handlePublish(false, undefined, confirmed);
+  });
   const [historyTick, setHistoryTick] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -447,7 +454,11 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     }
   }
 
-  async function handlePublish(force = false, runId?: string) {
+  async function handlePublish(
+    force = false,
+    runId?: string,
+    confirmed: ConfirmedDraft | undefined = confirmation.confirmed(),
+  ) {
     // Publishing sends the saved draft, not the form: with unsaved edits the
     // owner would publish something other than what they see.
     if (busy || unsaved) return;
@@ -456,7 +467,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     const snapshot = { assistantId, fields: { ...latestRef.current } };
     try {
       await mutation.run("publishing", async () => {
-        const res = await publishAssistant(assistantId, force, runId);
+        const res = await publishAssistant(assistantId, force, runId, confirmed);
         publishSnapshotRef.current = snapshot;
         ignoreNextTickRef.current = true;
         toast.success(`Published (${formatDateTime(res.version.publishedAt ?? Date.now())}).`);
@@ -464,7 +475,11 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         draft.reload();
       });
     } catch (err) {
-      if (err instanceof FailedTestsError) {
+      if (err instanceof DraftChangedError) {
+        // Another save got there first: show what will change now.
+        setFailedRun(null);
+        confirmation.reopen(err.message);
+      } else if (err instanceof FailedTestsError) {
         setFailedRun(err.run);
       } else {
         setFormError(err instanceof ApiError ? err.message : "Could not publish.");
@@ -495,7 +510,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
               className="btn btn-secondary"
               disabled={busy || unsaved}
               aria-describedby={unsaved ? "behaviour-publish-hint" : undefined}
-              onClick={() => setConfirmPublish(true)}
+              onClick={() => confirmation.open()}
             >
               {publishing ? "Publishing…" : "Publish"}
             </button>
@@ -621,15 +636,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         </div>
       </form>
 
-      <PublishConfirmDialog
-        assistantId={assistantId}
-        open={confirmPublish}
-        onCancel={() => setConfirmPublish(false)}
-        onConfirm={() => {
-          setConfirmPublish(false);
-          void handlePublish(false);
-        }}
-      />
+      <PublishConfirmDialog {...confirmation.dialogProps} />
 
       {showHistory && <History assistantId={assistantId} refreshKey={historyTick} />}
     </div>

@@ -2314,9 +2314,13 @@ a {
   overflow-wrap: anywhere;
 }
 
-/* "How this answer was made" under an assistant reply. */
+/* "How this answer was made" under an assistant reply. It is also shown in
+   the Try it pane and in a Tests table cell, so it sizes to where it is
+   (inline-size containment: its content never widens a column or the pane)
+   and its narrow layout follows its own width, not the screen's. */
 .answer-trace {
   margin-top: var(--space-2);
+  container-type: inline-size;
 }
 
 .answer-trace > summary {
@@ -2395,9 +2399,12 @@ a {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 599px) {
+@container (max-width: 599px) {
   .trace-table .status-badge {
     white-space: normal;
+    /* Between words only: "Not used: weak match", never "No t us ed". */
+    overflow-wrap: normal;
+    word-break: normal;
   }
 
   .trace-facts {
@@ -2406,6 +2413,14 @@ a {
 
   .trace-facts dd {
     margin-bottom: var(--space-2);
+  }
+}
+
+/* The Try it pane: the list order already gives the rank. */
+@container (max-width: 420px) {
+  .trace-table th:first-child,
+  .trace-table td:first-child {
+    display: none;
   }
 }
 
@@ -2679,7 +2694,7 @@ a {
 
 @media (min-width: 600px) {
   .sources-table th,
-  .tests-table th {
+  .tests-table > thead > tr > th {
     white-space: nowrap;
   }
 
@@ -2692,8 +2707,15 @@ a {
     white-space: nowrap;
   }
 
-  .tests-table td:nth-child(2) {
+  /* Its own cells only: a result's trace holds a table of its own. */
+  .tests-table > tbody > tr > td:nth-child(2) {
     white-space: nowrap;
+  }
+
+  /* Room for an opened "How this answer was made", which (contained) never
+     widens the column itself. */
+  .tests-table > tbody > tr > td:nth-child(3) {
+    width: 50%;
   }
 
   .tests-table .actions {

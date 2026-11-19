@@ -1,5 +1,6 @@
 import { isPlainObject } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
+import { expectedVersionConfig, type VersionRow } from "../db/versions.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
 import { plainPageFetcher } from "../ingest/pageFetcher.js";
 import type { SyncStartDeps } from "../ingest/sync.js";
@@ -27,6 +28,7 @@ import {
 import {
   getAnswerTrace,
   getConversation,
+  getPreviewTrace,
   listConversations,
   readConversationFilter,
 } from "./conversations.js";
@@ -146,6 +148,42 @@ function readPagingParams(url: URL): { limit?: number; offset?: number } {
   };
 }
 
+const DRAFT_CHANGED_MESSAGE =
+  "The draft changed since you looked at what will change. Check the changes again, then publish.";
+const DRAFT_CHANGED_CODE = "draft_changed";
+
+/** `expected` on a publish request: the draft id and revision `GET .../draft` returned. */
+function readExpectedDraft(raw: unknown): { draftId: string; revision: string } | undefined {
+  if (raw === undefined) return undefined;
+  if (
+    !isPlainObject(raw) ||
+    typeof raw.draftId !== "string" ||
+    raw.draftId === "" ||
+    typeof raw.revision !== "string" ||
+    raw.revision === ""
+  ) {
+    throw new BadRequest(["expected: must have a draftId and a revision"]);
+  }
+  return { draftId: raw.draftId, revision: raw.revision };
+}
+
+/** The current draft when it is still the one confirmed; otherwise `draft_changed`. */
+async function confirmedDraft(
+  tenant: AdminRouteDeps["tenant"],
+  assistantId: string,
+  expected: { draftId: string; revision: string },
+): Promise<VersionRow> {
+  const draft = await getDraft(tenant, assistantId);
+  if (draft.id !== expected.draftId || (await configRevision(draft)) !== expected.revision) {
+    throw new Conflict(DRAFT_CHANGED_MESSAGE, DRAFT_CHANGED_CODE);
+  }
+  return draft;
+}
+
+function sameDraft(a: VersionRow, b: VersionRow): boolean {
+  return a.id === b.id && expectedVersionConfig(a) === expectedVersionConfig(b);
+}
+
 async function maybeRunTestsBeforePublish(deps: AdminRouteDeps, assistantId: string) {
   const count = await deps.tenant.tests.countFor(assistantId);
   if (count === 0) return null;
@@ -198,7 +236,10 @@ async function assistantRoutes(
       return Response.json({ versions: await listVersions(tenant, assistantId) });
     }
     if (action === "draft" && method === "GET") {
-      return Response.json({ draft: await getDraft(tenant, assistantId) });
+      const draft = await getDraft(tenant, assistantId);
+      // The revision Publish sends back (`expected`), so it publishes only
+      // the draft the owner was shown.
+      return Response.json({ draft, revision: await configRevision(draft) });
     }
     if (action === "draft" && method === "PUT") {
       const draft = await updateDraft(tenant, assistantId, await readJsonBody(request));
@@ -214,13 +255,19 @@ async function assistantRoutes(
       if (rawRunId !== undefined && (typeof rawRunId !== "string" || rawRunId.trim() === "")) {
         throw new BadRequest(["runId: must be a non-empty string"]);
       }
+      // The draft the owner confirmed in "What will change". When given, only
+      // that draft is published: a draft saved since (another tab, say) is
+      // refused with `draft_changed`, and the admin shows the new comparison.
+      const expected = readExpectedDraft(isPlainObject(body) ? body.expected : undefined);
+      const confirmed =
+        expected === undefined ? undefined : await confirmedDraft(tenant, assistantId, expected);
 
       if (force && typeof rawRunId === "string") {
         const reviewedRun = await tenant.tests.getRunForAssistant(assistantId, rawRunId);
         if (reviewedRun === null) {
           throw new NotFound("test run");
         }
-        const draft = await getDraft(tenant, assistantId);
+        const draft = confirmed ?? (await getDraft(tenant, assistantId));
         const currentRevision = await configRevision(draft);
         if (
           reviewedRun.versionId !== draft.id ||
@@ -246,6 +293,11 @@ async function assistantRoutes(
       // The specification's order: tests, then promote. A run only happens if
       // the owner has tests; publishing with none is the phase 1 path exactly.
       const run = await maybeRunTestsBeforePublish(deps, assistantId);
+      // The run read the draft again: a save between the check above and the
+      // run means the tests judged something the owner was not shown.
+      if (confirmed !== undefined && run !== null && !sameDraft(run.draft, confirmed)) {
+        throw new Conflict(DRAFT_CHANGED_MESSAGE, DRAFT_CHANGED_CODE);
+      }
       if (run !== null && !run.passed && !force) {
         // 409, not 400: the request was well formed, and the reason it did not
         // happen is a state the owner can inspect and then override.
@@ -259,10 +311,12 @@ async function assistantRoutes(
       }
       // The specification: "the choice is recorded on the run" — committed in
       // the same batch as promotion so the two cannot diverge.
+      // Bound to the confirmed draft's exact config in the promoting batch,
+      // so a save that lands after these checks still cannot go live.
       const version = await publishDraft(
         tenant,
         assistantId,
-        run?.draft,
+        run?.draft ?? confirmed,
         run !== null && !run.passed && force ? run.runId : undefined,
       );
       return Response.json({
@@ -390,6 +444,15 @@ async function assistantRoutes(
   }
 
   // `topics/:topicId` (rename, delete) and `topics/:topicId/merge`.
+  // `assistants/:id/preview-traces/:traceId`: how a "Try it" or test-run answer was made.
+  if (
+    segments.length === 4 &&
+    segments[2] === "preview-traces" &&
+    segments[3] &&
+    method === "GET"
+  ) {
+    return Response.json(await getPreviewTrace(tenant, assistantId, segments[3]));
+  }
   if (segments[2] === "topics" && segments[3]) {
     const topicId = segments[3];
     if (segments.length === 4 && method === "PATCH") {

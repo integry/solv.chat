@@ -1,8 +1,14 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AnswerTrace, AnswerTracePart, ConversationDetail } from "../src/api/types.js";
-import { formatMs } from "../src/screens/AnswerTrace.js";
+import type {
+  AnswerTrace,
+  AnswerTracePart,
+  Assistant,
+  ConversationDetail,
+} from "../src/api/types.js";
+import { AnswerTrace as AnswerTraceView, formatMs } from "../src/screens/AnswerTrace.js";
 import { Conversation } from "../src/screens/Conversation.js";
+import { TryItPane } from "../src/shell/TryItPane.js";
 import { expectNoSeriousA11yViolations } from "./support/axe.js";
 
 const DETAIL: ConversationDetail = {
@@ -94,6 +100,7 @@ function part(overrides: Partial<AnswerTracePart> = {}): AnswerTracePart {
 function trace(overrides: Partial<AnswerTrace> = {}): AnswerTrace {
   return {
     messageId: "msg_a",
+    source: "visitor",
     tokensIn: 1200,
     tokensOut: 300,
     costMicros: 20_000,
@@ -138,6 +145,81 @@ describe("How this answer was made", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+  });
+
+  const DRAFT_PART = part({
+    version: {
+      id: "ver_draft",
+      state: "draft",
+      current: { state: "draft", createdAt: 1_763_200_000_000, publishedAt: null },
+    },
+  });
+
+  it("offers how a Try it answer was made, read by its id from the assistant's preview traces", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const raw =
+          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        const url = new URL(raw, "https://example.com");
+        calls.push(`${(init?.method ?? "GET").toUpperCase()} ${url.pathname}`);
+        if (url.pathname === "/api/admin/chat") {
+          const sse = [
+            `event: token\ndata: ${JSON.stringify({ text: "Invoices go out monthly." })}\n\n`,
+            `event: done\ndata: ${JSON.stringify({ messageId: "msg_try", conversationId: "cnv_try" })}\n\n`,
+          ].join("");
+          return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+        }
+        if (url.pathname === "/api/admin/assistants/ast_1/preview-traces/msg_try") {
+          return Response.json(
+            trace({
+              messageId: "msg_try",
+              source: "try_it",
+              trace: { parts: [DRAFT_PART], truncated: false },
+            }),
+          );
+        }
+        return Response.json({ error: "Not found." }, { status: 404 });
+      }),
+    );
+    const assistant: Assistant = {
+      id: "ast_1",
+      orgId: "org_00000000000000000000",
+      name: "Docs Bot",
+      publicKey: "pk_ast_1",
+      allowedOrigins: [],
+      hasIngestKey: false,
+      createdAt: 1_700_000_000_000,
+    };
+    render(<TryItPane assistant={assistant} />);
+    fireEvent.change(screen.getByLabelText("Ask a question"), {
+      target: { value: "How does billing work?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Invoices go out monthly.");
+    const details = await openTrace();
+    await waitFor(() => expect(details.textContent).toContain("SettingsThe draft (Try it)"));
+    expect(calls).toContain("GET /api/admin/assistants/ast_1/preview-traces/msg_try");
+    expect(calls.some((c) => c.includes("/conversations/"))).toBe(false);
+  });
+
+  it("labels a test run's answer as the draft in a test run", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          trace({
+            messageId: "msg_test",
+            source: "test_run",
+            trace: { parts: [DRAFT_PART], truncated: false },
+          }),
+        ),
+      ),
+    );
+    render(<AnswerTraceView assistantId="ast_1" messageId="msg_test" />);
+    const details = await openTrace();
+    await waitFor(() => expect(details.textContent).toContain("SettingsThe draft (test run)"));
   });
 
   it("is closed by default, on assistant replies only, and loads nothing until opened", async () => {

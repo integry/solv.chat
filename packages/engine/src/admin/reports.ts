@@ -92,8 +92,9 @@ export async function periodFigures(
  * range's answers were timed: answers written before timings existed have
  * none, and a median of the few timed ones beside many untimed ones would
  * describe a different period than the one the owner picked. Answers that
- * used a page action are left out of all of it (see `replyTiming`), and
- * counted on their own so the screen can say so.
+ * used a page action, and replies that found nothing to answer from, are
+ * left out of all of it (see `replyTiming`), and counted on their own so the
+ * screen can say so.
  */
 export async function responseTimeFigures(
   tenant: Tenant,
@@ -116,6 +117,7 @@ export async function responseTimeFigures(
     status,
     answers: timing.replies,
     pageActionAnswers: timing.pageActionReplies,
+    noContentAnswers: timing.noContentReplies,
     timed: timing.timed,
     firstTokenMedianMs: measured ? timing.firstTokenMedianMs : null,
     firstTokenP90Ms: measured ? timing.firstTokenP90Ms : null,

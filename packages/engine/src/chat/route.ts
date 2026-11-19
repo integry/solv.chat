@@ -22,13 +22,7 @@ import { ProviderError } from "../providers/error.js";
 import { llmProviderFor } from "../providers/factory.js";
 import { type Embedder, type Retriever, vectorizeRetriever } from "../providers/retrieval.js";
 import type { LlmProvider } from "../providers/types.js";
-import type {
-  AuthProvider,
-  KeyProvider,
-  LlmProviderName,
-  Principal,
-  Seams,
-} from "../seams/types.js";
+import type { AuthProvider, LlmProviderName, Principal, Seams } from "../seams/types.js";
 import { actionRunnerFor } from "./actionRunner.js";
 import {
   type AnswerReviewHook,
@@ -38,9 +32,14 @@ import {
 } from "./answer.js";
 import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
 import { mcpRunnerFor } from "./mcpRunner.js";
-import { type AnswerReviewer, modelReviewer, runAnswerReview } from "./review.js";
+import {
+  type AnswerReviewer,
+  modelReviewer,
+  REVIEW_MAX_SUBJECT_TITLES,
+  runAnswerReview,
+} from "./review.js";
 import type { ToolRunner } from "./toolLoop.js";
-import type { KeySource } from "./trace.js";
+import { modelKeySource } from "./trace.js";
 
 export interface ChatEnv extends ProviderEnv {
   DB: D1Database;
@@ -159,6 +158,11 @@ function readAssistantKey(body: unknown): string | null {
   return trimmed;
 }
 
+interface SiteNames {
+  name: string;
+  title: string;
+}
+
 interface StreamAnswerParams {
   env: ChatEnv;
   seams: Seams;
@@ -178,6 +182,8 @@ interface StreamAnswerParams {
   allowedTools: readonly string[];
   /** The version the behaviour and tools came from, for the answer's trace. */
   version: AnswerTraceContext["version"];
+  /** The assistant's name and its widget title, for the answer review's site subject. */
+  site: SiteNames;
   conversationId: string | undefined;
   pageUrl: string | undefined;
   preview: boolean;
@@ -205,29 +211,13 @@ interface StreamResumeParams {
   /** The published version's tool allow-list, as for a fresh answer. */
   allowedTools: readonly string[];
   version: AnswerTraceContext["version"];
+  site: SiteNames;
   conversationId: string;
   resumeMessageId: string;
   actionResults: readonly ActionResult[];
   pageActions: readonly PageAction[] | undefined;
   actionsEnabled: boolean;
   origin: string | null;
-}
-
-/**
- * Where the model key for `provider` comes from, for an answer's trace. Reads
- * which providers have a stored key (names only, never the sealed value) and
- * the seam's own flags: a host that manages keys and allows no own key
- * always supplies it.
- */
-async function modelKeySource(
-  tenant: ReturnType<typeof forPublicScope>,
-  keys: KeyProvider,
-  provider: LlmProviderName,
-): Promise<KeySource> {
-  if (keys.managed === true && keys.ownKeysAllowed !== true) return "managed";
-  const stored = await tenant.providerSettings.listKeys();
-  if (stored.some((key) => key.provider === provider)) return "stored";
-  return keys.managed === true ? "managed" : "environment";
 }
 
 /** Resolves the embedder, retriever, LLM provider, and model for chat or test runs. */
@@ -348,6 +338,7 @@ async function resolveAnswerDeps(params: {
   assistantId: string;
   allowedTools: readonly string[];
   version: AnswerTraceContext["version"];
+  site: SiteNames;
   pageActions: readonly PageAction[] | undefined;
   actionsEnabled: boolean;
   preview: boolean;
@@ -376,13 +367,14 @@ async function resolveAnswerDeps(params: {
   if (actionRunner) runners.push(actionRunner);
   if (mcp) runners.push(mcp);
 
-  // Previews store no message, so they keep no trace and skip the read.
-  const trace: AnswerTraceContext | undefined = params.preview
-    ? undefined
-    : {
-        version: params.version,
-        keySource: await modelKeySource(params.tenant, seams.keys, provider.name),
-      };
+  // The key source is read by the trace write after `done`, never before the
+  // answer starts. A preview ("Try it") stores no message, so its trace is
+  // kept apart from visitor replies, marked as one.
+  const trace: AnswerTraceContext = {
+    version: params.version,
+    keySource: () => modelKeySource(params.tenant.providerSettings, seams.keys, provider.name),
+    ...(params.preview ? { preview: { source: "try_it" as const } } : {}),
+  };
 
   // Previews ("Try it") are not reviewed; test runs do not come through here.
   const reviewer =
@@ -411,6 +403,16 @@ async function resolveAnswerDeps(params: {
               {
                 messages: params.tenant.messages,
                 topics: params.tenant.topics,
+                // What the site is about, read in the deferred review: the
+                // names it answers as and some of its content's titles.
+                subject: async (assistantId) => ({
+                  name: params.site.name,
+                  title: params.site.title,
+                  contentTitles: await params.tenant.documents.titlesForAssistant(
+                    assistantId,
+                    REVIEW_MAX_SUBJECT_TITLES,
+                  ),
+                }),
                 reviewer,
                 limits: seams.limits,
                 usage: seams.usage,
@@ -599,6 +601,7 @@ export async function adminChatRoute(
     behaviour: version.config.behaviour,
     allowedTools: version.config.allowedTools,
     version: { id: version.id, state: "draft" },
+    site: { name: assistant.name, title: version.config.widget.title },
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: true,
@@ -685,6 +688,7 @@ export async function chatRoute(
       behaviour: version.config.behaviour,
       allowedTools: version.config.allowedTools,
       version: { id: version.id, state: "published" },
+      site: { name: assistant.name, title: version.config.widget.title },
       conversationId: parsed.value.conversationId ?? "",
       resumeMessageId: parsed.value.resumeMessageId ?? "",
       actionResults: parsed.value.actionResults,
@@ -712,6 +716,7 @@ export async function chatRoute(
     behaviour: version.config.behaviour,
     allowedTools: version.config.allowedTools,
     version: { id: version.id, state: "published" },
+    site: { name: assistant.name, title: version.config.widget.title },
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: false,

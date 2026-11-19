@@ -19,6 +19,7 @@ import { PageHeader } from "../ui/PageHeader.js";
 import { Skeleton } from "../ui/Skeleton.js";
 import { StatusBadge, type StatusTone } from "../ui/StatusBadge.js";
 import { Notice, useToast } from "../ui/Toast.js";
+import { AnswerTrace } from "./AnswerTrace.js";
 import { describeExpectation, TestEditor } from "./TestEditor.js";
 
 export interface TestsProps {
@@ -177,13 +178,24 @@ export function Tests({ assistantId }: TestsProps) {
       render: (test) => {
         const result = resultFor(test);
         if (!result) return <span className="muted">—</span>;
+        const trace = result.traceId ? (
+          <div className="test-trace">
+            <AnswerTrace assistantId={assistantId} messageId={result.traceId} />
+          </div>
+        ) : null;
         if (result.outcome === "passed") {
-          return <span className="muted">{result.reason}</span>;
+          return (
+            <div>
+              <span className="muted">{result.reason}</span>
+              {trace}
+            </div>
+          );
         }
         return (
           <div className="test-failure">
             <p className="test-failure-reason">{result.reason}</p>
             {result.excerpt && <blockquote className="test-excerpt">{result.excerpt}</blockquote>}
+            {trace}
           </div>
         );
       },

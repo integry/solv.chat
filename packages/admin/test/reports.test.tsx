@@ -126,7 +126,7 @@ describe("Reports screen", () => {
     expect(screen.getByText("75%")).toBeTruthy();
     expect(
       screen.getByText(
-        "Share of answers your assistant could give from your content. Off-topic questions are not counted.",
+        "Share of answers your assistant could give from your content. A partial answer counts as half. Off-topic questions are not counted.",
       ),
     ).toBeTruthy();
     expect(screen.getByText("13%")).toBeTruthy();
@@ -431,6 +431,7 @@ const RESPONSE_TIME: ResponseTimePeriod = {
   status: "measured",
   answers: 40,
   pageActionAnswers: 0,
+  noContentAnswers: 0,
   timed: 40,
   firstTokenMedianMs: 820,
   firstTokenP90Ms: 2_450,
@@ -441,6 +442,7 @@ const RESPONSE_TIME: ResponseTimePeriod = {
     status: "measured",
     answers: 30,
     pageActionAnswers: 0,
+    noContentAnswers: 0,
     timed: 28,
     firstTokenMedianMs: 1_240,
     firstTokenP90Ms: 2_430,
@@ -521,6 +523,19 @@ describe("Reports response time", () => {
     expect(full.textContent).toContain("6.1 s");
   });
 
+  it("says replies that found nothing to answer from are left out, and why", async () => {
+    installFakeServer({
+      report: { ...SEEDED_REPORT, responseTime: { ...RESPONSE_TIME, noContentAnswers: 3 } },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Reports" }));
+
+    const section = await screen.findByRole("region", { name: "Response time" });
+    expect(section.textContent).toContain(
+      "3 replies that found nothing in your content are not counted, because they are sent at once without writing an answer.",
+    );
+  });
+
   it("says every answer used a page action instead of calling them old", async () => {
     installFakeServer({
       report: {
@@ -530,6 +545,7 @@ describe("Reports response time", () => {
           status: "page_actions_only",
           answers: 0,
           pageActionAnswers: 4,
+          noContentAnswers: 0,
           timed: 0,
           firstTokenMedianMs: null,
           firstTokenP90Ms: null,

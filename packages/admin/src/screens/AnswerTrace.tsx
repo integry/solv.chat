@@ -16,7 +16,11 @@ import { formatCost } from "./figures.js";
 
 export interface AnswerTraceProps {
   assistantId: string;
-  conversationId: string;
+  /**
+   * The visitor conversation the reply is in. Absent for a "Try it" or
+   * test-run answer, whose trace is read by its id under the assistant.
+   */
+  conversationId?: string | undefined;
   messageId: string;
 }
 
@@ -94,14 +98,18 @@ const COLUMNS: readonly DataTableColumn<AnswerTraceCandidate & { rank: number }>
 function VersionText({
   assistantId,
   version,
+  source,
 }: {
   assistantId: string;
   version: AnswerTracePart["version"];
+  source: AnswerTraceData["source"];
 }) {
   const current = version.current;
   const label =
     version.state === "draft"
-      ? "The draft (Try it)"
+      ? source === "test_run"
+        ? "The draft (test run)"
+        : "The draft (Try it)"
       : current === null
         ? "A published version that no longer exists"
         : `Published version from ${formatDateTime(current.publishedAt ?? current.createdAt)}`;
@@ -124,10 +132,12 @@ function TracePartView({
   assistantId,
   part,
   heading,
+  source,
 }: {
   assistantId: string;
   part: AnswerTracePart;
   heading: string | null;
+  source: AnswerTraceData["source"];
 }) {
   const rows = part.retrieval.candidates.map((c, i) => ({ ...c, rank: i + 1 }));
   return (
@@ -145,7 +155,7 @@ function TracePartView({
       <dl className="trace-facts">
         <dt>Settings</dt>
         <dd>
-          <VersionText assistantId={assistantId} version={part.version} />
+          <VersionText assistantId={assistantId} version={part.version} source={source} />
         </dd>
         <dt>Model</dt>
         <dd>
@@ -195,6 +205,7 @@ function TraceBody({ assistantId, data }: { assistantId: string; data: AnswerTra
           key={index}
           assistantId={assistantId}
           part={part}
+          source={data.source}
           heading={
             parts.length === 1
               ? null
@@ -223,9 +234,11 @@ function TraceBody({ assistantId, data }: { assistantId: string; data: AnswerTra
  */
 export function AnswerTrace({ assistantId, conversationId, messageId }: AnswerTraceProps) {
   const [opened, setOpened] = useState(false);
-  const res = useResource<AnswerTraceData>(
-    opened ? `/api/admin/conversations/${conversationId}/messages/${messageId}/trace` : null,
-  );
+  const path =
+    conversationId === undefined
+      ? `/api/admin/assistants/${assistantId}/preview-traces/${messageId}`
+      : `/api/admin/conversations/${conversationId}/messages/${messageId}/trace`;
+  const res = useResource<AnswerTraceData>(opened ? path : null);
   return (
     <details
       className="disclosure answer-trace"

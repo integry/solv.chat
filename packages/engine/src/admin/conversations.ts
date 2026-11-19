@@ -1,5 +1,5 @@
 import { type AnswerOutcome, isId, MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
-import type { TraceDropReason, TracePart } from "../chat/trace.js";
+import type { PreviewTraceSource, StoredTrace, TraceDropReason, TracePart } from "../chat/trace.js";
 import type {
   ConversationFilter,
   ConversationRow,
@@ -323,6 +323,11 @@ export interface AnswerTracePartView {
 
 export interface AnswerTraceView {
   messageId: string;
+  /**
+   * Where the answer came from: a visitor reply, or one that stored no
+   * message ("Try it", a test run), marked as such.
+   */
+  source: "visitor" | PreviewTraceSource;
   tokensIn: number;
   tokensOut: number;
   costMicros: number | null;
@@ -357,23 +362,60 @@ export async function getAnswerTrace(
   }
 
   const stored = await tenant.traces.get(message.id);
-  const base = {
+  return {
     messageId: message.id,
+    source: "visitor",
     tokensIn: message.tokensIn,
     tokensOut: message.tokensOut,
     costMicros: message.costMicros,
     firstTokenMs: message.firstTokenMs,
     totalMs: message.totalMs,
+    trace: await traceView(tenant, conversation.assistantId, stored),
   };
-  if (stored === null) return { ...base, trace: null };
+}
 
+/**
+ * How one "Try it" answer or answer-test answer was made: the trace the
+ * preview kept in `preview_traces`, for this assistant (and, through the
+ * tenant, this org). A visitor reply's id is never found here.
+ */
+export async function getPreviewTrace(
+  tenant: Tenant,
+  assistantId: string,
+  traceId: string,
+): Promise<AnswerTraceView> {
+  const row = await tenant.previewTraces.get(assistantId, traceId);
+  if (row === null) throw new NotFound("trace");
+  const answer = row.trace?.parts[0];
+  return {
+    messageId: row.id,
+    source: row.source,
+    tokensIn: row.tokensIn,
+    tokensOut: row.tokensOut,
+    costMicros: row.costMicros,
+    firstTokenMs: answer?.timing.firstTokenMs ?? null,
+    totalMs: answer?.timing.totalMs ?? null,
+    trace: await traceView(tenant, assistantId, row.trace),
+  };
+}
+
+/**
+ * A stored trace with the content it names read now: the view shows what
+ * that content says today, and says so when it is gone.
+ */
+async function traceView(
+  tenant: Tenant,
+  assistantId: string,
+  stored: StoredTrace | null,
+): Promise<AnswerTraceView["trace"]> {
+  if (stored === null) return null;
   const chunkIds = [
     ...new Set(stored.parts.flatMap((p) => p.retrieval.candidates.map((c) => c.chunkId))),
   ];
   const versionIds = [...new Set(stored.parts.map((p) => p.version.id))];
   const [chunks, versions] = await Promise.all([
-    tenant.documents.chunksByIds(conversation.assistantId, chunkIds),
-    Promise.all(versionIds.map((id) => tenant.versions.byId(conversation.assistantId, id))),
+    tenant.documents.chunksByIds(assistantId, chunkIds),
+    Promise.all(versionIds.map((id) => tenant.versions.byId(assistantId, id))),
   ]);
   const chunkById = new Map(chunks.map((c) => [c.id, c]));
   const versionById = new Map(versions.flatMap((v) => (v === null ? [] : [[v.id, v] as const])));
@@ -419,5 +461,5 @@ export async function getAnswerTrace(
     };
   });
 
-  return { ...base, trace: { parts, truncated: stored.truncated === true } };
+  return { parts, truncated: stored.truncated === true };
 }

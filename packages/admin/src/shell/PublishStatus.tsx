@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, putJson } from "../api/client.js";
-import { FailedTestsError, publishAssistant } from "../api/publish.js";
+import {
+  type ConfirmedDraft,
+  DraftChangedError,
+  FailedTestsError,
+  publishAssistant,
+} from "../api/publish.js";
 import type { TestRunSummary, VersionRow } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
 import { FailedTestsPanel } from "../screens/FailedTestsPanel.js";
@@ -8,7 +13,7 @@ import { ConfirmDialog, Dialog } from "../ui/Dialog.js";
 import { RowMenu } from "../ui/RowMenu.js";
 import { StatusBadge, type StatusTone } from "../ui/StatusBadge.js";
 import { useToast } from "../ui/Toast.js";
-import { PublishConfirmDialog } from "./PublishConfirm.js";
+import { PublishConfirmDialog, usePublishConfirmation } from "./PublishConfirm.js";
 import { useAssistantMutation } from "./useAssistantMutations.js";
 
 /**
@@ -114,7 +119,9 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
   const toast = useToast();
   const [failedRun, setFailedRun] = useState<TestRunSummary | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
-  const [confirmPublish, setConfirmPublish] = useState(false);
+  const confirmation = usePublishConfirmation(assistantId, (confirmed) => {
+    void handlePublish(false, undefined, confirmed);
+  });
   const [discardError, setDiscardError] = useState<string | null>(null);
 
   if (!snapshot) return null;
@@ -124,18 +131,26 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
   const { unsaved } = mutation;
   const canPublish = state !== "live" && !mutation.busy && !unsaved;
 
-  async function handlePublish(force = false, runId?: string) {
+  async function handlePublish(
+    force = false,
+    runId?: string,
+    confirmed: ConfirmedDraft | undefined = confirmation.confirmed(),
+  ) {
     if (mutation.busy || mutation.unsaved) return;
     try {
       const result = await mutation.run("publishing", () =>
-        publishAssistant(assistantId, force, runId),
+        publishAssistant(assistantId, force, runId, confirmed),
       );
       if (!result.ran) return;
       setFailedRun(null);
       toast.success("Published. Visitors now get this version.");
       reload();
     } catch (err) {
-      if (err instanceof FailedTestsError) {
+      if (err instanceof DraftChangedError) {
+        // Another save got there first: show what will change now.
+        setFailedRun(null);
+        confirmation.reopen(err.message);
+      } else if (err instanceof FailedTestsError) {
         setFailedRun(err.run);
       } else {
         setFailedRun(null);
@@ -181,7 +196,7 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
                   ? "Nothing new to publish."
                   : "Shows what will change, runs your tests, then publishes."
             }
-            onClick={() => setConfirmPublish(true)}
+            onClick={() => confirmation.open()}
           >
             {mutation.publishing ? "Publishing…" : "Publish draft"}
           </button>
@@ -202,15 +217,7 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
         </div>
       )}
 
-      <PublishConfirmDialog
-        assistantId={assistantId}
-        open={confirmPublish}
-        onCancel={() => setConfirmPublish(false)}
-        onConfirm={() => {
-          setConfirmPublish(false);
-          void handlePublish(false);
-        }}
-      />
+      <PublishConfirmDialog {...confirmation.dialogProps} />
 
       <ConfirmDialog
         open={confirmDiscard}

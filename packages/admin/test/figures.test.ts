@@ -3,6 +3,7 @@ import {
   durationChange,
   formatDuration,
   formatResponseTime,
+  noContentNote,
   pageActionNote,
   responseTimeNote,
 } from "../src/screens/figures.js";
@@ -45,6 +46,16 @@ describe("response-time figures", () => {
     // The status sentence already says it, or there is nothing to leave out.
     expect(pageActionNote("page_actions_only", 3)).toBeNull();
     expect(pageActionNote("no_answers", 0)).toBeNull();
+  });
+
+  it("says when replies that found nothing to answer from are left out", () => {
+    expect(noContentNote(0)).toBeNull();
+    expect(noContentNote(1)).toBe(
+      "1 reply that found nothing in your content is not counted, because it is sent at once without writing an answer.",
+    );
+    expect(noContentNote(2)).toBe(
+      "2 replies that found nothing in your content are not counted, because they are sent at once without writing an answer.",
+    );
   });
 
   it("compares two waits as they are shown", () => {

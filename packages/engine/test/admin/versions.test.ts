@@ -103,6 +103,74 @@ describe("admin versions API", () => {
     expect(JSON.parse(draft?.config ?? "{}").behaviour.greeting).toBe("Version 1 greeting");
   });
 
+  it("publishes only the draft that was confirmed: a draft saved since is refused with draft_changed", async () => {
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Reviewed greeting" },
+    });
+    // Tab A opens "What will change" and reads the draft with its revision.
+    const shown = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: VersionRow; revision: string };
+    expect(shown.revision).toMatch(/^[0-9a-f]{64}$/);
+
+    // Tab B saves while A's dialog is open.
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Never reviewed" },
+    });
+
+    const refused = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      expected: { draftId: shown.draft.id, revision: shown.revision },
+    });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ code: "draft_changed" });
+    expect((await tableVersions(assistantId)).filter((r) => r.state === "published")).toEqual([]);
+
+    // A reads the comparison again and confirms what is there now.
+    const again = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: VersionRow; revision: string };
+    expect(again.revision).not.toBe(shown.revision);
+    const published = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      expected: { draftId: again.draft.id, revision: again.revision },
+    });
+    expect(published.status).toBe(200);
+    const live = (await tableVersions(assistantId)).find((r) => r.state === "published");
+    expect(JSON.parse(live?.config ?? "{}").behaviour.greeting).toBe("Never reviewed");
+  });
+
+  it("refuses a confirmed draft that was published meanwhile, and a malformed one", async () => {
+    const shown = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: VersionRow; revision: string };
+    // Another tab publishes: the confirmed draft row is no longer the draft.
+    expect((await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`)).status).toBe(
+      200,
+    );
+    const stale = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      expected: { draftId: shown.draft.id, revision: shown.revision },
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ code: "draft_changed" });
+
+    const malformed = await call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      expected: { draftId: shown.draft.id },
+    });
+    expect(malformed.status).toBe(400);
+  });
+
+  it("binds promotion to the confirmed draft's config, so a save after the check still cannot go live", async () => {
+    const tenant = forPrincipal(env.DB, { orgId: TEST_ORG_ID, userId: "owner", role: "owner" });
+    const confirmed = await tenant.versions.draft(assistantId);
+    if (confirmed === null) throw new Error("expected a draft");
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Saved after the check" },
+    });
+    const error = await publishDraft(tenant, assistantId, confirmed).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(Conflict);
+    expect((error as Conflict).code).toBe("draft_changed");
+    expect((await tableVersions(assistantId)).filter((r) => r.state === "published")).toEqual([]);
+  });
+
   it("a second publish archives the first and history is newest-first", async () => {
     const t0 = Date.now() + 1_000;
     vi.useFakeTimers();
@@ -787,6 +855,55 @@ describe("publish gate with answer tests", () => {
     expect(rows.filter((r) => r.state === "published")).toHaveLength(0);
     const draft = rows.find((r) => r.state === "draft");
     expect(JSON.parse(draft?.config ?? "{}").behaviour.greeting).toBe("Untested greeting");
+  });
+
+  it("refuses with draft_changed when the confirmed draft is saved over while its tests run", async () => {
+    let signalRunning!: () => void;
+    const testRunning = new Promise<void>((resolve) => {
+      signalRunning = resolve;
+    });
+    let releaseProvider!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const retriever = memoryRetriever();
+    await seedChunk(retriever);
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder: constantEmbedder(),
+        retriever,
+        provider: {
+          name: "anthropic",
+          model: ANTHROPIC_MODELS.fast.id,
+          async *stream() {
+            signalRunning();
+            await gate;
+            yield { kind: "text", text: "Pro costs $29." };
+            yield { kind: "usage", tokensIn: 10, tokensOut: 5 };
+          },
+        },
+      },
+    });
+    await call(app, "POST", `/api/admin/assistants/${assistantId}/tests`, {
+      question: "What does Pro cost?",
+      expectation: { kind: "contains", phrase: "$29" },
+    });
+    const shown = (await (
+      await call(app, "GET", `/api/admin/assistants/${assistantId}/draft`)
+    ).json()) as { draft: VersionRow; revision: string };
+
+    const publishPromise = call(app, "POST", `/api/admin/assistants/${assistantId}/publish`, {
+      expected: { draftId: shown.draft.id, revision: shown.revision },
+    });
+    await testRunning;
+    await call(app, "PUT", `/api/admin/assistants/${assistantId}/draft`, {
+      behaviour: { greeting: "Untested greeting" },
+    });
+    releaseProvider();
+    const publishRes = await publishPromise;
+    expect(publishRes.status).toBe(409);
+    expect(await publishRes.json()).toMatchObject({ code: "draft_changed" });
+    expect((await tableVersions(assistantId)).filter((r) => r.state === "published")).toEqual([]);
   });
 
   it("records published_anyway = 1 on the reviewed run when force: true submits runId", async () => {

@@ -190,6 +190,8 @@ export interface AnswerTracePart {
 /** `GET /api/admin/conversations/:id/messages/:messageId/trace`. */
 export interface AnswerTrace {
   messageId: string;
+  /** A visitor reply, or a "Try it" or test-run answer (which stores no message). */
+  source: "visitor" | "try_it" | "test_run";
   tokensIn: number;
   tokensOut: number;
   costMicros: number | null;
@@ -345,6 +347,8 @@ export interface TestResult {
   outcome: TestOutcome;
   reason: string;
   excerpt: string;
+  /** How this test's answer was made (`preview-traces/:id`); absent on older runs. */
+  traceId?: string;
 }
 
 export interface AnswerTest {

@@ -27,6 +27,7 @@ import {
   type AnswerRecorder,
   answerRecorder,
   type KeySource,
+  type PreviewTraceSource,
   type TraceCandidate,
   type TracePart,
   type TraceStop,
@@ -59,7 +60,8 @@ export interface AnswerDeps {
   /**
    * What the answer's trace needs that the answer path does not know: the
    * version that answered and where the model key came from. Absent, no
-   * trace is written (previews and test runs store no message to keep one on).
+   * trace is written. A preview ("Try it", a test run) stores no message, so
+   * its trace is written only when `trace.preview` says where it goes.
    */
   trace?: AnswerTraceContext | undefined;
   /**
@@ -78,7 +80,24 @@ export interface AnswerReviewHook {
 
 export interface AnswerTraceContext {
   version: { id: string; state: "published" | "draft" };
-  keySource: KeySource;
+  /**
+   * Where the model key came from. A function is called only when a model
+   * was asked, from the trace write after `done`, so the visitor never waits
+   * on the read it may take.
+   */
+  keySource: KeySource | (() => Promise<KeySource>);
+  /**
+   * For an answer that stores no message: where it came from, and for a test
+   * run which run and test, so its trace is kept apart from visitor replies
+   * (`preview_traces`). Required for a preview to have a trace at all.
+   */
+  preview?: PreviewTraceTarget | undefined;
+}
+
+export interface PreviewTraceTarget {
+  source: PreviewTraceSource;
+  runId?: string | undefined;
+  testId?: string | undefined;
 }
 
 export interface AnswerInput {
@@ -252,14 +271,32 @@ interface TraceFacts {
   stop: TraceStop;
 }
 
-function tracePartFor(deps: AnswerDeps, facts: TraceFacts): TracePart | null {
-  if (!deps.trace) return null;
+/** Which reply a trace belongs to, and what a preview's trace must keep itself. */
+interface TraceTarget {
+  messageId: string;
+  assistantId: string;
+  /** True for "Try it" and test runs: no message row exists. */
+  preview: boolean;
+  /** A preview's tokens and cost: there is no message row to read them from. */
+  tokensIn?: number;
+  tokensOut?: number;
+  costMicros?: number | null;
+}
+
+async function tracePartFor(
+  context: AnswerTraceContext,
+  provider: LlmProvider,
+  facts: TraceFacts,
+): Promise<TracePart> {
+  const keySource = facts.modelCalled
+    ? typeof context.keySource === "function"
+      ? await context.keySource()
+      : context.keySource
+    : null;
   return {
     kind: facts.kind,
-    version: { ...deps.trace.version },
-    model: facts.modelCalled
-      ? { provider: deps.provider.name, id: deps.provider.model, keySource: deps.trace.keySource }
-      : null,
+    version: { ...context.version },
+    model: keySource === null ? null : { provider: provider.name, id: provider.model, keySource },
     retrieval: { floor: SCORE_FLOOR, ms: facts.timing.retrievalMs, candidates: facts.candidates },
     timing: { firstTokenMs: facts.timing.firstTokenMs, totalMs: facts.timing.totalMs },
     tools: { rounds: facts.timing.toolRounds, ms: facts.timing.toolMs },
@@ -268,23 +305,41 @@ function tracePartFor(deps: AnswerDeps, facts: TraceFacts): TracePart | null {
 }
 
 /**
- * Writes a message's trace once its reply is complete and sent. A failure
- * is logged (its message only: a trace holds ids and numbers, and the error
- * names no request data) and swallowed: the visitor already has the answer.
+ * Writes a reply's trace once it is complete and sent: on the stored message
+ * for a visitor, in `preview_traces`, marked with where it came from, for
+ * "Try it" and a test run. The key source is read here too, after `done`.
+ * A failure is logged (its message only: a trace holds ids and numbers, and
+ * the error names no request data) and swallowed: the reply is already sent.
  */
 async function saveTrace(
   deps: AnswerDeps,
-  messageId: string,
+  target: TraceTarget,
   facts: TraceFacts,
   clock: () => number,
 ): Promise<void> {
-  const part = tracePartFor(deps, facts);
-  if (part === null) return;
+  const context = deps.trace;
+  if (!context) return;
+  // A preview without a target has nowhere to keep it; a visitor reply never has one.
+  if (target.preview !== (context.preview !== undefined)) return;
   try {
-    if (part.kind === "answer") {
-      await deps.tenant.traces.put(messageId, part, clock());
+    const part = await tracePartFor(context, deps.provider, facts);
+    if (context.preview !== undefined) {
+      await deps.tenant.previewTraces.put({
+        id: target.messageId,
+        assistantId: target.assistantId,
+        source: context.preview.source,
+        runId: context.preview.runId,
+        testId: context.preview.testId,
+        tokensIn: target.tokensIn ?? 0,
+        tokensOut: target.tokensOut ?? 0,
+        costMicros: target.costMicros ?? null,
+        part,
+        createdAt: clock(),
+      });
+    } else if (part.kind === "answer") {
+      await deps.tenant.traces.put(target.messageId, part, clock());
     } else {
-      await deps.tenant.traces.append(messageId, part, clock());
+      await deps.tenant.traces.append(target.messageId, part, clock());
     }
   } catch (err) {
     console.error("chat: trace write failed", {
@@ -423,13 +478,13 @@ export async function* answerMessage(
       });
     }
     yield { type: "done", messageId, conversationId };
+    await saveTrace(
+      deps,
+      { messageId, assistantId: input.assistantId, preview: input.preview === true },
+      { kind: "answer", candidates, timing, modelCalled: false, stop: "complete" },
+      clock,
+    );
     if (!input.preview) {
-      await saveTrace(
-        deps,
-        messageId,
-        { kind: "answer", candidates, timing, modelCalled: false, stop: "complete" },
-        clock,
-      );
       scheduleReview(deps, {
         orgId: input.orgId,
         assistantId: input.assistantId,
@@ -593,14 +648,19 @@ export async function* answerMessage(
       conversationId,
       awaitingActions: pending.map((call) => call.callId),
     };
-    if (!input.preview) {
-      await saveTrace(
-        deps,
+    await saveTrace(
+      deps,
+      {
         messageId,
-        { kind: "answer", candidates, timing, modelCalled: true, stop: "paused" },
-        clock,
-      );
-    }
+        assistantId: input.assistantId,
+        preview: input.preview === true,
+        tokensIn,
+        tokensOut,
+        costMicros: messageCost,
+      },
+      { kind: "answer", candidates, timing, modelCalled: true, stop: "paused" },
+      clock,
+    );
     return;
   }
 
@@ -635,13 +695,20 @@ export async function* answerMessage(
   yield { type: "done", messageId, conversationId };
   // After `done`, in the pipeline that persisted the message: the visitor has
   // the whole answer before this write starts, and its failure is swallowed.
-  if (!input.preview) {
-    await saveTrace(
-      deps,
+  await saveTrace(
+    deps,
+    {
       messageId,
-      { kind: "answer", candidates, timing, modelCalled: true, stop: stopFor(stopReason) },
-      clock,
-    );
+      assistantId: input.assistantId,
+      preview: input.preview === true,
+      tokensIn,
+      tokensOut,
+      costMicros: messageCost,
+    },
+    { kind: "answer", candidates, timing, modelCalled: true, stop: stopFor(stopReason) },
+    clock,
+  );
+  if (!input.preview) {
     scheduleReview(deps, {
       orgId: input.orgId,
       assistantId: input.assistantId,
@@ -945,7 +1012,7 @@ export async function* answerWithActionResults(
         // recorded on it: this is the one stored answer an error can explain.
         await saveTrace(
           deps,
-          pendingReply.id,
+          { messageId: pendingReply.id, assistantId: input.assistantId, preview: false },
           {
             kind: "resume",
             candidates,
@@ -1013,7 +1080,7 @@ export async function* answerWithActionResults(
       };
       await saveTrace(
         deps,
-        pendingReply.id,
+        { messageId: pendingReply.id, assistantId: input.assistantId, preview: false },
         { kind: "resume", candidates, timing, modelCalled: true, stop: "paused" },
         clock,
       );
@@ -1027,7 +1094,7 @@ export async function* answerWithActionResults(
     yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
     await saveTrace(
       deps,
-      pendingReply.id,
+      { messageId: pendingReply.id, assistantId: input.assistantId, preview: false },
       { kind: "resume", candidates, timing, modelCalled: true, stop: stopFor(stopReason) },
       clock,
     );

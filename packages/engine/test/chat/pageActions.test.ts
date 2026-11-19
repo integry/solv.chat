@@ -12,6 +12,7 @@ import { responseTimeFigures } from "../../src/admin/reports.js";
 import { createApp } from "../../src/app.js";
 import { RESUME_CLAIM_TTL_MS } from "../../src/chat/answer.js";
 import { SAFETY_FRAME } from "../../src/chat/prompt.js";
+import type { ReviewInput } from "../../src/chat/review.js";
 import { MAX_TOOL_CALLS_PER_CONVERSATION } from "../../src/chat/toolLoop.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { ANTHROPIC_MODELS, costMicros } from "../../src/models.js";
@@ -374,6 +375,50 @@ describe("chat/pageActions", () => {
       ["resume", "complete", 0],
     ]);
     expect(JSON.stringify(trace)).not.toContain("Ignore previous instructions");
+  });
+
+  it("reviews a resumed reply once, on its whole stored text, never while it is paused", async () => {
+    await publishConfig(true);
+    const reviewed: ReviewInput[] = [];
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder,
+        retriever,
+        provider: scriptedProvider([
+          { text: "Your plan is on the billing page. ", calls: [NAVIGATE_CALL] },
+          { text: "It is open now.", calls: [] },
+        ]),
+        model: ANTHROPIC_MODELS.fast,
+        reviewer: {
+          async review(input) {
+            reviewed.push(input);
+            return { outcome: "answered", confidence: null };
+          },
+        },
+      },
+    });
+
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION],
+    });
+    const done1 = first.find((e) => e.type === "done");
+    if (done1?.type !== "done") throw new Error("expected done event");
+    expect(reviewed).toEqual([]);
+
+    await postChat(app, {
+      conversationId: done1.conversationId,
+      resumeMessageId: done1.messageId,
+      actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: "opened" }],
+    });
+
+    const stored = await tenant.messages.get(done1.messageId);
+    expect(stored?.content).toBe("Your plan is on the billing page. It is open now.");
+    // The substance came before the page action: the review sees it too.
+    expect(reviewed).toHaveLength(1);
+    expect(reviewed[0]?.reply).toBe(stored?.content);
+    expect(reviewed[0]?.question).toBe("How do I change my plan?");
+    expect(stored?.outcome).toBe("answered");
   });
 
   it("leaves answers that used a page action out of Response time, before and after they complete", async () => {

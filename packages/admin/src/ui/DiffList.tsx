@@ -83,13 +83,16 @@ function ListChange({ change }: { change: Extract<ConfigChange, { kind: "list" }
     <>
       {membership && (
         <ul className="diff-items">
-          {change.added.map((item) => (
-            <li key={`added-${item}`} className="diff-item-added">
+          {change.added.map((item, index) => (
+            // A list may hold the same text twice, so the position is part of the key.
+            // biome-ignore lint/suspicious/noArrayIndexKey: items have no id, and repeats are allowed
+            <li key={`added-${index}-${item}`} className="diff-item-added">
               <span className="diff-mark">Added:</span> {item}
             </li>
           ))}
-          {change.removed.map((item) => (
-            <li key={`removed-${item}`} className="diff-item-removed">
+          {change.removed.map((item, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: items have no id, and repeats are allowed
+            <li key={`removed-${index}-${item}`} className="diff-item-removed">
               <span className="diff-mark">Removed:</span> {item}
             </li>
           ))}

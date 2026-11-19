@@ -320,6 +320,8 @@ describe("admin phase 1 screens", () => {
     const answered = screen.getByRole("region", { name: "Answered share" });
     expect(answered.textContent).toContain("75%");
     expect(answered.textContent).toContain("5 points lower than the 7 days before");
+    // How the share is counted, in the words Reports uses.
+    expect(answered.textContent).toContain("A partial answer counts as half.");
     const notHelpful = screen.getByRole("region", { name: "Marked not helpful" });
     expect(notHelpful.textContent).toContain("25%");
     expect(notHelpful.textContent).toContain("Same as the 7 days before");
@@ -343,6 +345,7 @@ describe("admin phase 1 screens", () => {
       status: "measured" as const,
       answers: 12,
       pageActionAnswers: 0,
+      noContentAnswers: 0,
       timed: 12,
       firstTokenMedianMs: 1_900,
       firstTokenP90Ms: 4_000,
@@ -374,6 +377,7 @@ describe("admin phase 1 screens", () => {
       status: "measured" as const,
       answers: 12,
       pageActionAnswers: 1,
+      noContentAnswers: 0,
       timed: 12,
       firstTokenMedianMs: 1_900,
       firstTokenP90Ms: 4_000,
@@ -400,6 +404,7 @@ describe("admin phase 1 screens", () => {
       status: "mostly_untimed" as const,
       answers: 12,
       pageActionAnswers: 0,
+      noContentAnswers: 0,
       timed: 2,
       firstTokenMedianMs: null,
       firstTokenP90Ms: null,
