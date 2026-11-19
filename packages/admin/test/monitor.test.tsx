@@ -754,6 +754,36 @@ describe("Monitor screens", () => {
   });
 
   describe("Conversations", () => {
+    it("badges a miss by its outcome's own words, as the filters name it", async () => {
+      installServer({
+        conversations: () => [
+          conversation({ id: "cnv_gap", firstQuestion: "Gap?", hasNotHelpful: false }),
+          conversation({
+            id: "cnv_off",
+            firstQuestion: "Capital of Australia?",
+            hasUnanswered: false,
+            hasOffTopic: true,
+            hasNotHelpful: false,
+          }),
+          conversation({
+            id: "cnv_person",
+            firstQuestion: "Call me?",
+            hasUnanswered: false,
+            hasAskedForPerson: true,
+            hasNotHelpful: false,
+          }),
+        ],
+      });
+      await open("/admin/conversations");
+      const badges = async (name: RegExp) =>
+        [...(await screen.findByRole("link", { name })).querySelectorAll(".conv-badges > *")].map(
+          (b) => b.textContent,
+        );
+      expect(await badges(/Gap\?/)).toEqual(["Unanswered"]);
+      expect(await badges(/Capital of Australia\?/)).toEqual(["Off topic"]);
+      expect(await badges(/Call me\?/)).toEqual(["Asked for a person"]);
+    });
+
     it("shows each row with its first question, time, count and badges; the row opens it", async () => {
       installServer({
         conversations: () => [

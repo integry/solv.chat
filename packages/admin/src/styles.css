@@ -2126,6 +2126,22 @@ a {
   width: 100%;
 }
 
+/* A select is as wide as its longest option: a topic name near the 40-character
+   maximum would push the page sideways on a phone. It shrinks to the row instead,
+   and the shown name is cut with an ellipsis. */
+.list-topic {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(100%, 18rem);
+}
+
+.list-topic .select {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .filter-chips {
   display: flex;
   flex-wrap: wrap;

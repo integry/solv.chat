@@ -28,7 +28,16 @@ export interface ConversationSummaryRow {
   pageUrl: string;
   firstQuestion: string | null;
   turnCount: number;
+  /**
+   * A reply found nothing (`answered = 0`) and was not reviewed as off topic
+   * or as asking for a person: those show as `hasOffTopic` and
+   * `hasAskedForPerson` instead.
+   */
   hasUnanswered: boolean;
+  /** A reply the answer review found off topic, as the "Off topic" filter reads it. */
+  hasOffTopic: boolean;
+  /** A reply where the visitor asked for a person, as the "Asked for a person" filter reads it. */
+  hasAskedForPerson: boolean;
   /** A visitor gave at least one reply a thumbs down. */
   hasNotHelpful: boolean;
   /** At least one reply called an MCP tool or a page action. */
@@ -83,6 +92,8 @@ interface SummaryRow {
   first_question: string | null;
   turn_count: number;
   has_unanswered: number;
+  has_off_topic: number;
+  has_asked_for_person: number;
   has_not_helpful: number;
   used_tool: number;
   last_message_at: number;
@@ -113,6 +124,11 @@ const map = (row: Row): ConversationRow => ({
 const UNANSWERED = `SELECT 1 FROM messages u
    WHERE u.org_id = c.org_id AND u.conversation_id = c.id
      AND u.role = 'assistant' AND u.answered = 0`;
+// The list's "Unanswered" badge: a miss whose review gave it no wording of
+// its own. A miss reviewed as off topic or asking for a person shows that
+// outcome instead, as the filters name it.
+const UNANSWERED_BADGE = `${UNANSWERED}
+     AND (u.outcome IS NULL OR u.outcome NOT IN ('off_topic', 'wants_human'))`;
 const OUTCOME = `SELECT 1 FROM messages o
    WHERE o.org_id = c.org_id AND o.conversation_id = c.id
      AND o.role = 'assistant' AND o.outcome = `;
@@ -239,7 +255,9 @@ export function conversationsFor(db: D1Database, orgId: string) {
                      FROM messages m
                     WHERE m.org_id = ?1 AND m.conversation_id = c.id) AS turn_count,
                   c.last_message_at,
-                  EXISTS(${UNANSWERED}) AS has_unanswered,
+                  EXISTS(${UNANSWERED_BADGE}) AS has_unanswered,
+                  EXISTS(${OUTCOME}'off_topic') AS has_off_topic,
+                  EXISTS(${OUTCOME}'wants_human') AS has_asked_for_person,
                   EXISTS(${NOT_HELPFUL}) AS has_not_helpful,
                   EXISTS(${USED_TOOL}) AS used_tool
              ${where}
@@ -263,6 +281,8 @@ export function conversationsFor(db: D1Database, orgId: string) {
           firstQuestion: r.first_question,
           turnCount: r.turn_count,
           hasUnanswered: r.has_unanswered === 1,
+          hasOffTopic: r.has_off_topic === 1,
+          hasAskedForPerson: r.has_asked_for_person === 1,
           hasNotHelpful: r.has_not_helpful === 1,
           usedTool: r.used_tool === 1,
           lastMessageAt: r.last_message_at,

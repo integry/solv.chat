@@ -1,4 +1,5 @@
-import { isRetryableStatus, ProviderError, toProviderError } from "./error.js";
+import { EmptyReplyError, isRetryableStatus, ProviderError, toProviderError } from "./error.js";
+import { type ReasoningSwitchState, sendWithReasoningSwitch } from "./reasoning.js";
 import { readEventStream } from "./sse.js";
 import type { LlmProvider } from "./types.js";
 
@@ -27,12 +28,17 @@ interface OpenRouterChunkPayload {
   choices?: Array<{
     delta?: {
       content?: string | null;
+      reasoning?: string | null;
+      reasoning_details?: unknown[] | null;
     };
     finish_reason?: string | null;
   }>;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
+    completion_tokens_details?: {
+      reasoning_tokens?: number | null;
+    } | null;
     cost?: number | null;
   } | null;
   error?: {
@@ -58,6 +64,7 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
   const doFetch = options.fetchImpl ?? fetch;
   const httpReferer = options.httpReferer ?? OPENROUTER_DEFAULT_REFERER;
   const title = options.title ?? OPENROUTER_DEFAULT_TITLE;
+  const switchState: ReasoningSwitchState = { refused: false };
 
   return {
     name: "openrouter",
@@ -70,22 +77,31 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
 
       let response: Response;
       try {
-        response = await doFetch(OPENROUTER_CHAT_COMPLETIONS_URL, {
-          method: "POST",
-          ...(streamOptions?.signal ? { signal: streamOptions.signal } : {}),
-          headers: {
-            authorization: `Bearer ${options.apiKey}`,
-            "content-type": "application/json",
-            "http-referer": httpReferer,
-            "x-title": title,
-          },
-          body: JSON.stringify({
-            model: options.model,
-            messages,
-            max_tokens: request.maxTokens,
-            stream: true,
+        response = await sendWithReasoningSwitch(request, switchState, true, (off, maxTokens) =>
+          doFetch(OPENROUTER_CHAT_COMPLETIONS_URL, {
+            method: "POST",
+            ...(streamOptions?.signal ? { signal: streamOptions.signal } : {}),
+            headers: {
+              authorization: `Bearer ${options.apiKey}`,
+              "content-type": "application/json",
+              "http-referer": httpReferer,
+              "x-title": title,
+            },
+            body: JSON.stringify({
+              model: options.model,
+              messages,
+              max_tokens: maxTokens,
+              stream: true,
+              // Only for `reasoning: "off"`: `effort: "none"` "Disables
+              // reasoning entirely". Reasoning tokens are output tokens and
+              // count against the limit. A model whose reasoning is mandatory
+              // rejects it; that 400 is asked again without it and with a
+              // larger limit (`sendWithReasoningSwitch`).
+              // Source: https://openrouter.ai/docs/use-cases/reasoning-tokens — checked 2026-11-19
+              ...(off ? { reasoning: { effort: "none" } } : {}),
+            }),
           }),
-        });
+        );
       } catch (err) {
         throw toProviderError(err, "openrouter request failed");
       }
@@ -104,6 +120,9 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
       let costMicros: number | undefined;
       let sawTerminal = false;
       let failure: ProviderError | undefined;
+      // A reply is text; reasoning alone is not one.
+      let sawText = false;
+      let sawReasoning = false;
 
       try {
         for await (const event of readEventStream(response.body, streamOptions?.signal)) {
@@ -118,6 +137,8 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
             if (typeof completionTokens === "number" && Number.isFinite(completionTokens)) {
               tokensOut = completionTokens;
             }
+            const reasoningTokens = payload.usage.completion_tokens_details?.reasoning_tokens;
+            if (typeof reasoningTokens === "number" && reasoningTokens > 0) sawReasoning = true;
             // Source: https://openrouter.ai/docs/use-cases/usage-accounting — checked 2026-11-15
             // `usage.cost` is reported in OpenRouter credits; stored as micro-credits (10^-6).
             const costCredits = payload.usage.cost;
@@ -136,7 +157,17 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
           }
 
           const choice = payload.choices?.[0];
+          // Source: https://openrouter.ai/docs/use-cases/reasoning-tokens — checked 2026-11-19
+          // (`choices[].delta.reasoning_details` per chunk; `reasoning` on messages).
+          const details = choice?.delta?.reasoning_details;
+          if (
+            (Array.isArray(details) && details.length > 0) ||
+            (typeof choice?.delta?.reasoning === "string" && choice.delta.reasoning.length > 0)
+          ) {
+            sawReasoning = true;
+          }
           if (typeof choice?.delta?.content === "string" && choice.delta.content.length > 0) {
+            sawText = true;
             yield { kind: "text", text: choice.delta.content };
           }
           if (choice?.finish_reason !== undefined && choice.finish_reason !== null) {
@@ -152,6 +183,10 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
       }
       if (failure === undefined && (tokensIn === undefined || tokensOut === undefined)) {
         failure = new ProviderError("openrouter stream ended without usage", true);
+      }
+      // This provider streams no tool calls, so a reply is text only.
+      if (failure === undefined && sawReasoning && !sawText) {
+        failure = new EmptyReplyError("openrouter");
       }
 
       if (tokensIn !== undefined || tokensOut !== undefined || costMicros !== undefined) {

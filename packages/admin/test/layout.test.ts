@@ -11,7 +11,13 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ADMIN_CSP, ADMIN_PREVIEW_CSP, defaultVersionConfig } from "@solvchat/core";
+import {
+  ADMIN_CSP,
+  ADMIN_PREVIEW_CSP,
+  defaultVersionConfig,
+  TOPIC_NAME_MAX_LENGTH,
+  type TopicItem,
+} from "@solvchat/core";
 import axe from "axe-core";
 import { build, createServer, type ViteDevServer } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -114,6 +120,17 @@ const REPORT: AssistantReport = {
   uncitedSources: [],
   uncitedTotal: 0,
 };
+
+/** A topic name at the 40-character maximum, for the Conversations topic filter. */
+const LONG_TOPIC: TopicItem = {
+  id: "top_long",
+  name: "Wholesale bread orders for cafés, hotels",
+  createdAt: 1_700_000_000_000,
+};
+const TOPICS: TopicItem[] = [
+  { id: "top_1", name: "Opening hours", createdAt: 1_700_000_000_000 },
+  LONG_TOPIC,
+];
 
 const TESTS: AnswerTest[] = [
   {
@@ -560,6 +577,10 @@ function answerAdminApi(req: IncomingMessage, res: ServerResponse): void {
   }
   if (pathname === `/assistants/${ASSISTANT.id}/overview`) {
     res.end(JSON.stringify(monitorOverview(Date.now())));
+    return;
+  }
+  if (pathname === `/assistants/${ASSISTANT.id}/topics`) {
+    res.end(JSON.stringify({ topics: TOPICS, reviewAnswers: true }));
     return;
   }
   if (pathname === `/assistants/${ASSISTANT.id}/conversations`) {
@@ -1068,6 +1089,47 @@ describe("Admin layout regressions (Chromium)", () => {
 
         await openScreen(path, 380, ".stat-card");
         expect(new Set(await tops()).size).toBe(4);
+      }
+    }, 30_000);
+
+    it("shrinks the topic filter to the row and truncates a 40-character topic at 380px and 320px", async () => {
+      expect(LONG_TOPIC.name).toHaveLength(TOPIC_NAME_MAX_LENGTH);
+      for (const width of [380, 320]) {
+        await openScreen("/admin/conversations", width, ".list-topic select");
+        // The long topic chosen, so it is the name the select shows.
+        await cdp.evaluate<void>(`(() => {
+          const select = document.querySelector(".list-topic select");
+          select.value = ${JSON.stringify(LONG_TOPIC.id)};
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        })()`);
+        await waitFor(
+          `document.querySelector(".list-topic select").value === ${JSON.stringify(LONG_TOPIC.id)} && document.querySelector(".conv-row")`,
+          "topic chosen",
+        );
+        const metrics = await cdp.evaluate<{
+          overflow: number;
+          selectRight: number;
+          toolbarRight: number;
+          clientWidth: number;
+          textOverflow: string;
+          shown: string;
+        }>(`(() => {
+          const select = document.querySelector(".list-topic select");
+          const toolbar = document.querySelector(".list-toolbar");
+          return {
+            overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+            selectRight: select.getBoundingClientRect().right,
+            toolbarRight: toolbar.getBoundingClientRect().right,
+            clientWidth: document.documentElement.clientWidth,
+            textOverflow: getComputedStyle(select).textOverflow,
+            shown: select.selectedOptions[0].textContent,
+          };
+        })()`);
+        expect({ width, overflow: metrics.overflow }).toEqual({ width, overflow: 0 });
+        expect(metrics.shown).toBe(LONG_TOPIC.name);
+        expect(metrics.selectRight).toBeLessThanOrEqual(metrics.toolbarRight + 0.5);
+        expect(metrics.selectRight).toBeLessThanOrEqual(metrics.clientWidth);
+        expect(metrics.textOverflow).toBe("ellipsis");
       }
     }, 30_000);
 

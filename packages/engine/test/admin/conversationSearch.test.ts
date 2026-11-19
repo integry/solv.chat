@@ -449,6 +449,7 @@ describe("conversation search", () => {
             resumeContext: null,
             tokensIn: 0,
             tokensOut: 0,
+            now,
           }),
         ).toBe(true);
       };

@@ -69,6 +69,16 @@ export interface LlmRequest {
    * is allowed.
    */
   tools?: readonly ToolDefinition[] | undefined;
+  /**
+   * `"off"`: ask the model not to reason before it replies, so a small
+   * `maxTokens` goes to the reply and not to reasoning (the answer review's
+   * two-line label). Each provider sends its own switch for it; a model that
+   * refuses the switch (400) is asked again without it, with at least
+   * `REASONING_FALLBACK_MIN_OUTPUT_TOKENS`, so the call still works
+   * (`providers/reasoning.ts`). Omitted: the model's default, and the request
+   * body is unchanged (visitor answers send nothing here).
+   */
+  reasoning?: "off" | undefined;
 }
 
 export interface LlmProvider {

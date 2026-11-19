@@ -8,6 +8,7 @@ import {
   parseChatRequest,
   parseFeedbackRequest,
   serializeChatEvent,
+  type VersionConfig,
 } from "@solvchat/core";
 import { assistantByPublicKey, assistantForMessage, originAllowedInOrg } from "../db/public.js";
 import { forPublicScope } from "../db/tenant.js";
@@ -161,6 +162,18 @@ function readAssistantKey(body: unknown): string | null {
 interface SiteNames {
   name: string;
   title: string;
+  greeting: string;
+  persona: string;
+}
+
+/** What the answer review is told the site is: owner-written text only. */
+function siteNames(name: string, config: VersionConfig): SiteNames {
+  return {
+    name,
+    title: config.widget.title,
+    greeting: config.behaviour.greeting,
+    persona: config.behaviour.persona,
+  };
 }
 
 interface StreamAnswerParams {
@@ -182,7 +195,7 @@ interface StreamAnswerParams {
   allowedTools: readonly string[];
   /** The version the behaviour and tools came from, for the answer's trace. */
   version: AnswerTraceContext["version"];
-  /** The assistant's name and its widget title, for the answer review's site subject. */
+  /** What the answer review is told about the site (name, widget title, greeting, persona). */
   site: SiteNames;
   conversationId: string | undefined;
   pageUrl: string | undefined;
@@ -273,15 +286,20 @@ export async function resolveChatProviders(
  * use inside the deferred review, so the visitor's request reads no extra key.
  * The reviewer is the fast tier of the provider that answered (the same
  * configured model on OpenRouter, which has no tiers), with the same key.
+ * The scheduled catch-up gives no answering provider: one is built the same
+ * way, from the org's settings.
  */
-function reviewerSource(params: {
+export function reviewerSource(params: {
   seams: Seams;
   overrides: ChatRouteOverrides | undefined;
   orgId: string;
   assistantId: string;
   providerKind: LlmProviderName;
   tier: Tier;
-  provider: LlmProvider;
+  /** The provider that answered; absent in the catch-up. */
+  provider?: LlmProvider | undefined;
+  /** The configured model (OpenRouter's only model), when no provider is given. */
+  configuredModel?: string | undefined;
 }): (() => Promise<AnswerReviewer>) | null {
   const { overrides, seams } = params;
   if (overrides?.reviewer !== undefined) {
@@ -297,13 +315,15 @@ function reviewerSource(params: {
           ? OPENAI_MODELS.fast
           : undefined;
     const provider =
-      params.providerKind === "openrouter" || params.tier === "fast"
+      params.provider !== undefined &&
+      (params.providerKind === "openrouter" || params.tier === "fast")
         ? params.provider
         : await llmProviderFor(
             {
               orgId: params.orgId,
               provider: params.providerKind,
               tier: "fast",
+              model: params.providerKind === "openrouter" ? params.configuredModel : undefined,
               fetchImpl: overrides?.fetch,
             },
             seams.keys,
@@ -312,7 +332,9 @@ function reviewerSource(params: {
       provider,
       model: fastModel,
       // Recorded like any model use, through the seam: it counts toward the
-      // daily spend cap and `usage_daily`, and never as a message.
+      // daily spend cap and `usage_daily`, and never as a message. One event
+      // per call that reported usage (each provider reports once per call),
+      // so a retry and a catch-up call are metered like the first.
       onUsage: (tokensIn, tokensOut, cost) =>
         seams.usage.record({
           orgId: params.orgId,
@@ -403,11 +425,16 @@ async function resolveAnswerDeps(params: {
               {
                 messages: params.tenant.messages,
                 topics: params.tenant.topics,
+                // A review that gives no usable result says why, in the trace.
+                traces: params.tenant.traces,
                 // What the site is about, read in the deferred review: the
-                // names it answers as and some of its content's titles.
+                // names it answers as, the owner's greeting and persona (of
+                // the version that answered) and some of its content's titles.
                 subject: async (assistantId) => ({
                   name: params.site.name,
                   title: params.site.title,
+                  greeting: params.site.greeting,
+                  persona: params.site.persona,
                   contentTitles: await params.tenant.documents.titlesForAssistant(
                     assistantId,
                     REVIEW_MAX_SUBJECT_TITLES,
@@ -601,7 +628,7 @@ export async function adminChatRoute(
     behaviour: version.config.behaviour,
     allowedTools: version.config.allowedTools,
     version: { id: version.id, state: "draft" },
-    site: { name: assistant.name, title: version.config.widget.title },
+    site: siteNames(assistant.name, version.config),
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: true,
@@ -688,7 +715,7 @@ export async function chatRoute(
       behaviour: version.config.behaviour,
       allowedTools: version.config.allowedTools,
       version: { id: version.id, state: "published" },
-      site: { name: assistant.name, title: version.config.widget.title },
+      site: siteNames(assistant.name, version.config),
       conversationId: parsed.value.conversationId ?? "",
       resumeMessageId: parsed.value.resumeMessageId ?? "",
       actionResults: parsed.value.actionResults,
@@ -716,7 +743,7 @@ export async function chatRoute(
     behaviour: version.config.behaviour,
     allowedTools: version.config.allowedTools,
     version: { id: version.id, state: "published" },
-    site: { name: assistant.name, title: version.config.widget.title },
+    site: siteNames(assistant.name, version.config),
     conversationId: parsed.value.conversationId,
     pageUrl: parsed.value.pageUrl,
     preview: false,

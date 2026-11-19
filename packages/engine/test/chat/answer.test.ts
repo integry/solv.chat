@@ -554,16 +554,18 @@ describe("chat/answer", () => {
         instructions?: string;
       };
       // The answer review runs after each answer, on the fast tier.
-      if ((body.system ?? body.instructions) === REVIEW_FRAME) {
+      const review = (body.system ?? body.instructions) === REVIEW_FRAME;
+      if (review) {
         reviewModels.push(body.model ?? "");
       } else {
         requestedModels.push({ url, model: body.model ?? "" });
       }
+      const text = review ? "outcome: answered\ntopic: Greetings" : "hi";
 
       const sse = url.includes("anthropic.com")
         ? [
             'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10}}}\n\n',
-            'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n',
+            `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text } })}\n\n`,
             'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":5}}\n\n',
             'event: message_stop\ndata: {"type":"message_stop"}\n\n',
           ].join("")
@@ -637,6 +639,63 @@ describe("chat/answer", () => {
       }
     } finally {
       warnSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("asks the review with thinking off and leaves the answer's request as it was", async () => {
+    const answerBodies: Record<string, unknown>[] = [];
+    const reviewBodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        const review = body.system === REVIEW_FRAME;
+        (review ? reviewBodies : answerBodies).push(body);
+        const text = review ? "outcome: answered\ntopic: Passwords" : "Use the reset link.";
+        const sse = [
+          'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10}}}\n\n',
+          `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text } })}\n\n`,
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}\n\n',
+          'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ].join("");
+        return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }),
+    );
+    try {
+      const app = createApp(fakeSeams(), { chat: { embedder, retriever } });
+      const ctx = createExecutionContext();
+      const res = await app.fetch(
+        new Request("https://engine.example/v1/chat", {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: "https://site.example" },
+          body: JSON.stringify({
+            protocol: 1,
+            assistant: "pk_ans_1",
+            visitorId: "vis_1",
+            message: "How do I reset my password?",
+          }),
+        }),
+        { ...env, SOLV_LLM_PROVIDER: "anthropic", SOLV_LLM_TIER: "fast" },
+        ctx,
+      );
+      await res.text();
+      await waitOnExecutionContext(ctx);
+
+      expect(answerBodies).toHaveLength(1);
+      // The visitor's answer: the same fields as before, and no `thinking`,
+      // so the model's default applies.
+      expect(Object.keys(answerBodies[0] ?? {}).sort()).toEqual(
+        ["max_tokens", "messages", "model", "stream", "system"].sort(),
+      );
+      expect(answerBodies[0]?.max_tokens).toBe(1024);
+      expect(reviewBodies).toHaveLength(1);
+      expect(reviewBodies[0]).toMatchObject({
+        model: ANTHROPIC_MODELS.fast.id,
+        max_tokens: 64,
+        thinking: { type: "disabled" },
+      });
+    } finally {
       vi.unstubAllGlobals();
     }
   });

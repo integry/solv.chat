@@ -1055,6 +1055,7 @@ export async function* answerWithActionResults(
       tokensOut,
       costMicros: resumeCost,
       documentIds: usedDocumentIds(chunks),
+      now: clock(),
     });
     if (!saved) {
       yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };

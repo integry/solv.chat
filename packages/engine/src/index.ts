@@ -4,6 +4,7 @@ export {
   createApp,
   type Env,
   type RunDueSyncsOptions,
+  type RunReviewCatchUpOptions,
 } from "./app.js";
 export {
   type AnswerDeps,
@@ -30,7 +31,14 @@ export {
   REVIEW_FRAME,
   type ReviewInput,
   type ReviewResult,
+  type ReviewRunResult,
 } from "./chat/review.js";
+export {
+  MAX_REVIEW_CATCH_UP_PER_TICK,
+  REVIEW_CATCH_UP_MIN_AGE_MS,
+  REVIEW_CATCH_UP_WINDOW_MS,
+  type ReviewCatchUpResult,
+} from "./chat/reviewCatchUp.js";
 export type { ChatRouteOverrides } from "./chat/route.js";
 export {
   MAX_TOOL_CALLS_PER_CONVERSATION,

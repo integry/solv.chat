@@ -327,10 +327,12 @@ three due sources per call, oldest first by the later of their last run
 start and their org's last refusal by the auth seam: an org refused at one
 tick goes behind every other due source, so however many sources it has, the
 next tick reads past them. The Workers `scheduled` handler
-calls it, and the open build's `wrangler.jsonc` runs it hourly. A host with
+calls it (with the answer-review catch-up, "Answer review"; one failing does
+not stop the other), and the open build's `wrangler.jsonc` runs it hourly. A host with
 its own cron (every 10 minutes, say) calls `runDueSyncs` instead. Finding due
-sources is the one query without an org filter: a cron has no request and so
-no org, so it reads only org and source ids, and everything after goes
+sources (and the catch-up's replies, `reviewCatchUpCandidates`, read org by
+org through the `orgs` table) is a query without an org filter: a cron has
+no request and so no org, so it reads only org and source ids, and everything after goes
 through the org's `Tenant` once the auth seam has vouched for it. A refusal
 is recorded in `sync_org_refusals` from the seam's own answer, keyed by the
 org; nothing of the org is read.
@@ -382,7 +384,9 @@ The Monitor screens read:
 - Conversation: `GET …/conversations/:id/messages/:messageId/trace` is how one
   assistant reply was made (see "Answer traces"); `trace: null` for a reply
   with none, and 404 for a visitor message or a message outside that
-  conversation or org. `GET …/assistants/:id/preview-traces/:traceId` is the
+  conversation or org; `reviewFailure` is the answer review's reason code
+  when it gave no result (null otherwise, and always for a preview).
+  `GET …/assistants/:id/preview-traces/:traceId` is the
   same view for a "Try it" answer (the id its `done` event carried) or a test
   run's answer (`traceId` on its result), with `source` `try_it` or
   `test_run` (`visitor` on the first); 404 for any other id, assistant or org.
@@ -457,17 +461,80 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   for it. Not the Queue: one short call per answer needs no durable retry, the
   open engine's only queue is the ingest queue (whose consumer is built for
   documents), and the visitor is never waiting either way. Each attempt has a
-  10-second timeout (`REVIEW_TIMEOUT_MS`); a failure or timeout is retried
-  once, an unusable label is not. For a reply with content, a failed or
-  skipped review leaves the outcome NULL and changes nothing else (a
-  retrieval miss differs, below).
+  10-second timeout (`REVIEW_TIMEOUT_MS`); a failure, a timeout or an
+  unusable label is retried once. For a reply with content, a failed or
+  skipped review leaves the outcome NULL (a retrieval miss differs, below)
+  and records why in the answer's trace; deferred work that is cut off
+  records nothing, and the scheduled catch-up (below) takes it up.
+- **Why a review gave nothing.** Once its attempts are used up, the reason is
+  stored on the answer's trace (`message_traces.detail`, `review.failed`) as
+  a fixed code (`REVIEW_FAILURES` in `@solvchat/core`): `review_timeout`,
+  `review_provider_error` (the provider refused or failed the call, or no
+  reviewer could be built, a missing key say), `review_empty` (no reply
+  text at all: the model reasoned and used up its output allowance, say),
+  `review_unparseable` (text, but no label in it),
+  `review_skipped_spend_cap`, or `review_error` (the
+  spend limit could not be read, or the outcome not saved). Never the
+  provider's response text or anything the visitor wrote, in the trace or
+  in a log line: logs carry the code and error names only. The reason is
+  recorded for a retrieval miss too, though its `declined` is still stored.
+  A message whose own trace write failed gets a trace holding only the note
+  (`parts` empty); `boundTrace` leaves room for the note
+  (`TRACE_REVIEW_RESERVE_BYTES`). A trace stored before it did may fill the
+  whole 32 KiB; when the note does not fit, that trace is cut down by
+  `boundTrace` with the note in it (the first answer and the latest request
+  stay, marked `truncated`) and written back only if no other write changed
+  it since it was read, a claim only while there is still no note. The
+  admin's answer trace returns it as `reviewFailure` and says it in plain
+  words under "Answer check" ("Not checked. It failed after a retry: the
+  last try took too long." and so on: only the last attempt's reason is
+  kept, so the words name that one).
+- **Catch-up.** The Workers `scheduled` handler (the same cron as the
+  sitemap sync; `app.runReviewCatchUp(env)` for a host with its own cron)
+  reviews, each tick, up to `MAX_REVIEW_CATCH_UP_PER_TICK` (10) visitor
+  replies first written in the last 24 hours (`REVIEW_CATCH_UP_WINDOW_MS`)
+  and completed at least 5 minutes ago (`REVIEW_CATCH_UP_MIN_AGE_MS`, so it
+  never races the live review) that are complete (not paused), have no
+  outcome and no review note on their trace, oldest first. A reply that
+  paused for page actions counts from the continuation that completed it
+  (`messages.resumed_at`, written in the same update as its text), since that
+  is when its live review starts; any other from when it was written. Each org is checked with the auth seam
+  first (`queued_ingest`, as a scheduled sync's is). Replies are read in
+  pages of 50, up to `REVIEW_CATCH_UP_MAX_PAGES` (5) a tick; each later page
+  leaves out the orgs the seam refused so far and starts past the last row
+  read, so a refused org's backlog never keeps other orgs' replies from
+  being reached. Before anything is spent
+  the reply is claimed on its trace (`review.catchUp`, a conditional write),
+  so each is attempted at most once by the catch-up, even with two ticks at
+  once or a tick cut off. A read that fails after the claim records
+  `review_error` on the trace, so a claimed reply that was not reviewed
+  still says why. The claim also keeps its time (`review.claimedAt`), so a
+  run cut off before it can record anything (during the provider call, say)
+  needs no help from that run: the admin reports a claim still open after
+  `REVIEW_CLAIM_EXPIRY_MS` (5 minutes, well past a claimed review's two
+  10-second calls) on a reply with no outcome as `review_error`. A recorded
+  failure replaces the claim; a run that ends without one closes it
+  (`releaseReviewCatchUp`, only while the note is still that claim), so a
+  reply left unreviewed on purpose ("Review answers" off) is not called cut
+  off. It is then reviewed exactly as the live path does
+  it: the same spend cap (`Limits`, `{ kind: "review" }`), key, provider and
+  "Review answers" switch (off: no call; only a retrieval miss is stored, as
+  `declined`), retry and reason codes, topic rules and metering. "Try it"
+  and test-run answers store no message, so they are never taken.
 - **What is reviewed.** Completed replies to visitors (`POST /v1/chat`),
   including a paused reply once its continuation completes (never while
   paused). "Try it" previews and test runs are not reviewed.
 - **Retrieval misses.** A reply that is the fixed fallback text because nothing
   cleared the floor is reviewed too, with the same frame (the question and the
-  fallback reply): the question alone tells an off-topic question or a request
-  for a person from a real content gap. Only `declined`, `off_topic` or
+  fallback reply), and the request says the assistant found nothing on the
+  site, so the label is judged from the question and the site's subject, not
+  from the reply: the question alone tells an off-topic question or a request
+  for a person from a real content gap. The frame states the rule: `off_topic`
+  when a visitor could not reasonably expect this site's assistant to answer
+  it (general knowledge, trivia, art, sport, news, another organisation's
+  business), however sensible the question; `declined` when it is about
+  something the site could cover (its business, what it offers, prices,
+  orders, opening hours, policies, people or content), and when unsure. Only `declined`, `off_topic` or
   `wants_human` is accepted (`MISS_OUTCOMES`); any other label (a fallback
   reply cannot have answered, even partly), no label, a failure, a timeout,
   the spend cap being reached, or "Review answers" off stores `declined`
@@ -476,9 +543,15 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   review. `answered` stays 0 whatever the outcome.
 - **The site's subject.** `off_topic` needs to know what the site is about,
   so the request also carries, as tagged data like the rest, the assistant's
-  name, its widget title and up to 20 titles of its content (pages, pushed
+  name, its widget title, the greeting and the persona of its published
+  version (owner-written; the persona already goes to the answering model;
+  the start of each, `REVIEW_MAX_SUBJECT_ABOUT_CHARS`, 400 characters, left
+  out when blank) and up to 20 titles of its content (pages, pushed
   documents, written answers; `REVIEW_MAX_SUBJECT_TITLES`, each cut to 120
-  characters), read in the deferred review. With no content title (a new
+  characters), read in the deferred review. There is no separate "site
+  description" field; the greeting and persona are the owner's own words
+  about the assistant. Nothing about the visitor is added: the question and
+  the reply are the only visitor data the review gets. With no content title (a new
   assistant, say) the subject is unknown: the request says so and that
   off_topic must not be used, and a retrieval miss reviewed as `off_topic`
   anyway is stored as `declined`, so a real content gap is never dropped from
@@ -493,7 +566,10 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   `OPENAI_MODELS.fast`; on OpenRouter, which has no tiers, the configured
   model), with the same key, through the normal provider layer. It cannot
   give a confidence. There is no per-assistant reviewer prompt and no model
-  picker.
+  picker. The call asks for no reasoning (`reasoning: "off"`, under
+  "Providers"): reasoning counts against its 64 output tokens, and with
+  thinking left at its default Claude Haiku 5.5 often spent them all on
+  thinking and wrote no label.
 - **Untrusted input.** The reviewer's system prompt is a fixed frame
   (`REVIEW_FRAME`). The question and the reply travel in the user turn as data,
   each between start and end lines carrying a random tag per call, so text
@@ -508,21 +584,34 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   `scripts/review-eval.mjs` runs the set against the real fast-tier model
   (opt-in, needs a provider key, never in CI; exits 1 when an injected case
   is mishandled). The output is parsed
-  strictly as two fields: the whole reply, less surrounding whitespace, must
-  be exactly the two lines `outcome: <label>` and `topic: <name>`, the label
-  one of the five; anything else is stored as NULL, with no topic.
+  as two fields, each on its own: the reply, less surrounding whitespace and
+  blank lines, must be at most two lines, each read on its own as
+  `outcome: <label>` or `topic: <name>` (field names in any case, either
+  order). A label that is not exactly one of the five is no outcome (the
+  topic still stands); a missing, malformed or refused topic is no topic, or
+  "Other" (the outcome still stands). A line that is neither field gives
+  nothing and costs the other field nothing; a field given twice is not
+  taken. Longer output (a third line, a code fence, prose around the
+  fields) is neither.
 - **Cost.** The call's tokens and cost are recorded through `UsageSink` like
   any model use (`messages: 0`), so they count toward `usage_daily` and the
   daily spend cap. Before each attempt the review asks `Limits` with
   `{ kind: "review" }` and is skipped when the cap is reached (the open
-  `basicLimits` applies only the spend cap to it, no rate limit). At most 64
+  `basicLimits` applies only the spend cap to it, no rate limit); a check
+  that fails is not retried. At most 64
   output tokens (the label and a topic of at most 40 characters in any
   script); the reply is cut to its first 6000 characters.
 - **Metering.** The usage counter a host bills on (`messages`) does not change.
-  When an outcome is stored, the seam also receives an event that counts
+  Each reviewer call that the provider reports usage for (every call that
+  reached it: each provider reports once per call) is one usage event, so a
+  retry and a catch-up call are metered like the first; the answered-message
+  event (`messages: 1`) is never sent again. When an outcome is stored, the
+  seam also receives an event that counts
   nothing (`messages`, tokens and cost all 0) and carries
   `review: { messageId, outcome, confidence }`, so a host can apply its own
-  rule later. The open `usageDaily` writes nothing for such an event.
+  rule later. The open `usageDaily` writes nothing for such an event. It is
+  sent once per message: a second write of an outcome (the catch-up after a
+  live review that did store one) changes nothing and sends nothing.
 - **Answered share** (Overview and Reports): over the range's replies less
   those reviewed as `off_topic` (an assistant that rightly refuses a question
   about something else has not failed), a reviewed reply counts 1 for
@@ -538,7 +627,11 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
 - **Conversations** shows the outcome as a badge on each reviewed assistant
   reply ("Answered", "Partly answered", "Could not answer", "Off topic",
   "Asked for a person"); a retrieval miss reviewed as `declined` keeps its
-  "Unanswered" badge. A reply that Gaps would list offers "Write an answer
+  "Unanswered" badge. The list badges a conversation the same way
+  (`hasUnanswered`, `hasOffTopic`, `hasAskedForPerson`): "Unanswered" for a
+  miss that is unreviewed or `declined`, and "Off topic" or "Asked for a
+  person" for a reply with that outcome, as the filters of those names find
+  it, never "Unanswered" for it. A reply that Gaps would list offers "Write an answer
   for this"; one reviewed as `off_topic` or `wants_human` does not. The
   "Could not answer", "Asked for a person" and "Off topic" filters read the
   outcome, so "Asked for a person" finds a visitor who asked for one even
@@ -563,7 +656,17 @@ are about.
   message), not the reply: it describes what was asked, the Topics list
   counts questions, and the Conversations filter finds where it was asked. A
   retrieval miss's question gets one too (its topic stands even when its label
-  is replaced by `declined`). A question is tagged once; nothing re-tags it.
+  is replaced by `declined`). An `off_topic` question gets no topic and never
+  creates one: it is not about the site, so it would only fill the Topics
+  list and the topic filter; the "Off topic" filter is how the owner finds
+  these. Migration 0031 cleared the topic of questions tagged before this
+  (it keeps every topic: the schema cannot tell an owner-renamed topic from
+  one the review named, so one left with no questions stays until the owner
+  deletes it). When an answer is stored as `off_topic`, its question's topic
+  is cleared first (unless the answer already has another outcome): an
+  earlier run may have stored the topic and been cut off before the outcome,
+  and the catch-up then finds the question tagged. A question is tagged
+  once; nothing re-tags it.
   There is no manual tagging of a message.
 - **The cap.** At most 40 topics per assistant (`MAX_TOPICS_PER_ASSISTANT`),
   not counting "Other", which is always available. When the list is full the
@@ -627,6 +730,10 @@ the trace reads.
 - A paused reply's continuations are appended as further parts (at most 8 per
   message: the first answer and the newest resumes).
 
+The answer review adds its note to the same document when it gave no
+result: a fixed reason code and whether the catch-up took the answer, with
+the time of an open catch-up claim (see "Answer review"), never text.
+
 The trace holds references, never copies: no prompt, question, chunk text,
 tool or action output. It is written after the reply is complete and sent, in
 the deferred step that persisted the message; a failed write is logged (the
@@ -684,6 +791,19 @@ were recorded for this answer."
 OpenAI embeddings (default) and OpenRouter embeddings (`SOLV_EMBEDDINGS_PROVIDER=openrouter`,
 fixed to `openai/text-embedding-3-small` at 1536 dimensions). `Retriever` has one: Vectorize; the interface exists so
 Cloudflare AI Search can be added as a second backend.
+
+A request may ask for `reasoning: "off"` (the answer review does; visitor
+answers do not, and their request body is unchanged). Each provider sends its
+own switch: Anthropic `thinking: {type: "disabled"}`, or `{type:
+"between_tools"}` on Claude Sonnet 5.5, and nothing on models whose thinking
+is always on (Opus 5.5, Fable, Mythos); OpenAI and OpenRouter `reasoning:
+{effort: "none"}`. A model that refuses the switch (HTTP 400) is asked once
+more without it and with an output limit of at least
+`REASONING_FALLBACK_MIN_OUTPUT_TOKENS`, since on every provider reasoning
+counts against the output limit; the provider instance then skips the switch
+(`providers/reasoning.ts`). A reply that reasoned and then wrote no text and
+called no tool is not a successful empty answer: the provider reports its
+usage and throws `EmptyReplyError` (a retryable `ProviderError`).
 
 Model IDs, prices and limits live in one file, `packages/engine/src/models.ts`.
 Every value in that file is taken from the provider's current documentation and

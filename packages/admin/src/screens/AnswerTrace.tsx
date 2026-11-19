@@ -1,3 +1,4 @@
+import type { ReviewFailure } from "@solvchat/core";
 import { type SyntheticEvent, useState } from "react";
 import type {
   AnswerTraceCandidate,
@@ -35,6 +36,26 @@ const KEY_SOURCE_LABELS: Record<NonNullable<AnswerTracePart["model"]>["keySource
   environment: "key set on the server",
   managed: "key included with your plan",
 };
+
+/** Why the answer check gave no result, in plain words. */
+export const REVIEW_FAILURE_LABELS: Record<ReviewFailure, string> = {
+  review_timeout: "It failed after a retry: the last try took too long.",
+  review_provider_error: "It failed after a retry: the AI provider could not do the last try.",
+  review_empty: "It failed after a retry: the last try came back empty.",
+  review_unparseable: "It failed after a retry: the last try gave a reply we could not read.",
+  review_skipped_spend_cap: "Skipped: the daily spend limit was reached.",
+  review_error: "Something went wrong on our side while checking.",
+};
+
+function ReviewFailureNote({ failure }: { failure: ReviewFailure | null | undefined }) {
+  if (failure === null || failure === undefined) return null;
+  return (
+    <dl className="trace-facts">
+      <dt>Answer check</dt>
+      <dd>Not checked. {REVIEW_FAILURE_LABELS[failure]}</dd>
+    </dl>
+  );
+}
 
 const STOP_LABELS: Record<AnswerTracePart["stop"], string> = {
   complete: "Finished",
@@ -191,7 +212,12 @@ function TracePartView({
 
 function TraceBody({ assistantId, data }: { assistantId: string; data: AnswerTraceData }) {
   if (data.trace === null) {
-    return <p className="muted">No details were recorded for this answer.</p>;
+    return (
+      <div className="trace-body">
+        <p className="muted">No details were recorded for this answer.</p>
+        <ReviewFailureNote failure={data.reviewFailure} />
+      </div>
+    );
   }
   const { parts, truncated } = data.trace;
   // OpenRouter reports cost in its own credits, as Overview and Reports say.
@@ -223,6 +249,7 @@ function TraceBody({ assistantId, data }: { assistantId: string; data: AnswerTra
         <dt>Cost</dt>
         <dd>{data.costMicros === null ? "Unknown" : formatCost(data.costMicros, unit)}</dd>
       </dl>
+      <ReviewFailureNote failure={data.reviewFailure} />
       {truncated && <p className="muted">Some details were left out to keep this record small.</p>}
     </div>
   );

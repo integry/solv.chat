@@ -218,8 +218,9 @@ describe("chat/trace", () => {
     const app = appFor(undefined, seenKeys);
     const { done } = await ask(app);
     // The real provider ran with the key, so it was in reach of the trace
-    // (the answer, then the answer review with the same key).
-    expect(seenKeys).toEqual([MODEL_KEY, MODEL_KEY]);
+    // (the answer, then the answer review with the same key: this fake
+    // answers it with no label, so it is retried once).
+    expect(seenKeys).toEqual([MODEL_KEY, MODEL_KEY, MODEL_KEY]);
 
     const trace = await tenant.traces.get(done.messageId);
     expect(trace?.parts).toHaveLength(1);
@@ -403,6 +404,7 @@ describe("chat/trace", () => {
       firstTokenMs: null,
       totalMs: null,
       trace: null,
+      reviewFailure: null,
     });
   });
 

@@ -487,4 +487,96 @@ describe("answer outcome in the admin", () => {
     });
     expect(bad.status).toBe(400);
   });
+
+  it("lists in 'Most often unanswered' exactly what Gaps lists, for a mix of outcomes", async () => {
+    const ast = await seedAssistant(ORG_A);
+    const at = FIXED_NOW - 600_000;
+    const turns: Array<[string, boolean, AnswerOutcome | undefined]> = [
+      // One question asked with every outcome: only its gap asks count.
+      ["Do you ship to Spain?", false, "declined"],
+      ["Do you ship to Spain?", false, undefined],
+      ["Do you ship to Spain?", true, "declined"],
+      ["Do you ship to Spain?", false, "off_topic"],
+      ["Do you ship to Spain?", false, "wants_human"],
+      ["Do you ship to Spain?", true, "answered"],
+      ["Do you ship to Spain?", true, "partial"],
+      // Questions whose only misses are not content gaps.
+      ["What is the capital of Australia?", false, "off_topic"],
+      ["What is the capital of Australia?", true, "off_topic"],
+      ["Can I talk to a person?", false, "wants_human"],
+      ["Can I talk to a person?", true, "wants_human"],
+      ["Refund window?", true, "declined"],
+    ];
+    for (const [i, [question, answered, outcome]] of turns.entries()) {
+      await seedTurn({
+        orgId: ORG_A,
+        assistantId: ast,
+        question,
+        answered,
+        ...(outcome ? { outcome } : {}),
+        at: at + i * 10,
+      });
+    }
+    const gaps = await listGaps(tenantFor(ORG_A), ast, { openOnly: true });
+    const report = await reportFor(tenantFor(ORG_A), ast, 30, FIXED_NOW);
+    expect(report.topGaps.map((g) => [g.question, g.count])).toEqual(
+      gaps.gaps.map((g) => [g.question, g.times]),
+    );
+    expect(report.topGaps.map((g) => [g.question, g.count])).toEqual([
+      ["do you ship to spain?", 3],
+      ["refund window?", 1],
+    ]);
+  });
+
+  it("badges a conversation by its miss's own outcome in the list", async () => {
+    const ast = await seedAssistant(ORG_A);
+    const gap = await seedTurn({ orgId: ORG_A, assistantId: ast, question: "a", answered: false });
+    const declined = await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "b",
+      answered: false,
+      outcome: "declined",
+    });
+    const offTopic = await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "c",
+      answered: false,
+      outcome: "off_topic",
+    });
+    const person = await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "d",
+      answered: false,
+      outcome: "wants_human",
+    });
+    const answered = await seedTurn({
+      orgId: ORG_A,
+      assistantId: ast,
+      question: "e",
+      answered: true,
+      outcome: "answered",
+    });
+    const res = await call(appForOrg(ORG_A), `/api/admin/assistants/${ast}/conversations`);
+    const body = (await res.json()) as {
+      conversations: Array<{
+        id: string;
+        hasUnanswered: boolean;
+        hasOffTopic: boolean;
+        hasAskedForPerson: boolean;
+      }>;
+    };
+    const flags = Object.fromEntries(
+      body.conversations.map((c) => [c.id, [c.hasUnanswered, c.hasOffTopic, c.hasAskedForPerson]]),
+    );
+    expect(flags).toEqual({
+      [gap.conversationId]: [true, false, false],
+      [declined.conversationId]: [true, false, false],
+      [offTopic.conversationId]: [false, true, false],
+      [person.conversationId]: [false, false, true],
+      [answered.conversationId]: [false, false, false],
+    });
+  });
 });

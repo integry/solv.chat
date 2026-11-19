@@ -471,6 +471,12 @@ export function messagesFor(db: D1Database, orgId: string) {
       costMicros?: number | null | undefined;
       /** Documents this continuation was given, added to those the pause recorded. */
       documentIds?: readonly string[] | undefined;
+      /**
+       * When this continuation saved the reply (`resumed_at`). The review
+       * catch-up counts its wait from here, so it never takes a reply whose
+       * live review this continuation is about to start.
+       */
+      now: number;
     }): Promise<boolean> {
       const update = prepare(
         db,
@@ -485,7 +491,8 @@ export function messagesFor(db: D1Database, orgId: string) {
                 cost_micros = cost_micros + ?11,
                 resume_claim = NULL,
                 resume_claimed_at = NULL,
-                resume_revision = resume_revision + 1
+                resume_revision = resume_revision + 1,
+                resumed_at = ?13
           WHERE org_id = ?1
             AND id = ?2
             AND resume_claim = ?9
@@ -507,6 +514,7 @@ export function messagesFor(db: D1Database, orgId: string) {
           params.revision,
           params.costMicros === undefined ? 0 : params.costMicros,
           searchableText(params.content),
+          params.now,
         );
       const documentIds = params.documentIds ?? [];
       if (documentIds.length === 0) {
@@ -865,4 +873,78 @@ export function messagesFor(db: D1Database, orgId: string) {
       return res.results.map((row) => ({ question: row.question, count: row.count }));
     },
   };
+}
+
+/** An answer the review catch-up may take: its org as stored (to be vouched for) and its id. */
+export interface ReviewCatchUpCandidate {
+  claimedOrgId: string;
+  messageId: string;
+  /** When the reply was first written: the paging cursor. */
+  createdAt: number;
+}
+
+/**
+ * Visitor replies first written at or after `from`, and last written (by
+ * the first request or by a page-action continuation, `resumed_at`) at or
+ * before `to`, that still have no outcome and no review note on their trace
+ * (no recorded failure, not taken by the catch-up), oldest first. Complete
+ * replies only: a reply still waiting for page actions (`resume_context`
+ * set) is not the answer yet. A continuation's completion is when the live
+ * review starts, so a reply paused for long is judged by that, not by when
+ * it was first written. "Try it" and test-run answers store no message, so
+ * they are never here.
+ *
+ * Across orgs, like `dueSitemapSources`: this is the scheduler's own
+ * discovery. Every row's org is checked with the auth seam before anything is
+ * read or written for it, and that work goes through a `Tenant`. Each org is
+ * read through its own `(org_id, role, created_at)` index range.
+ *
+ * `excludeOrgIds` leaves out orgs the seam refused earlier in the same tick,
+ * and `after` starts past the last row already read, so one tick can page on
+ * past an org whose replies would otherwise fill every page.
+ */
+export async function reviewCatchUpCandidates(
+  db: D1Database,
+  options: {
+    from: number;
+    to: number;
+    limit: number;
+    excludeOrgIds?: readonly string[] | undefined;
+    after?: { createdAt: number; messageId: string } | undefined;
+  },
+): Promise<ReviewCatchUpCandidate[]> {
+  const res = await db
+    .prepare(
+      `SELECT m.org_id AS org_id, m.id AS id, m.created_at AS created_at
+         FROM orgs o
+         JOIN messages m ON m.org_id = o.id AND m.role = 'assistant'
+                        AND m.created_at >= ?1 AND m.created_at <= ?2
+         LEFT JOIN message_traces t ON t.org_id = m.org_id AND t.message_id = m.id
+        WHERE m.outcome IS NULL
+          AND m.reply_to IS NOT NULL
+          AND m.resume_context IS NULL
+          AND (m.resumed_at IS NULL OR m.resumed_at <= ?2)
+          AND (t.detail IS NULL
+               OR CASE WHEN json_valid(t.detail)
+                       THEN json_extract(t.detail, '$.review') IS NULL
+                       ELSE 0 END)
+          AND o.id NOT IN (SELECT value FROM json_each(?4))
+          AND (?5 IS NULL OR m.created_at > ?5 OR (m.created_at = ?5 AND m.id > ?6))
+        ORDER BY m.created_at ASC, m.id ASC
+        LIMIT ?3`,
+    )
+    .bind(
+      options.from,
+      options.to,
+      options.limit,
+      JSON.stringify(options.excludeOrgIds ?? []),
+      options.after?.createdAt ?? null,
+      options.after?.messageId ?? "",
+    )
+    .all<{ org_id: string; id: string; created_at: number }>();
+  return res.results.map((row) => ({
+    claimedOrgId: row.org_id,
+    messageId: row.id,
+    createdAt: row.created_at,
+  }));
 }

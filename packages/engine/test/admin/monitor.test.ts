@@ -754,6 +754,7 @@ describe("admin Monitor screen APIs", () => {
         resumeContext: null,
         tokensIn: 0,
         tokensOut: 0,
+        now,
       });
       expect(completed).toBe(true);
 

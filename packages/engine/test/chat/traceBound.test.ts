@@ -6,6 +6,8 @@ import {
   MAX_TRACE_BYTES,
   MAX_TRACE_CANDIDATES,
   MAX_TRACE_PARTS,
+  parseStoredTrace,
+  TRACE_REVIEW_RESERVE_BYTES,
   type TracePart,
   traceCandidates,
 } from "../../src/chat/trace.js";
@@ -38,6 +40,39 @@ function part(kind: TracePart["kind"], candidates: number, idLength = 20): Trace
 const bytes = (value: unknown) => encoder.encode(JSON.stringify(value)).byteLength;
 
 describe("chat/trace bounds", () => {
+  it("keeps the review's note, leaves room for it, and reads back only known codes", () => {
+    const parts = [
+      part("answer", 500, 5000),
+      ...Array.from({ length: 30 }, () => part("resume", 500, 5000)),
+    ];
+    const bounded = boundTrace({ v: 1, parts, review: { failed: "review_timeout" } });
+    expect(bounded.review).toEqual({ failed: "review_timeout" });
+    const unbounded = boundTrace({ v: 1, parts });
+    // The note written later, at its largest, still fits under the table's cap.
+    const noted = { ...unbounded, review: { failed: "review_skipped_spend_cap", catchUp: true } };
+    expect(bytes({ review: noted.review })).toBeLessThan(TRACE_REVIEW_RESERVE_BYTES);
+    expect(bytes(noted)).toBeLessThanOrEqual(MAX_TRACE_BYTES);
+    // Anything but the engine's own codes is dropped on read.
+    expect(
+      parseStoredTrace(JSON.stringify({ v: 1, parts: [], review: { failed: "provider said no" } }))
+        ?.review,
+    ).toBeUndefined();
+    expect(
+      parseStoredTrace(JSON.stringify({ v: 1, parts: [], review: { catchUp: true } }))?.review,
+    ).toEqual({ catchUp: true });
+    // A catch-up claim keeps its time (and fits the reserve); a bad one is dropped.
+    const claim = { catchUp: true, claimedAt: Date.UTC(2026, 10, 19) };
+    expect(bytes({ review: claim })).toBeLessThan(TRACE_REVIEW_RESERVE_BYTES);
+    expect(parseStoredTrace(JSON.stringify({ v: 1, parts: [], review: claim }))?.review).toEqual(
+      claim,
+    );
+    expect(
+      parseStoredTrace(
+        JSON.stringify({ v: 1, parts: [], review: { catchUp: true, claimedAt: "soon" } }),
+      )?.review,
+    ).toEqual({ catchUp: true });
+  });
+
   it("keeps a full trace from the engine whole and under the cap", () => {
     const parts = [part("answer", 20), ...Array.from({ length: 7 }, () => part("resume", 20))];
     const bounded = boundTrace({ v: 1, parts });

@@ -1,5 +1,16 @@
-import { type AnswerOutcome, isId, MAX_CONVERSATION_SEARCH_LENGTH } from "@solvchat/core";
-import type { PreviewTraceSource, StoredTrace, TraceDropReason, TracePart } from "../chat/trace.js";
+import {
+  type AnswerOutcome,
+  isId,
+  MAX_CONVERSATION_SEARCH_LENGTH,
+  type ReviewFailure,
+} from "@solvchat/core";
+import {
+  type PreviewTraceSource,
+  reviewFailureOf,
+  type StoredTrace,
+  type TraceDropReason,
+  type TracePart,
+} from "../chat/trace.js";
 import type {
   ConversationFilter,
   ConversationRow,
@@ -335,6 +346,12 @@ export interface AnswerTraceView {
   totalMs: number | null;
   /** Null for an answer written before traces existed, or whose trace could not be written. */
   trace: { parts: AnswerTracePartView[]; truncated: boolean } | null;
+  /**
+   * Why the answer check gave no result, as a fixed code (never the
+   * provider's text or the visitor's), or null when it did, is running or
+   * has not run. `review_error` too for a catch-up that was cut off.
+   */
+  reviewFailure: ReviewFailure | null;
 }
 
 /**
@@ -347,6 +364,7 @@ export async function getAnswerTrace(
   tenant: Tenant,
   conversationId: string,
   messageId: string,
+  now: number = Date.now(),
 ): Promise<AnswerTraceView> {
   const [conversation, message] = await Promise.all([
     tenant.conversations.get(conversationId),
@@ -371,6 +389,8 @@ export async function getAnswerTrace(
     firstTokenMs: message.firstTokenMs,
     totalMs: message.totalMs,
     trace: await traceView(tenant, conversation.assistantId, stored),
+    // A catch-up claim its run never finished says `review_error` too.
+    reviewFailure: reviewFailureOf(stored?.review, message.outcome, now),
   };
 }
 
@@ -396,6 +416,8 @@ export async function getPreviewTrace(
     firstTokenMs: answer?.timing.firstTokenMs ?? null,
     totalMs: answer?.timing.totalMs ?? null,
     trace: await traceView(tenant, assistantId, row.trace),
+    // "Try it" and test runs are never reviewed.
+    reviewFailure: null,
   };
 }
 
@@ -408,7 +430,9 @@ async function traceView(
   assistantId: string,
   stored: StoredTrace | null,
 ): Promise<AnswerTraceView["trace"]> {
-  if (stored === null) return null;
+  // A trace with only the review's note (the answer's own write failed) has
+  // no details of how the answer was made.
+  if (stored === null || stored.parts.length === 0) return null;
   const chunkIds = [
     ...new Set(stored.parts.flatMap((p) => p.retrieval.candidates.map((c) => c.chunkId))),
   ];

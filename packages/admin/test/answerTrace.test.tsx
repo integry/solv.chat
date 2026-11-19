@@ -274,6 +274,46 @@ describe("How this answer was made", () => {
     await expectNoSeriousA11yViolations(details);
   });
 
+  it.each([
+    ["review_timeout", "It failed after a retry: the last try took too long."],
+    [
+      "review_provider_error",
+      "It failed after a retry: the AI provider could not do the last try.",
+    ],
+    ["review_empty", "It failed after a retry: the last try came back empty."],
+    ["review_unparseable", "It failed after a retry: the last try gave a reply we could not read."],
+    ["review_skipped_spend_cap", "Skipped: the daily spend limit was reached."],
+    ["review_error", "Something went wrong on our side while checking."],
+  ] as const)("says in plain words why the answer was not checked (%s)", async (code, words) => {
+    installServer(() => Response.json(trace({ reviewFailure: code })));
+    render(<Conversation assistantId="ast_1" conversationId="cnv_1" onBack={() => {}} />);
+    const details = await openTrace();
+    expect(await within(details).findByText(`Not checked. ${words}`)).toBeTruthy();
+    expect(within(details).queryByText(code)).toBeNull();
+  });
+
+  it("says why an answer with no details was not checked", async () => {
+    installServer(() => Response.json(trace({ trace: null, reviewFailure: "review_timeout" })));
+    render(<Conversation assistantId="ast_1" conversationId="cnv_1" onBack={() => {}} />);
+    const details = await openTrace();
+    expect(
+      await within(details).findByText("No details were recorded for this answer."),
+    ).toBeTruthy();
+    expect(
+      within(details).getByText(
+        "Not checked. It failed after a retry: the last try took too long.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says nothing about the check when it gave a result", async () => {
+    installServer(() => Response.json(trace({ reviewFailure: null })));
+    render(<Conversation assistantId="ast_1" conversationId="cnv_1" onBack={() => {}} />);
+    const details = await openTrace();
+    await within(details).findByText("Whole answer");
+    expect(within(details).queryByText("Answer check")).toBeNull();
+  });
+
   it("says no details were recorded for an answer from before traces", async () => {
     installServer(() => Response.json(trace({ trace: null, firstTokenMs: null, totalMs: null })));
     render(<Conversation assistantId="ast_1" conversationId="cnv_1" onBack={() => {}} />);

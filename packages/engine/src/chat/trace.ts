@@ -1,3 +1,4 @@
+import { isReviewFailure, type ReviewFailure } from "@solvchat/core";
 import type { KeyProvider, LlmProviderName } from "../seams/types.js";
 
 /**
@@ -24,6 +25,12 @@ export const MAX_TRACE_PARTS = 8;
  * migration 0026 refuses a longer row as a backstop.
  */
 export const MAX_TRACE_BYTES = 32 * 1024;
+/**
+ * Bytes `boundTrace` leaves free for the answer review's note (`review`),
+ * which is written later, into the stored JSON, without re-bounding it. The
+ * largest note is under 70 bytes.
+ */
+export const TRACE_REVIEW_RESERVE_BYTES = 128;
 /** Scores are kept to four decimal places: enough to rank, and a third of the bytes. */
 const SCORE_PLACES = 10_000;
 const MAX_ID_CHARS = 256;
@@ -98,11 +105,72 @@ export interface TracePart {
   stop: TraceStop;
 }
 
+/**
+ * What the answer review left on the trace. `failed`: why its last attempt
+ * gave no usable result (a fixed code, never provider or visitor text).
+ * `catchUp`: the scheduled catch-up has taken this answer (each answer once).
+ * `claimedAt`: when it did, kept until its run ends without a failure (a
+ * failure replaces the whole note), so a run cut off after the claim still
+ * leaves evidence (`reviewFailureOf`). Absent when the review stored its
+ * outcome, or has not run.
+ */
+export interface TraceReviewNote {
+  failed?: ReviewFailure;
+  catchUp?: true;
+  claimedAt?: number;
+}
+
 export interface StoredTrace {
   v: typeof TRACE_VERSION;
+  /** Empty when only the review's note was recorded (the answer's own trace write failed). */
   parts: TracePart[];
   /** Set when something had to be left out to stay within `MAX_TRACE_BYTES`. */
   truncated?: true;
+  review?: TraceReviewNote;
+}
+
+/** The note as stored, keeping only what this engine writes. */
+export function readReviewNote(value: unknown): TraceReviewNote | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const obj = value as Record<string, unknown>;
+  const note: TraceReviewNote = {
+    ...(isReviewFailure(obj.failed) ? { failed: obj.failed } : {}),
+    ...(obj.catchUp === true ? { catchUp: true as const } : {}),
+    ...(Number.isSafeInteger(obj.claimedAt) && (obj.claimedAt as number) >= 0
+      ? { claimedAt: obj.claimedAt as number }
+      : {}),
+  };
+  return note.failed === undefined && note.catchUp === undefined && note.claimedAt === undefined
+    ? undefined
+    : note;
+}
+
+/**
+ * How long a catch-up claim may stay open before it counts as cut off. Ours:
+ * a claimed review is a few reads, two calls of `REVIEW_TIMEOUT_MS` (10
+ * seconds) at most, and a few writes, so one still open after 5 minutes has
+ * stopped, and nothing will finish it.
+ */
+export const REVIEW_CLAIM_EXPIRY_MS = 5 * 60 * 1000;
+
+/**
+ * Why an answer has no review result, as the admin reports it: the recorded
+ * reason, or `review_error` for an answer the catch-up claimed and never
+ * finished (its run was cut off before it could record anything, and no
+ * later tick takes it again). Null when the review stored an outcome, is
+ * still running, or has not run.
+ */
+export function reviewFailureOf(
+  note: TraceReviewNote | undefined,
+  outcome: string | null,
+  now: number,
+): ReviewFailure | null {
+  if (note === undefined) return null;
+  if (note.failed !== undefined) return note.failed;
+  if (note.claimedAt !== undefined && outcome === null) {
+    return now - note.claimedAt >= REVIEW_CLAIM_EXPIRY_MS ? "review_error" : null;
+  }
+  return null;
 }
 
 const encoder = new TextEncoder();
@@ -147,18 +215,22 @@ export function boundTrace(trace: StoredTrace): StoredTrace {
     parts = [parts[0] as TracePart, ...parts.slice(-(MAX_TRACE_PARTS - 1))];
     truncated = true;
   }
+  const review = readReviewNote(trace.review);
   const build = (): StoredTrace => ({
     v: TRACE_VERSION,
     parts,
     ...(truncated ? { truncated: true as const } : {}),
+    ...(review !== undefined ? { review } : {}),
   });
+  // Room is left for a review note written later, straight into the JSON.
+  const limit = MAX_TRACE_BYTES - TRACE_REVIEW_RESERVE_BYTES;
   let out = build();
-  while (byteLength(out) > MAX_TRACE_BYTES && parts.length > 2) {
+  while (byteLength(out) > limit && parts.length > 2) {
     parts = [parts[0] as TracePart, ...parts.slice(2)];
     truncated = true;
     out = build();
   }
-  while (byteLength(out) > MAX_TRACE_BYTES) {
+  while (byteLength(out) > limit) {
     const longest = parts.reduce(
       (best, p, i) =>
         p.retrieval.candidates.length > (parts[best]?.retrieval.candidates.length ?? 0) ? i : best,
@@ -167,7 +239,7 @@ export function boundTrace(trace: StoredTrace): StoredTrace {
     const target = parts[longest];
     if (!target || target.retrieval.candidates.length === 0) {
       // Nothing left to drop: a trace this large cannot come from the engine.
-      return { v: TRACE_VERSION, parts: [], truncated: true };
+      return { v: TRACE_VERSION, parts: [], truncated: true, ...(review ? { review } : {}) };
     }
     parts = parts.map((p, i) =>
       i === longest
@@ -191,7 +263,13 @@ export function parseStoredTrace(raw: string): StoredTrace | null {
   if (typeof value !== "object" || value === null) return null;
   const obj = value as Record<string, unknown>;
   if (obj.v !== TRACE_VERSION || !Array.isArray(obj.parts)) return null;
-  return value as StoredTrace;
+  const review = readReviewNote(obj.review);
+  return {
+    v: TRACE_VERSION,
+    parts: obj.parts as TracePart[],
+    ...(obj.truncated === true ? { truncated: true as const } : {}),
+    ...(review !== undefined ? { review } : {}),
+  };
 }
 
 /**

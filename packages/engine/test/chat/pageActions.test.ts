@@ -421,6 +421,87 @@ describe("chat/pageActions", () => {
     expect(stored?.outcome).toBe("answered");
   });
 
+  it("keeps the review catch-up off a reply paused for long while its live review runs", async () => {
+    await publishConfig(true);
+    let calls = 0;
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder,
+        retriever,
+        provider: scriptedProvider([
+          { text: "Your plan is on the billing page. ", calls: [NAVIGATE_CALL] },
+          { text: "It is open now.", calls: [] },
+        ]),
+        model: ANTHROPIC_MODELS.fast,
+        // The live review's call (the first) stays open until released; a
+        // catch-up would make a second call to the same reviewer.
+        reviewer: {
+          async review() {
+            calls++;
+            if (calls === 1) await held;
+            return { outcome: "answered", confidence: null };
+          },
+        },
+      },
+    });
+
+    const first = await postChat(app, {
+      message: "How do I change my plan?",
+      pageActions: [NAVIGATE_ACTION],
+    });
+    const done1 = first.find((e) => e.type === "done");
+    if (done1?.type !== "done") throw new Error("expected done event");
+    // The visitor took ten minutes to run the page action: the reply was
+    // first written well past the catch-up's wait.
+    await env.DB.prepare(
+      "UPDATE messages SET created_at = created_at - ?1 WHERE org_id = ?2 AND conversation_id = ?3",
+    )
+      .bind(10 * 60 * 1000, TEST_ORG_ID, done1.conversationId)
+      .run();
+
+    const ctx = createExecutionContext();
+    const res = await app.fetch(
+      new Request("https://engine.example/v1/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://site.example" },
+        body: JSON.stringify({
+          protocol: CHAT_PROTOCOL_VERSION,
+          assistant: "pk_act_1",
+          visitorId: "vis_1",
+          conversationId: done1.conversationId,
+          resumeMessageId: done1.messageId,
+          actionResults: [{ callId: NAVIGATE_CALL.callId, ok: true, result: "opened" }],
+        }),
+      }),
+      env,
+      ctx,
+    );
+    const second = parseSseBody(await res.text());
+    expect(second.find((e) => e.type === "done")).toMatchObject({ messageId: done1.messageId });
+    // The stream is closed; the live review is under way and held.
+    await vi.waitFor(() => expect(calls).toBe(1));
+    expect((await tenant.messages.get(done1.messageId))?.outcome).toBeNull();
+
+    // A scheduled tick now: the reply is complete, unreviewed and was first
+    // written ten minutes ago, but it was completed just now.
+    const tick = await app.runReviewCatchUp(env, { now: () => Date.now() });
+    expect(tick.taken).toBe(0);
+    expect(calls).toBe(1);
+
+    release?.();
+    await waitOnExecutionContext(ctx);
+    expect(calls).toBe(1);
+    expect((await tenant.messages.get(done1.messageId))?.outcome).toBe("answered");
+    // A later tick finds it reviewed.
+    const later = await app.runReviewCatchUp(env, { now: () => Date.now() + 6 * 60 * 1000 });
+    expect(later.taken).toBe(0);
+    expect(calls).toBe(1);
+  });
+
   it("leaves answers that used a page action out of Response time, before and after they complete", async () => {
     await publishConfig(true);
     const everything = {

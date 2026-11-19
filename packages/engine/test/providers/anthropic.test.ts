@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { anthropicProvider } from "../../src/providers/anthropic.js";
-import { ProviderError } from "../../src/providers/error.js";
+import { EmptyReplyError, ProviderError } from "../../src/providers/error.js";
+import { REASONING_FALLBACK_MIN_OUTPUT_TOKENS } from "../../src/providers/reasoning.js";
 import type { LlmChunk, LlmRequest, ToolDefinition } from "../../src/providers/types.js";
 
 const SAMPLE_REQUEST: LlmRequest = {
@@ -576,6 +577,125 @@ describe("anthropicProvider", () => {
       expect(error).toBeInstanceOf(ProviderError);
       expect((error as ProviderError).retryable).toBe(false);
       expect(chunks).toEqual([{ kind: "usage", tokensIn: 14, tokensOut: 9, stopReason: "tools" }]);
+    });
+  });
+
+  describe("reasoning off", () => {
+    const TEXT_STREAM = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":14}}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ].join("");
+    const THINKING_ONLY_STREAM = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":14}}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":64}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ].join("");
+    const OFF: LlmRequest = { ...SAMPLE_REQUEST, maxTokens: 64, reasoning: "off" };
+
+    function recording(responses: Array<() => Response>) {
+      const bodies: Record<string, unknown>[] = [];
+      const fetchImpl: typeof fetch = async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        const next = responses[Math.min(bodies.length - 1, responses.length - 1)];
+        if (!next) throw new Error("no response scripted");
+        return next();
+      };
+      return { bodies, fetchImpl };
+    }
+
+    it("sends no thinking field when the request does not ask", async () => {
+      const { bodies, fetchImpl } = recording([() => sseResponse(TEXT_STREAM)]);
+      const provider = anthropicProvider({ apiKey: "k", model: "claude-haiku-5-5", fetchImpl });
+      await collect(provider.stream(SAMPLE_REQUEST));
+      expect(bodies[0]).not.toHaveProperty("thinking");
+      expect(bodies[0]?.max_tokens).toBe(256);
+    });
+
+    it.each([
+      ["claude-haiku-5-5", { type: "disabled" }],
+      ["claude-sonnet-5-5", { type: "between_tools" }],
+    ])("turns thinking off on %s with the value it accepts", async (model, thinking) => {
+      const { bodies, fetchImpl } = recording([() => sseResponse(TEXT_STREAM)]);
+      const provider = anthropicProvider({ apiKey: "k", model, fetchImpl });
+      const chunks = await collect(provider.stream(OFF));
+      expect(chunks[0]).toEqual({ kind: "text", text: "ok" });
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).toMatchObject({ thinking, max_tokens: 64 });
+    });
+
+    it.each(["claude-opus-5-5", "claude-fable-5-2"])(
+      "sends nothing to %s, which cannot turn thinking off, and leaves room for thinking",
+      async (model) => {
+        const { bodies, fetchImpl } = recording([() => sseResponse(TEXT_STREAM)]);
+        const provider = anthropicProvider({ apiKey: "k", model, fetchImpl });
+        await collect(provider.stream(OFF));
+        expect(bodies).toHaveLength(1);
+        expect(bodies[0]).not.toHaveProperty("thinking");
+        expect(bodies[0]?.max_tokens).toBe(REASONING_FALLBACK_MIN_OUTPUT_TOKENS);
+      },
+    );
+
+    it("asks again without the field when a model refuses it, and remembers", async () => {
+      const { bodies, fetchImpl } = recording([
+        () =>
+          new Response('{"error":{"message":"PROVIDER_TEXT thinking.type.disabled"}}', {
+            status: 400,
+          }),
+        () => sseResponse(TEXT_STREAM),
+      ]);
+      const provider = anthropicProvider({ apiKey: "k", model: "claude-new-model", fetchImpl });
+      const chunks = await collect(provider.stream(OFF));
+      expect(chunks).toEqual([
+        { kind: "text", text: "ok" },
+        { kind: "usage", tokensIn: 14, tokensOut: 2, stopReason: "end" },
+      ]);
+      expect(bodies).toHaveLength(2);
+      expect(bodies[0]).toMatchObject({ thinking: { type: "disabled" }, max_tokens: 64 });
+      expect(bodies[1]).not.toHaveProperty("thinking");
+      expect(bodies[1]?.max_tokens).toBe(REASONING_FALLBACK_MIN_OUTPUT_TOKENS);
+
+      // The next call goes straight to the request that works.
+      await collect(provider.stream(OFF));
+      expect(bodies).toHaveLength(3);
+      expect(bodies[2]).not.toHaveProperty("thinking");
+    });
+
+    it("does not resend a 400 for a request that did not ask for reasoning off", async () => {
+      const { bodies, fetchImpl } = recording([() => new Response("{}", { status: 400 })]);
+      const provider = anthropicProvider({ apiKey: "k", model: "claude-haiku-5-5", fetchImpl });
+      await expect(collect(provider.stream(SAMPLE_REQUEST))).rejects.toMatchObject({
+        status: 400,
+        retryable: false,
+      });
+      expect(bodies).toHaveLength(1);
+    });
+
+    it("reports a thinking-only reply as EmptyReplyError, after its usage", async () => {
+      const { fetchImpl } = recording([() => sseResponse(THINKING_ONLY_STREAM)]);
+      const provider = anthropicProvider({ apiKey: "k", model: "claude-haiku-5-5", fetchImpl });
+      const { chunks, error } = await collectUntilThrow(provider.stream(SAMPLE_REQUEST));
+      expect(chunks).toEqual([
+        { kind: "usage", tokensIn: 14, tokensOut: 64, stopReason: "length" },
+      ]);
+      expect(error).toBeInstanceOf(EmptyReplyError);
+      expect(error).toBeInstanceOf(ProviderError);
+      expect(error).toMatchObject({ retryable: true });
+    });
+
+    it("keeps a reply that thought and then wrote text", async () => {
+      const stream = THINKING_ONLY_STREAM.replace(
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hi"}}\n\nevent: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}',
+      );
+      const { fetchImpl } = recording([() => sseResponse(stream)]);
+      const provider = anthropicProvider({ apiKey: "k", model: "claude-haiku-5-5", fetchImpl });
+      const chunks = await collect(provider.stream(SAMPLE_REQUEST));
+      expect(chunks[0]).toEqual({ kind: "text", text: "hi" });
     });
   });
 });
