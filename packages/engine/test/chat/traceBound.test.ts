@@ -60,6 +60,17 @@ describe("chat/trace bounds", () => {
     expect(
       parseStoredTrace(JSON.stringify({ v: 1, parts: [], review: { catchUp: true } }))?.review,
     ).toEqual({ catchUp: true });
+    // A catch-up claim keeps its time (and fits the reserve); a bad one is dropped.
+    const claim = { catchUp: true, claimedAt: Date.UTC(2026, 10, 19) };
+    expect(bytes({ review: claim })).toBeLessThan(TRACE_REVIEW_RESERVE_BYTES);
+    expect(parseStoredTrace(JSON.stringify({ v: 1, parts: [], review: claim }))?.review).toEqual(
+      claim,
+    );
+    expect(
+      parseStoredTrace(
+        JSON.stringify({ v: 1, parts: [], review: { catchUp: true, claimedAt: "soon" } }),
+      )?.review,
+    ).toEqual({ catchUp: true });
   });
 
   it("keeps a full trace from the engine whole and under the cap", () => {

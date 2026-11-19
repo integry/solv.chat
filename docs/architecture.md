@@ -500,7 +500,15 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   so each is attempted at most once by the catch-up, even with two ticks at
   once or a tick cut off. A read that fails after the claim records
   `review_error` on the trace, so a claimed reply that was not reviewed
-  still says why. It is then reviewed exactly as the live path does
+  still says why. The claim also keeps its time (`review.claimedAt`), so a
+  run cut off before it can record anything (during the provider call, say)
+  needs no help from that run: the admin reports a claim still open after
+  `REVIEW_CLAIM_EXPIRY_MS` (5 minutes, well past a claimed review's two
+  10-second calls) on a reply with no outcome as `review_error`. A recorded
+  failure replaces the claim; a run that ends without one closes it
+  (`releaseReviewCatchUp`, only while the note is still that claim), so a
+  reply left unreviewed on purpose ("Review answers" off) is not called cut
+  off. It is then reviewed exactly as the live path does
   it: the same spend cap (`Limits`, `{ kind: "review" }`), key, provider and
   "Review answers" switch (off: no call; only a retrieval miss is stored, as
   `declined`), retry and reason codes, topic rules and metering. "Try it"
@@ -699,8 +707,8 @@ the trace reads.
   message: the first answer and the newest resumes).
 
 The answer review adds its note to the same document when it gave no
-result: a fixed reason code and whether the catch-up took the answer (see
-"Answer review"), never text.
+result: a fixed reason code and whether the catch-up took the answer, with
+the time of an open catch-up claim (see "Answer review"), never text.
 
 The trace holds references, never copies: no prompt, question, chunk text,
 tool or action output. It is written after the reply is complete and sent, in

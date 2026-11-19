@@ -109,11 +109,15 @@ export interface TracePart {
  * What the answer review left on the trace. `failed`: why its last attempt
  * gave no usable result (a fixed code, never provider or visitor text).
  * `catchUp`: the scheduled catch-up has taken this answer (each answer once).
- * Absent when the review stored its outcome, or has not run.
+ * `claimedAt`: when it did, kept until its run ends without a failure (a
+ * failure replaces the whole note), so a run cut off after the claim still
+ * leaves evidence (`reviewFailureOf`). Absent when the review stored its
+ * outcome, or has not run.
  */
 export interface TraceReviewNote {
   failed?: ReviewFailure;
   catchUp?: true;
+  claimedAt?: number;
 }
 
 export interface StoredTrace {
@@ -132,8 +136,41 @@ export function readReviewNote(value: unknown): TraceReviewNote | undefined {
   const note: TraceReviewNote = {
     ...(isReviewFailure(obj.failed) ? { failed: obj.failed } : {}),
     ...(obj.catchUp === true ? { catchUp: true as const } : {}),
+    ...(Number.isSafeInteger(obj.claimedAt) && (obj.claimedAt as number) >= 0
+      ? { claimedAt: obj.claimedAt as number }
+      : {}),
   };
-  return note.failed === undefined && note.catchUp === undefined ? undefined : note;
+  return note.failed === undefined && note.catchUp === undefined && note.claimedAt === undefined
+    ? undefined
+    : note;
+}
+
+/**
+ * How long a catch-up claim may stay open before it counts as cut off. Ours:
+ * a claimed review is a few reads, two calls of `REVIEW_TIMEOUT_MS` (10
+ * seconds) at most, and a few writes, so one still open after 5 minutes has
+ * stopped, and nothing will finish it.
+ */
+export const REVIEW_CLAIM_EXPIRY_MS = 5 * 60 * 1000;
+
+/**
+ * Why an answer has no review result, as the admin reports it: the recorded
+ * reason, or `review_error` for an answer the catch-up claimed and never
+ * finished (its run was cut off before it could record anything, and no
+ * later tick takes it again). Null when the review stored an outcome, is
+ * still running, or has not run.
+ */
+export function reviewFailureOf(
+  note: TraceReviewNote | undefined,
+  outcome: string | null,
+  now: number,
+): ReviewFailure | null {
+  if (note === undefined) return null;
+  if (note.failed !== undefined) return note.failed;
+  if (note.claimedAt !== undefined && outcome === null) {
+    return now - note.claimedAt >= REVIEW_CLAIM_EXPIRY_MS ? "review_error" : null;
+  }
+  return null;
 }
 
 const encoder = new TextEncoder();

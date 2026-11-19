@@ -1,6 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { defaultVersionConfig } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getAnswerTrace } from "../../src/admin/conversations.js";
 import { createApp } from "../../src/app.js";
 import { REVIEW_FRAME } from "../../src/chat/review.js";
 import {
@@ -9,6 +10,7 @@ import {
   REVIEW_CATCH_UP_WINDOW_MS,
 } from "../../src/chat/reviewCatchUp.js";
 import type { ChatRouteOverrides } from "../../src/chat/route.js";
+import { REVIEW_CLAIM_EXPIRY_MS } from "../../src/chat/trace.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import type { LimitAction, UsageEvent } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
@@ -499,6 +501,117 @@ describe("chat: answer review catch-up", () => {
     expect(await outcomeOf(TEST_ORG_ID, fine.replyId)).toBe("answered");
     // Taken once: the next tick leaves it, and the admin can say why.
     expect((await runCatchUp()).taken).toBe(0);
+  });
+
+  /** What the admin's answer trace says about the review, read at `now`. */
+  async function reviewFailureAt(turn: { conversationId: string; replyId: string }, now: number) {
+    const view = await getAnswerTrace(
+      tenantFor(TEST_ORG_ID),
+      turn.conversationId,
+      turn.replyId,
+      now,
+    );
+    return view.reviewFailure;
+  }
+
+  it("leaves an answer whose catch-up is cut off mid-review saying why, with no help from the run", async () => {
+    const turn = await seedReply({});
+    let during: { note: unknown; soon: unknown; later: unknown } | undefined;
+    const provider = reviewFetch([ok("answered")]);
+    const { runCatchUp } = setup({
+      replies: [ok("answered")],
+      chat: {
+        // During the provider request, where a cut-off run stops: only what
+        // is already committed counts.
+        fetch: async (input, init) => {
+          during = {
+            note: JSON.parse((await rawTrace(TEST_ORG_ID, turn.replyId)) ?? "{}").review,
+            soon: await reviewFailureAt(turn, NOW + 30_000),
+            later: await reviewFailureAt(turn, NOW + REVIEW_CLAIM_EXPIRY_MS),
+          };
+          return provider(input, init);
+        },
+      },
+    });
+
+    const run = await runCatchUp();
+    expect(run.results).toEqual([{ status: "stored", outcome: "answered" }]);
+    // The claim is committed with its time before the call: a run stopped
+    // there says nothing while it might still be running, then review_error.
+    expect(during).toEqual({
+      note: { catchUp: true, claimedAt: NOW },
+      soon: null,
+      later: "review_error",
+    });
+    // The run finished: its claim is closed, and the answer has its outcome.
+    expect(JSON.parse((await rawTrace(TEST_ORG_ID, turn.replyId)) ?? "{}").review).toEqual({
+      catchUp: true,
+    });
+    expect(await reviewFailureAt(turn, NOW + REVIEW_CATCH_UP_WINDOW_MS)).toBeNull();
+  });
+
+  it("reports a claim its run never finished as review_error, and still never retakes it", async () => {
+    const turn = await seedReply({});
+    // What a run cut off after its claim leaves behind: the claim alone.
+    const claimedAt = NOW - 60_000;
+    expect(await tenantFor(TEST_ORG_ID).traces.claimReviewCatchUp(turn.replyId, claimedAt)).toBe(
+      true,
+    );
+    expect(await reviewFailureAt(turn, claimedAt + REVIEW_CLAIM_EXPIRY_MS - 1)).toBeNull();
+    expect(await reviewFailureAt(turn, claimedAt + REVIEW_CLAIM_EXPIRY_MS)).toBe("review_error");
+    const { reviewCalls, runCatchUp } = setup({ replies: [ok("answered")] });
+    expect((await runCatchUp()).taken).toBe(0);
+    expect(reviewCalls()).toBe(0);
+    // The note is untouched by the tick, so the admin keeps saying why.
+    expect(await reviewFailureAt(turn, NOW + REVIEW_CLAIM_EXPIRY_MS)).toBe("review_error");
+  });
+
+  it("closes the claim of an answer it leaves unreviewed on purpose, so it is not called cut off", async () => {
+    await tenantFor(TEST_ORG_ID).providerSettings.upsert({ reviewAnswers: false });
+    const turn = await seedReply({});
+    const { runCatchUp } = setup({ replies: [ok("answered")] });
+    expect((await runCatchUp()).results).toEqual([{ status: "not_reviewed" }]);
+    expect(JSON.parse((await rawTrace(TEST_ORG_ID, turn.replyId)) ?? "{}").review).toEqual({
+      catchUp: true,
+    });
+    expect(await reviewFailureAt(turn, NOW + REVIEW_CATCH_UP_WINDOW_MS)).toBeNull();
+  });
+
+  it("still says review_error when the failure's own write fails after the claim", async () => {
+    const turn = await seedReply({});
+    const { app } = setup({ replies: [{ status: 500 }] });
+    // Every review-note write fails except the claim (the conditional one).
+    const db = env.DB;
+    const failing = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            const stmt = target.prepare(sql);
+            const noteWrite =
+              sql.includes("message_traces") &&
+              sql.includes("'$.review'") &&
+              !sql.includes("'$.review') IS NULL");
+            if (!noteWrite) return stmt;
+            return {
+              bind: () => ({
+                run: async () => {
+                  throw new Error("D1_ERROR: network lost");
+                },
+              }),
+            };
+          };
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const run = await app.runReviewCatchUp({ ...env, DB: failing }, { now: () => NOW });
+    expect(run.results).toEqual([{ status: "failed", failure: "review_provider_error" }]);
+    expect(JSON.parse((await rawTrace(TEST_ORG_ID, turn.replyId)) ?? "{}").review).toEqual({
+      catchUp: true,
+      claimedAt: NOW,
+    });
+    expect(await reviewFailureAt(turn, NOW + REVIEW_CLAIM_EXPIRY_MS)).toBe("review_error");
   });
 
   it("reviews each org's answers within that org", async () => {

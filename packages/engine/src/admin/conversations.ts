@@ -4,7 +4,13 @@ import {
   MAX_CONVERSATION_SEARCH_LENGTH,
   type ReviewFailure,
 } from "@solvchat/core";
-import type { PreviewTraceSource, StoredTrace, TraceDropReason, TracePart } from "../chat/trace.js";
+import {
+  type PreviewTraceSource,
+  reviewFailureOf,
+  type StoredTrace,
+  type TraceDropReason,
+  type TracePart,
+} from "../chat/trace.js";
 import type {
   ConversationFilter,
   ConversationRow,
@@ -342,7 +348,8 @@ export interface AnswerTraceView {
   trace: { parts: AnswerTracePartView[]; truncated: boolean } | null;
   /**
    * Why the answer check gave no result, as a fixed code (never the
-   * provider's text or the visitor's), or null when it did or has not run.
+   * provider's text or the visitor's), or null when it did, is running or
+   * has not run. `review_error` too for a catch-up that was cut off.
    */
   reviewFailure: ReviewFailure | null;
 }
@@ -357,6 +364,7 @@ export async function getAnswerTrace(
   tenant: Tenant,
   conversationId: string,
   messageId: string,
+  now: number = Date.now(),
 ): Promise<AnswerTraceView> {
   const [conversation, message] = await Promise.all([
     tenant.conversations.get(conversationId),
@@ -381,7 +389,8 @@ export async function getAnswerTrace(
     firstTokenMs: message.firstTokenMs,
     totalMs: message.totalMs,
     trace: await traceView(tenant, conversation.assistantId, stored),
-    reviewFailure: stored?.review?.failed ?? null,
+    // A catch-up claim its run never finished says `review_error` too.
+    reviewFailure: reviewFailureOf(stored?.review, message.outcome, now),
   };
 }
 

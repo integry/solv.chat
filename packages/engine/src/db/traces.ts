@@ -192,7 +192,9 @@ export function tracesFor(db: D1Database, orgId: string) {
      * took, is refused.
      */
     async claimReviewCatchUp(messageId: string, now: number): Promise<boolean> {
-      const note = JSON.stringify({ catchUp: true } satisfies TraceReviewNote);
+      // The claim carries its time: if the run is cut off after it, the
+      // answer still says why once the claim expires (`reviewFailureOf`).
+      const note = JSON.stringify({ catchUp: true, claimedAt: now } satisfies TraceReviewNote);
       const res = await prepareInsert(
         db,
         `INSERT INTO message_traces (org_id, message_id, detail, created_at, updated_at)
@@ -205,6 +207,27 @@ export function tracesFor(db: D1Database, orgId: string) {
         .bind(orgId, messageId, note, now)
         .run();
       return (res.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Closes this run's claim (`claimedAt`, from `claimReviewCatchUp`) when it
+     * ended without a failure, leaving `{ catchUp: true }`. Only that claim:
+     * a note written since (a recorded failure, say) is left as it is.
+     */
+    async releaseReviewCatchUp(messageId: string, claimedAt: number, now: number): Promise<void> {
+      const note = JSON.stringify({ catchUp: true } satisfies TraceReviewNote);
+      await prepare(
+        db,
+        `UPDATE message_traces
+            SET detail = json_set(detail, '$.review', json(?3)), updated_at = ?4
+          WHERE org_id = ?1 AND message_id = ?2
+            AND CASE WHEN json_valid(detail)
+                     THEN json_extract(detail, '$.review.claimedAt') = ?5
+                          AND json_extract(detail, '$.review.failed') IS NULL
+                     ELSE 0 END`,
+      )
+        .bind(orgId, messageId, note, now, claimedAt)
+        .run();
     },
 
     /**

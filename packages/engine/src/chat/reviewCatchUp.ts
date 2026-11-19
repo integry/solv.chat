@@ -122,10 +122,19 @@ async function catchUpOne(
 ): Promise<ReviewRunResult | null> {
   const tenant = forScheduledReview(deps.db, orgId);
   // Claimed before anything is spent: a run cut off from here on never
-  // retries this reply.
-  if (!(await tenant.traces.claimReviewCatchUp(messageId, clock()))) return null;
+  // retries this reply. The claim keeps its time, so a run cut off before it
+  // records anything still leaves an answer that says why once the claim
+  // expires (`reviewFailureOf`), with no help from the run itself.
+  const claimedAt = clock();
+  if (!(await tenant.traces.claimReviewCatchUp(messageId, claimedAt))) return null;
   try {
-    return await reviewClaimed(deps, tenant, orgId, messageId, clock);
+    const result = await reviewClaimed(deps, tenant, orgId, messageId, clock);
+    // A failure has replaced the claim with its reason (or, if that write
+    // failed, the open claim will say `review_error`). Otherwise the run
+    // finished: close the claim, so an answer left without an outcome on
+    // purpose ("Review answers" off) is not reported as cut off.
+    if (result.status !== "failed") await release(tenant, messageId, claimedAt, clock);
+    return result;
   } catch (err) {
     // A read failed after the claim (`runAnswerReview` itself never throws).
     // The claim keeps the reply from every later tick, so say why here, or
@@ -145,6 +154,22 @@ async function catchUpOne(
       });
     }
     return { status: "failed", failure: "review_error" };
+  }
+}
+
+/** Closes this run's claim. Never throws: the review's result stands either way. */
+async function release(
+  tenant: Tenant,
+  messageId: string,
+  claimedAt: number,
+  clock: () => number,
+): Promise<void> {
+  try {
+    await tenant.traces.releaseReviewCatchUp(messageId, claimedAt, clock());
+  } catch (err) {
+    console.error("chat: review catch-up claim not closed", {
+      error: err instanceof Error ? err.name : typeof err,
+    });
   }
 }
 
