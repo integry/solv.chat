@@ -134,6 +134,8 @@ export function isAnswerOutcome(value: unknown): value is AnswerOutcome {
  * - `review_timeout`: the model did not reply in time.
  * - `review_provider_error`: the provider refused or failed the call (or no
  *   reviewer could be built, a missing key say).
+ * - `review_empty`: the model wrote no reply at all (it reasoned and used up
+ *   its output allowance, say).
  * - `review_unparseable`: the reply was not one of the five labels.
  * - `review_skipped_spend_cap`: the daily spend limit was reached first.
  * - `review_error`: something on our side failed (the spend limit could not
@@ -142,6 +144,7 @@ export function isAnswerOutcome(value: unknown): value is AnswerOutcome {
 export const REVIEW_FAILURES = [
   "review_timeout",
   "review_provider_error",
+  "review_empty",
   "review_unparseable",
   "review_skipped_spend_cap",
   "review_error",

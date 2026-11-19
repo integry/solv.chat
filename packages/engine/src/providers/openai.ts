@@ -1,4 +1,5 @@
-import { isRetryableStatus, ProviderError, toProviderError } from "./error.js";
+import { EmptyReplyError, isRetryableStatus, ProviderError, toProviderError } from "./error.js";
+import { type ReasoningSwitchState, sendWithReasoningSwitch } from "./reasoning.js";
 import { readEventStream } from "./sse.js";
 import { parseToolInput } from "./toolInput.js";
 import type {
@@ -91,6 +92,7 @@ function consumePendingToolCall(
 /** Creates an OpenAI Responses API streaming provider. */
 export function openaiProvider(options: OpenAiOptions): LlmProvider {
   const doFetch = options.fetchImpl ?? fetch;
+  const switchState: ReasoningSwitchState = { refused: false };
 
   return {
     name: "openai",
@@ -98,28 +100,39 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
     async *stream(request, streamOptions) {
       let response: Response;
       try {
-        response = await doFetch(OPENAI_RESPONSES_URL, {
-          method: "POST",
-          ...(streamOptions?.signal ? { signal: streamOptions.signal } : {}),
-          headers: {
-            authorization: `Bearer ${options.apiKey}`,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            model: options.model,
-            ...(request.system.length > 0 ? { instructions: request.system } : {}),
-            input: toResponsesInput(request.messages),
-            max_output_tokens: request.maxTokens,
-            stream: true,
-            // Responses are stored by default; disable storage because this provider replays history each call.
-            // Source: https://developers.openai.com/api/docs/guides/migrate-to-responses — checked 2026-11-15
-            store: false,
-            // Absent when no tool is allowed, matching phase 1's no-tools invariant.
-            ...(request.tools && request.tools.length > 0
-              ? { tools: request.tools.map(toResponsesTool) }
-              : {}),
+        response = await sendWithReasoningSwitch(request, switchState, true, (off, maxTokens) =>
+          doFetch(OPENAI_RESPONSES_URL, {
+            method: "POST",
+            ...(streamOptions?.signal ? { signal: streamOptions.signal } : {}),
+            headers: {
+              authorization: `Bearer ${options.apiKey}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              model: options.model,
+              ...(request.system.length > 0 ? { instructions: request.system } : {}),
+              input: toResponsesInput(request.messages),
+              max_output_tokens: maxTokens,
+              stream: true,
+              // Responses are stored by default; disable storage because this provider replays history each call.
+              // Source: https://developers.openai.com/api/docs/guides/migrate-to-responses — checked 2026-11-15
+              store: false,
+              // Absent when no tool is allowed, matching phase 1's no-tools invariant.
+              ...(request.tools && request.tools.length > 0
+                ? { tools: request.tools.map(toResponsesTool) }
+                : {}),
+              // Only for `reasoning: "off"`. Reasoning tokens count against
+              // max_output_tokens, and the limit can be reached during
+              // reasoning with no visible output. `none` turns reasoning off
+              // on gpt-6-luna (the fast tier); a model that rejects it (gpt-6.1-sol
+              // accepts neither `none` nor `minimal`) gets a 400 and is asked
+              // again without it and with a larger limit (`sendWithReasoningSwitch`).
+              // Source: https://developers.openai.com/api/docs/guides/reasoning and
+              // https://developers.openai.com/api/docs/models/gpt-6-luna — checked 2026-11-19
+              ...(off ? { reasoning: { effort: "none" } } : {}),
+            }),
           }),
-        });
+        );
       } catch (err) {
         throw toProviderError(err, "openai request failed");
       }
@@ -139,6 +152,9 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
       let stopReason: StopReason | undefined;
       let failure: ProviderError | undefined;
       let toolInputFailure: ProviderError | undefined;
+      // A reply is text or a tool call; a reasoning item alone is not one.
+      let sawText = false;
+      let sawReasoning = false;
       // Tool arguments arrive as fragments keyed by the Responses API `item_id`.
       // Buffer per item and parse once the call is complete.
       const pending = new Map<string, { callId: string; name: string; json: string }>();
@@ -169,6 +185,7 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
 
           if (eventType === "response.output_text.delta") {
             if (typeof payload.delta === "string" && payload.delta.length > 0) {
+              sawText = true;
               yield { kind: "text", text: payload.delta };
             }
             continue;
@@ -176,6 +193,7 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
 
           if (eventType === "response.output_item.added") {
             const item = payload.item;
+            if (item?.type === "reasoning") sawReasoning = true;
             if (
               item?.type === "function_call" &&
               typeof item.id === "string" &&
@@ -229,6 +247,9 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
             const reported = readUsage(payload.response?.usage);
             if (reported.tokensIn !== undefined) tokensIn = reported.tokensIn;
             if (reported.tokensOut !== undefined) tokensOut = reported.tokensOut;
+            if (payload.response?.output?.some((item) => item.type === "reasoning")) {
+              sawReasoning = true;
+            }
 
             if (eventType === "response.incomplete") {
               const reason = payload.response?.incomplete_details?.reason;
@@ -260,6 +281,12 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
       }
       if (failure === undefined && (tokensIn === undefined || tokensOut === undefined)) {
         failure = new ProviderError("openai stream ended without usage", true);
+      }
+      // Reasoning that reached the limit (or simply stopped) before any output:
+      // "Check whether output_text is empty before treating the response as
+      // usable." Source: https://developers.openai.com/api/docs/guides/reasoning — checked 2026-11-19
+      if (failure === undefined && sawReasoning && !sawText && stopReason !== "tools") {
+        failure = new EmptyReplyError("openai");
       }
 
       // Counts the provider has already reported are billed whether or not the

@@ -470,8 +470,10 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   stored on the answer's trace (`message_traces.detail`, `review.failed`) as
   a fixed code (`REVIEW_FAILURES` in `@solvchat/core`): `review_timeout`,
   `review_provider_error` (the provider refused or failed the call, or no
-  reviewer could be built, a missing key say), `review_unparseable` (no
-  label in the reply), `review_skipped_spend_cap`, or `review_error` (the
+  reviewer could be built, a missing key say), `review_empty` (no reply
+  text at all: the model reasoned and used up its output allowance, say),
+  `review_unparseable` (text, but no label in it),
+  `review_skipped_spend_cap`, or `review_error` (the
   spend limit could not be read, or the outcome not saved). Never the
   provider's response text or anything the visitor wrote, in the trace or
   in a log line: logs carry the code and error names only. The reason is
@@ -564,7 +566,10 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   `OPENAI_MODELS.fast`; on OpenRouter, which has no tiers, the configured
   model), with the same key, through the normal provider layer. It cannot
   give a confidence. There is no per-assistant reviewer prompt and no model
-  picker.
+  picker. The call asks for no reasoning (`reasoning: "off"`, under
+  "Providers"): reasoning counts against its 64 output tokens, and with
+  thinking left at its default Claude Haiku 5.5 often spent them all on
+  thinking and wrote no label.
 - **Untrusted input.** The reviewer's system prompt is a fixed frame
   (`REVIEW_FRAME`). The question and the reply travel in the user turn as data,
   each between start and end lines carrying a random tag per call, so text
@@ -786,6 +791,19 @@ were recorded for this answer."
 OpenAI embeddings (default) and OpenRouter embeddings (`SOLV_EMBEDDINGS_PROVIDER=openrouter`,
 fixed to `openai/text-embedding-3-small` at 1536 dimensions). `Retriever` has one: Vectorize; the interface exists so
 Cloudflare AI Search can be added as a second backend.
+
+A request may ask for `reasoning: "off"` (the answer review does; visitor
+answers do not, and their request body is unchanged). Each provider sends its
+own switch: Anthropic `thinking: {type: "disabled"}`, or `{type:
+"between_tools"}` on Claude Sonnet 5.5, and nothing on models whose thinking
+is always on (Opus 5.5, Fable, Mythos); OpenAI and OpenRouter `reasoning:
+{effort: "none"}`. A model that refuses the switch (HTTP 400) is asked once
+more without it and with an output limit of at least
+`REASONING_FALLBACK_MIN_OUTPUT_TOKENS`, since on every provider reasoning
+counts against the output limit; the provider instance then skips the switch
+(`providers/reasoning.ts`). A reply that reasoned and then wrote no text and
+called no tool is not a successful empty answer: the provider reports its
+usage and throws `EmptyReplyError` (a retryable `ProviderError`).
 
 Model IDs, prices and limits live in one file, `packages/engine/src/models.ts`.
 Every value in that file is taken from the provider's current documentation and

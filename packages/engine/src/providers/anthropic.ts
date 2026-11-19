@@ -1,4 +1,5 @@
-import { isRetryableStatus, ProviderError, toProviderError } from "./error.js";
+import { EmptyReplyError, isRetryableStatus, ProviderError, toProviderError } from "./error.js";
+import { type ReasoningSwitchState, sendWithReasoningSwitch } from "./reasoning.js";
 import { readEventStream } from "./sse.js";
 import { parseToolInput } from "./toolInput.js";
 import type { LlmMessage, LlmProvider, StopReason, ToolDefinition } from "./types.js";
@@ -54,6 +55,7 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
   // Injected so tests drive the parser from canned bytes; the default keeps
   // production wiring a one-liner.
   const doFetch = options.fetchImpl ?? fetch;
+  const switchState: ReasoningSwitchState = { refused: false };
 
   return {
     name: "anthropic",
@@ -61,29 +63,38 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
     async *stream(request, streamOptions) {
       let response: Response;
       try {
-        response = await doFetch(ANTHROPIC_MESSAGES_URL, {
-          method: "POST",
-          ...(streamOptions?.signal ? { signal: streamOptions.signal } : {}),
-          headers: {
-            // Header only: never a query string, which ends up in logs we do not
-            // control.
-            "x-api-key": options.apiKey,
-            "anthropic-version": ANTHROPIC_VERSION,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            model: options.model,
-            system: request.system,
-            messages: toAnthropicMessages(request.messages),
-            max_tokens: request.maxTokens,
-            stream: true,
-            // Absent when no tool is allowed, so the body stays byte-identical
-            // to phase 1 and the existing request-shape test still holds.
-            ...(request.tools && request.tools.length > 0
-              ? { tools: request.tools.map(toAnthropicTool) }
-              : {}),
-          }),
-        });
+        response = await sendWithReasoningSwitch(
+          request,
+          switchState,
+          thinkingOff(options.model) !== null,
+          (off, maxTokens) =>
+            doFetch(ANTHROPIC_MESSAGES_URL, {
+              method: "POST",
+              ...(streamOptions?.signal ? { signal: streamOptions.signal } : {}),
+              headers: {
+                // Header only: never a query string, which ends up in logs we do not
+                // control.
+                "x-api-key": options.apiKey,
+                "anthropic-version": ANTHROPIC_VERSION,
+                "content-type": "application/json",
+              },
+              body: JSON.stringify({
+                model: options.model,
+                system: request.system,
+                messages: toAnthropicMessages(request.messages),
+                max_tokens: maxTokens,
+                stream: true,
+                // Absent when no tool is allowed, so the body stays byte-identical
+                // to phase 1 and the existing request-shape test still holds.
+                ...(request.tools && request.tools.length > 0
+                  ? { tools: request.tools.map(toAnthropicTool) }
+                  : {}),
+                // Only for `reasoning: "off"`; otherwise absent, so the model's
+                // default applies.
+                ...(off ? { thinking: thinkingOff(options.model) } : {}),
+              }),
+            }),
+        );
       } catch (err) {
         throw toProviderError(err, "anthropic request failed");
       }
@@ -104,6 +115,9 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
       let failure: ProviderError | undefined;
       let toolInputFailure: ProviderError | undefined;
       let stopReason: StopReason | undefined;
+      // A reply is text or a tool call; a thinking block alone is not one.
+      let sawReply = false;
+      let sawThinking = false;
       // Tool input arrives as a stream of JSON fragments, keyed by the
       // content block index. Buffer per block and parse once at the block
       // boundary: half an object cannot be validated, and handing fragments
@@ -133,6 +147,9 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
 
           if (eventType === "content_block_start") {
             const block = payload.content_block;
+            if (block?.type === "thinking" || block?.type === "redacted_thinking") {
+              sawThinking = true;
+            }
             if (
               block?.type === "tool_use" &&
               typeof block.id === "string" &&
@@ -146,6 +163,7 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
 
           if (eventType === "content_block_delta") {
             if (payload.delta?.type === "text_delta" && typeof payload.delta.text === "string") {
+              if (payload.delta.text !== "") sawReply = true;
               yield { kind: "text", text: payload.delta.text };
             }
             if (
@@ -168,6 +186,7 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
               // completed malformed calls still owe the caller any reported usage.
               try {
                 const input = parseToolInput("anthropic", open.json);
+                sawReply = true;
                 yield {
                   kind: "tool_call",
                   call: {
@@ -218,6 +237,11 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
       if (failure === undefined && (tokensIn === undefined || tokensOut === undefined)) {
         failure = new ProviderError("anthropic stream ended without usage", true);
       }
+      // Thinking that spent the output limit (or simply stopped) before any
+      // text: not an empty answer, a failed one.
+      if (failure === undefined && sawThinking && !sawReply) {
+        failure = new EmptyReplyError("anthropic");
+      }
 
       // Counts the provider has already reported are billed whether or not the
       // stream completes, so they are handed to the caller before any failure
@@ -234,6 +258,24 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
       if (failure !== undefined) throw failure;
     },
   };
+}
+
+/**
+ * The `thinking` value that turns thinking off on `model`, or null when the
+ * model cannot turn it off. Claude Haiku 5.5 (the fast tier) and the other
+ * models that accept `"disabled"` take it at effort `high` or below; this
+ * request sends no effort, and those models default to `high` or `medium`.
+ * Claude Sonnet 5.5 rejects `"disabled"` and takes `"between_tools"` instead
+ * (no up-front thinking). Opus 5.5, Fable and Mythos think always and reject
+ * both, so nothing is sent. A model missing from this list that rejects the
+ * value gets a 400 and is asked again without it (`sendWithReasoningSwitch`).
+ * Source: https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting
+ * ("Thinking support, defaults, and rejected configurations by model") — checked 2026-11-19
+ */
+export function thinkingOff(model: string): { type: "disabled" | "between_tools" } | null {
+  if (/^claude-(opus-5-5|fable-|mythos-)/.test(model)) return null;
+  if (model.startsWith("claude-sonnet-5-5")) return { type: "between_tools" };
+  return { type: "disabled" };
 }
 
 // Source: https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview — checked 2026-11-15

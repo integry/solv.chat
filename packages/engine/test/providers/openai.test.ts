@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { ProviderError } from "../../src/providers/error.js";
+import { EmptyReplyError, ProviderError } from "../../src/providers/error.js";
 import { openaiProvider } from "../../src/providers/openai.js";
+import { REASONING_FALLBACK_MIN_OUTPUT_TOKENS } from "../../src/providers/reasoning.js";
 import type { LlmChunk, LlmRequest, ToolDefinition } from "../../src/providers/types.js";
 
 const SAMPLE_REQUEST: LlmRequest = {
@@ -655,6 +656,68 @@ describe("openaiProvider", () => {
       expect(error).toBeInstanceOf(ProviderError);
       expect((error as ProviderError).retryable).toBe(false);
       expect(chunks).toEqual([{ kind: "usage", tokensIn: 14, tokensOut: 9, stopReason: "tools" }]);
+    });
+  });
+
+  describe("reasoning off", () => {
+    const OFF: LlmRequest = { ...SAMPLE_REQUEST, maxTokens: 64, reasoning: "off" };
+    // A reasoning model that spent the limit before writing anything.
+    const REASONING_ONLY_STREAM = [
+      'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"reasoning","id":"rs_1"}}\n\n',
+      'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1"}}\n\n',
+      'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"reasoning"}],"usage":{"input_tokens":11,"output_tokens":64}}}\n\n',
+    ].join("");
+    function recording(responses: Array<() => Response>) {
+      const bodies: Record<string, unknown>[] = [];
+      const fetchImpl: typeof fetch = async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        const next = responses[Math.min(bodies.length - 1, responses.length - 1)];
+        if (!next) throw new Error("no response scripted");
+        return next();
+      };
+      return { bodies, fetchImpl };
+    }
+
+    it("sends no reasoning field when the request does not ask", async () => {
+      const { bodies, fetchImpl } = recording([() => sseResponse(COMPLETE_TEXT_STREAM)]);
+      const provider = openaiProvider({ apiKey: "k", model: "gpt-6-luna", fetchImpl });
+      await collect(provider.stream(SAMPLE_REQUEST));
+      expect(bodies[0]).not.toHaveProperty("reasoning");
+      expect(bodies[0]?.max_output_tokens).toBe(256);
+    });
+
+    it("asks for reasoning effort none, keeping the small limit", async () => {
+      const { bodies, fetchImpl } = recording([() => sseResponse(COMPLETE_TEXT_STREAM)]);
+      const provider = openaiProvider({ apiKey: "k", model: "gpt-6-luna", fetchImpl });
+      await collect(provider.stream(OFF));
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).toMatchObject({ reasoning: { effort: "none" }, max_output_tokens: 64 });
+    });
+
+    it("asks again without it, with room to reason, when the model refuses none", async () => {
+      const { bodies, fetchImpl } = recording([
+        () => new Response('{"error":{"message":"PROVIDER_TEXT"}}', { status: 400 }),
+        () => sseResponse(COMPLETE_TEXT_STREAM),
+      ]);
+      const provider = openaiProvider({ apiKey: "k", model: "gpt-6.1-sol", fetchImpl });
+      const chunks = await collect(provider.stream(OFF));
+      expect(chunks[0]).toEqual({ kind: "text", text: "Hello" });
+      expect(bodies).toHaveLength(2);
+      expect(bodies[1]).not.toHaveProperty("reasoning");
+      expect(bodies[1]?.max_output_tokens).toBe(REASONING_FALLBACK_MIN_OUTPUT_TOKENS);
+      await collect(provider.stream(OFF));
+      expect(bodies).toHaveLength(3);
+      expect(bodies[2]).not.toHaveProperty("reasoning");
+    });
+
+    it("reports a reasoning-only reply as EmptyReplyError, after its usage", async () => {
+      const { fetchImpl } = recording([() => sseResponse(REASONING_ONLY_STREAM)]);
+      const provider = openaiProvider({ apiKey: "k", model: "gpt-6-luna", fetchImpl });
+      const { chunks, error } = await collectUntilThrow(provider.stream(SAMPLE_REQUEST));
+      expect(chunks).toEqual([
+        { kind: "usage", tokensIn: 11, tokensOut: 64, stopReason: "length" },
+      ]);
+      expect(error).toBeInstanceOf(EmptyReplyError);
     });
   });
 });

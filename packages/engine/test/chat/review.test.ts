@@ -27,6 +27,7 @@ import {
 } from "../../src/chat/review.js";
 import type { TraceReviewNote } from "../../src/chat/trace.js";
 import { ANTHROPIC_MODELS, costMicros } from "../../src/models.js";
+import { EmptyReplyError } from "../../src/providers/error.js";
 import type { LlmChunk, LlmProvider, LlmRequest } from "../../src/providers/types.js";
 import type { LimitAction, UsageEvent } from "../../src/seams/types.js";
 
@@ -169,6 +170,10 @@ describe("chat/review: the request", () => {
       ].join("\n"),
     });
     expect(request.maxTokens).toBeLessThanOrEqual(64);
+  });
+
+  it("asks for no reasoning, so the 64 tokens go to the two lines", () => {
+    expect(buildReviewRequest(JOB).reasoning).toBe("off");
   });
 
   it("sends what the site is about as data, bounded, between tagged lines", () => {
@@ -504,6 +509,72 @@ describe("chat/review: running a review", () => {
     expect(requests).toHaveLength(2);
     expect(stored).toEqual([]);
     warn.mockRestore();
+  });
+
+  it("retries a reply that only reasoned once, then gives up with review_empty", async () => {
+    const requests: LlmRequest[] = [];
+    // What a provider does when the model thought through its output limit:
+    // the tokens are reported, then EmptyReplyError.
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream(request): AsyncIterable<LlmChunk> {
+        requests.push(request);
+        yield { kind: "usage", tokensIn: 120, tokensOut: 64, stopReason: "length" };
+        throw new EmptyReplyError("anthropic");
+      },
+    };
+    const events: UsageEvent[] = [];
+    const { deps, stored } = runDeps({ reviewer: async () => reviewerFrom(provider, events) });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(runAnswerReview(deps, JOB)).resolves.toEqual({
+      status: "failed",
+      failure: "review_empty",
+    });
+    expect(requests).toHaveLength(REVIEW_MAX_ATTEMPTS);
+    expect(requests.every((r) => r.reasoning === "off")).toBe(true);
+    // Both calls' tokens are still metered.
+    expect(events.map((e) => e.tokensOut)).toEqual([64, 64]);
+    expect(stored).toEqual([]);
+    expect(warn).toHaveBeenCalledWith("chat: answer review gave no result", {
+      reason: "review_empty",
+    });
+    warn.mockRestore();
+  });
+
+  it("records a reply with no text at all as review_empty, not review_unparseable", async () => {
+    const { provider, requests } = scriptedProvider("  \n");
+    const { deps } = runDeps({ reviewer: async () => reviewerFrom(provider) });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(runAnswerReview(deps, JOB)).resolves.toEqual({
+      status: "failed",
+      failure: "review_empty",
+    });
+    expect(requests).toHaveLength(2);
+    warn.mockRestore();
+  });
+
+  it("stores the retry's outcome after a reply that only reasoned", async () => {
+    let call = 0;
+    const provider: LlmProvider = {
+      name: "anthropic",
+      model: ANTHROPIC_MODELS.fast.id,
+      async *stream(): AsyncIterable<LlmChunk> {
+        call++;
+        if (call === 1) {
+          yield { kind: "usage", tokensIn: 120, tokensOut: 64, stopReason: "length" };
+          throw new EmptyReplyError("anthropic");
+        }
+        yield { kind: "text", text: out("answered") };
+        yield { kind: "usage", tokensIn: 120, tokensOut: 8 };
+      },
+    };
+    const { deps, stored } = runDeps({ reviewer: async () => reviewerFrom(provider) });
+    await expect(runAnswerReview(deps, JOB)).resolves.toMatchObject({
+      status: "stored",
+      outcome: "answered",
+    });
+    expect(stored).toEqual([{ id: JOB.messageId, outcome: "answered", confidence: null }]);
   });
 
   it("keeps a confidence in range and drops one out of range", async () => {

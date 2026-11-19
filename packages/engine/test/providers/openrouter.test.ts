@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { ProviderError } from "../../src/providers/error.js";
+import { EmptyReplyError, ProviderError } from "../../src/providers/error.js";
 import { openrouterProvider } from "../../src/providers/openrouter.js";
+import { REASONING_FALLBACK_MIN_OUTPUT_TOKENS } from "../../src/providers/reasoning.js";
 import type { LlmChunk, LlmRequest } from "../../src/providers/types.js";
 
 const SAMPLE_REQUEST: LlmRequest = {
@@ -299,5 +300,71 @@ describe("openrouterProvider", () => {
     }
     expect(received).toEqual([{ kind: "text", text: "Hello" }]);
     expect(cancelSpy).toHaveBeenCalledTimes(1);
+  });
+
+  describe("reasoning off", () => {
+    const OFF: LlmRequest = { ...SAMPLE_REQUEST, maxTokens: 64, reasoning: "off" };
+    const TEXT_STREAM = [
+      'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":2}}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    const REASONING_ONLY_STREAM = [
+      'data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"Hmm"}]},"finish_reason":null}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":11,"completion_tokens":64,"completion_tokens_details":{"reasoning_tokens":64}}}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+
+    function recording(responses: Array<() => Response>) {
+      const bodies: Record<string, unknown>[] = [];
+      const fetchImpl: typeof fetch = async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        const next = responses[Math.min(bodies.length - 1, responses.length - 1)];
+        if (!next) throw new Error("no response scripted");
+        return next();
+      };
+      return { bodies, fetchImpl };
+    }
+
+    it("sends no reasoning field when the request does not ask", async () => {
+      const { bodies, fetchImpl } = recording([() => sseResponse(TEXT_STREAM)]);
+      const provider = openrouterProvider({ apiKey: "k", model: "some/model", fetchImpl });
+      await collect(provider.stream(SAMPLE_REQUEST));
+      expect(bodies[0]).not.toHaveProperty("reasoning");
+    });
+
+    it("asks for reasoning effort none, keeping the small limit", async () => {
+      const { bodies, fetchImpl } = recording([() => sseResponse(TEXT_STREAM)]);
+      const provider = openrouterProvider({ apiKey: "k", model: "some/model", fetchImpl });
+      await collect(provider.stream(OFF));
+      expect(bodies[0]).toMatchObject({ reasoning: { effort: "none" }, max_tokens: 64 });
+    });
+
+    it("asks again without it, with room to reason, when reasoning is mandatory", async () => {
+      const { bodies, fetchImpl } = recording([
+        () => new Response('{"error":{"message":"PROVIDER_TEXT"}}', { status: 400 }),
+        () => sseResponse(TEXT_STREAM),
+      ]);
+      const provider = openrouterProvider({ apiKey: "k", model: "some/reasoner", fetchImpl });
+      const chunks = await collect(provider.stream(OFF));
+      expect(chunks[0]).toEqual({ kind: "text", text: "ok" });
+      expect(bodies).toHaveLength(2);
+      expect(bodies[1]).not.toHaveProperty("reasoning");
+      expect(bodies[1]?.max_tokens).toBe(REASONING_FALLBACK_MIN_OUTPUT_TOKENS);
+    });
+
+    it("reports a reasoning-only reply as EmptyReplyError, after its usage", async () => {
+      const { fetchImpl } = recording([() => sseResponse(REASONING_ONLY_STREAM)]);
+      const provider = openrouterProvider({ apiKey: "k", model: "some/model", fetchImpl });
+      const chunks: LlmChunk[] = [];
+      let error: unknown;
+      try {
+        for await (const chunk of provider.stream(SAMPLE_REQUEST)) chunks.push(chunk);
+      } catch (err) {
+        error = err;
+      }
+      expect(chunks).toEqual([{ kind: "usage", tokensIn: 11, tokensOut: 64 }]);
+      expect(error).toBeInstanceOf(EmptyReplyError);
+    });
   });
 });

@@ -34,7 +34,7 @@ const REPLY = "You can ask for a refund within 30 days.";
 /** What a failing provider puts in its error body: must never be stored or shown. */
 const PROVIDER_TEXT = "PROVIDER_TEXT_MARKER overloaded";
 
-type ReviewReply = { status: number; text?: string } | "hang";
+type ReviewReply = { status: number; text?: string } | "hang" | "thinking_only";
 
 /**
  * The real Anthropic provider over a fake network, for review requests only:
@@ -54,6 +54,19 @@ function reviewFetch(replies: ReviewReply[], seen: string[] = []): typeof fetch 
       return new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
       });
+    }
+    if (reply === "thinking_only") {
+      // What Claude Haiku 5.5 sent when it thought through all 64 tokens:
+      // a thinking block, no text block, stopped at max_tokens.
+      const sse = [
+        'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":90}}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":64}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ].join("");
+      return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
     }
     if (reply.status !== 200) {
       return new Response(JSON.stringify({ error: { message: PROVIDER_TEXT } }), {
@@ -1040,9 +1053,14 @@ describe("chat: a failed live review says why in the answer's trace", () => {
   it.each([
     ["review_provider_error", [{ status: 500 }]],
     ["review_unparseable", [{ status: 200, text: "I am not sure" }]],
+    ["review_empty", ["thinking_only"]],
   ] as const)("records %s after one retry, and the admin shows it", async (code, replies) => {
     const { reply, seen, view } = await askAndReadTrace([...replies]);
     expect(seen).toHaveLength(2);
+    // Both attempts ask the fast tier with thinking off.
+    for (const raw of seen) {
+      expect(JSON.parse(raw)).toMatchObject({ max_tokens: 64, thinking: { type: "disabled" } });
+    }
     // A retrieval miss is still stored, as declined.
     expect(reply?.outcome).toBe("declined");
     expect(view.reviewFailure).toBe(code);

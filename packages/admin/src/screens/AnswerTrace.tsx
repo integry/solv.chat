@@ -41,6 +41,7 @@ const KEY_SOURCE_LABELS: Record<NonNullable<AnswerTracePart["model"]>["keySource
 export const REVIEW_FAILURE_LABELS: Record<ReviewFailure, string> = {
   review_timeout: "It failed after a retry: the last try took too long.",
   review_provider_error: "It failed after a retry: the AI provider could not do the last try.",
+  review_empty: "It failed after a retry: the last try came back empty.",
   review_unparseable: "It failed after a retry: the last try gave a reply we could not read.",
   review_skipped_spend_cap: "Skipped: the daily spend limit was reached.",
   review_error: "Something went wrong on our side while checking.",

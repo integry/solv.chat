@@ -11,6 +11,7 @@ import {
   topicKey,
 } from "@solvchat/core";
 import { costMicros, type ModelInfo } from "../models.js";
+import { EmptyReplyError } from "../providers/error.js";
 import type { LlmProvider, LlmRequest } from "../providers/types.js";
 import type { Limits, UsageSink } from "../seams/types.js";
 import type { TraceReviewNote } from "./trace.js";
@@ -176,6 +177,12 @@ export function buildReviewRequest(input: ReviewInput, tag: string = randomTag()
     system: REVIEW_FRAME,
     messages: [{ role: "user", content }],
     maxTokens: REVIEW_MAX_OUTPUT_TOKENS,
+    // Two short lines need no reasoning, and reasoning counts against the 64
+    // tokens: replayed against Claude Haiku 5.5 with thinking left at its
+    // default, 7 of 14 replies were thinking only, with no text; with thinking
+    // off, 14 of 14 were the two lines. Each provider sends its own off switch
+    // (`providers/reasoning.ts`).
+    reasoning: "off",
   };
 }
 
@@ -264,7 +271,12 @@ export interface ModelReviewerDeps {
   onUsage: (tokensIn: number, tokensOut: number, costMicros: number | null) => Promise<void>;
 }
 
-/** The fast-tier model call behind `AnswerReviewer`. It cannot give a confidence. */
+/**
+ * The fast-tier model call behind `AnswerReviewer`. It cannot give a
+ * confidence. A reply with no text (the provider's `EmptyReplyError` for one
+ * that only reasoned, or nothing at all) throws `EmptyReplyError`, which the
+ * runner records as `review_empty`, apart from a reply it cannot read.
+ */
 export function modelReviewer(deps: ModelReviewerDeps): AnswerReviewer {
   return {
     async review(input, options) {
@@ -282,6 +294,7 @@ export function modelReviewer(deps: ModelReviewerDeps): AnswerReviewer {
         }
         // A tool call cannot happen (no tools are offered) and is ignored.
       }
+      if (text.trim() === "") throw new EmptyReplyError(deps.provider.name);
       return { ...parseReviewOutput(text), confidence: null };
     },
   };
@@ -421,7 +434,7 @@ type AttemptOutcome =
 
 /**
  * Up to `REVIEW_MAX_ATTEMPTS` reviewer calls, each with the timeout, the cap
- * checked before each. A failure, a timeout or an unusable label is retried
+ * checked before each. A failure, a timeout, an empty reply or an unusable label is retried
  * once; the last attempt's reason is returned. Never throws for the
  * reviewer's sake. A topic named by any attempt is kept (the newest), since
  * an unusable label does not make the topic wrong.
@@ -468,7 +481,12 @@ async function attemptReview(
       if (outcome !== null) return { ok: true, result: { ...result, outcome, topic } };
       failure = "review_unparseable";
     } catch (err) {
-      failure = err instanceof ReviewTimeout ? "review_timeout" : "review_provider_error";
+      failure =
+        err instanceof ReviewTimeout
+          ? "review_timeout"
+          : err instanceof EmptyReplyError
+            ? "review_empty"
+            : "review_provider_error";
     }
   }
   return { ok: false, failure, topic };
