@@ -10,8 +10,18 @@ import {
   REVIEW_CATCH_UP_WINDOW_MS,
 } from "../../src/chat/reviewCatchUp.js";
 import type { ChatRouteOverrides } from "../../src/chat/route.js";
-import { REVIEW_CLAIM_EXPIRY_MS } from "../../src/chat/trace.js";
+import {
+  MAX_TRACE_BYTES,
+  MAX_TRACE_CANDIDATES,
+  MAX_TRACE_PARTS,
+  REVIEW_CLAIM_EXPIRY_MS,
+  type StoredTrace,
+  TRACE_REVIEW_RESERVE_BYTES,
+  type TracePart,
+  type TraceReviewNote,
+} from "../../src/chat/trace.js";
 import { forPrincipal } from "../../src/db/tenant.js";
+import { tracesFor } from "../../src/db/traces.js";
 import type { LimitAction, UsageEvent } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
@@ -161,6 +171,66 @@ async function rawTrace(orgId: string, messageId: string): Promise<string | null
     .bind(orgId, messageId)
     .first<{ detail: string }>();
   return row?.detail ?? null;
+}
+
+const encoder = new TextEncoder();
+const byteSize = (text: string) => encoder.encode(text).byteLength;
+
+/** The bytes `json_set` adds to a trace that has no note yet, writing this one in place. */
+const inPlaceBytes = (note: TraceReviewNote) => byteSize(`,"review":${JSON.stringify(note)}`);
+
+/**
+ * A trace as the engine stored it before `boundTrace` kept room for the
+ * review's note: within every bound it had (at most 8 parts of 20
+ * candidates, ids of at most 256 characters, as a host's retriever may
+ * return), exactly `bytes` long, which may be up to the table's whole cap.
+ */
+function preChangeTrace(bytes: number): StoredTrace {
+  const parts: TracePart[] = [];
+  const trace: StoredTrace = { v: 1, parts };
+  const size = () => byteSize(JSON.stringify(trace));
+  while (size() < bytes) {
+    let current = parts[parts.length - 1];
+    if (current === undefined || current.retrieval.candidates.length === MAX_TRACE_CANDIDATES) {
+      current = {
+        kind: parts.length === 0 ? "answer" : "resume",
+        version: { id: "ver_1", state: "published" },
+        model: { provider: "anthropic", id: "vendor-model", keySource: "environment" },
+        retrieval: { floor: 0.3, ms: 12, candidates: [] },
+        // Each part told apart by its timing.
+        timing: { firstTokenMs: 300, totalMs: 900 + parts.length },
+        tools: { rounds: 1, ms: 40 },
+        stop: "complete",
+      };
+      parts.push(current);
+    }
+    const n = current.retrieval.candidates.length;
+    current.retrieval.candidates.push({
+      chunkId: `chk_${parts.length}_${n}_`.padEnd(256, "c"),
+      documentId: `doc_${parts.length}_${n}_`.padEnd(256, "d"),
+      score: 0.5,
+      used: true,
+    });
+  }
+  // Chunk ids shortened from the end, to land on `bytes` exactly.
+  for (const c of parts.flatMap((p) => p.retrieval.candidates).reverse()) {
+    const over = size() - bytes;
+    if (over <= 0) break;
+    c.chunkId = c.chunkId.slice(0, Math.max(12, c.chunkId.length - over));
+  }
+  expect(size()).toBe(bytes);
+  expect(parts.length).toBeLessThanOrEqual(MAX_TRACE_PARTS);
+  return trace;
+}
+
+/** Stores a trace's JSON as it is, as an engine before this one wrote it. */
+async function seedStoredTrace(orgId: string, messageId: string, trace: StoredTrace) {
+  await env.DB.prepare(
+    `INSERT INTO message_traces (org_id, message_id, detail, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?4)`,
+  )
+    .bind(orgId, messageId, JSON.stringify(trace), NOW - 10 * 60 * 1000)
+    .run();
 }
 
 function setup(options: {
@@ -666,6 +736,193 @@ describe("chat: answer review catch-up", () => {
     expect(logged).toContain("review_provider_error");
     expect(logged).not.toContain("PROVIDER_TEXT_MARKER");
     expect(logged).not.toContain("VISITOR_TEXT_MARKER");
+  });
+
+  describe("on a trace stored before room was kept for the note", () => {
+    const claim = { catchUp: true as const, claimedAt: NOW };
+
+    /** A stored trace's JSON, read back. */
+    async function storedTrace(messageId: string) {
+      const detail = (await rawTrace(TEST_ORG_ID, messageId)) ?? "";
+      return { bytes: byteSize(detail), trace: JSON.parse(detail || "{}") as StoredTrace };
+    }
+
+    /**
+     * A db whose next read of a trace for `fitReviewNote` is followed, before
+     * its write, by `meanwhile`: another write landing in between.
+     */
+    function writeBetween(meanwhile: () => Promise<void>): D1Database {
+      return new Proxy(env.DB, {
+        get(target, prop) {
+          if (prop === "prepare") {
+            return (sql: string) => {
+              const stmt = target.prepare(sql);
+              if (!sql.includes("AS unnoted")) return stmt;
+              return {
+                bind: (...values: unknown[]) => ({
+                  first: async () => {
+                    const row = await stmt.bind(...values).first();
+                    await meanwhile();
+                    return row;
+                  },
+                }),
+              };
+            };
+          }
+          const value = Reflect.get(target, prop);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }
+
+    it("claims and reviews the answer, keeping its first answer and latest request", async () => {
+      const turn = await seedReply({});
+      // One byte too full for the claim in place: the table would refuse it.
+      const before = preChangeTrace(MAX_TRACE_BYTES - inPlaceBytes(claim) + 1);
+      expect(before.parts).toHaveLength(3);
+      await seedStoredTrace(TEST_ORG_ID, turn.replyId, before);
+      const { reviewCalls, runCatchUp } = setup({ replies: [ok("answered")] });
+
+      expect(await runCatchUp()).toEqual({
+        taken: 1,
+        results: [{ status: "stored", outcome: "answered" }],
+      });
+      expect(reviewCalls()).toBe(1);
+      expect(await outcomeOf(TEST_ORG_ID, turn.replyId)).toBe("answered");
+      expect(await topicOf(TEST_ORG_ID, turn.questionId)).toBe("Refunds");
+      // Cut down as `boundTrace` cuts any trace, with room for the next note:
+      // the oldest resume goes, the first answer and the latest request stay
+      // whole. The run finished, so its claim is closed.
+      const after = await storedTrace(turn.replyId);
+      expect(after.bytes).toBeLessThanOrEqual(MAX_TRACE_BYTES - TRACE_REVIEW_RESERVE_BYTES);
+      expect(after.trace).toEqual({
+        v: 1,
+        parts: [before.parts[0], before.parts[2]],
+        truncated: true,
+        review: { catchUp: true },
+      });
+      expect(await reviewFailureAt(turn, NOW + REVIEW_CATCH_UP_WINDOW_MS)).toBeNull();
+      // Taken once, like any other.
+      expect((await runCatchUp()).taken).toBe(0);
+      expect(reviewCalls()).toBe(1);
+    });
+
+    it("records why on a trace that took the claim in place but has no room for the failure", async () => {
+      const turn = await seedReply({});
+      const failure = { failed: "review_provider_error", catchUp: true } as const;
+      // The claim just fits in place; the longer failure that replaces it does not.
+      const before = preChangeTrace(MAX_TRACE_BYTES - inPlaceBytes(claim));
+      expect(inPlaceBytes(failure)).toBeGreaterThan(inPlaceBytes(claim));
+      await seedStoredTrace(TEST_ORG_ID, turn.replyId, before);
+      let during: StoredTrace | undefined;
+      const provider = reviewFetch([{ status: 500 }]);
+      const { runCatchUp } = setup({
+        replies: [{ status: 500 }],
+        chat: {
+          fetch: async (input, init) => {
+            during ??= (await storedTrace(turn.replyId)).trace;
+            return provider(input, init);
+          },
+        },
+      });
+
+      const run = await runCatchUp();
+      expect(run.results).toEqual([{ status: "failed", failure: "review_provider_error" }]);
+      // The claim went in as it was, leaving the answer's trace whole.
+      expect(during).toEqual({ ...before, review: claim });
+      const after = await storedTrace(turn.replyId);
+      expect(after.bytes).toBeLessThanOrEqual(MAX_TRACE_BYTES);
+      expect(after.trace).toEqual({
+        v: 1,
+        parts: [before.parts[0], before.parts[2]],
+        truncated: true,
+        review: failure,
+      });
+      expect(await reviewFailureAt(turn, NOW)).toBe("review_provider_error");
+      expect((await runCatchUp()).taken).toBe(0);
+    });
+
+    it("records the live review's failure on a full trace, and the catch-up leaves it", async () => {
+      const turn = await seedReply({});
+      const before = preChangeTrace(MAX_TRACE_BYTES);
+      await seedStoredTrace(TEST_ORG_ID, turn.replyId, before);
+      await tenantFor(TEST_ORG_ID).traces.recordReview(
+        turn.replyId,
+        { failed: "review_timeout" },
+        NOW,
+      );
+      expect((await storedTrace(turn.replyId)).trace).toEqual({
+        v: 1,
+        parts: [before.parts[0], before.parts[2]],
+        truncated: true,
+        review: { failed: "review_timeout" },
+      });
+      const { reviewCalls, runCatchUp } = setup({ replies: [ok("answered")] });
+      expect((await runCatchUp()).taken).toBe(0);
+      expect(reviewCalls()).toBe(0);
+      expect(await reviewFailureAt(turn, NOW)).toBe("review_timeout");
+    });
+
+    it("claims a full trace once, even twice at a time, and never over a note", async () => {
+      const open = await seedReply({});
+      const noted = await seedReply({});
+      await seedStoredTrace(TEST_ORG_ID, open.replyId, preChangeTrace(MAX_TRACE_BYTES));
+      const note = { failed: "review_timeout" } as const;
+      await seedStoredTrace(TEST_ORG_ID, noted.replyId, {
+        ...preChangeTrace(MAX_TRACE_BYTES - inPlaceBytes(note)),
+        review: note,
+      });
+      const traces = tenantFor(TEST_ORG_ID).traces;
+
+      const claims = await Promise.all([
+        traces.claimReviewCatchUp(open.replyId, NOW),
+        traces.claimReviewCatchUp(open.replyId, NOW + 1),
+      ]);
+      expect(claims.filter(Boolean)).toHaveLength(1);
+      expect((await storedTrace(open.replyId)).trace.review).toEqual({
+        catchUp: true,
+        claimedAt: NOW + claims.indexOf(true),
+      });
+      expect(await traces.claimReviewCatchUp(open.replyId, NOW + 2)).toBe(false);
+
+      // A note already there is never replaced by a claim, however full the trace.
+      const notedDetail = await rawTrace(TEST_ORG_ID, noted.replyId);
+      expect(await traces.claimReviewCatchUp(noted.replyId, NOW)).toBe(false);
+      expect(await rawTrace(TEST_ORG_ID, noted.replyId)).toBe(notedDetail);
+    });
+
+    it("never writes over a full trace another write changed after it was read", async () => {
+      const claimed = await seedReply({});
+      const failed = await seedReply({});
+      for (const turn of [claimed, failed]) {
+        await seedStoredTrace(TEST_ORG_ID, turn.replyId, preChangeTrace(MAX_TRACE_BYTES));
+      }
+      const live = tenantFor(TEST_ORG_ID).traces;
+
+      // The live review records a failure while the catch-up cuts the trace
+      // down for its claim: the claim is refused, the failure stands.
+      const claimTraces = tracesFor(
+        writeBetween(() => live.recordReview(claimed.replyId, { failed: "review_timeout" }, NOW)),
+        TEST_ORG_ID,
+      );
+      expect(await claimTraces.claimReviewCatchUp(claimed.replyId, NOW)).toBe(false);
+      expect((await storedTrace(claimed.replyId)).trace.review).toEqual({
+        failed: "review_timeout",
+      });
+
+      // A failure note whose trace was claimed meanwhile is not written over
+      // it; the caller is told, and logs it.
+      const failTraces = tracesFor(
+        writeBetween(async () => {
+          expect(await live.claimReviewCatchUp(failed.replyId, NOW)).toBe(true);
+        }),
+        TEST_ORG_ID,
+      );
+      await expect(
+        failTraces.recordReview(failed.replyId, { failed: "review_unparseable" }, NOW),
+      ).rejects.toThrow(/not written/);
+      expect((await storedTrace(failed.replyId)).trace.review).toEqual(claim);
+    });
   });
 });
 

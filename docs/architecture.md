@@ -478,9 +478,14 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   recorded for a retrieval miss too, though its `declined` is still stored.
   A message whose own trace write failed gets a trace holding only the note
   (`parts` empty); `boundTrace` leaves room for the note
-  (`TRACE_REVIEW_RESERVE_BYTES`). The admin's answer trace returns it as
-  `reviewFailure` and says it in plain words under "Answer check" ("Not
-  checked. The check took too long, twice." and so on).
+  (`TRACE_REVIEW_RESERVE_BYTES`). A trace stored before it did may fill the
+  whole 32 KiB; when the note does not fit, that trace is cut down by
+  `boundTrace` with the note in it (the first answer and the latest request
+  stay, marked `truncated`) and written back only if no other write changed
+  it since it was read, a claim only while there is still no note. The
+  admin's answer trace returns it as `reviewFailure` and says it in plain
+  words under "Answer check" ("Not checked. The check took too long,
+  twice." and so on).
 - **Catch-up.** The Workers `scheduled` handler (the same cron as the
   sitemap sync; `app.runReviewCatchUp(env)` for a host with its own cron)
   reviews, each tick, up to `MAX_REVIEW_CATCH_UP_PER_TICK` (10) visitor
