@@ -170,6 +170,7 @@ function setup(options: {
   const seen: string[] = [];
   const events: UsageEvent[] = [];
   const checks: LimitAction[] = [];
+  const resolved: string[] = [];
   const app = createApp(
     fakeSeams({
       usage: {
@@ -186,6 +187,7 @@ function setup(options: {
       auth: {
         async resolveOrg(claim) {
           if (claim.kind !== "queued_ingest") return null;
+          resolved.push(claim.orgId);
           return options.refuse?.includes(claim.orgId) ? null : claim.orgId;
         },
       },
@@ -196,7 +198,7 @@ function setup(options: {
   const reviewCalls = () => seen.length;
   const runCatchUp = (maxAnswers?: number) =>
     app.runReviewCatchUp(env, { now: () => NOW, maxAnswers });
-  return { app, seen, events, checks, reviewCalls, runCatchUp };
+  return { app, seen, events, checks, resolved, reviewCalls, runCatchUp };
 }
 
 describe("chat: answer review catch-up", () => {
@@ -351,6 +353,91 @@ describe("chat: answer review catch-up", () => {
     }
     expect(await outcomeOf(ORG_B, refused.replyId)).toBeNull();
     expect(await rawTrace(ORG_B, refused.replyId)).toBeNull();
+  });
+
+  it("pages past a refused org's backlog to reach other orgs' answers", async () => {
+    // More refused replies than one page holds, all older than the answer
+    // from the org the seam vouches for.
+    const refused: string[] = [];
+    for (let i = 0; i < 60; i++) {
+      const turn = await seedReply({
+        orgId: ORG_B,
+        assistantId: "ast_b",
+        ageMs: 20 * 60 * 60 * 1000 - i * 1000,
+      });
+      refused.push(turn.replyId);
+    }
+    const eligible = await seedReply({ ageMs: 10 * 60 * 1000 });
+    const { resolved, reviewCalls, runCatchUp } = setup({
+      replies: [ok("answered")],
+      refuse: [ORG_B],
+    });
+    const result = await runCatchUp();
+    expect(result.taken).toBe(1);
+    expect(reviewCalls()).toBe(1);
+    expect(await outcomeOf(TEST_ORG_ID, eligible.replyId)).toBe("answered");
+    // The refused org is asked about once per tick, and nothing of its is touched.
+    expect(resolved.filter((o) => o === ORG_B)).toHaveLength(1);
+    for (const id of refused) expect(await rawTrace(ORG_B, id)).toBeNull();
+  });
+
+  it("records review_error when a read fails after the claim, and goes on", async () => {
+    const broken = await seedReply({ orgId: ORG_B, assistantId: "ast_b", ageMs: 30 * 60 * 1000 });
+    const fine = await seedReply({});
+    const { app, runCatchUp } = setup({ replies: [ok("answered")] });
+    // A transient read failure on one org's provider settings, after its claim.
+    const db = env.DB;
+    const failing = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            const stmt = target.prepare(sql);
+            if (!sql.includes("org_provider_settings")) return stmt;
+            return new Proxy(stmt, {
+              get(s, p) {
+                if (p === "bind") {
+                  return (...args: unknown[]) => {
+                    const bound = s.bind(...args);
+                    if (args[0] !== ORG_B) return bound;
+                    return {
+                      first: async () => {
+                        throw new Error("D1_ERROR: network lost");
+                      },
+                      all: async () => {
+                        throw new Error("D1_ERROR: network lost");
+                      },
+                      run: async () => {
+                        throw new Error("D1_ERROR: network lost");
+                      },
+                      raw: async () => {
+                        throw new Error("D1_ERROR: network lost");
+                      },
+                    };
+                  };
+                }
+                const value = Reflect.get(s, p);
+                return typeof value === "function" ? value.bind(s) : value;
+              },
+            });
+          };
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const result = await app.runReviewCatchUp({ ...env, DB: failing }, { now: () => NOW });
+    expect(result.taken).toBe(2);
+    expect(result.results).toEqual([
+      { status: "failed", failure: "review_error" },
+      { status: "stored", outcome: "answered" },
+    ]);
+    expect(JSON.parse((await rawTrace(ORG_B, broken.replyId)) ?? "{}").review).toEqual({
+      catchUp: true,
+      failed: "review_error",
+    });
+    expect(await outcomeOf(TEST_ORG_ID, fine.replyId)).toBe("answered");
+    // Taken once: the next tick leaves it, and the admin can say why.
+    expect((await runCatchUp()).taken).toBe(0);
   });
 
   it("reviews each org's answers within that org", async () => {

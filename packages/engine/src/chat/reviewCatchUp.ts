@@ -1,5 +1,5 @@
 import { reviewCatchUpCandidates } from "../db/messages.js";
-import { forScheduledReview } from "../db/tenant.js";
+import { forScheduledReview, type Tenant } from "../db/tenant.js";
 import { type ProviderEnv, resolveProviderSettings } from "../providers/config.js";
 import type { Seams } from "../seams/types.js";
 import {
@@ -29,8 +29,14 @@ export const REVIEW_CATCH_UP_WINDOW_MS = 24 * 60 * 60 * 1000;
  * the two never review one reply at the same time.
  */
 export const REVIEW_CATCH_UP_MIN_AGE_MS = 5 * 60 * 1000;
-/** Rows read per tick: some may belong to an org the auth seam refuses. */
-const CANDIDATES_PER_TICK = 50;
+/** Rows read per page: some may belong to an org the auth seam refuses. */
+const CANDIDATES_PER_PAGE = 50;
+/**
+ * Pages read per tick at most. Each later page leaves out every org refused
+ * so far and starts past the last row read, so a refused org's backlog,
+ * however long, costs at most one page and never hides other orgs' replies.
+ */
+export const REVIEW_CATCH_UP_MAX_PAGES = 5;
 
 export interface ReviewCatchUpDeps {
   db: D1Database;
@@ -60,36 +66,46 @@ export async function runReviewCatchUp(deps: ReviewCatchUpDeps): Promise<ReviewC
   const max = Math.max(0, Math.trunc(deps.maxAnswers ?? MAX_REVIEW_CATCH_UP_PER_TICK));
   const result: ReviewCatchUpResult = { taken: 0, results: [] };
   if (max === 0) return result;
-  const candidates = await reviewCatchUpCandidates(deps.db, {
-    from: now - REVIEW_CATCH_UP_WINDOW_MS,
-    to: now - REVIEW_CATCH_UP_MIN_AGE_MS,
-    limit: Math.max(max, CANDIDATES_PER_TICK),
-  });
+  const limit = Math.max(max, CANDIDATES_PER_PAGE);
   const vouched = new Map<string, string | null>();
-  for (const candidate of candidates) {
-    if (result.taken >= max) break;
-    let orgId = vouched.get(candidate.claimedOrgId);
-    if (orgId === undefined) {
-      // The org was read from a row the engine wrote, and is checked again
-      // with the seam, as a scheduled sync's is: a suspended org gets no review.
-      orgId = await deps.seams.auth.resolveOrg({
-        kind: "queued_ingest",
-        orgId: candidate.claimedOrgId,
-      });
-      vouched.set(candidate.claimedOrgId, orgId);
+  let after: { createdAt: number; messageId: string } | undefined;
+  for (let page = 0; page < REVIEW_CATCH_UP_MAX_PAGES && result.taken < max; page++) {
+    const refused = [...vouched].filter(([, orgId]) => orgId === null).map(([claimed]) => claimed);
+    const candidates = await reviewCatchUpCandidates(deps.db, {
+      from: now - REVIEW_CATCH_UP_WINDOW_MS,
+      to: now - REVIEW_CATCH_UP_MIN_AGE_MS,
+      limit,
+      excludeOrgIds: refused,
+      after,
+    });
+    for (const candidate of candidates) {
+      if (result.taken >= max) break;
+      after = { createdAt: candidate.createdAt, messageId: candidate.messageId };
+      let orgId = vouched.get(candidate.claimedOrgId);
+      if (orgId === undefined) {
+        // The org was read from a row the engine wrote, and is checked again
+        // with the seam, as a scheduled sync's is: a suspended org gets no review.
+        orgId = await deps.seams.auth.resolveOrg({
+          kind: "queued_ingest",
+          orgId: candidate.claimedOrgId,
+        });
+        vouched.set(candidate.claimedOrgId, orgId);
+      }
+      if (orgId === null) continue;
+      try {
+        const outcome = await catchUpOne(deps, orgId, candidate.messageId, clock);
+        if (outcome === null) continue;
+        result.taken++;
+        result.results.push(outcome);
+      } catch (err) {
+        // Only the claim itself throws here (nothing was written, so a later
+        // tick may take the reply). One reply's fault never stops the others.
+        console.warn("chat: review catch-up failed", {
+          error: err instanceof Error ? err.name : typeof err,
+        });
+      }
     }
-    if (orgId === null) continue;
-    try {
-      const outcome = await catchUpOne(deps, orgId, candidate.messageId, clock);
-      if (outcome === null) continue;
-      result.taken++;
-      result.results.push(outcome);
-    } catch (err) {
-      // One reply's fault must not stop the others; it stays claimed.
-      console.warn("chat: review catch-up failed", {
-        error: err instanceof Error ? err.name : typeof err,
-      });
-    }
+    if (candidates.length < limit) break;
   }
   return result;
 }
@@ -105,7 +121,38 @@ async function catchUpOne(
   // Claimed before anything is spent: a run cut off from here on never
   // retries this reply.
   if (!(await tenant.traces.claimReviewCatchUp(messageId, clock()))) return null;
+  try {
+    return await reviewClaimed(deps, tenant, orgId, messageId, clock);
+  } catch (err) {
+    // A read failed after the claim (`runAnswerReview` itself never throws).
+    // The claim keeps the reply from every later tick, so say why here, or
+    // it would stay unreviewed with nothing in its trace.
+    console.warn("chat: review catch-up failed", {
+      error: err instanceof Error ? err.name : typeof err,
+    });
+    try {
+      await tenant.traces.recordReview(
+        messageId,
+        { catchUp: true, failed: "review_error" },
+        clock(),
+      );
+    } catch (recordErr) {
+      console.error("chat: review failure not recorded", {
+        error: recordErr instanceof Error ? recordErr.name : typeof recordErr,
+      });
+    }
+    return { status: "failed", failure: "review_error" };
+  }
+}
 
+/** Reviews a reply this run has claimed. */
+async function reviewClaimed(
+  deps: ReviewCatchUpDeps,
+  tenant: Tenant,
+  orgId: string,
+  messageId: string,
+  clock: () => number,
+): Promise<ReviewRunResult> {
   const reply = await tenant.messages.get(messageId);
   if (reply === null || reply.role !== "assistant" || reply.outcome !== null) {
     return { status: "not_reviewed" };

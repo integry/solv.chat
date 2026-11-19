@@ -871,6 +871,8 @@ export function messagesFor(db: D1Database, orgId: string) {
 export interface ReviewCatchUpCandidate {
   claimedOrgId: string;
   messageId: string;
+  /** When the reply was written: the paging cursor. */
+  createdAt: number;
 }
 
 /**
@@ -884,14 +886,24 @@ export interface ReviewCatchUpCandidate {
  * discovery. Every row's org is checked with the auth seam before anything is
  * read or written for it, and that work goes through a `Tenant`. Each org is
  * read through its own `(org_id, role, created_at)` index range.
+ *
+ * `excludeOrgIds` leaves out orgs the seam refused earlier in the same tick,
+ * and `after` starts past the last row already read, so one tick can page on
+ * past an org whose replies would otherwise fill every page.
  */
 export async function reviewCatchUpCandidates(
   db: D1Database,
-  options: { from: number; to: number; limit: number },
+  options: {
+    from: number;
+    to: number;
+    limit: number;
+    excludeOrgIds?: readonly string[] | undefined;
+    after?: { createdAt: number; messageId: string } | undefined;
+  },
 ): Promise<ReviewCatchUpCandidate[]> {
   const res = await db
     .prepare(
-      `SELECT m.org_id AS org_id, m.id AS id
+      `SELECT m.org_id AS org_id, m.id AS id, m.created_at AS created_at
          FROM orgs o
          JOIN messages m ON m.org_id = o.id AND m.role = 'assistant'
                         AND m.created_at >= ?1 AND m.created_at <= ?2
@@ -903,10 +915,23 @@ export async function reviewCatchUpCandidates(
                OR CASE WHEN json_valid(t.detail)
                        THEN json_extract(t.detail, '$.review') IS NULL
                        ELSE 0 END)
+          AND o.id NOT IN (SELECT value FROM json_each(?4))
+          AND (?5 IS NULL OR m.created_at > ?5 OR (m.created_at = ?5 AND m.id > ?6))
         ORDER BY m.created_at ASC, m.id ASC
         LIMIT ?3`,
     )
-    .bind(options.from, options.to, options.limit)
-    .all<{ org_id: string; id: string }>();
-  return res.results.map((row) => ({ claimedOrgId: row.org_id, messageId: row.id }));
+    .bind(
+      options.from,
+      options.to,
+      options.limit,
+      JSON.stringify(options.excludeOrgIds ?? []),
+      options.after?.createdAt ?? null,
+      options.after?.messageId ?? "",
+    )
+    .all<{ org_id: string; id: string; created_at: number }>();
+  return res.results.map((row) => ({
+    claimedOrgId: row.org_id,
+    messageId: row.id,
+    createdAt: row.created_at,
+  }));
 }

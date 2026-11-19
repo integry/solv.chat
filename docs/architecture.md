@@ -488,10 +488,16 @@ the fallback), `off_topic` (not about this site's subject) or `wants_human`
   least 5 minutes ago (`REVIEW_CATCH_UP_MIN_AGE_MS`, so it never races the
   live review) that are complete (not paused), have no outcome and no review
   note on their trace, oldest first. Each org is checked with the auth seam
-  first (`queued_ingest`, as a scheduled sync's is). Before anything is spent
+  first (`queued_ingest`, as a scheduled sync's is). Replies are read in
+  pages of 50, up to `REVIEW_CATCH_UP_MAX_PAGES` (5) a tick; each later page
+  leaves out the orgs the seam refused so far and starts past the last row
+  read, so a refused org's backlog never keeps other orgs' replies from
+  being reached. Before anything is spent
   the reply is claimed on its trace (`review.catchUp`, a conditional write),
   so each is attempted at most once by the catch-up, even with two ticks at
-  once or a tick cut off. It is then reviewed exactly as the live path does
+  once or a tick cut off. A read that fails after the claim records
+  `review_error` on the trace, so a claimed reply that was not reviewed
+  still says why. It is then reviewed exactly as the live path does
   it: the same spend cap (`Limits`, `{ kind: "review" }`), key, provider and
   "Review answers" switch (off: no call; only a retrieval miss is stored, as
   `declined`), retry and reason codes, topic rules and metering. "Try it"
