@@ -96,8 +96,17 @@ export interface TracePart {
   /** `answer` for the request that wrote the message, `resume` for a page-action continuation. */
   kind: "answer" | "resume";
   version: { id: string; state: "published" | "draft" };
-  /** Null when no model was asked (nothing relevant was found). */
-  model: { provider: LlmProviderName; id: string; keySource: KeySource } | null;
+  /**
+   * Null when no model was asked (nothing relevant was found). `reasoningOff`:
+   * the answer was sent with `reasoning: "off"` (the fast tier). Absent in
+   * traces written before it was recorded.
+   */
+  model: {
+    provider: LlmProviderName;
+    id: string;
+    keySource: KeySource;
+    reasoningOff?: boolean;
+  } | null;
   retrieval: { floor: number; ms: number; candidates: TraceCandidate[] };
   /** Milliseconds from the start of the request. */
   timing: { firstTokenMs: number | null; totalMs: number };

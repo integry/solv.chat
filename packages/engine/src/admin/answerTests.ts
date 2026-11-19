@@ -156,6 +156,8 @@ export interface RunDeps {
   limits: Limits;
   /** The retrieval score floor; absent, the default. */
   scoreFloor?: number | undefined;
+  /** Answers sent with `reasoning: "off"`, as the live answer is (`answerReasoningOff`). */
+  reasoningOff?: boolean | undefined;
   secretKey?: string | undefined;
   fetchImpl?: typeof fetch | undefined;
   runners?: readonly ToolRunner[] | undefined;
@@ -415,6 +417,7 @@ export async function runAnswerTests(
           model: deps.model,
           usage: deps.usage,
           scoreFloor: deps.scoreFloor,
+          reasoningOff: deps.reasoningOff,
           runners,
           signal: controller.signal,
           // Kept apart from visitor replies, marked as a test run of this run.

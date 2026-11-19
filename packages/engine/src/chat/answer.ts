@@ -11,7 +11,13 @@ import { type ResolvedChunk, resolveChunks } from "../ingest/resolve.js";
 import type { ModelInfo } from "../models.js";
 import { ProviderError } from "../providers/error.js";
 import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
-import type { LlmMessage, LlmProvider, LlmToolResult, ToolCall } from "../providers/types.js";
+import type {
+  LlmMessage,
+  LlmProvider,
+  LlmRequest,
+  LlmToolResult,
+  ToolCall,
+} from "../providers/types.js";
 import type { UsageSink } from "../seams/types.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
 import type { ReviewJob } from "./review.js";
@@ -57,6 +63,13 @@ export interface AnswerDeps {
    * `scoreFloorFrom`). Absent, the default `SCORE_FLOOR`.
    */
   scoreFloor?: number | undefined;
+  /**
+   * True on the fast tier (Anthropic and OpenAI): every model call of this
+   * answer, each tool round and a page-action continuation included, is sent
+   * with `reasoning: "off"` (`answerReasoningOff` in `route.ts`). Absent or
+   * false, the request is unchanged and the model's default applies.
+   */
+  reasoningOff?: boolean | undefined;
   now?: (() => number) | undefined;
   signal?: AbortSignal | undefined;
   /**
@@ -290,9 +303,19 @@ interface TraceTarget {
   costMicros?: number | null;
 }
 
+/**
+ * The answer request with `reasoning: "off"` when the deps ask for it. The
+ * tool loop sends every round with the same request fields, so the switch
+ * reaches each call. Otherwise the request is returned as it was built.
+ */
+function withReasoning(deps: AnswerDeps, request: LlmRequest): LlmRequest {
+  return deps.reasoningOff === true ? { ...request, reasoning: "off" } : request;
+}
+
 async function tracePartFor(
   context: AnswerTraceContext,
   provider: LlmProvider,
+  reasoningOff: boolean,
   floor: number,
   facts: TraceFacts,
 ): Promise<TracePart> {
@@ -304,7 +327,10 @@ async function tracePartFor(
   return {
     kind: facts.kind,
     version: { ...context.version },
-    model: keySource === null ? null : { provider: provider.name, id: provider.model, keySource },
+    model:
+      keySource === null
+        ? null
+        : { provider: provider.name, id: provider.model, keySource, reasoningOff },
     retrieval: { floor, ms: facts.timing.retrievalMs, candidates: facts.candidates },
     timing: { firstTokenMs: facts.timing.firstTokenMs, totalMs: facts.timing.totalMs },
     tools: { rounds: facts.timing.toolRounds, ms: facts.timing.toolMs },
@@ -330,7 +356,13 @@ async function saveTrace(
   // A preview without a target has nowhere to keep it; a visitor reply never has one.
   if (target.preview !== (context.preview !== undefined)) return;
   try {
-    const part = await tracePartFor(context, deps.provider, floorFor(deps), facts);
+    const part = await tracePartFor(
+      context,
+      deps.provider,
+      deps.reasoningOff === true,
+      floorFor(deps),
+      facts,
+    );
     if (context.preview !== undefined) {
       await deps.tenant.previewTraces.put({
         id: target.messageId,
@@ -526,12 +558,15 @@ export async function* answerMessage(
     return;
   }
 
-  const request = buildPrompt({
-    behaviour: input.behaviour,
-    chunks,
-    history,
-    question: input.message,
-  });
+  const request = withReasoning(
+    deps,
+    buildPrompt({
+      behaviour: input.behaviour,
+      chunks,
+      history,
+      question: input.message,
+    }),
+  );
 
   // Atomically reserve conversation tool budget before dispatch so failed
   // answers and concurrent requests cannot exceed the per-conversation cap.
@@ -932,12 +967,15 @@ export async function* answerWithActionResults(
       return keptChunks(deps, hits, resolved);
     });
 
-    const request = buildPrompt({
-      behaviour: input.behaviour,
-      chunks,
-      history,
-      question: questionMsg.content,
-    });
+    const request = withReasoning(
+      deps,
+      buildPrompt({
+        behaviour: input.behaviour,
+        chunks,
+        history,
+        question: questionMsg.content,
+      }),
+    );
 
     const llmResults: LlmToolResult[] = [];
     const resolvedPriorCalls: StoredToolCall[] = priorCalls.map((call) => {

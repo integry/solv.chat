@@ -314,6 +314,48 @@ describe("How this answer was made", () => {
     expect(within(details).queryByText("Answer check")).toBeNull();
   });
 
+  it.each([
+    [true, "Off: asked to answer without thinking first"],
+    [false, "The model's usual setting"],
+  ] as const)(
+    "says in plain words whether the model thought first (reasoningOff %s)",
+    async (off, words) => {
+      installServer(() =>
+        Response.json(
+          trace({
+            trace: {
+              parts: [
+                part({
+                  model: {
+                    provider: "anthropic",
+                    id: "model-fast",
+                    keySource: "environment",
+                    reasoningOff: off,
+                  },
+                }),
+              ],
+              truncated: false,
+            },
+          }),
+        ),
+      );
+      render(<Conversation assistantId="ast_1" conversationId="cnv_1" onBack={() => {}} />);
+      const details = await openTrace();
+      const view = within(details);
+      expect(await view.findByText("Thinking before answering")).toBeTruthy();
+      expect(view.getByText(words)).toBeTruthy();
+      expect(view.queryByText(/reasoning/i)).toBeNull();
+    },
+  );
+
+  it("says nothing about thinking for a trace written before it was recorded", async () => {
+    installServer(() => Response.json(trace()));
+    render(<Conversation assistantId="ast_1" conversationId="cnv_1" onBack={() => {}} />);
+    const details = await openTrace();
+    await within(details).findByText("Whole answer");
+    expect(within(details).queryByText("Thinking before answering")).toBeNull();
+  });
+
   it("says no details were recorded for an answer from before traces", async () => {
     installServer(() => Response.json(trace({ trace: null, firstTokenMs: null, totalMs: null })));
     render(<Conversation assistantId="ast_1" conversationId="cnv_1" onBack={() => {}} />);

@@ -251,6 +251,8 @@ export async function resolveChatProviders(
   tier: Tier;
   /** The retrieval score floor, `SOLV_SCORE_FLOOR` or the default. */
   scoreFloor: number;
+  /** Whether answers ask the model not to reason (`answerReasoningOff`). */
+  reasoningOff: boolean;
 }> {
   const resolved = await resolveProviderSettings(env.DB, env, orgId);
   const providerKind = overrides?.providerKind ?? resolved.llmProvider.value;
@@ -290,7 +292,20 @@ export async function resolveChatProviders(
     providerKind,
     tier,
     scoreFloor: scoreFloorFrom(env),
+    reasoningOff: answerReasoningOff(providerKind, tier),
   };
+}
+
+/**
+ * Whether answers on this provider and tier are sent with `reasoning: "off"`.
+ * The fast tier (Anthropic and OpenAI) only phrases content that retrieval
+ * has already found, so reasoning there would delay the first word, be billed
+ * as output and share the answer's output limit. The balanced tier keeps the
+ * model's default. OpenRouter has a configured model, not a tier, and is left
+ * at its default too.
+ */
+export function answerReasoningOff(providerKind: LlmProviderName, tier: Tier): boolean {
+  return providerKind !== "openrouter" && tier === "fast";
 }
 
 /**
@@ -378,8 +393,17 @@ async function resolveAnswerDeps(params: {
   preview: boolean;
 }) {
   const { env, seams, overrides } = params;
-  const { embedder, retriever, provider, model, settings, providerKind, tier, scoreFloor } =
-    await resolveChatProviders(env, seams, params.orgId, overrides);
+  const {
+    embedder,
+    retriever,
+    provider,
+    model,
+    settings,
+    providerKind,
+    tier,
+    scoreFloor,
+    reasoningOff,
+  } = await resolveChatProviders(env, seams, params.orgId, overrides);
 
   const actionRunner = params.preview
     ? null
@@ -470,6 +494,7 @@ async function resolveAnswerDeps(params: {
     model,
     usage: seams.usage,
     scoreFloor,
+    reasoningOff,
     runners,
     trace,
     review,

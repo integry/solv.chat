@@ -37,6 +37,11 @@ const KEY_SOURCE_LABELS: Record<NonNullable<AnswerTracePart["model"]>["keySource
   managed: "key included with your plan",
 };
 
+/** Whether the model was asked to answer without thinking first, in plain words. */
+export function reasoningText(off: boolean): string {
+  return off ? "Off: asked to answer without thinking first" : "The model's usual setting";
+}
+
 /** Why the answer check gave no result, in plain words. */
 export const REVIEW_FAILURE_LABELS: Record<ReviewFailure, string> = {
   review_timeout: "It failed after a retry: the last try took too long.",
@@ -184,6 +189,12 @@ function TracePartView({
             ? "No model was asked: nothing relevant was found."
             : `${PROVIDER_LABELS[part.model.provider]} ${part.model.id} (${KEY_SOURCE_LABELS[part.model.keySource]})`}
         </dd>
+        {part.model?.reasoningOff !== undefined && (
+          <>
+            <dt>Thinking before answering</dt>
+            <dd>{reasoningText(part.model.reasoningOff)}</dd>
+          </>
+        )}
         <dt>Searching your content</dt>
         <dd>{formatMs(part.retrieval.ms)}</dd>
         <dt>First words shown</dt>

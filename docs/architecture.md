@@ -447,6 +447,14 @@ The Monitor screens read:
 4. Call the model through the provider interface, streaming. If tools are allowed,
    run the MCP loop: the model asks for a tool, the Worker calls the MCP server,
    the result goes back as untrusted data.
+   On the fast tier (Anthropic and OpenAI) every call of the answer is sent
+   with `reasoning: "off"` (see "Providers"): the first call, each round of
+   the tool loop, a page-action continuation, and the admin's "Try it" and
+   test runs, so previews behave like the live answer. The content is already
+   retrieved and the fast model only has to phrase it; reasoning would delay
+   the first word, be billed as output and share the answer's 1,024-token
+   limit, so a long think could cut the answer short. The balanced tier and
+   OpenRouter keep the model's default. There is no setting for it.
 5. Persist messages, citations, token counts, cost and the two timings; update
    `usage_daily`. After the `done` event, in the same deferred pipeline, write
    the answer's trace.
@@ -729,7 +737,11 @@ the trace reads.
 - The provider and model id actually called, or none when nothing relevant
   was found and no model was asked, and where the model key came from:
   `stored` (Settings → Providers), `environment` (Worker secret) or `managed`
-  (`KeyProvider.managed`). Never any key material.
+  (`KeyProvider.managed`). Never any key material. Beside them, `reasoningOff`:
+  whether the answer was sent with `reasoning: "off"` (the fast tier). It
+  records what was asked; a model that refused the switch answered with its
+  default (see "Providers"). Traces from before it was recorded have no
+  value.
 - Timing in milliseconds: retrieval (embedding, vector query and D1 lookup),
   first token sent to the visitor, total; tool rounds run and their total time.
 - Stop reason: `complete`, `length` (the model hit its output limit),
@@ -767,7 +779,9 @@ under each result that has one (`traceId`), labelled "The draft (Try it)" or
 The admin's Conversation screen shows it under each assistant reply as "How
 this answer was made", closed and loaded on first open: the content it was
 given, ranked, with scores and a plain label for what was not used; the
-settings version with a link to History; the model; the three timings; tokens
+settings version with a link to History; the model, and under "Thinking
+before answering" either "Off: asked to answer without thinking first" or
+"The model's usual setting" (nothing for older traces); the three timings; tokens
 and cost. Chunk ids are resolved to the document's current title and text when
 the view is read, and a chunk that no longer exists says "This content has
 since changed or been removed." Replies from before traces say "No details
@@ -802,8 +816,11 @@ OpenAI embeddings (default) and OpenRouter embeddings (`SOLV_EMBEDDINGS_PROVIDER
 fixed to `openai/text-embedding-3-small` at 1536 dimensions). `Retriever` has one: Vectorize; the interface exists so
 Cloudflare AI Search can be added as a second backend.
 
-A request may ask for `reasoning: "off"` (the answer review does; visitor
-answers do not, and their request body is unchanged). Each provider sends its
+A request may ask for `reasoning: "off"`. The answer review always does;
+visitor answers do on the fast tier of Anthropic and OpenAI only (see
+"Answering a message"). Balanced-tier and OpenRouter answers do not, and their
+request body is unchanged: OpenRouter has a configured model id, not a tier,
+so there is no fast model to apply the rule to. Each provider sends its
 own switch: Anthropic `thinking: {type: "disabled"}`, or `{type:
 "between_tools"}` on Claude Sonnet 5.5, and nothing on models whose thinking
 is always on (Opus 5.5, Fable, Mythos); OpenAI and OpenRouter `reasoning:
@@ -811,7 +828,8 @@ is always on (Opus 5.5, Fable, Mythos); OpenAI and OpenRouter `reasoning:
 more without it and with an output limit of at least
 `REASONING_FALLBACK_MIN_OUTPUT_TOKENS`, since on every provider reasoning
 counts against the output limit; the provider instance then skips the switch
-(`providers/reasoning.ts`). A reply that reasoned and then wrote no text and
+(`providers/reasoning.ts`). For an answer that limit is 4,096 instead of
+1,024, so a refused switch still produces an answer, never an error. A reply that reasoned and then wrote no text and
 called no tool is not a successful empty answer: the provider reports its
 usage and throws `EmptyReplyError` (a retryable `ProviderError`).
 

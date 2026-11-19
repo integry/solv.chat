@@ -187,6 +187,8 @@ export interface AnswerTracePart {
     provider: "anthropic" | "openai" | "openrouter";
     id: string;
     keySource: "stored" | "environment" | "managed";
+    /** Sent with reasoning off (the fast tier). Absent on older traces. */
+    reasoningOff?: boolean;
   } | null;
   retrieval: { floor: number; ms: number; candidates: AnswerTraceCandidate[] };
   timing: { firstTokenMs: number | null; totalMs: number };
