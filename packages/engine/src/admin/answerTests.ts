@@ -154,6 +154,8 @@ export interface RunDeps {
   model?: ModelInfo | undefined;
   usage: UsageSink;
   limits: Limits;
+  /** The retrieval score floor; absent, the default. */
+  scoreFloor?: number | undefined;
   secretKey?: string | undefined;
   fetchImpl?: typeof fetch | undefined;
   runners?: readonly ToolRunner[] | undefined;
@@ -412,6 +414,7 @@ export async function runAnswerTests(
           provider: deps.provider,
           model: deps.model,
           usage: deps.usage,
+          scoreFloor: deps.scoreFloor,
           runners,
           signal: controller.signal,
           // Kept apart from visitor replies, marked as a test run of this run.

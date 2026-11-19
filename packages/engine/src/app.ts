@@ -8,6 +8,7 @@ import {
   publicConfigRoute,
   resolveChatProviders,
 } from "./chat/route.js";
+import type { ScoreFloorEnv } from "./chat/scoreFloor.js";
 import { forPrincipal, forScheduledSync, type Tenant } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
 import { plainPageFetcher } from "./ingest/pageFetcher.js";
@@ -54,7 +55,7 @@ function widgetAsset(): Response {
   });
 }
 
-export interface Env extends ProviderEnv {
+export interface Env extends ProviderEnv, ScoreFloorEnv {
   DB: D1Database;
   VECTORS: VectorizeIndex;
   DOCS: R2Bucket;

@@ -18,7 +18,7 @@ function part(kind: TracePart["kind"], candidates: number, idLength = 20): Trace
     version: { id: "ver_1", state: "published" },
     model: { provider: "openrouter", id: "vendor/model", keySource: "environment" },
     retrieval: {
-      floor: 0.3,
+      floor: 0.2,
       ms: 12,
       candidates: Array.from({ length: candidates }, () => ({
         // Engine ids are a prefix and 20 characters.
@@ -89,7 +89,7 @@ describe("chat/trace bounds", () => {
         { chunkId: "gone", score: 0.8 },
         { chunkId: "hit", score: 0.9 },
       ],
-      0.3,
+      0.2,
       [
         { chunkId: "hit", documentId: "doc_hit" },
         { chunkId: "low", documentId: "doc_low" },
@@ -99,6 +99,25 @@ describe("chat/trace bounds", () => {
       { chunkId: "hit", documentId: "doc_hit", score: 0.9, used: true },
       { chunkId: "gone", documentId: null, score: 0.8, used: false, dropped: "not_found" },
       { chunkId: "low", documentId: "doc_low", score: 0.1, used: false, dropped: "below_floor" },
+    ]);
+  });
+
+  it("marks a chunk under the floor used when it was kept in the same-document margin", () => {
+    const candidates = traceCandidates(
+      [
+        { chunkId: "hit", score: 0.31 },
+        { chunkId: "near", score: 0.17 },
+      ],
+      0.2,
+      [
+        { chunkId: "hit", documentId: "doc_hit" },
+        { chunkId: "near", documentId: "doc_hit" },
+      ],
+      new Set(["hit", "near"]),
+    );
+    expect(candidates).toEqual([
+      { chunkId: "hit", documentId: "doc_hit", score: 0.31, used: true },
+      { chunkId: "near", documentId: "doc_hit", score: 0.17, used: true },
     ]);
   });
 

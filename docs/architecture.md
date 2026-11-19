@@ -428,7 +428,16 @@ The Monitor screens read:
 
 1. Load the published version (or the draft, for the admin "Try it" pane).
 2. Retrieve: embed the question, query the retriever for the assistant, keep the
-   top chunks above a score floor (top 6, floor 0.3; chosen for v1, not tuned).
+   top chunks above a score floor (top 6, floor 0.2). The floor only keeps out
+   unrelated content: the model already declines when given content that does
+   not hold the answer. Measured with `text-embedding-3-small` against short
+   owner-written answers, answerable questions scored 0.25 to 0.43 and unrelated
+   ones about 0, so 0.2 sits in the gap (v1's 0.3 refused answerable questions;
+   OpenAI documents no absolute threshold). A chunk up to 0.05 under the floor
+   is kept too, but only when a chunk of the same document cleared it; when
+   nothing clears the floor nothing is kept, so off-topic questions still find
+   nothing. An instance may set `SOLV_SCORE_FLOOR` (0 to 0.9); the trace records
+   the floor used.
 3. Build the prompt: fixed safety frame, the owner's behaviour fields, retrieved
    chunks with their URLs (capped at 2000 characters each), the last 6 turns.
 4. Call the model through the provider interface, streaming. If tools are allowed,
@@ -608,7 +617,8 @@ the trace reads.
 - Retrieval: every candidate the retriever returned (at most 20; `TOP_K` is 6
   today), best first, with chunk id, document id, similarity score (four
   decimal places), and whether it was passed to the model or dropped:
-  `below_floor` (under the score floor, which is recorded too) or `not_found`
+  `below_floor` (under the score floor this answer used, which is recorded
+  too; a chunk kept in the same-document margin is marked passed) or `not_found`
   (the vector matched but its chunk is no longer in D1). There is no prompt
   budget that drops chunks today, so no reason exists for one.
 - The version that answered (its id, and `published` for a visitor, `draft`
