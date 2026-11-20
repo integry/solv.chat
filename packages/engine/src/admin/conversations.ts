@@ -43,6 +43,12 @@ export interface ConversationTurn {
   role: MessageRole;
   content: string;
   citations: Citation[];
+  /**
+   * Whether the visitor saw `citations` under the reply. False when the
+   * version had "Show sources in answers" off: the admin then shows them as
+   * the content the answer used.
+   */
+  citationsShown: boolean;
   toolCalls: ConversationToolCall[] | null;
   answered: boolean;
   /** For a reply, what the answer review decided; null when it was not reviewed. */
@@ -278,6 +284,7 @@ export async function getConversation(
       role: msg.role,
       content: msg.content,
       citations: msg.citations,
+      citationsShown: msg.citationsShown,
       toolCalls: msg.role === "assistant" ? mapToolCalls(msg.toolCalls) : null,
       answered: msg.answered,
       outcome: msg.role === "assistant" ? msg.outcome : null,

@@ -216,6 +216,7 @@ function behaviourEqual(a: BehaviourConfig, b: BehaviourConfig): boolean {
     a.greeting === b.greeting &&
     a.persona === b.persona &&
     a.fallbackText === b.fallbackText &&
+    a.showSources === b.showSources &&
     sameStrings(a.suggestedQuestions, b.suggestedQuestions)
   );
 }
@@ -238,6 +239,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const [persona, setPersona] = useState("");
   const [fallbackText, setFallbackText] = useState("");
   const [questions, setQuestions] = useState<string[]>([]);
+  const [showSources, setShowSources] = useState(true);
   const [initializedFor, setInitializedFor] = useState<string | null>(null);
 
   // "See History" on a conversation's answer details opens it with `history=open`.
@@ -256,8 +258,8 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const mutation = useAssistantMutation(assistantId);
   const { saving, publishing, busy } = mutation;
 
-  const latestRef = useRef({ greeting, persona, fallbackText, questions });
-  latestRef.current = { greeting, persona, fallbackText, questions };
+  const latestRef = useRef({ greeting, persona, fallbackText, questions, showSources });
+  latestRef.current = { greeting, persona, fallbackText, questions, showSources };
   const savedBehaviourRef = useRef(savedBehaviour);
   savedBehaviourRef.current = savedBehaviour;
   const lastTickRef = useRef(mutation.tick);
@@ -268,6 +270,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     persona: string;
     fallbackText: string;
     questions: string[];
+    showSources: boolean;
   } | null>(null);
   const prevSavedBehaviourRef = useRef<BehaviourConfig | undefined>(undefined);
   // What the fields held when Publish was pressed. Publishing replaces the
@@ -275,7 +278,13 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   // a field the owner changed while the publish was in flight keeps its edit.
   const publishSnapshotRef = useRef<{
     assistantId: string;
-    fields: { greeting: string; persona: string; fallbackText: string; questions: string[] };
+    fields: {
+      greeting: string;
+      persona: string;
+      fallbackText: string;
+      questions: string[];
+      showSources: boolean;
+    };
   } | null>(null);
 
   useEffect(() => {
@@ -304,6 +313,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
             persona: saved.persona,
             fallbackText: saved.fallbackText,
             questions: questionsSame ? latest.questions : saved.suggestedQuestions,
+            showSources: saved.showSources,
           },
         };
       }
@@ -344,6 +354,9 @@ export function Behaviour({ assistantId }: BehaviourProps) {
       if (!keep || sameStrings(latest.questions, keep.questions)) {
         setQuestions(savedBehaviour.suggestedQuestions);
       }
+      if (!keep || latest.showSources === keep.showSources) {
+        setShowSources(savedBehaviour.showSources);
+      }
       setInitializedFor(key);
     } else if (
       publishSnapshotRef.current !== null &&
@@ -370,6 +383,9 @@ export function Behaviour({ assistantId }: BehaviourProps) {
       if (!snapshot || sameStrings(latestRef.current.questions, snapshot.questions)) {
         setQuestions(savedBehaviour.suggestedQuestions);
       }
+      if (!snapshot || latestRef.current.showSources === snapshot.showSources) {
+        setShowSources(savedBehaviour.showSources);
+      }
       setInitializedFor(key);
     }
   }, [assistantId, draft.value?.draft.id, initializedFor, savedBehaviour]);
@@ -379,6 +395,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     persona,
     fallbackText,
     suggestedQuestions: cleanQuestions(questions),
+    showSources,
   };
   const unsaved =
     savedBehaviour !== undefined &&
@@ -418,7 +435,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     setFormError(null);
     setFailedRun(null);
 
-    const submitted = { greeting, persona, fallbackText, questions };
+    const submitted = { greeting, persona, fallbackText, questions, showSources };
 
     try {
       await mutation.run("saving", async () => {
@@ -439,6 +456,9 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         }
         if (sameStrings(latestRef.current.questions, submitted.questions)) {
           setQuestions(res.draft.config.behaviour.suggestedQuestions);
+        }
+        if (latestRef.current.showSources === submitted.showSources) {
+          setShowSources(res.draft.config.behaviour.showSources);
         }
         toast.success("Draft saved.");
       });
@@ -627,6 +647,35 @@ export function Behaviour({ assistantId }: BehaviourProps) {
             disabled={saving}
             error={questionError}
           />
+        </FieldGroup>
+
+        <FieldGroup
+          id="behaviour-sources-group"
+          title="Sources"
+          help="Links to the pages an answer came from, shown under the answer."
+        >
+          <div className="field">
+            <label className="checkbox-label">
+              <input
+                id="behaviour-show-sources"
+                type="checkbox"
+                checked={showSources}
+                disabled={saving}
+                aria-describedby="behaviour-show-sources-hint"
+                onChange={(e) => setShowSources(e.target.checked)}
+              />
+              <span>Show sources in answers</span>
+            </label>
+            <p id="behaviour-show-sources-hint" className="field-hint">
+              When this is off, answers have no numbers like [1] and no list of links. You still see
+              which content each answer used.
+            </p>
+            {fieldErrors["behaviour.showSources"] && (
+              <p className="field-error" role="alert">
+                {fieldErrors["behaviour.showSources"]}
+              </p>
+            )}
+          </div>
         </FieldGroup>
 
         <div className="actions form-footer">

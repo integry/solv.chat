@@ -141,6 +141,11 @@ export interface ConversationTurn {
   role: "user" | "assistant";
   content: string;
   citations: Citation[];
+  /**
+   * False when the visitor saw no citations ("Show sources in answers" was
+   * off): `citations` then lists the content the answer used. Absent means shown.
+   */
+  citationsShown?: boolean;
   toolCalls?: ConversationToolCall[] | null;
   answered: boolean;
   /** For a reply, what the answer review decided; null or absent when it was not reviewed. */

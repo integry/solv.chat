@@ -110,6 +110,9 @@ from the auth seam and pass it down.
   `declined` | `off_topic` | `wants_human`, or NULL when not reviewed) and
   outcome_confidence (0-1, NULL when the reviewer cannot give one; nothing
   reads it yet). See "Answer review".
+  For assistant replies, also citations_shown (1 when the visitor was shown
+  the citations, 0 when the version had "Show sources in answers" off; 1 for
+  rows written before migration 0034). The citations are stored either way.
   For visitor questions, topic_id (the question's topic, or NULL: not
   reviewed, or its topic was deleted; indexed on its own, so deleting a topic
   finds its questions without reading every message). See "Topics".
@@ -573,6 +576,7 @@ The Monitor screens read:
      chunks fill the set, best first.
 3. Build the prompt: fixed safety frame, the owner's behaviour fields, retrieved
    chunks with their URLs (capped at 2000 characters each), the last 6 turns.
+   The frame depends on "Show sources in answers" (below).
 4. Call the model through the provider interface, streaming. If tools are allowed,
    run the MCP loop: the model asks for a tool, the Worker calls the MCP server,
    the result goes back as untrusted data. Each call's output limit is the
@@ -600,6 +604,46 @@ The Monitor screens read:
    under Gaps.
 8. Once the reply is complete, stored and sent, hand it to the answer review
    (below), which runs as separate deferred work.
+
+## Sources in answers
+
+"Show sources in answers" (`behaviour.showSources`, on by default; a version
+stored before it existed reads as on) is a behaviour setting like the others:
+edited on Behaviour, part of the draft and the publish diff, followed by
+visitors once published and by "Try it" and test runs from the draft.
+
+- **On.** The frame asks for `[n]` markers after the sentences they support,
+  the stream is passed on untouched, and `citation` events follow the text:
+  the public response is exactly what it was before the setting.
+- **Off.** The frame (`SAFETY_FRAME_NO_CITATIONS`) asks for no markers and no
+  source list. Markers that still appear are taken out in the engine
+  (`chat/citationMarkers.ts`), from the streamed tokens and from the stored
+  text, so an API client gets the same as the widget: the end of the stream
+  that could still be a marker split across chunks is held back until the
+  next chunk (or the end) settles it, however long the unfinished marker is,
+  so nothing sent is ever taken back. Only numbers 1 to `TOP_K` are taken,
+  anywhere in prose (also straight after a word, "Password[1]") but never
+  inside Markdown code, an inline span or a fenced or indented block, also
+  one within a list item or a quote (so `items[1]` stays), never a Markdown
+  link and never in a link's destination (an inline link's, an image's, an
+  autolink's or a reference definition's, so `report[1].pdf` in a link's
+  address stays), with the spaces before them. Lines end at LF, CRLF or a
+  bare CR alike, as the widget reads them, and keep the endings the model
+  wrote. No `citation` event is sent,
+  so the widget shows no sources block. Page actions do not depend on
+  citations and work as before.
+- **Kept either way.** Everything the owner sees: the trace, the stored
+  citations, `message_documents` (Reports' "Content used most / never used"
+  count the same), and the conversation view, which shows a reply's pages
+  under "Used content" instead of "Sources" when the visitor saw none
+  (`citationsShown: false` on the turn). A test run's "cites" check reads the
+  pages the answer used, and says "Used" instead of "Cited".
+- **No talk about sources.** Both frames tell the model never to write about
+  its inputs ("Source 1", "(Source 2)", "the sources say", "according to the
+  provided content"); with sources on, the `[n]` marker is the only reference.
+  This rests on the prompt alone: no post-check rewrites such wording, because
+  a site's own text can say "source" ("Source 2" may be a product), and the
+  sentence around it cannot be cut out without changing what it says.
 
 ## Answer review
 
