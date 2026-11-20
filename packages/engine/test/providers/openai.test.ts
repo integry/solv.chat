@@ -720,4 +720,48 @@ describe("openaiProvider", () => {
       expect(error).toBeInstanceOf(EmptyReplyError);
     });
   });
+
+  describe("stop reasons", () => {
+    // `output_tokens` includes reasoning (`output_tokens_details.reasoning_tokens`).
+    function reasonedThenText(terminal: string): string {
+      return [
+        'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"reasoning","id":"rs_1"}}\n\n',
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"CORS does not replace"}\n\n',
+        terminal,
+      ].join("");
+    }
+    const usage = {
+      input_tokens: 40,
+      output_tokens: 1024,
+      output_tokens_details: { reasoning_tokens: 650 },
+    };
+
+    it.each([
+      ["max_output_tokens", "length"],
+      ["content_filter", "refused"],
+    ] as const)("maps an incomplete %s to %s", async (reason, neutral) => {
+      const terminal = `event: response.incomplete\ndata: ${JSON.stringify({ type: "response.incomplete", response: { status: "incomplete", incomplete_details: { reason }, usage } })}\n\n`;
+      const fetchImpl = vi.fn(async () => sseResponse(reasonedThenText(terminal)));
+      const provider = openaiProvider({ apiKey: "k", model: "gpt-6-luna", fetchImpl });
+      const chunks = await collect(provider.stream(SAMPLE_REQUEST));
+      expect(chunks).toEqual([
+        { kind: "text", text: "CORS does not replace" },
+        // Billed output, reasoning included: nothing is subtracted.
+        { kind: "usage", tokensIn: 40, tokensOut: 1024, stopReason: neutral },
+      ]);
+    });
+
+    it("maps a completed response to end and counts reasoning tokens as output", async () => {
+      const terminal = `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { status: "completed", output: [{ type: "reasoning" }, { type: "message" }], usage } })}\n\n`;
+      const fetchImpl = vi.fn(async () => sseResponse(reasonedThenText(terminal)));
+      const provider = openaiProvider({ apiKey: "k", model: "gpt-6-luna", fetchImpl });
+      const chunks = await collect(provider.stream(SAMPLE_REQUEST));
+      expect(chunks.at(-1)).toEqual({
+        kind: "usage",
+        tokensIn: 40,
+        tokensOut: 1024,
+        stopReason: "end",
+      });
+    });
+  });
 });

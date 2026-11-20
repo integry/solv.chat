@@ -59,7 +59,9 @@ function ReviewFailureNote({ failure }: { failure: ReviewFailure | null | undefi
 
 const STOP_LABELS: Record<AnswerTracePart["stop"], string> = {
   complete: "Finished",
-  length: "Cut off at the length limit",
+  length: "Cut short at the length limit",
+  tool: "Stopped while asking for a tool",
+  refused: "The AI model declined to go on",
   spend_cap: "Stopped by the daily spend limit",
   error: "Stopped by an error",
   paused: "Waited for the visitor's page",
@@ -213,7 +215,7 @@ function TracePartView({
           </>
         )}
         <dt>Ended</dt>
-        <dd>{STOP_LABELS[part.stop]}</dd>
+        <dd>{STOP_LABELS[part.stop] ?? "Finished"}</dd>
       </dl>
     </section>
   );

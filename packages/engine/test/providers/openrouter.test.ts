@@ -62,7 +62,7 @@ describe("openrouterProvider", () => {
     expect(chunks).toEqual([
       { kind: "text", text: "Hello" },
       { kind: "text", text: " world" },
-      { kind: "usage", tokensIn: 11, tokensOut: 5, costMicros: 1230 },
+      { kind: "usage", tokensIn: 11, tokensOut: 5, costMicros: 1230, stopReason: "end" },
     ]);
 
     expect(capturedUrl).toBe("https://openrouter.ai/api/v1/chat/completions");
@@ -95,7 +95,7 @@ describe("openrouterProvider", () => {
 
     expect(await collect(freeModel.stream(SAMPLE_REQUEST))).toEqual([
       { kind: "text", text: "Free" },
-      { kind: "usage", tokensIn: 10, tokensOut: 2, costMicros: 0 },
+      { kind: "usage", tokensIn: 10, tokensOut: 2, costMicros: 0, stopReason: "end" },
     ]);
 
     const noCostReported = openrouterProvider({
@@ -113,7 +113,7 @@ describe("openrouterProvider", () => {
 
     expect(await collect(noCostReported.stream(SAMPLE_REQUEST))).toEqual([
       { kind: "text", text: "Hi" },
-      { kind: "usage", tokensIn: 10, tokensOut: 2 },
+      { kind: "usage", tokensIn: 10, tokensOut: 2, stopReason: "end" },
     ]);
   });
 
@@ -363,8 +363,42 @@ describe("openrouterProvider", () => {
       } catch (err) {
         error = err;
       }
-      expect(chunks).toEqual([{ kind: "usage", tokensIn: 11, tokensOut: 64 }]);
+      expect(chunks).toEqual([
+        { kind: "usage", tokensIn: 11, tokensOut: 64, stopReason: "length" },
+      ]);
       expect(error).toBeInstanceOf(EmptyReplyError);
     });
+  });
+
+  describe("stop reasons", () => {
+    it.each([
+      ["stop", "end"],
+      ["length", "length"],
+      ["content_filter", "refused"],
+      ["tool_calls", "tools"],
+      ["some_native_value", "end"],
+    ] as const)(
+      "maps finish_reason %s to %s and counts reasoning tokens as output",
+      async (raw, neutral) => {
+        const fetchImpl = vi.fn(async () =>
+          sseResponse(
+            [
+              'data: {"choices":[{"delta":{"reasoning":"thinking"},"finish_reason":null}]}\n\n',
+              'data: {"choices":[{"delta":{"content":"Here is"},"finish_reason":null}]}\n\n',
+              `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: raw }] })}\n\n`,
+              'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":1024,"completion_tokens_details":{"reasoning_tokens":600},"cost":0.001}}\n\n',
+              "data: [DONE]\n\n",
+            ].join(""),
+          ),
+        );
+        const provider = openrouterProvider({ apiKey: "k", model: "vendor/model", fetchImpl });
+        const chunks = await collect(provider.stream(SAMPLE_REQUEST));
+        expect(chunks).toEqual([
+          { kind: "text", text: "Here is" },
+          // completion_tokens already includes the 600 reasoning tokens.
+          { kind: "usage", tokensIn: 11, tokensOut: 1024, costMicros: 1000, stopReason: neutral },
+        ]);
+      },
+    );
   });
 });

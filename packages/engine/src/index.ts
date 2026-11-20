@@ -14,7 +14,11 @@ export {
   TOP_K,
 } from "./chat/answer.js";
 export { type CheckFailure, type CheckFailureReason, runPublicChecks } from "./chat/checks.js";
+export { CUT_SHORT_LINE } from "./chat/cutShort.js";
 export {
+  ANSWER_REASONING_TOKENS,
+  ANSWER_VISIBLE_TOKENS,
+  answerOutputLimit,
   type BuildPromptInput,
   buildPrompt,
   MAX_CHUNK_CHARS,
