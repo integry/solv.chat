@@ -5,6 +5,7 @@ import { type Embedder, embeddingCostMicros, type Retriever } from "../providers
 import type { UsageSink } from "../seams/types.js";
 import { chunkMarkdown, exceedsChunkBudget } from "./chunk.js";
 import type { IngestQueueMessage } from "./documents.js";
+import { INGEST_VERSION } from "./version.js";
 
 export interface IngestConsumerDeps {
   db: D1Database;
@@ -21,15 +22,101 @@ export interface IngestConsumerDeps {
 }
 
 /**
- * The text a chunk is embedded as: its heading path, then its body.
+ * How much heading context a chunk's embedding input may carry: at most this
+ * many characters of heading path per character of body, so the path is at
+ * most a third of the input.
  *
  * The chunker moves headings out of `text` into `headingPath`, so embedding
- * the body alone would drop the subject a section is about — and for a
- * hand-written entry the heading *is* the question. The path is short (a few
- * headings), so this stays well inside the embedding model's input limit.
+ * the body alone would drop the subject a section is about. But the path
+ * starts with the page's own title, which every chunk of the page shares:
+ * left unbounded, a 47-character footer list under "Test your MCP server
+ * online > Guides" was mostly title, and scored like the page's best answer
+ * for any question about testing an MCP server (issue #123). Bounding the
+ * share means the body always carries the vector: an empty or near-empty
+ * chunk gets almost no heading at all, so it cannot score on its title, and
+ * a full chunk (1200 characters) still gets its whole path. When the path is
+ * too long, its broadest headings go first (the page title, then the next),
+ * because the narrowest one says most about this chunk and least about its
+ * neighbours.
  */
-export function embeddingInput(chunk: { headingPath: string; text: string }): string {
-  return chunk.headingPath === "" ? chunk.text : `${chunk.headingPath}\n\n${chunk.text}`;
+export const MAX_HEADING_SHARE = 0.5;
+
+/**
+ * The text a chunk is embedded as: its heading path (bounded, see
+ * `MAX_HEADING_SHARE`), then its body. `headingIsContent` lifts the bound
+ * for a written answer, whose heading is the owner's question: owner-written
+ * content, not a page's title, and the very words a visitor asks; and for
+ * a document that is a single chunk, whose headings no other chunk shares.
+ */
+export function embeddingInput(
+  chunk: { headingPath: string; text: string },
+  options: { headingIsContent?: boolean | undefined } = {},
+): string {
+  const context =
+    options.headingIsContent === true
+      ? chunk.headingPath
+      : boundedHeadingPath(chunk.headingPath, Math.floor(chunk.text.length * MAX_HEADING_SHARE));
+  return context === "" ? chunk.text : `${context}\n\n${chunk.text}`;
+}
+
+/** The narrowest headings of `path` (joined with " > ") that fit in `budget` characters. */
+export function boundedHeadingPath(path: string, budget: number): string {
+  if (path.length <= budget) return path;
+  const headings = path.split(" > ");
+  while (headings.length > 0 && headings.join(" > ").length > budget) headings.shift();
+  return headings.join(" > ");
+}
+
+/** A chunk ready to store, with the text its vector is made from. */
+interface IndexedChunk {
+  id: string;
+  ordinal: number;
+  text: string;
+  headingPath: string;
+  embedText: string;
+}
+
+/**
+ * The chunks to store for a document. A written answer (an `entry`) also
+ * gets one chunk embedded as its question alone, holding the same text as
+ * its first chunk: a visitor who asks the owner's question in the owner's
+ * words then matches it almost exactly, however long the answer is, where
+ * the question would be diluted in a vector of the whole answer. Selection
+ * keeps one of the two (they are duplicates; see `selectChunks`).
+ */
+export function chunksToIndex(
+  markdown: string,
+  document: { title: string },
+  sourceKind: "push" | "sitemap" | "entry",
+): IndexedChunk[] {
+  const entry = sourceKind === "entry";
+  const parts = chunkMarkdown(markdown);
+  // A document that is one chunk has nothing to share its headings with:
+  // its title is its subject, not a label repeated over its other chunks
+  // ("# How long is the refund window?" over "30 days."), so it keeps them.
+  const headingIsContent = entry || parts.length === 1;
+  const chunks: IndexedChunk[] = parts.map((chunk) => {
+    const headingPath = chunk.headingPath.join(" > ");
+    return {
+      id: newId("chk"),
+      ordinal: chunk.ordinal,
+      text: chunk.text,
+      headingPath,
+      embedText: embeddingInput({ headingPath, text: chunk.text }, { headingIsContent }),
+    };
+  });
+  const [first] = chunks;
+  const question = document.title.trim();
+  if (entry && first !== undefined && question !== "") {
+    chunks.push({
+      id: newId("chk"),
+      ordinal: chunks.length,
+      text: first.text,
+      headingPath: first.headingPath,
+      embedText: question,
+    });
+  }
+  return chunks;
 }
 
 function isIngestMessage(body: unknown): body is IngestQueueMessage {
@@ -83,7 +170,10 @@ async function processIngestMessage(
     return;
   }
 
-  if (document.indexedHash === contentHash) {
+  // Indexed, and by the current pipeline. A document indexed by an older
+  // version is rebuilt from its stored text (a re-index; see
+  // `ingest/version.ts`), once: the commit records the version.
+  if (document.indexedHash === contentHash && document.ingestVersion >= INGEST_VERSION) {
     message.ack();
     return;
   }
@@ -95,7 +185,7 @@ async function processIngestMessage(
   }
 
   try {
-    await indexDocument(message, deps, tenant, document, source.assistantId, orgId);
+    await indexDocument(message, deps, tenant, document, source, orgId);
   } catch (err) {
     // Recorded on every failed attempt, so the admin shows "Failed" rather
     // than "Indexing…" while the Queue retries; a later success marks the
@@ -116,9 +206,10 @@ async function indexDocument(
   deps: IngestConsumerDeps,
   tenant: Tenant,
   document: DocumentRow,
-  assistantId: string,
+  source: { assistantId: string; kind: "push" | "sitemap" | "entry" },
   orgId: string,
 ): Promise<void> {
+  const { assistantId } = source;
   const contentHash = document.contentHash;
   const object = document.bodyKey !== null ? await deps.docs.get(document.bodyKey) : null;
   if (object === null) {
@@ -143,29 +234,27 @@ async function indexDocument(
     message.ack();
     return;
   }
-  const chunks = parts.map((chunk) => ({
-    id: newId("chk"),
-    ordinal: chunk.ordinal,
-    text: chunk.text,
-    headingPath: chunk.headingPath.join(" > "),
-  }));
+  const chunks = chunksToIndex(markdown, document, source.kind);
 
   let vectors: number[][] = [];
   if (chunks.length > 0) {
     // Metered per provider request, as soon as each one is billed: when a
     // later request or the upsert fails, the message retries and pays again
     // for the requests that succeeded, and the owner's figure should say so.
-    const embedded = await deps.embedder.embed(chunks.map(embeddingInput), async (tokens) => {
-      await deps.usage?.record({
-        orgId,
-        assistantId,
-        at: Date.now(),
-        messages: 0,
-        tokensIn: 0,
-        tokensOut: 0,
-        costMicros: embeddingCostMicros(tokens),
-      });
-    });
+    const embedded = await deps.embedder.embed(
+      chunks.map((chunk) => chunk.embedText),
+      async (tokens) => {
+        await deps.usage?.record({
+          orgId,
+          assistantId,
+          at: Date.now(),
+          messages: 0,
+          tokensIn: 0,
+          tokensOut: 0,
+          costMicros: embeddingCostMicros(tokens),
+        });
+      },
+    );
     vectors = embedded.vectors;
   }
 
@@ -187,7 +276,12 @@ async function indexDocument(
   }
 
   const previousChunkIds = (await tenant.documents.listChunks(document.id)).map((c) => c.id);
-  const committed = await tenant.documents.replaceChunks(document.id, chunks, contentHash);
+  const committed = await tenant.documents.replaceChunks(
+    document.id,
+    chunks.map(({ id, ordinal, text, headingPath }) => ({ id, ordinal, text, headingPath })),
+    contentHash,
+    INGEST_VERSION,
+  );
   const newChunkIds = chunks.map((c) => c.id);
 
   if (!committed) {

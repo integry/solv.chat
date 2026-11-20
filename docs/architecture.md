@@ -67,7 +67,10 @@ from the auth seam and pass it down.
   not be indexed: `too_long`, `missing_body` or `embedding_failed`; never a
   provider message), and for sitemap sync: etag, last_modified and
   sitemap_lastmod (validators from the last check) and sync_checked_at (when
-  a check last succeeded).
+  a check last succeeded), and ingest_version (the ingest version its chunks
+  were built with) and page_version (for a fetched page, the version of the
+  HTML extraction its stored text came from; NULL otherwise); see
+  "Re-indexing".
 - `source_syncs` — org_id, source_id, run_id, lease_until (set while a run
   holds the source), started_at, finished_at, outcome (`running` |
   `succeeded` | `partial` | `failed`), counts (added, updated, unchanged,
@@ -84,7 +87,9 @@ from the auth seam and pass it down.
 - `sync_org_refusals` — org_id, refused_at: when the auth seam last refused
   the org at a scheduler tick (see "Scheduled sitemap sync").
 - `chunks` — id, document_id, ordinal, text, heading_path. Vectors live in Vectorize
-  keyed by chunk id, with `org_id` and `assistant_id` as metadata filters.
+  keyed by chunk id, with `org_id` and `assistant_id` as metadata filters. A
+  written answer has one more chunk than its text needs: the same text as its
+  first chunk, embedded as its question alone (see "Chunks and embeddings").
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
   the widget's localStorage), started_at, page_url, last_message_at (when the
   newest message was written, `started_at` while there is none; kept by
@@ -209,7 +214,8 @@ hand as an entry. There is no crawler that follows links: only the pages a
 sitemap lists are ever fetched.
 
 Sitemap import fetches each chosen page through the `PageFetcher` seam (see
-"Extension seams"). The open build's fetcher validates every URL and redirect
+"Extension seams"), and the open build's extraction leaves page chrome out
+(see "Page text"). The open build's fetcher validates every URL and redirect
 hop as `https:` and checks the hostname via DNS-over-HTTPS before fetching,
 refusing private, loopback, or link-local addresses. A page with no text is
 written as its title alone; a response that is not a page or text (a PDF, an
@@ -234,6 +240,103 @@ names: refusing hostnames that resolve to private, loopback or link-local
 addresses is then the host's job. A host `PageFetcher` replaces the open
 build's fetcher for pages entirely, so every check for pages (https only,
 each redirect hop, the address check, size cap and timeout) is the host's.
+
+### Page text
+
+A fetched HTML page becomes text without the parts every page repeats
+(`extractHtml` in `ingest/htmlToMarkdown.ts`). Navigation, the site header
+and footer, sidebars and "related" lists repeat on every page; indexed, they
+are short chunks whose heading path is the page's own title, and they
+matched every question about that title better than the page's real text
+(issue #123).
+
+- The page's own content is used when it marks it: its `main` (or
+  `role="main"`), else its only `article`; a page with neither, or with
+  several articles, is read whole. A `main` that holds no text (filled by a
+  script) falls back to the whole page.
+- Landmark regions are left out: `nav`, `aside`, `footer`, `menu`, `dialog`
+  and `template` wherever they are; any element whose `role` is
+  `navigation`, `banner`, `contentinfo`, `complementary`, `search`, `menu` or
+  `menubar`; and a `header` outside an article, section or `main` (inside
+  one it is that content's own header, with its title). Matching is
+  nesting-aware, and an element never closed is kept rather than swallowing
+  the rest of the page.
+- What is left is split into blocks (paragraphs, lists, headings). A block
+  with at least two links and at most a tenth of its letters and digits
+  outside them is a list of links, not content, and is left out
+  (`LINK_BLOCK_MIN_LINKS`, `LINK_BLOCK_MAX_OUTSIDE_SHARE`). A list whose
+  items say something besides their link, prose with links, a paragraph that
+  is one link (an email address) and a heading that is a link (a permalink)
+  stay.
+
+Pushed and written content is Markdown the owner chose and is not filtered.
+
+### Chunks and embeddings
+
+Documents are cut by heading into chunks of at most 1,200 characters
+(`ingest/chunk.ts`), each with its heading path.
+
+- **Minimum size.** No chunk has less than `MIN_CHUNK_CHARS` (200) characters
+  of text unless it is its document's only chunk. A shorter one is merged
+  into a neighbour: one under the same heading path that the two fit
+  together within 1,200 characters (the previous, then the next), else the
+  previous, else the next; when neither fits, the same-heading one, the
+  previous or the next anyway (at most about 1,400 characters). The merged
+  chunk keeps the headings the two share as its path and writes the others
+  into its text, so no word or heading is lost. 200 is ours, from the data
+  in issue #123: the chrome chunks that won were 45 to 74 characters under
+  heading paths of 40 to 60, so the path was most of what was embedded;
+  200 characters is two or three sentences, over three times those, and a
+  sixth of a full chunk.
+- **Embedding input** (`embeddingInput` in `ingest/consumer.ts`). A chunk is
+  embedded as its heading path, then its text, with the path bounded to half
+  the text's length (a third of the input), dropping the broadest headings
+  first (the page title, then the next). The path tells the model what a
+  section is about, but the page title is shared by every chunk of a page; a
+  bounded share means the text always carries the vector, so a near-empty
+  chunk cannot score on its title. A written answer, and a document that is
+  one chunk, keep the whole path: there it is the subject, not a label
+  repeated over other chunks.
+- **Written answers' questions.** A written answer (an `entry`) also gets one
+  chunk embedded as its question alone, holding the same text as its first
+  chunk, so a visitor who asks the owner's question matches it almost
+  exactly however long the answer is. Retrieval keeps one of the two (they
+  are duplicates).
+
+### Re-indexing
+
+Each document records the ingest version it was built with (`ingest_version`)
+and, for a fetched page, the extraction version of its stored text
+(`page_version`); the engine's are `INGEST_VERSION` and `PAGE_TEXT_VERSION`
+in `ingest/version.ts` (2 for both since issue #123; everything stored
+before is 1, and `page_version` NULL). A version is bumped when a change to
+its part would make existing documents worse than new ones.
+
+- A document indexed by an older ingest version is rebuilt from its stored
+  text: the consumer, given a message for a document whose content is
+  indexed but by an older version, chunks and embeds it again and commits it
+  with the current version (the commit's guard admits it once, so two
+  messages for one document commit once). A push of unchanged text queues
+  such a document too, and still counts it as unchanged.
+- **Rebuild** (Sources, `POST …/assistants/:id/reindex`) queues every
+  document of the assistant whose content is indexed by an older ingest
+  version, up to 1,000 per request (`REINDEX_MAX_DOCUMENTS`; the answer
+  says how many are left). It asks `Limits` with `{ kind: "ingest" }`
+  first, like any ingest, and answers 429 when refused. Nothing is fetched,
+  so a page keeps the text its old extraction made until it is fetched
+  again. It costs what indexing the same content again costs: the
+  embedding of every chunk, metered through `UsageSink` as it is billed.
+  Pressing it again before the queue has run queues the same documents
+  again; each is still rebuilt once.
+- A **scheduled sync** fetches a page whose `page_version` or
+  `ingest_version` is older than the engine's in full, once: it is not
+  skipped on an unchanged `<lastmod>` and is asked without validators, so
+  no 304 keeps the old text. Unchanged text is then queued to be rebuilt
+  (and counted as unchanged); changed text is an ordinary update. The run's
+  caps, `Limits.checkSync` and the usage seam apply as to any run, so the
+  first syncs after an upgrade fetch every page of a source again (up to
+  the per-run page cap) and pay for their embeddings once. The one-time
+  import records the current `page_version` for the pages it fetched.
 
 ### Scheduled sitemap sync
 
@@ -289,7 +392,8 @@ A sitemap source can stay in step with its sitemap. Its `sync` setting is
 5. Removes the source's documents whose URL is no longer listed (that source
    only; vectors and R2 bodies are cleaned up as for a prune).
 6. Skips pages whose sitemap `<lastmod>` equals the one stored at the last
-   check, without fetching them, once their current content is indexed and
+   check, without fetching them, once their current content is indexed (by
+   the current versions; see "Re-indexing") and
    while that check (`documents.sync_checked_at`) is less than `recheckDays`
    old (7 days by default); a document whose indexing failed, or whose last
    check is older, is checked again with a conditional request. Without the
@@ -339,8 +443,8 @@ org; nothing of the org is read.
 
 D1 is the only source of truth for live chunks; readers resolve retrieved vector
 ids through D1, so leftover vectors and R2 objects can accumulate after failures.
-They cost storage only and never affect an answer. A later task adds a reindex
-command that rebuilds an assistant's index from D1.
+They cost storage only and never affect an answer. Rebuild (see
+"Re-indexing") rebuilds an assistant's chunks from their stored text.
 
 ## Admin API
 
@@ -408,7 +512,10 @@ The Monitor screens read:
   shows); sent when the latest run did not end `too_many_removals`, it is
   answered `409` with `code: "sync_anyway_not_offered"`. The schedule is changed with `PATCH /api/admin/sources/:id` and
   `{ "settings": { "sync": … } }`; `maxRemovePercent` and `recheckDays` the
-  same way.
+  same way. `GET …/assistants/:id/reindex` answers `{ outdated }`, how many
+  documents were indexed by an older ingest version, and
+  `POST …/assistants/:id/reindex` queues them ("Rebuild"; `202` with
+  `{ queued, remaining }`; see "Re-indexing").
 - Gaps: a group's questions are those whose reply was reviewed as `declined`
   (a retrieval miss or not), or, with no outcome (older rows, a review not yet
   run), found nothing above the score floor (`answered = 0`). A reply reviewed
@@ -431,8 +538,10 @@ The Monitor screens read:
 ## Answering a message
 
 1. Load the published version (or the draft, for the admin "Try it" pane).
-2. Retrieve: embed the question, query the retriever for the assistant, keep the
-   top chunks above a score floor (top 6, floor 0.2). The floor only keeps out
+2. Retrieve: embed the question, query the retriever for the assistant for 20
+   candidates (`CANDIDATE_POOL`; Vectorize returns up to 100 without values or
+   metadata), and give the model at most 6 (`TOP_K`) above a score floor
+   (0.2), chosen by `selectCandidates` (below). The floor only keeps out
    unrelated content: the model already declines when given content that does
    not hold the answer. Measured with `text-embedding-3-small` against short
    owner-written answers, answerable questions scored 0.25 to 0.43 and unrelated
@@ -441,7 +550,17 @@ The Monitor screens read:
    is kept too, but only when a chunk of the same document cleared it; when
    nothing clears the floor nothing is kept, so off-topic questions still find
    nothing. An instance may set `SOLV_SCORE_FLOOR` (0 to 0.9); the trace records
-   the floor used.
+   the floor used. Of the chunks that pass the floor, in order:
+   - Duplicates: of chunks with identical or near-identical text (the same
+     words, or word sets overlapping at least 90% for texts of 8 words or
+     more) only the best-scored is kept, except that a written answer is kept
+     over a page chunk it duplicates.
+   - The written answer: the best-scoring written answer at or above the
+     floor itself is always given, in place of the lowest-scored chunk when
+     the set is full.
+   - The rest by score, at most 2 from one document
+     (`MAX_CHUNKS_PER_DOCUMENT`); when that leaves fewer than 6, the capped
+     chunks fill the set, best first.
 3. Build the prompt: fixed safety frame, the owner's behaviour fields, retrieved
    chunks with their URLs (capped at 2000 characters each), the last 6 turns.
 4. Call the model through the provider interface, streaming. If tools are allowed,
@@ -717,13 +836,17 @@ ignored what it was given. A small recorder (`answerRecorder` in
 `chat/trace.ts`) is threaded through the answer path and is the only clock
 the trace reads.
 
-- Retrieval: every candidate the retriever returned (at most 20; `TOP_K` is 6
-  today), best first, with chunk id, document id, similarity score (four
-  decimal places), and whether it was passed to the model or dropped:
-  `below_floor` (under the score floor this answer used, which is recorded
-  too; a chunk kept in the same-document margin is marked passed) or `not_found`
-  (the vector matched but its chunk is no longer in D1). There is no prompt
-  budget that drops chunks today, so no reason exists for one.
+- Retrieval: every candidate the retriever returned (at most 20, the
+  candidate pool; `TOP_K` of them at most reach the model), best first, with
+  chunk id, document id, similarity score (four decimal places), and whether
+  it was passed to the model or dropped: `below_floor` (under the score floor
+  this answer used, which is recorded too; a chunk kept in the same-document
+  margin is marked passed), `not_found` (the vector matched but its chunk is
+  no longer in D1), `duplicate` (the same text as a better chunk),
+  `document_cap` (its document had given its share and others filled the
+  set) or `rank` (`TOP_K` better chunks filled the set). The admin shows each
+  candidate's heading path beside its title, read from the chunk when the
+  view is read, like its text.
 - The version that answered (its id, and `published` for a visitor, `draft`
   for "Try it" and a test run).
 - The provider and model id actually called, or none when nothing relevant
@@ -1207,6 +1330,9 @@ Install
   an entry source and removes the gap; Conversations' "Write an answer for this"
   opens it on Gaps, filled in), "Dismiss" with undo on Gaps, "Add to tests" on both.
 - Plain words on every control. No model, temperature or chunking settings.
+- Sources offers "Rebuild" while some of the assistant's content was indexed
+  by an older ingest version, saying what it does and what it costs before
+  it starts (see "Re-indexing").
 - Sources gives a sitemap source a Sync column: how often it syncs (Off,
   Every day, Every week), when it last synced with the outcome and counts or
   the last error in plain words, when it next syncs, and "Sync now". A

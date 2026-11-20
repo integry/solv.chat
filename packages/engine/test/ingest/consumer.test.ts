@@ -92,13 +92,16 @@ function makeMessage(body: IngestQueueMessage) {
   };
 }
 
+/** A paragraph over `MIN_CHUNK_CHARS`, so a section of it is a chunk of its own. */
+const para = (lead: string) => `${lead} ${"These words fill the section out. ".repeat(7)}`.trim();
+
 describe("ingest consumer", () => {
   it("chunks, embeds, and upserts every chunk with orgId and assistantId metadata", async () => {
     const { assistantId, sourceId } = await seedOrgAndAssistant();
     const { documentId, hash, tenant } = await seedDocument(
       sourceId,
       "Guide",
-      "# Intro\n\nFirst paragraph.\n\n# Usage\n\nSecond paragraph.",
+      `# Intro\n\n${para("First paragraph.")}\n\n# Usage\n\n${para("Second paragraph.")}`,
     );
 
     const embedder = fakeEmbedder();
@@ -383,7 +386,7 @@ describe("ingest consumer", () => {
       documentId,
       hash: hash1,
       tenant,
-    } = await seedDocument(sourceId, "Doc", "# A\n\nOne.\n\n# B\n\nTwo.");
+    } = await seedDocument(sourceId, "Doc", `# A\n\n${para("One.")}\n\n# B\n\n${para("Two.")}`);
 
     const embedder = fakeEmbedder();
     const retriever = memoryRetriever();
@@ -876,7 +879,7 @@ describe("ingest consumer", () => {
     const docA1 = await seedDocument(
       orgA.sourceId,
       "Title A1",
-      "# Section 1\n\nAlpha.\n\n# Section 2\n\nBeta.",
+      `# Section 1\n\n${para("Alpha.")}\n\n# Section 2\n\n${para("Beta.")}`,
       orgA.orgId,
       "a1",
       "https://a.test/1",
@@ -929,7 +932,7 @@ describe("ingest consumer", () => {
         chunkId: a1Chunks[1]?.id,
         documentId: docA1.documentId,
         score: 0.9,
-        text: "Beta.",
+        text: para("Beta."),
         headingPath: "Section 2",
         url: "https://a.test/1",
         sourceKind: "push",
@@ -939,7 +942,7 @@ describe("ingest consumer", () => {
         chunkId: a1Chunks[0]?.id,
         documentId: docA1.documentId,
         score: 0.7,
-        text: "Alpha.",
+        text: para("Alpha."),
         headingPath: "Section 1",
         url: "https://a.test/1",
         sourceKind: "push",

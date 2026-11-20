@@ -10,7 +10,12 @@ import type { KeyProvider, LlmProviderName } from "../seams/types.js";
  */
 
 export const TRACE_VERSION = 1;
-/** Candidates kept per request. The retriever is asked for `TOP_K` today; this is the ceiling. */
+/**
+ * Candidates kept per request: every hit the retriever returned. The answer
+ * path asks it for this many (`CANDIDATE_POOL`), more than the `TOP_K` it
+ * gives the model, so duplicates and a document's extra chunks can be set
+ * aside without leaving the set short.
+ */
 export const MAX_TRACE_CANDIDATES = 20;
 /**
  * Requests kept per message: the first answer and up to seven page-action
@@ -20,7 +25,7 @@ export const MAX_TRACE_PARTS = 8;
 /**
  * The stored JSON for one message never exceeds this many UTF-8 bytes. The
  * fullest trace the engine can write (8 parts of 20 candidates) is about
- * 20 KiB, and a typical one (one part, `TOP_K` candidates) under 1 KiB;
+ * 20 KiB, and a typical one (one part, `CANDIDATE_POOL` candidates) about 2 KiB;
  * anything larger is cut down by `boundTrace` before it is written, and
  * migration 0026 refuses a longer row as a backstop.
  */
@@ -40,7 +45,13 @@ export type TraceDropReason =
   /** Its similarity score was under the floor. */
   | "below_floor"
   /** The vector matched, but its chunk is no longer in D1 (content changed or was removed). */
-  | "not_found";
+  | "not_found"
+  /** Its text is identical or nearly identical to a better-scored chunk that was used. */
+  | "duplicate"
+  /** Its document had already given its share, and other documents filled the set. */
+  | "document_cap"
+  /** Better matches filled the set (`TOP_K`). */
+  | "rank";
 
 export interface TraceCandidate {
   chunkId: string;
@@ -326,14 +337,17 @@ export function answerRecorder(clock: () => number = Date.now): AnswerRecorder {
 /**
  * The candidates retrieval considered, best first: every hit the retriever
  * returned, marked used when it reached the model, or with the reason it did
- * not. `kept` names chunks under the floor that were still given to the
- * model (within the same-document margin); they are marked used.
+ * not. `kept` names the chunks given to the model (some may be under the
+ * floor, within the same-document margin); `reasons` says why a chunk that
+ * cleared the floor was not (`selectCandidates`). Left out, `kept` means
+ * "every resolved chunk at or above the floor", as before selection existed.
  */
 export function traceCandidates(
   hits: readonly { chunkId: string; score: number }[],
   floor: number,
   resolved: readonly { chunkId: string; documentId: string }[],
-  kept: ReadonlySet<string> = new Set(),
+  kept?: ReadonlySet<string>,
+  reasons: ReadonlyMap<string, Exclude<TraceDropReason, "below_floor" | "not_found">> = new Map(),
 ): TraceCandidate[] {
   const byId = new Map(resolved.map((c) => [c.chunkId, c.documentId]));
   return [...hits]
@@ -343,7 +357,8 @@ export function traceCandidates(
       const score = Number.isFinite(hit.score)
         ? Math.round(hit.score * SCORE_PLACES) / SCORE_PLACES
         : 0;
-      if (hit.score < floor && !kept.has(hit.chunkId)) {
+      const isKept = kept?.has(hit.chunkId) === true;
+      if (hit.score < floor && !isKept) {
         return {
           chunkId: hit.chunkId,
           documentId: byId.get(hit.chunkId) ?? null,
@@ -356,6 +371,9 @@ export function traceCandidates(
       if (documentId === undefined) {
         return { chunkId: hit.chunkId, documentId: null, score, used: false, dropped: "not_found" };
       }
-      return { chunkId: hit.chunkId, documentId, score, used: true };
+      if (kept === undefined || isKept)
+        return { chunkId: hit.chunkId, documentId, score, used: true };
+      const reason = reasons.get(hit.chunkId);
+      return { chunkId: hit.chunkId, documentId, score, used: false, dropped: reason ?? "rank" };
     });
 }

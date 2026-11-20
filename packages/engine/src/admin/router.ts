@@ -56,6 +56,7 @@ import {
   testProviderKey,
   updateProviderSettings,
 } from "./providers.js";
+import { type ReindexDeps, ReindexRefused, reindexAssistant, reindexStatus } from "./reindex.js";
 import { parseReportDays, reportFor } from "./reports.js";
 import { importSitemapUrls, previewSitemap } from "./sitemap.js";
 import { getSourceSync, readSyncNowBody, syncSourceNow } from "./sourceSync.js";
@@ -102,6 +103,8 @@ export interface AdminRouteDeps {
   resolveRunDeps?: (() => Promise<RunDeps>) | undefined;
   /** What "Sync now" needs to start a run; `createApp` always passes it. */
   syncStart?: SyncStartDeps | undefined;
+  /** What "Rebuild" (re-index from stored text) needs; `createApp` always passes it. */
+  reindex?: Pick<ReindexDeps, "queue" | "limits"> | undefined;
 }
 
 function mcpDeps(deps: AdminRouteDeps): McpDeps {
@@ -326,6 +329,16 @@ async function assistantRoutes(
     }
     if (action === "sources" && method === "GET") {
       return Response.json({ sources: await listSources(tenant, assistantId) });
+    }
+    if (action === "reindex" && method === "GET") {
+      return Response.json(await reindexStatus(tenant, assistantId));
+    }
+    if (action === "reindex" && method === "POST") {
+      if (!deps.reindex) throw new NotFound();
+      return Response.json(
+        await reindexAssistant({ tenant, orgId: deps.orgId, ...deps.reindex }, assistantId),
+        { status: 202 },
+      );
     }
     if (action === "sources" && method === "POST") {
       const source = await createSource(tenant, assistantId, await readJsonBody(request));
@@ -755,6 +768,12 @@ export async function adminRoutes(
     }
     if (error instanceof TooLarge) {
       return Response.json({ error: error.message }, { status: 413 });
+    }
+    if (error instanceof ReindexRefused) {
+      return Response.json(
+        { error: "Your plan's limits do not allow this right now." },
+        { status: 429 },
+      );
     }
     if (error instanceof Conflict) {
       return Response.json(

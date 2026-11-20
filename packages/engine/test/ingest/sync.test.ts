@@ -19,6 +19,7 @@ import {
   type SyncSchedulerDeps,
   startSourceSync,
 } from "../../src/ingest/sync.js";
+import { INGEST_VERSION, PAGE_TEXT_VERSION } from "../../src/ingest/version.js";
 import type {
   Limits,
   PageFetcher,
@@ -220,7 +221,9 @@ const docUrls = async (sourceId: string, orgId = ORG) =>
 async function syncOnce(h: ReturnType<typeof harness>, sourceId: string) {
   const started = await startSourceSync(h.deps(), ORG, sourceId);
   await h.drain();
-  await env.DB.prepare("UPDATE documents SET indexed_hash = content_hash WHERE source_id = ?1")
+  await env.DB.prepare(
+    `UPDATE documents SET indexed_hash = content_hash, ingest_version = ${INGEST_VERSION} WHERE source_id = ?1`,
+  )
     .bind(sourceId)
     .run();
   return started;
@@ -298,6 +301,52 @@ describe("scheduled sitemap sync", () => {
     });
   });
 
+  it("reads and rebuilds an unchanged page made by an older ingest version once, on the next run", async () => {
+    const h = harness({
+      sitemap: { dated: "2026-11-01", etagged: null },
+      pages: { dated: "Dated.", etagged: "Etagged." },
+    });
+    const sourceId = await seedSource(await seedAssistant());
+    await syncOnce(h, sourceId);
+    const tenant = forScheduledSync(env.DB, ORG);
+    const docs = await tenant.documents.listForSync(sourceId);
+    expect(docs.every((d) => d.pageVersion === PAGE_TEXT_VERSION)).toBe(true);
+
+    // As every document stored before the version existed: an older ingest
+    // version, and no extraction version.
+    await env.DB.prepare(
+      "UPDATE documents SET ingest_version = 1, page_version = NULL WHERE source_id = ?1",
+    )
+      .bind(sourceId)
+      .run();
+    h.ingestMessages.length = 0;
+    h.pageFetches.length = 0;
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await syncOnce(h, sourceId);
+
+    // Both are read in full: `dated` despite its unchanged lastmod, and
+    // neither with validators, so no 304 can keep the old text.
+    expect(h.pageFetches.map((f) => f.url).sort()).toEqual([page("dated"), page("etagged")]);
+    expect(h.pageFetches.every((f) => f.validators === undefined)).toBe(true);
+    // The text has not changed, and each is still queued once to be rebuilt.
+    expect(h.ingestMessages.map((m) => m.documentId).sort()).toEqual(docs.map((d) => d.id).sort());
+    expect((await state(sourceId))?.counts).toMatchObject({ unchanged: 2, updated: 0, failed: 0 });
+    expect(
+      (await tenant.documents.listForSync(sourceId)).every(
+        (d) => d.pageVersion === PAGE_TEXT_VERSION,
+      ),
+    ).toBe(true);
+
+    // Rebuilt (`syncOnce` commits as the consumer does), the next run is back to normal.
+    h.ingestMessages.length = 0;
+    h.pageFetches.length = 0;
+    h.advance(SYNC_INTERVAL_MS.daily);
+    await syncOnce(h, sourceId);
+    expect(h.pageFetches.map((f) => f.url)).toEqual([page("etagged")]);
+    expect(h.pageFetches[0]?.validators?.etag).toBeTruthy();
+    expect(h.ingestMessages).toEqual([]);
+  });
+
   it("queues indexing again for an unchanged page whose indexing failed, by lastmod and by a 304", async () => {
     const h = harness({
       sitemap: { dated: "2026-11-01", etagged: null },
@@ -336,7 +385,9 @@ describe("scheduled sitemap sync", () => {
     expect((await state(sourceId))?.counts).toMatchObject({ unchanged: 2, failed: 0 });
 
     // Once indexed, unchanged pages are skipped again and nothing is queued.
-    await env.DB.prepare("UPDATE documents SET indexed_hash = content_hash WHERE source_id = ?1")
+    await env.DB.prepare(
+      `UPDATE documents SET indexed_hash = content_hash, ingest_version = ${INGEST_VERSION} WHERE source_id = ?1`,
+    )
       .bind(sourceId)
       .run();
     h.ingestMessages.length = 0;

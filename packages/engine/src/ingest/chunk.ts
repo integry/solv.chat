@@ -14,6 +14,21 @@ export const MAX_HEADING_CHARS = 200;
 // made of thousands of tiny sections reaches this, and it is packed first;
 // one still over the cap after packing is refused, never cut.
 export const MAX_CHUNKS = 1500;
+/**
+ * No chunk is stored with less text than this; a shorter one is merged into
+ * a neighbour (see `mergeSmallChunks`). Measured from issue #123: the chunks
+ * that crowded out real answers were footer and "related" lists of 45 to 74
+ * characters, embedded behind a heading path of 40 to 60 characters
+ * ("How to test an MCP server before you deploy it > Guides"). At that size
+ * the path is most of the embedding input, so `text-embedding-3-small`
+ * scores the chunk on its page's title, not its words; OpenAI's guide says
+ * nothing about a minimum length, so the number is ours. 200 characters is
+ * about 50 tokens, two or three sentences: over three times the heading paths
+ * above and the longest chrome chunk, and a sixth of `MAX_CHARS`, so a merge
+ * never makes a chunk much larger than a full one. A document whose whole
+ * text is shorter (a one-line written answer) is still one chunk.
+ */
+export const MIN_CHUNK_CHARS = 200;
 
 export interface Chunk {
   ordinal: number;
@@ -254,7 +269,10 @@ function splitLong(lines: string[]): string[] {
  * Splits Markdown by ATX headings, carrying the heading path on each chunk and
  * subdividing long sections at paragraph boundaries with overlap.
  */
-export function chunkMarkdown(markdown: string): Chunk[] {
+export function chunkMarkdown(
+  markdown: string,
+  options: { minChars?: number | undefined } = {},
+): Chunk[] {
   const chunks: Chunk[] = [];
   const stack: Array<{ depth: number; text: string }> = [];
   let buffer: string[] = [];
@@ -305,7 +323,8 @@ export function chunkMarkdown(markdown: string): Chunk[] {
   }
 
   flush();
-  return chunks.length > MAX_CHUNKS ? limitChunkCount(chunks) : chunks;
+  const merged = mergeSmallChunks(chunks, options.minChars ?? MIN_CHUNK_CHARS);
+  return merged.length > MAX_CHUNKS ? limitChunkCount(merged) : merged;
 }
 
 function commonPrefix(a: string[], b: string[]): string[] {
@@ -320,6 +339,95 @@ function renderUnder(base: string[], chunk: Chunk): string {
     .slice(base.length)
     .map((heading, i) => `${"#".repeat(Math.min(6, base.length + i + 1))} ${heading}`);
   return [...lines, chunk.text].join("\n\n");
+}
+
+/**
+ * The heading path a merged chunk's text ends under, when it differs from
+ * its `headingPath` (the headings its parts share). Kept beside the chunk,
+ * not in it, so the stored shape does not change.
+ */
+const endsUnder = new WeakMap<Chunk, string[]>();
+
+/**
+ * Two neighbouring chunks as one, keeping the headings they share as the
+ * path and writing the rest into the text. The second part repeats none of
+ * the heading lines the first part already ends under.
+ */
+function mergePair(first: Chunk, second: Chunk): Chunk {
+  const base = commonPrefix(first.headingPath, second.headingPath);
+  const firstEnd = endsUnder.get(first) ?? first.headingPath;
+  const open = Math.max(base.length, commonPrefix(firstEnd, second.headingPath).length);
+  const secondLines = second.headingPath
+    .slice(open)
+    .map((heading, i) => `${"#".repeat(Math.min(6, open + i + 1))} ${heading}`);
+  const merged: Chunk = {
+    ordinal: first.ordinal,
+    headingPath: base,
+    text: [renderUnder(base, first), ...secondLines, second.text].join("\n\n"),
+  };
+  endsUnder.set(merged, endsUnder.get(second) ?? second.headingPath);
+  return merged;
+}
+
+const samePath = (a: Chunk, b: Chunk): boolean =>
+  a.headingPath.length === b.headingPath.length &&
+  a.headingPath.every((heading, i) => heading === b.headingPath[i]);
+
+/**
+ * Merges every chunk shorter than `minChars` into a neighbour, so no chunk
+ * is stored on a few words. For each short chunk, the neighbour is, in
+ * order: one under the same heading path (the previous, then the next)
+ * that the two fit together within `MAX_CHARS`; the previous one, then the
+ * next, within `MAX_CHARS`; and when neither fits, the same-heading one,
+ * else the previous, else the next, whatever the size (at most about
+ * `MAX_CHARS + minChars` and the headings). A merge keeps the shared
+ * headings as the path and writes the rest into the text, so no word or
+ * heading is lost. A document with one chunk keeps it, however short.
+ */
+export function mergeSmallChunks(chunks: readonly Chunk[], minChars: number): Chunk[] {
+  const out = [...chunks];
+  const small = (chunk: Chunk) => chunk.text.length < minChars;
+  let i = 0;
+  while (out.length > 1 && i < out.length) {
+    const chunk = out[i] as Chunk;
+    if (!small(chunk)) {
+      i++;
+      continue;
+    }
+    const prev = i > 0 ? (out[i - 1] as Chunk) : undefined;
+    const next = i + 1 < out.length ? (out[i + 1] as Chunk) : undefined;
+    const withPrev = prev === undefined ? undefined : mergePair(prev, chunk);
+    const withNext = next === undefined ? undefined : mergePair(chunk, next);
+    const fits = (merged: Chunk | undefined): merged is Chunk =>
+      merged !== undefined && merged.text.length <= MAX_CHARS;
+    const order: Array<["prev" | "next", Chunk | undefined]> = [
+      ...(prev !== undefined && samePath(prev, chunk) && fits(withPrev)
+        ? [["prev", withPrev] as ["prev", Chunk]]
+        : []),
+      ...(next !== undefined && samePath(next, chunk) && fits(withNext)
+        ? [["next", withNext] as ["next", Chunk]]
+        : []),
+      ...(fits(withPrev) ? [["prev", withPrev] as ["prev", Chunk]] : []),
+      ...(fits(withNext) ? [["next", withNext] as ["next", Chunk]] : []),
+      ...(prev !== undefined && samePath(prev, chunk)
+        ? [["prev", withPrev] as ["prev", Chunk]]
+        : []),
+      ...(next !== undefined && samePath(next, chunk)
+        ? [["next", withNext] as ["next", Chunk]]
+        : []),
+      ["prev", withPrev],
+      ["next", withNext],
+    ];
+    const [side, merged] = order.find(([, m]) => m !== undefined) as ["prev" | "next", Chunk];
+    if (side === "prev") {
+      out.splice(i - 1, 2, merged);
+      // The merged chunk is not short; carry on with what follows it.
+    } else {
+      out.splice(i, 2, merged);
+      // The merged chunk may still be short (two short ones); look again.
+    }
+  }
+  return out.map((chunk, ordinal) => ({ ...chunk, ordinal }));
 }
 
 /**
