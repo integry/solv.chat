@@ -1,4 +1,5 @@
 import { adminAsset } from "./admin/assets.js";
+import type { ReindexDeps } from "./admin/reindex.js";
 import { adminRoutes } from "./admin/router.js";
 import { type ReviewCatchUpResult, runReviewCatchUp } from "./chat/reviewCatchUp.js";
 import {
@@ -260,6 +261,10 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           checkConfigError: (resolved) =>
             checkLlmConfigError(env.DB, env, seams.keys, principal.orgId, resolved),
           resolveRunDeps: () => resolveRunDeps(principal.orgId, tenant),
+          reindex: {
+            queue: env.INGEST_QUEUE as unknown as ReindexDeps["queue"],
+            limits: seams.limits,
+          },
           syncStart: {
             docs: env.DOCS,
             queue: env.INGEST_QUEUE as unknown as SyncQueue,
