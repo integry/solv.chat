@@ -8,6 +8,7 @@ import {
   PAGE_FETCH_TIMEOUT_MS,
   plainPageFetcher,
 } from "../ingest/pageFetcher.js";
+import { PAGE_TEXT_VERSION } from "../ingest/version.js";
 import type { PageFetcher } from "../seams/types.js";
 import {
   assertPublicHttpsUrl,
@@ -461,6 +462,15 @@ export async function importSitemapUrls(
     documents.length > 0
       ? await pushDocuments(deps, scope, { sourceId: source.id, documents })
       : { written: 0, unchanged: 0 };
+  if (documents.length > 0) {
+    // Every page's text (new or confirmed unchanged) was read just now by
+    // the current extraction, so a later sync need not read it again in full.
+    await deps.tenant.documents.setPageVersion(
+      source.id,
+      documents.map((doc) => doc.externalId),
+      PAGE_TEXT_VERSION,
+    );
+  }
 
   return {
     source,

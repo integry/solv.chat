@@ -13,6 +13,7 @@ import type { IngestScope, Tenant } from "../db/tenant.js";
 import type { Retriever } from "../providers/retrieval.js";
 import { sha256Hex } from "../util/crypto.js";
 import { chunkMarkdown, exceedsChunkBudget, MAX_CHUNKS } from "./chunk.js";
+import { INGEST_VERSION } from "./version.js";
 
 export const MAX_BATCH_DOCUMENTS = 100;
 
@@ -280,6 +281,11 @@ export async function pushDocuments(
 
       if (prev.url === document.url || metadataUpdated) {
         if (prev.indexedHash === hash) {
+          // Indexed by an older ingest version: the text is unchanged, so it
+          // still counts as unchanged, but it is queued once to be rebuilt.
+          if ((prev.ingestVersion ?? INGEST_VERSION) < INGEST_VERSION && prev.bodyKey !== null) {
+            await deps.queue.send({ orgId: scope.orgId, documentId: prev.id, contentHash: hash });
+          }
           if (metadataUpdated) {
             written++;
           } else {

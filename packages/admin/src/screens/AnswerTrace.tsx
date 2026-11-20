@@ -73,9 +73,18 @@ export function formatMs(ms: number): string {
 
 function statusFor(candidate: AnswerTraceCandidate): { tone: StatusTone; label: string } {
   if (candidate.used) return { tone: "success", label: "Used" };
-  if (candidate.dropped === "not_found")
-    return { tone: "warning", label: "Not used: content gone" };
-  return { tone: "neutral", label: "Not used: weak match" };
+  switch (candidate.dropped) {
+    case "not_found":
+      return { tone: "warning", label: "Not used: content gone" };
+    case "duplicate":
+      return { tone: "neutral", label: "Not used: same as a better match" };
+    case "document_cap":
+      return { tone: "neutral", label: "Not used: enough from this page" };
+    case "rank":
+      return { tone: "neutral", label: "Not used: better matches filled the space" };
+    default:
+      return { tone: "neutral", label: "Not used: weak match" };
+  }
 }
 
 function ContentCell({ candidate }: { candidate: AnswerTraceCandidate }) {

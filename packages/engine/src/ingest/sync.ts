@@ -30,6 +30,7 @@ import {
   SyncRunEnded,
   TooLarge,
 } from "./documents.js";
+import { INGEST_VERSION, PAGE_TEXT_VERSION } from "./version.js";
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -217,6 +218,16 @@ interface Plan {
 }
 
 /**
+ * True when a document's stored text and its chunks were made by the current
+ * page extraction and ingest versions. One that is not is fetched again in
+ * full by the next run, whatever its `<lastmod>` and validators say, and
+ * rebuilt even when the page has not changed.
+ */
+function isCurrent(doc: { ingestVersion: number; pageVersion: number | null }): boolean {
+  return doc.ingestVersion >= INGEST_VERSION && (doc.pageVersion ?? 0) >= PAGE_TEXT_VERSION;
+}
+
+/**
  * Decides what one run does, from the sitemap, the source's documents and
  * when each page was last queued: what to remove, what to skip on an
  * unchanged `<lastmod>`, and which pages to fetch, within the caps. An
@@ -259,11 +270,14 @@ function planRun(
       entry.lastmod !== null &&
       doc.sitemapLastmod === entry.lastmod &&
       doc.indexedHash === doc.contentHash &&
+      isCurrent(doc) &&
       doc.syncCheckedAt !== null &&
       options.now - doc.syncCheckedAt < options.recheckMs
     ) {
-      // Skipped only once its content is indexed: a document whose indexing
-      // failed is checked again, so the page's handler can queue it anew.
+      // Skipped only once its content is indexed, by the current versions:
+      // a document whose indexing failed is checked again, so the page's
+      // handler can queue it anew, and so is one made by an older version
+      // of the ingest pipeline, once (see `ingest/version.ts`).
       // A check older than `recheckMs` is due again; it is a conditional
       // request, so an unchanged page costs a 304.
       unchanged++;
@@ -559,9 +573,13 @@ export async function processSyncPage(
     const prev = await tenant.documents.syncValidators(source.id, externalId);
     let fetched: Awaited<ReturnType<PageFetcher["fetchPage"]>>;
     try {
+      // No validators for text an older extraction made: a 304 would keep
+      // it, and the page must be read again by the current one.
       fetched = await deps.pages.fetchPage(
         page.url,
-        prev ? { etag: prev.etag, lastModified: prev.lastModified } : undefined,
+        prev && (prev.pageVersion ?? 0) >= PAGE_TEXT_VERSION
+          ? { etag: prev.etag, lastModified: prev.lastModified }
+          : undefined,
       );
     } catch {
       // Refused, timed out or unreachable: the next run tries again.
@@ -577,7 +595,11 @@ export async function processSyncPage(
       // Unchanged content still owed its indexing (an earlier attempt failed
       // and its retries ran out) is queued again, as `pushDocuments` does for
       // an unchanged push; the consumer ignores it once indexed.
-      if (prev.indexedHash !== prev.contentHash && prev.bodyKey !== null) {
+      // So is content indexed by an older ingest version, to be rebuilt once.
+      if (
+        (prev.indexedHash !== prev.contentHash || prev.ingestVersion < INGEST_VERSION) &&
+        prev.bodyKey !== null
+      ) {
         await deps.queue.send({
           orgId: deps.orgId,
           documentId: prev.id,
@@ -629,6 +651,8 @@ export async function processSyncPage(
         lastModified: fetched.lastModified,
         sitemapLastmod: page.lastmod,
         checkedAt: now(),
+        // The text stored (or confirmed unchanged) was read just now.
+        pageVersion: PAGE_TEXT_VERSION,
       },
       fence(),
     );

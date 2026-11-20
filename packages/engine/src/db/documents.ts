@@ -1,3 +1,4 @@
+import { INGEST_VERSION } from "../ingest/version.js";
 import { prepare, prepareInsert } from "./sql.js";
 import { type SyncRunFence, syncRunHolds } from "./sync.js";
 
@@ -12,6 +13,8 @@ interface DocumentDbRow {
   indexed_hash: string | null;
   body_key: string | null;
   updated_at: number;
+  ingest_version: number;
+  page_version: number | null;
 }
 
 interface ChunkDbRow {
@@ -34,6 +37,10 @@ export interface DocumentRow {
   indexedHash: string | null;
   bodyKey: string | null;
   updatedAt: number;
+  /** The ingest version its searchable chunks were built with (see `ingest/version.ts`). */
+  ingestVersion: number;
+  /** For a fetched page, the extraction version of its stored text; null otherwise or before. */
+  pageVersion: number | null;
 }
 
 /**
@@ -57,6 +64,8 @@ export interface ExistingDocumentState {
   contentHash: string;
   indexedHash: string | null;
   bodyKey: string | null;
+  /** Absent means current: a row this push just wrote. */
+  ingestVersion?: number;
 }
 
 export interface ChunkRow {
@@ -102,6 +111,8 @@ export interface DocumentSyncRow {
   lastModified: string | null;
   sitemapLastmod: string | null;
   syncCheckedAt: number | null;
+  ingestVersion: number;
+  pageVersion: number | null;
 }
 
 /** What a sync page needs before its conditional request: validators, and whether indexing is owed. */
@@ -112,6 +123,8 @@ export interface DocumentSyncValidators {
   indexedHash: string | null;
   etag: string | null;
   lastModified: string | null;
+  ingestVersion: number;
+  pageVersion: number | null;
 }
 
 /** Validators recorded when a sync checks a page, for the next run's conditional request. */
@@ -120,6 +133,11 @@ export interface DocumentSyncCheck {
   lastModified: string | null;
   sitemapLastmod: string | null;
   checkedAt: number;
+  /**
+   * The extraction version of the text now stored for the page, when this
+   * check stored or confirmed it; left out, the stored version is kept.
+   */
+  pageVersion?: number | undefined;
 }
 
 export interface ChunkInput {
@@ -130,7 +148,7 @@ export interface ChunkInput {
 }
 
 const DOC_COLUMNS =
-  "id, org_id, source_id, external_id, url, title, content_hash, indexed_hash, body_key, updated_at";
+  "id, org_id, source_id, external_id, url, title, content_hash, indexed_hash, body_key, updated_at, ingest_version, page_version";
 const CHUNK_COLUMNS = "id, org_id, document_id, ordinal, text, heading_path";
 
 const mapDocument = (row: DocumentDbRow): DocumentRow => ({
@@ -144,6 +162,8 @@ const mapDocument = (row: DocumentDbRow): DocumentRow => ({
   indexedHash: row.indexed_hash,
   bodyKey: row.body_key,
   updatedAt: row.updated_at,
+  ingestVersion: row.ingest_version,
+  pageVersion: row.page_version,
 });
 
 const mapChunk = (row: ChunkDbRow): ChunkRow => ({
@@ -311,7 +331,7 @@ export function documentsFor(db: D1Database, orgId: string) {
       // all. One parameter also stays clear of D1's 100-parameter limit.
       const rows = await prepare(
         db,
-        `SELECT id, external_id, url, content_hash, indexed_hash, body_key FROM documents
+        `SELECT id, external_id, url, content_hash, indexed_hash, body_key, ingest_version FROM documents
          WHERE org_id = ?1 AND source_id = ?2
            AND external_id IN (SELECT value FROM json_each(?3))`,
       )
@@ -323,6 +343,7 @@ export function documentsFor(db: D1Database, orgId: string) {
           content_hash: string;
           indexed_hash: string | null;
           body_key: string | null;
+          ingest_version: number;
         }>();
       for (const row of rows.results) {
         result.set(row.external_id, {
@@ -331,6 +352,7 @@ export function documentsFor(db: D1Database, orgId: string) {
           contentHash: row.content_hash,
           indexedHash: row.indexed_hash,
           bodyKey: row.body_key,
+          ingestVersion: row.ingest_version,
         });
       }
       return result;
@@ -341,7 +363,7 @@ export function documentsFor(db: D1Database, orgId: string) {
       const res = await prepare(
         db,
         `SELECT id, external_id, url, body_key, content_hash, indexed_hash,
-                etag, last_modified, sitemap_lastmod, sync_checked_at
+                etag, last_modified, sitemap_lastmod, sync_checked_at, ingest_version, page_version
            FROM documents WHERE org_id = ?1 AND source_id = ?2`,
       )
         .bind(orgId, sourceId)
@@ -356,6 +378,8 @@ export function documentsFor(db: D1Database, orgId: string) {
           last_modified: string | null;
           sitemap_lastmod: string | null;
           sync_checked_at: number | null;
+          ingest_version: number;
+          page_version: number | null;
         }>();
       return res.results.map((row) => ({
         id: row.id,
@@ -368,6 +392,8 @@ export function documentsFor(db: D1Database, orgId: string) {
         lastModified: row.last_modified,
         sitemapLastmod: row.sitemap_lastmod,
         syncCheckedAt: row.sync_checked_at,
+        ingestVersion: row.ingest_version,
+        pageVersion: row.page_version,
       }));
     },
 
@@ -378,7 +404,8 @@ export function documentsFor(db: D1Database, orgId: string) {
     ): Promise<DocumentSyncValidators | null> {
       const row = await prepare(
         db,
-        `SELECT id, body_key, content_hash, indexed_hash, etag, last_modified FROM documents
+        `SELECT id, body_key, content_hash, indexed_hash, etag, last_modified, ingest_version, page_version
+           FROM documents
           WHERE org_id = ?1 AND source_id = ?2 AND external_id = ?3`,
       )
         .bind(orgId, sourceId, externalId)
@@ -389,6 +416,8 @@ export function documentsFor(db: D1Database, orgId: string) {
           indexed_hash: string | null;
           etag: string | null;
           last_modified: string | null;
+          ingest_version: number;
+          page_version: number | null;
         }>();
       return row
         ? {
@@ -398,6 +427,8 @@ export function documentsFor(db: D1Database, orgId: string) {
             indexedHash: row.indexed_hash,
             etag: row.etag,
             lastModified: row.last_modified,
+            ingestVersion: row.ingest_version,
+            pageVersion: row.page_version,
           }
         : null;
     },
@@ -415,7 +446,8 @@ export function documentsFor(db: D1Database, orgId: string) {
     ): Promise<boolean> {
       const res = await prepare(
         db,
-        `UPDATE documents SET etag = ?4, last_modified = ?5, sitemap_lastmod = ?6, sync_checked_at = ?7
+        `UPDATE documents SET etag = ?4, last_modified = ?5, sitemap_lastmod = ?6, sync_checked_at = ?7,
+                page_version = COALESCE(?10, page_version)
           WHERE org_id = ?1 AND source_id = ?2 AND external_id = ?3
             AND ${syncRunHolds("?1", "?2", "?8", "?9")}`,
       )
@@ -429,9 +461,23 @@ export function documentsFor(db: D1Database, orgId: string) {
           check.checkedAt,
           fence.runId,
           fence.now,
+          check.pageVersion ?? null,
         )
         .run();
       return (res.meta.changes ?? 0) > 0;
+    },
+
+    /** Records which extraction version the stored text of these pages came from. */
+    async setPageVersion(sourceId: string, externalIds: string[], version: number): Promise<void> {
+      if (externalIds.length === 0) return;
+      await prepare(
+        db,
+        `UPDATE documents SET page_version = ?3
+          WHERE org_id = ?1 AND source_id = ?2
+            AND external_id IN (SELECT value FROM json_each(?4))`,
+      )
+        .bind(orgId, sourceId, version, JSON.stringify([...new Set(externalIds)]))
+        .run();
     },
 
     async upsert(input: UpsertDocumentInput): Promise<DocumentRow> {
@@ -595,6 +641,50 @@ export function documentsFor(db: D1Database, orgId: string) {
      * applies while `contentHash` is still the document's content: a newer
      * push or save replaces the hash, which makes the error stale.
      */
+    /**
+     * The assistant's documents whose current content is indexed, but by an
+     * ingest version older than `version`: what a re-index rebuilds. A
+     * document still owed its indexing is left out (it is queued already
+     * and will be built by the current version). Bounded by `limit`, oldest
+     * version first.
+     */
+    async listOutdated(
+      assistantId: string,
+      version: number,
+      limit: number,
+    ): Promise<Array<{ id: string; contentHash: string }>> {
+      const res = await prepare(
+        db,
+        `SELECT d.id AS id, d.content_hash AS content_hash
+           FROM sources s
+           JOIN documents d ON d.org_id = s.org_id AND d.source_id = s.id
+          WHERE s.org_id = ?1 AND s.assistant_id = ?2
+            AND d.ingest_version < ?3 AND d.indexed_hash = d.content_hash
+            AND d.body_key IS NOT NULL
+          ORDER BY d.ingest_version ASC, d.id ASC
+          LIMIT ?4`,
+      )
+        .bind(orgId, assistantId, version, limit)
+        .all<{ id: string; content_hash: string }>();
+      return res.results.map((row) => ({ id: row.id, contentHash: row.content_hash }));
+    },
+
+    /** How many documents `listOutdated` would return with no limit. */
+    async countOutdated(assistantId: string, version: number): Promise<number> {
+      const row = await prepare(
+        db,
+        `SELECT COUNT(*) AS total
+           FROM sources s
+           JOIN documents d ON d.org_id = s.org_id AND d.source_id = s.id
+          WHERE s.org_id = ?1 AND s.assistant_id = ?2
+            AND d.ingest_version < ?3 AND d.indexed_hash = d.content_hash
+            AND d.body_key IS NOT NULL`,
+      )
+        .bind(orgId, assistantId, version)
+        .first<{ total: number }>();
+      return Number(row?.total ?? 0);
+    },
+
     async markIndexError(id: string, contentHash: string, code: IndexErrorCode): Promise<boolean> {
       const res = await prepare(
         db,
@@ -610,6 +700,7 @@ export function documentsFor(db: D1Database, orgId: string) {
       documentId: string,
       chunks: ChunkInput[],
       expectedContentHash?: string,
+      ingestVersion: number = INGEST_VERSION,
     ): Promise<boolean> {
       if (expectedContentHash === undefined) {
         const stmts: D1PreparedStatement[] = [
@@ -631,48 +722,46 @@ export function documentsFor(db: D1Database, orgId: string) {
 
       // One batch on purpose: the content-hash guard only protects the
       // commit if every insert runs in the same transaction. Each statement
-      // binds 7 parameters (limit 100) and the largest document yields about
+      // binds 8 parameters (limit 100) and the largest document yields about
       // 900 chunks; Cloudflare documents that "a batch containing 2,000
       // statements executes in a single Worker invocation".
       // Source: https://developers.cloudflare.com/d1/platform/limits/ — checked 2026-11-14
+      //
+      // The guard admits content not yet indexed, and content indexed by an
+      // older ingest version (a re-index of unchanged text). Two re-index
+      // messages for one document cannot both commit: the first sets the
+      // version, and the second's guard is then false.
+      const owed = `content_hash = ?3 AND (indexed_hash IS NULL OR indexed_hash != ?3 OR ingest_version < ?4)`;
       const stmts: D1PreparedStatement[] = [
         prepare(
           db,
           `DELETE FROM chunks
            WHERE org_id = ?1 AND document_id = ?2
-             AND EXISTS (
-               SELECT 1 FROM documents
-               WHERE org_id = ?1 AND id = ?2 AND content_hash = ?3
-                 AND (indexed_hash IS NULL OR indexed_hash != ?3)
-             )`,
-        ).bind(orgId, documentId, expectedContentHash),
+             AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${owed})`,
+        ).bind(orgId, documentId, expectedContentHash, ingestVersion),
         ...chunks.map((chunk) =>
           prepareInsert(
             db,
             `INSERT INTO chunks (id, org_id, document_id, ordinal, text, heading_path)
-             SELECT ?2, ?1, ?3, ?4, ?5, ?6
-             WHERE EXISTS (
-               SELECT 1 FROM documents
-               WHERE org_id = ?1 AND id = ?3 AND content_hash = ?7
-                 AND (indexed_hash IS NULL OR indexed_hash != ?7)
-             )`,
+             SELECT ?5, ?1, ?2, ?6, ?7, ?8
+             WHERE EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${owed})`,
           ).bind(
             orgId,
-            chunk.id,
             documentId,
+            expectedContentHash,
+            ingestVersion,
+            chunk.id,
             chunk.ordinal,
             chunk.text,
             chunk.headingPath,
-            expectedContentHash,
           ),
         ),
         prepare(
           db,
           `UPDATE documents
-           SET indexed_hash = ?3
-           WHERE org_id = ?1 AND id = ?2 AND content_hash = ?3
-             AND (indexed_hash IS NULL OR indexed_hash != ?3)`,
-        ).bind(orgId, documentId, expectedContentHash),
+           SET indexed_hash = ?3, ingest_version = ?4
+           WHERE org_id = ?1 AND id = ?2 AND ${owed}`,
+        ).bind(orgId, documentId, expectedContentHash, ingestVersion),
       ];
       const results = await db.batch(stmts);
       return (results[results.length - 1]?.meta.changes ?? 0) > 0;

@@ -1321,6 +1321,18 @@ a {
   border-color: var(--tone-info-border);
 }
 
+.rebuild-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.rebuild-notice p {
+  flex: 1 1 20rem;
+  margin: 0;
+}
+
 .notice-warning {
   background: var(--tone-warning-bg);
   color: var(--tone-warning-text);
