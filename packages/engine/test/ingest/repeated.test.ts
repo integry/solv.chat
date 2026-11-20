@@ -18,6 +18,11 @@ import {
   splitBlocks,
   withoutRepeated,
 } from "../../src/ingest/repeated.js";
+import {
+  type RepeatedQueue,
+  type RepeatedSourceMessage,
+  runRepeatedSourceBatch,
+} from "../../src/ingest/repeatedSource.js";
 import { INGEST_VERSION } from "../../src/ingest/version.js";
 import type { Embedder } from "../../src/providers/retrieval.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
@@ -156,6 +161,38 @@ describe("repeated blocks: the rules", () => {
 
 // Each test imports and indexes several pages, some more than once, through
 // D1 and R2; on a loaded host that takes longer than the default 5 seconds.
+/**
+ * `env.DB`, running `after` once a statement matching `sql` has returned
+ * its rows: another worker's writes landing between this one's read and
+ * its next statement.
+ */
+function interleavedDb(sql: RegExp, after: () => Promise<void>): D1Database {
+  return new Proxy(env.DB, {
+    get(target, prop) {
+      if (prop === "prepare") {
+        return (query: string) => {
+          const statement = target.prepare(query);
+          if (!sql.test(query)) return statement;
+          return {
+            bind(...values: unknown[]) {
+              const bound = statement.bind(...values);
+              return {
+                async all<T>() {
+                  const rows = await bound.all<T>();
+                  await after();
+                  return rows;
+                },
+              };
+            },
+          };
+        };
+      }
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 describe("repeated blocks across a source's pages", { timeout: 60_000 }, () => {
   let site: Awaited<ReturnType<typeof seedSite>>;
   let tenant: Tenant;
@@ -359,11 +396,11 @@ describe("repeated blocks across a source's pages", { timeout: 60_000 }, () => {
 
   /** A queue whose first `failures` sends throw before anything is delivered. */
   function flakyQueue(failures: number) {
-    const messages: IngestQueueMessage[] = [];
+    const messages: Array<IngestQueueMessage | RepeatedSourceMessage> = [];
     let left = failures;
     return {
       messages,
-      async sendBatch(batch: Array<{ body: IngestQueueMessage }>) {
+      async sendBatch(batch: Array<{ body: IngestQueueMessage | RepeatedSourceMessage }>) {
         if (left > 0) {
           left--;
           throw new Error("queue unavailable");
@@ -375,9 +412,10 @@ describe("repeated blocks across a source's pages", { timeout: 60_000 }, () => {
 
   /** Delivers messages once to the consumer with `queue` wired in. */
   async function deliverOnce(
-    messages: IngestQueueMessage[],
-    queue: { sendBatch(batch: Array<{ body: IngestQueueMessage }>): Promise<unknown> },
+    messages: Array<IngestQueueMessage | RepeatedSourceMessage>,
+    queue: RepeatedQueue,
     attempts = 1,
+    db: D1Database = env.DB,
   ): Promise<{ acked: number; retried: number }> {
     let acked = 0;
     let retried = 0;
@@ -396,7 +434,7 @@ describe("repeated blocks across a source's pages", { timeout: 60_000 }, () => {
           },
         })),
       },
-      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever, queue },
+      { db, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever, queue },
     );
     return { acked, retried };
   }
@@ -443,41 +481,165 @@ describe("repeated blocks across a source's pages", { timeout: 60_000 }, () => {
     expect(await pending(site.sitemapSourceId)).toEqual([]);
   });
 
-  it("gives the blocks back after a removal whose queuing failed", async () => {
-    await importPages(sitePages(6));
-    const removed = await deleteDocuments(
-      {
-        tenant,
-        docs: env.DOCS,
-        retriever,
-        repeated: { queue: flakyQueue(1), orgId: TEST_ORG_ID },
-      },
-      { orgId: TEST_ORG_ID, assistantId: site.assistantId },
-      { sourceId: site.sitemapSourceId, externalIds: ["page-4", "page-5"] },
-    );
-    expect(removed).toMatchObject({ deleted: 2 });
-    expect((await tenant.blocks.stored(site.sitemapSourceId))?.hashes).toEqual([]);
-    expect(await pending(site.sitemapSourceId)).not.toEqual([]);
+  async function owedRemovals(sourceId: string): Promise<number> {
+    return (await tenant.blocks.stored(sourceId))?.owed ?? 0;
+  }
 
-    // Any later message for one of the source's pages queues them all.
-    const [doc] = await tenant.documents.listBySource(site.sitemapSourceId);
-    const queue = capturingQueue();
-    await deliverOnce(
-      [
-        {
-          orgId: TEST_ORG_ID,
-          documentId: doc?.id as string,
-          contentHash: doc?.contentHash as string,
+  /** `tenant`, with its repeated-block counting failing for the next `failures` calls. */
+  function failingCompute(failures: number): Tenant {
+    let left = failures;
+    return {
+      ...tenant,
+      blocks: {
+        ...tenant.blocks,
+        async compute(sourceId: string) {
+          if (left > 0) {
+            left--;
+            throw new Error("D1 unavailable");
+          }
+          return tenant.blocks.compute(sourceId);
         },
-      ],
-      queue,
+      },
+    };
+  }
+
+  async function removePages(
+    externalIds: string[],
+    queue: RepeatedQueue,
+    on: Tenant = tenant,
+  ): Promise<{ deleted: number }> {
+    return deleteDocuments(
+      { tenant: on, docs: env.DOCS, retriever, repeated: { queue, orgId: TEST_ORG_ID } },
+      { orgId: TEST_ORG_ID, assistantId: site.assistantId },
+      { sourceId: site.sitemapSourceId, externalIds },
     );
-    expect(queue.messages).toHaveLength(4);
-    await drainConsumer(queue.messages, { embedder, retriever });
+  }
+
+  async function expectBlocksGivenBack() {
     const text = await indexedText(site.sitemapSourceId);
     expect(text.size).toBe(4);
     for (const indexed of text.values()) expect(indexed).toContain(COOKIE);
     expect(await pending(site.sitemapSourceId)).toEqual([]);
+    expect(await owedRemovals(site.sitemapSourceId)).toBe(0);
+  }
+
+  it("clears what a removal owes once it has reconciled", async () => {
+    await importPages(sitePages(6));
+    const queue = capturingQueue();
+    await removePages(["page-4", "page-5"], queue);
+    expect(queue.messages).toHaveLength(4);
+    expect(await owedRemovals(site.sitemapSourceId)).toBe(0);
+  });
+
+  it("gives the blocks back after a removal whose queuing failed, on its own", async () => {
+    await importPages(sitePages(6));
+    const queue = flakyQueue(1);
+    expect(await removePages(["page-4", "page-5"], queue)).toMatchObject({ deleted: 2 });
+    expect((await tenant.blocks.stored(site.sitemapSourceId))?.hashes).toEqual([]);
+    expect(await pending(site.sitemapSourceId)).not.toEqual([]);
+    expect(await owedRemovals(site.sitemapSourceId)).toBe(1);
+
+    // The removal queued the source itself: no other activity is needed.
+    expect(queue.messages).toEqual([
+      { kind: "repeated_source", orgId: TEST_ORG_ID, sourceId: site.sitemapSourceId },
+    ]);
+    await drainConsumer(queue.messages, { embedder, retriever });
+    await expectBlocksGivenBack();
+  });
+
+  it("gives the blocks back after a removal whose counting failed before anything was stored", async () => {
+    await importPages(sitePages(6));
+    const queue = capturingQueue();
+    const scheduled: Array<IngestQueueMessage | RepeatedSourceMessage> = [];
+    expect(
+      await removePages(
+        ["page-4", "page-5"],
+        {
+          async sendBatch(batch) {
+            scheduled.push(...batch.map((m) => m.body));
+          },
+        },
+        failingCompute(1),
+      ),
+    ).toMatchObject({ deleted: 2 });
+    // Nothing changed yet: the set is still the six-page one, nothing pending.
+    expect((await tenant.blocks.stored(site.sitemapSourceId))?.hashes).not.toEqual([]);
+    expect(await pending(site.sitemapSourceId)).toEqual([]);
+    expect(await owedRemovals(site.sitemapSourceId)).toBe(1);
+    expect(scheduled).toEqual([
+      { kind: "repeated_source", orgId: TEST_ORG_ID, sourceId: site.sitemapSourceId },
+    ]);
+    expect(queue.messages).toEqual([]);
+
+    await drainConsumer(scheduled, { embedder, retriever });
+    await expectBlocksGivenBack();
+  });
+
+  it("retries the source's message until its reconciliation runs through", async () => {
+    await importPages(sitePages(6));
+    const scheduled = capturingQueue();
+    await removePages(["page-4", "page-5"], flakyQueue(1));
+    const message = {
+      kind: "repeated_source",
+      orgId: TEST_ORG_ID,
+      sourceId: site.sitemapSourceId,
+    } as const;
+
+    // Delivered while the counting fails: retried, still owed.
+    let acked = 0;
+    let retried = 0;
+    const delivery = (attempts: number) => ({
+      id: newId("msg"),
+      timestamp: new Date(),
+      attempts,
+      body: message,
+      ack() {
+        acked++;
+      },
+      retry() {
+        retried++;
+      },
+    });
+    await runRepeatedSourceBatch([delivery(1)], {
+      tenant: failingCompute(1),
+      orgId: TEST_ORG_ID,
+      queue: scheduled,
+    });
+    expect({ acked, retried }).toEqual({ acked: 0, retried: 1 });
+    expect(await owedRemovals(site.sitemapSourceId)).toBe(1);
+
+    // The retry runs through and queues the four pages.
+    await runRepeatedSourceBatch([delivery(2)], {
+      tenant,
+      orgId: TEST_ORG_ID,
+      queue: scheduled,
+    });
+    expect({ acked, retried }).toEqual({ acked: 1, retried: 1 });
+    expect(scheduled.messages).toHaveLength(4);
+    await drainConsumer(scheduled.messages, { embedder, retriever });
+    await expectBlocksGivenBack();
+  });
+
+  it("fails a removal it could neither reconcile nor queue, and its retry reconciles", async () => {
+    await importPages(sitePages(6));
+    const down = {
+      async sendBatch(): Promise<unknown> {
+        throw new Error("queue unavailable");
+      },
+    };
+    await expect(removePages(["page-4", "page-5"], down, failingCompute(1))).rejects.toThrow(
+      "queue unavailable",
+    );
+    // The pages are gone and what they owe is recorded.
+    expect((await indexedText(site.sitemapSourceId)).size).toBe(4);
+    expect(await owedRemovals(site.sitemapSourceId)).toBe(1);
+
+    // The same request again: nothing is left to remove, and it reconciles.
+    const queue = capturingQueue();
+    expect(await removePages(["page-4", "page-5"], queue)).toMatchObject({ deleted: 0 });
+    expect(queue.messages).toHaveLength(4);
+    await drainConsumer(queue.messages, { embedder, retriever });
+    await expectBlocksGivenBack();
   });
 
   it("never touches written answers", async () => {
@@ -618,5 +780,54 @@ describe("repeated blocks across a source's pages", { timeout: 60_000 }, () => {
       .bind(site.sitemapSourceId, INGEST_VERSION)
       .first<{ n: number }>();
     expect(rows?.n).toBe(4);
+  });
+  it("does not keep chunks another build replaced after they were compared", async () => {
+    // Four pages with no repeated block, as version 2 left them.
+    await importPages(sitePages(4));
+    await env.DB.prepare(
+      "UPDATE documents SET ingest_version = 2, repeated_key = NULL WHERE source_id = ?1",
+    )
+      .bind(site.sitemapSourceId)
+      .run();
+    await env.DB.prepare("DELETE FROM document_blocks").run();
+    const [doc] = await tenant.documents.listBySource(site.sitemapSourceId);
+    if (doc === undefined) throw new Error("no document");
+    const before = (await indexedText(site.sitemapSourceId)).get(doc.externalId);
+
+    // Another build, made while a block of this page was repeated, commits
+    // its chunks right after this build compared the stored ones.
+    const other = { id: newId("chk"), ordinal: 0, text: "Only what was left.", headingPath: "" };
+    let interleaved = false;
+    const db = interleavedDb(
+      /FROM chunks WHERE org_id = \?1 AND document_id = \?2 ORDER BY ordinal/,
+      async () => {
+        if (interleaved) return;
+        interleaved = true;
+        expect(
+          await tenant.documents.replaceChunks(doc.id, [other], doc.contentHash, INGEST_VERSION, {
+            blocks: {
+              sourceId: site.sitemapSourceId,
+              hashes: ["b0123456789abcdef"],
+              key: "kother",
+            },
+          }),
+        ).toBe(true);
+      },
+    );
+    const message = { orgId: TEST_ORG_ID, documentId: doc.id, contentHash: doc.contentHash };
+    const queue = capturingQueue();
+    // Its chunks match what is stored when compared, but not when it commits:
+    // refused and retried, and the other build's state is left as it was.
+    expect(await deliverOnce([message], queue, 1, db)).toEqual({ acked: 0, retried: 1 });
+    expect(interleaved).toBe(true);
+    const after = await tenant.documents.get(doc.id);
+    expect(after?.repeatedKey).toBe("kother");
+    expect((await tenant.documents.listChunks(doc.id)).map((c) => c.id)).toEqual([other.id]);
+
+    // The retry finds the page built with a set the source no longer has,
+    // and rebuilds it: its text is back.
+    expect(await deliverOnce([message], queue, 2)).toEqual({ acked: 1, retried: 0 });
+    expect((await indexedText(site.sitemapSourceId)).get(doc.externalId)).toBe(before);
+    expect((await tenant.documents.get(doc.id))?.repeatedKey).toBe("");
   });
 });

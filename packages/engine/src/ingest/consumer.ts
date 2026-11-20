@@ -10,8 +10,10 @@ import {
   builtWithCurrentRepeated,
   type CommittedPage,
   checksRepeated,
+  isRepeatedSourceMessage,
   type RepeatedQueue,
   reconcileRepeated,
+  runRepeatedSourceBatch,
 } from "./repeatedSource.js";
 import { EMBEDDINGS_REUSABLE_FROM, INGEST_VERSION } from "./version.js";
 
@@ -166,6 +168,21 @@ async function processIngestMessage(
   message: Message<unknown>,
   deps: IngestConsumerDeps,
 ): Promise<void> {
+  if (isRepeatedSourceMessage(message.body)) {
+    // Normally routed before the embedder is resolved (see `app.ts`); handled
+    // here too so a host running only this batch still reconciles.
+    const orgId = await deps.resolveOrg(message.body.orgId);
+    if (orgId === null || deps.queue === undefined) {
+      message.ack();
+      return;
+    }
+    await runRepeatedSourceBatch([message], {
+      tenant: forQueuedIngest(deps.db, orgId),
+      orgId,
+      queue: deps.queue,
+    });
+    return;
+  }
   if (!isIngestMessage(message.body)) {
     message.ack();
     return;
@@ -204,13 +221,14 @@ async function processIngestMessage(
     (!checked || (await builtWithCurrentRepeated(tenant, document, stored)))
   ) {
     // Nothing to build, but the source may still owe pages a rebuild: a
-    // change whose pages were not all queued, or this message's own retry
-    // after its reconciliation failed. A failure here retries the message.
+    // change whose pages were not all queued, a removal not yet reconciled,
+    // or this message's own retry after its reconciliation failed. A
+    // failure here retries the message.
     if (
       checked &&
       deps.queue !== undefined &&
       stored !== null &&
-      (stored.pending.length > 0 || message.attempts > 1)
+      (stored.pending.length > 0 || stored.owed > 0 || message.attempts > 1)
     ) {
       await reconcileRepeated(tenant, document.sourceId, deps.queue, orgId);
     }
@@ -312,16 +330,22 @@ async function indexDocument(
   // and blocks are written. This is what spares the upgrade to version 3
   // an embedding for every page with no repeated block, and a page that
   // keeps its repeated block (most of the page) one on every crossing.
-  if (await reusesStoredChunks(tenant, document, chunks)) {
+  //
+  // The commit keeps only the chunks compared here: when another build
+  // replaced them in between, it is refused and the message is retried, so
+  // the next delivery compares (or rebuilds) against what is stored then
+  // rather than this build's key being recorded over that build's chunks.
+  const reusable = await reusableChunkIds(tenant, document, chunks);
+  if (reusable !== null) {
     const committed = await tenant.documents.replaceChunks(
       document.id,
       [],
       contentHash,
       INGEST_VERSION,
-      { blocks, keepChunks: true },
+      { blocks, keepChunks: reusable },
     );
     if (committed) await reconcileAndAck();
-    else message.ack();
+    else message.retry();
     return;
   }
 
@@ -393,19 +417,20 @@ async function indexDocument(
 }
 
 /**
- * True when the document's indexed chunks are exactly `chunks` (text,
- * heading path and order) and were built by an ingest version that embeds
- * a chunk as this one does, so their vectors can stay.
+ * The ids of the document's indexed chunks when they are exactly `chunks`
+ * (text, heading path and order) and were built by an ingest version that
+ * embeds a chunk as this one does, so their vectors can stay; null
+ * otherwise. The ids are what the commit checks are still stored.
  */
-async function reusesStoredChunks(
+async function reusableChunkIds(
   tenant: Tenant,
   document: DocumentRow,
   chunks: ReadonlyArray<{ ordinal: number; text: string; headingPath: string }>,
-): Promise<boolean> {
-  if (document.indexedHash !== document.contentHash) return false;
-  if (document.ingestVersion < EMBEDDINGS_REUSABLE_FROM) return false;
+): Promise<string[] | null> {
+  if (document.indexedHash !== document.contentHash) return null;
+  if (document.ingestVersion < EMBEDDINGS_REUSABLE_FROM) return null;
   const stored: ChunkRow[] = await tenant.documents.listChunks(document.id);
-  return (
+  const same =
     stored.length === chunks.length &&
     stored.every((row, i) => {
       const chunk = chunks[i];
@@ -415,8 +440,8 @@ async function reusesStoredChunks(
         row.text === chunk.text &&
         row.headingPath === chunk.headingPath
       );
-    })
-  );
+    });
+  return same ? stored.map((row) => row.id) : null;
 }
 
 /**

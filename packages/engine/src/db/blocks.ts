@@ -15,6 +15,8 @@ export interface StoredRepeated {
   raw: string;
   pending: string[];
   rev: number;
+  /** Removals whose reconciliation has not yet run through (`repeated_owed`); 0 when none. */
+  owed: number;
 }
 
 const stringArray = (raw: string): string[] =>
@@ -36,17 +38,23 @@ export function blocksFor(db: D1Database, orgId: string) {
     async stored(sourceId: string): Promise<StoredRepeated | null> {
       const row = await prepare(
         db,
-        `SELECT repeated_blocks, repeated_pending, repeated_rev
+        `SELECT repeated_blocks, repeated_pending, repeated_rev, repeated_owed
            FROM sources WHERE org_id = ?1 AND id = ?2`,
       )
         .bind(orgId, sourceId)
-        .first<{ repeated_blocks: string; repeated_pending: string; repeated_rev: number }>();
+        .first<{
+          repeated_blocks: string;
+          repeated_pending: string;
+          repeated_rev: number;
+          repeated_owed: number;
+        }>();
       if (row === null) return null;
       return {
         hashes: stringArray(row.repeated_blocks),
         raw: row.repeated_blocks,
         pending: stringArray(row.repeated_pending),
         rev: Number(row.repeated_rev),
+        owed: Number(row.repeated_owed),
       };
     },
 
@@ -128,6 +136,22 @@ export function blocksFor(db: D1Database, orgId: string) {
           WHERE org_id = ?1 AND id = ?2 AND repeated_rev = ?3`,
       )
         .bind(orgId, sourceId, rev, hashList(delivered))
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Clears the source's owed reconciliation (`repeated_owed`) once one that
+     * read it as `owed` has run through, unless a removal raised it since.
+     */
+    async discharge(sourceId: string, owed: number): Promise<boolean> {
+      if (owed === 0) return true;
+      const res = await prepare(
+        db,
+        `UPDATE sources SET repeated_owed = 0
+          WHERE org_id = ?1 AND id = ?2 AND repeated_owed = ?3`,
+      )
+        .bind(orgId, sourceId, owed)
         .run();
       return (res.meta.changes ?? 0) > 0;
     },

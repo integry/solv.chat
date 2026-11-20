@@ -11,10 +11,14 @@ import {
   resolveChatProviders,
 } from "./chat/route.js";
 import type { ScoreFloorEnv } from "./chat/scoreFloor.js";
-import { forPrincipal, forScheduledSync, type Tenant } from "./db/tenant.js";
+import { forPrincipal, forQueuedIngest, forScheduledSync, type Tenant } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
 import { plainPageFetcher } from "./ingest/pageFetcher.js";
-import type { RepeatedQueue } from "./ingest/repeatedSource.js";
+import {
+  isRepeatedSourceMessage,
+  type RepeatedQueue,
+  runRepeatedSourceBatch,
+} from "./ingest/repeatedSource.js";
 import { type IngestResource, ingestRoutes } from "./ingest/router.js";
 import {
   type DueSyncsResult,
@@ -315,7 +319,11 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         // Sync pages need no embedding key: they fetch and write a page, and
         // a changed page queues its own chunk-and-embed message.
         const syncPages = messages.filter((message) => isSyncPageMessage(message.body));
-        const ingest = messages.filter((message) => !isSyncPageMessage(message.body));
+        // Nor does a source owed a reconciliation of its repeated blocks.
+        const repeated = messages.filter((message) => isRepeatedSourceMessage(message.body));
+        const ingest = messages.filter(
+          (message) => !isSyncPageMessage(message.body) && !isRepeatedSourceMessage(message.body),
+        );
         if (syncPages.length > 0) {
           await runSyncPageBatch(syncPages, {
             tenant: forScheduledSync(env.DB, orgId),
@@ -323,6 +331,13 @@ export function createApp(seams: Seams, options?: AppOptions): App {
             docs: env.DOCS,
             queue: env.INGEST_QUEUE,
             pages,
+          });
+        }
+        if (repeated.length > 0) {
+          await runRepeatedSourceBatch(repeated, {
+            tenant: forQueuedIngest(env.DB, orgId),
+            orgId,
+            queue: env.INGEST_QUEUE as unknown as RepeatedQueue,
           });
         }
         if (ingest.length === 0) continue;

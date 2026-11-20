@@ -13,7 +13,7 @@ import type { IngestScope, Tenant } from "../db/tenant.js";
 import type { Retriever } from "../providers/retrieval.js";
 import { sha256Hex } from "../util/crypto.js";
 import { chunkMarkdown, exceedsChunkBudget, MAX_CHUNKS } from "./chunk.js";
-import { type RepeatedQueue, reconcileRepeated } from "./repeatedSource.js";
+import { type RepeatedQueue, reconcileAfterRemoval } from "./repeatedSource.js";
 import { INGEST_VERSION } from "./version.js";
 
 export const MAX_BATCH_DOCUMENTS = 100;
@@ -65,8 +65,9 @@ export interface DeleteDeps {
   retriever: Pick<Retriever, "remove">;
   /**
    * After a removal, the source's repeated blocks are worked out again and
-   * the pages whose blocks changed status are queued here (see "Repeated
-   * blocks"). Left out when the whole source goes.
+   * the pages whose blocks changed status are queued here, or a retried
+   * `repeated_source` message is (see "Repeated blocks"). Left out when the
+   * whole source goes.
    */
   repeated?: { queue: RepeatedQueue; orgId: string } | undefined;
 }
@@ -374,7 +375,14 @@ export async function removeSourceDocuments(
   // One D1 batch for every row, then batched cleanup: a large source or
   // prune stays within the per-request query and subrequest limits instead
   // of costing several calls per document.
-  const removed = await deps.tenant.documents.removeMany(toDelete.map((doc) => doc.id));
+  // With repeated blocks to keep up, the batch that deletes the pages also
+  // records that the source is owed a reconciliation, so no removal can
+  // complete without it (see "Repeated blocks").
+  const repeated = deps.repeated;
+  const removed = await deps.tenant.documents.removeMany(
+    toDelete.map((doc) => doc.id),
+    { oweRepeated: repeated === undefined ? undefined : sourceId },
+  );
 
   const vectorIds = [...removed.values()].flat();
   if (vectorIds.length > 0) {
@@ -394,20 +402,19 @@ export async function removeSourceDocuments(
   for (let i = 0; i < bodyKeys.length; i += R2_DELETE_KEYS_LIMIT) {
     await tryDeleteObject(deps.docs, bodyKeys.slice(i, i + R2_DELETE_KEYS_LIMIT), sourceId);
   }
-  // Fewer pages: a block may now be over the threshold, or under it. A
-  // failure here does not fail the removal: once a changed set is stored,
-  // the pages it owes a rebuild stay pending in D1 and the source's next
-  // reconciliation (a commit, a removal, a queued page) queues them.
-  const repeated = deps.repeated;
-  if (removed.size > 0 && repeated !== undefined) {
-    try {
-      await reconcileRepeated(deps.tenant, sourceId, repeated.queue, repeated.orgId);
-    } catch (err) {
-      console.warn("ingest delete: could not update repeated blocks", {
-        sourceId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+  // Fewer pages: a block may now be over the threshold, or under it. The
+  // source is reconciled now, or a retried `repeated_source` message does
+  // it; a removal with nothing to remove still runs one an earlier removal
+  // owes. Throws only when neither could be arranged (the removal is done
+  // and the owed reconciliation stays recorded; retrying it runs it).
+  if (repeated !== undefined) {
+    await reconcileAfterRemoval(
+      deps.tenant,
+      sourceId,
+      repeated.queue,
+      repeated.orgId,
+      removed.size > 0,
+    );
   }
   return removed.size;
 }

@@ -7,9 +7,34 @@ import type { Tenant } from "../db/tenant.js";
 import type { IngestQueueMessage } from "./documents.js";
 import { normalizeBlock, type PageBlocks, pageBlocks, repeatedKey } from "./repeated.js";
 
-/** The queue pages are sent to when their repeated blocks change. */
+/**
+ * A source whose pages were removed and whose repeated blocks must be worked
+ * out again: sent on the ingest queue when the removal could not do it
+ * itself, and retried until a reconciliation runs through.
+ */
+export interface RepeatedSourceMessage {
+  kind: "repeated_source";
+  orgId: string;
+  sourceId: string;
+}
+
+export function isRepeatedSourceMessage(body: unknown): body is RepeatedSourceMessage {
+  if (typeof body !== "object" || body === null) return false;
+  const record = body as Record<string, unknown>;
+  return (
+    record.kind === "repeated_source" &&
+    typeof record.orgId === "string" &&
+    record.orgId !== "" &&
+    typeof record.sourceId === "string" &&
+    record.sourceId !== ""
+  );
+}
+
+/** The queue pages (and a source owed a reconciliation) are sent to when their repeated blocks change. */
 export interface RepeatedQueue {
-  sendBatch(messages: Array<{ body: IngestQueueMessage }>): Promise<unknown>;
+  sendBatch(
+    messages: Array<{ body: IngestQueueMessage | RepeatedSourceMessage }>,
+  ): Promise<unknown>;
 }
 
 // "100 (or 256KB in total)" messages per `sendBatch`.
@@ -51,6 +76,11 @@ export interface CommittedPage {
  * counts held in `source_blocks`, nothing here reads more than the source's
  * page count, the rows over the threshold, and the pages holding a hash
  * whose status changed or is pending.
+ *
+ * `ranThrough` is true when the set was confirmed or stored and every page
+ * it owes was queued; the source's owed reconciliation (`repeated_owed`,
+ * raised by a removal) is then cleared, unless a removal raised it since
+ * it was read. It is false when every compare-and-set lost to another run.
  */
 export async function reconcileRepeated(
   tenant: Tenant,
@@ -58,16 +88,19 @@ export async function reconcileRepeated(
   queue: RepeatedQueue,
   orgId: string,
   committed?: CommittedPage,
-): Promise<{ queued: number }> {
+): Promise<{ queued: number; ranThrough: boolean }> {
   let current: Set<string> | null = null;
+  // The removals owed a reconciliation, as read with the set this run used.
+  let owedRemovals = 0;
   // The hashes whose pages this run queues, and the store they were read at.
   let owed: string[] = [];
   let rev = 0;
   for (let attempt = 0; attempt < SWAP_ATTEMPTS; attempt++) {
     const stored = await tenant.blocks.stored(sourceId);
-    if (stored === null) return { queued: 0 };
+    if (stored === null) return { queued: 0, ranThrough: true };
     owed = stored.pending;
     rev = stored.rev;
+    owedRemovals = stored.owed;
     const next = await tenant.blocks.compute(sourceId);
     const before = new Set(stored.hashes);
     const after = new Set(next);
@@ -103,7 +136,76 @@ export async function reconcileRepeated(
     await queue.sendBatch(messages.slice(i, i + QUEUE_SEND_BATCH_MESSAGES));
   }
   await tenant.blocks.settle(sourceId, rev, owed);
-  return { queued: messages.length };
+  if (current === null) return { queued: messages.length, ranThrough: false };
+  await tenant.blocks.discharge(sourceId, owedRemovals);
+  return { queued: messages.length, ranThrough: true };
+}
+
+/**
+ * After pages of a source were removed (`removedAny`; the removal raised
+ * `repeated_owed` in its own batch), or when an earlier removal's
+ * reconciliation is still owed: reconciles the source, and when that fails
+ * sends a `repeated_source` message, which is retried until a
+ * reconciliation runs through. Throws only when that send fails too; the
+ * owed reconciliation stays recorded in D1, so the caller's retry (a
+ * removal with nothing left to remove reconciles too) and any message for
+ * one of the source's indexed pages still run it.
+ */
+export async function reconcileAfterRemoval(
+  tenant: Tenant,
+  sourceId: string,
+  queue: RepeatedQueue,
+  orgId: string,
+  removedAny: boolean,
+): Promise<void> {
+  try {
+    if (!removedAny && ((await tenant.blocks.stored(sourceId))?.owed ?? 0) === 0) return;
+    if ((await reconcileRepeated(tenant, sourceId, queue, orgId)).ranThrough) return;
+  } catch (err) {
+    console.warn("ingest delete: could not update repeated blocks, scheduling retry", {
+      sourceId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  await queue.sendBatch([{ body: { kind: "repeated_source", orgId, sourceId } }]);
+}
+
+/**
+ * Runs the reconciliation a `repeated_source` message asks for, acknowledging
+ * it once one runs through (or the source is gone, or nothing is owed) and
+ * retrying it otherwise. The org was resolved for the whole group by the
+ * caller; a message for a source not in that org finds none and is
+ * acknowledged.
+ */
+export async function runRepeatedSourceBatch(
+  messages: ReadonlyArray<Message<unknown>>,
+  deps: { tenant: Tenant; orgId: string; queue: RepeatedQueue },
+): Promise<void> {
+  for (const message of messages) {
+    if (!isRepeatedSourceMessage(message.body)) {
+      message.ack();
+      continue;
+    }
+    const { sourceId } = message.body;
+    try {
+      const stored = await deps.tenant.blocks.stored(sourceId);
+      if (
+        stored === null ||
+        (stored.owed === 0 && stored.pending.length === 0) ||
+        (await reconcileRepeated(deps.tenant, sourceId, deps.queue, deps.orgId)).ranThrough
+      ) {
+        message.ack();
+      } else {
+        message.retry();
+      }
+    } catch (err) {
+      console.warn("ingest: repeated-blocks reconciliation failed, scheduling retry", {
+        messageId: message.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      message.retry();
+    }
+  }
 }
 
 /**

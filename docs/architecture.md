@@ -63,8 +63,9 @@ from the auth seam and pass it down.
   `recheckDays` (1–365, default 7); see "Scheduled sitemap sync". Every
   source also has repeated_blocks: the hashes of the text blocks that repeat
   across most of its pages, as last worked out, with repeated_pending (the
-  hashes whose change of status some pages may not have been queued for yet)
-  and repeated_rev (how many times repeated_blocks was stored); see
+  hashes whose change of status some pages may not have been queued for yet),
+  repeated_rev (how many times repeated_blocks was stored) and repeated_owed
+  (removals of its pages whose reconciliation has not yet run through); see
   "Repeated blocks".
 - `documents` — id, source_id, external_id, url, title, content_hash, updated_at,
   indexed_hash (the content last made searchable), index_error and
@@ -365,12 +366,23 @@ never touched. Nothing calls a model.
   paid for again on each crossing. Pages without the block are not
   touched. A page rebuilt into the very chunks it has (same text, heading
   paths and order, by an ingest version from `EMBEDDINGS_REUSABLE_FROM` on)
-  keeps its vectors and costs a D1 write, not an embedding. If the counting
+  keeps its vectors and costs a D1 write, not an embedding; that write is
+  refused unless the document's chunks are still the ones compared (by id),
+  and the message is then retried, so a build that replaced them in between
+  is never recorded under this build's key. If the counting
   fails after a commit, the page stays committed and its message is retried
   rather than acknowledged; the retry rebuilds the page if it was built with
   an older set, and otherwise reconciles again (as does any message for an
-  indexed page while hashes are pending). A failure after a removal does
-  not fail the removal; the pending hashes keep what it owes.
+  indexed page while hashes are pending). A removal raises the source's
+  `repeated_owed` in the batch that deletes the pages, and a reconciliation
+  that read it and ran through clears it (unless a removal raised it again
+  meanwhile). When the reconciliation after a removal fails, at any step,
+  the removal sends a `repeated_source` message on the ingest queue, which
+  is retried until a reconciliation runs through; any message for one of
+  the source's indexed pages reconciles too while it is owed. Only when
+  that send fails as well does the removal fail; the pages are gone and
+  the obligation stays recorded, and the same request again (or the next
+  sync run of the source), with nothing left to remove, reconciles.
 - **Owner view.** Sources says on a source's row how many repeated blocks
   (paragraphs, lists and code blocks) are left out, and its documents panel
   lists them, with the first 80 characters of each and on how many pages it

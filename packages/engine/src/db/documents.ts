@@ -162,10 +162,13 @@ export interface CommitOptions {
   /** Recorded in the same guarded batch; left out for a written answer. */
   blocks?: BlocksInput | undefined;
   /**
-   * The stored chunks (and so their vectors) are already what this build
-   * makes; only the document's state and blocks are written.
+   * The ids of the stored chunks this build compared and found to be what
+   * it makes: they (and so their vectors) stay, and only the document's
+   * state and blocks are written. The commit is refused unless the
+   * document's chunks are still exactly these, so a build that replaced
+   * them after the comparison is never recorded over by this one.
    */
-  keepChunks?: boolean | undefined;
+  keepChunks?: readonly string[] | undefined;
 }
 
 export interface ChunkInput {
@@ -563,9 +566,27 @@ export function documentsFor(db: D1Database, orgId: string) {
      * the caller can clean up vectors. Each group's chunk ids are read in the
      * same batch, just before its delete.
      */
-    async removeMany(ids: string[]): Promise<Map<string, string[]>> {
+    /**
+     * Deletes these documents (cascading chunks) in one batch. With
+     * `oweRepeated`, the same batch raises that source's `repeated_owed`
+     * (see "Repeated blocks"), so the removal cannot be committed without
+     * the reconciliation it owes being recorded.
+     */
+    async removeMany(
+      ids: string[],
+      options: { oweRepeated?: string | undefined } = {},
+    ): Promise<Map<string, string[]>> {
       const removed = new Map<string, string[]>();
       if (ids.length === 0) return removed;
+      const owe: D1PreparedStatement[] =
+        options.oweRepeated === undefined
+          ? []
+          : [
+              prepare(
+                db,
+                "UPDATE sources SET repeated_owed = repeated_owed + 1 WHERE org_id = ?1 AND id = ?2",
+              ).bind(orgId, options.oweRepeated),
+            ];
       const statements = inGroups(ids).flatMap((group) => [
         prepare(
           db,
@@ -578,7 +599,7 @@ export function documentsFor(db: D1Database, orgId: string) {
            RETURNING id`,
         ).bind(orgId, ...group),
       ]);
-      const results = await db.batch(statements);
+      const results = (await db.batch([...owe, ...statements])).slice(owe.length);
       for (let i = 0; i < results.length; i += 2) {
         const chunks = (results[i]?.results ?? []) as Array<{ id: string; document_id: string }>;
         for (const row of (results[i + 1]?.results ?? []) as Array<{ id: string }>) {
@@ -763,10 +784,26 @@ export function documentsFor(db: D1Database, orgId: string) {
       // see "Repeated blocks"). Two re-index messages for one document with
       // the same result cannot both commit: the first sets the version and
       // key, and the second's guard is then false.
-      const owed = `content_hash = ?3 AND (indexed_hash IS NULL OR indexed_hash != ?3 OR ingest_version < ?4 OR repeated_key IS NOT ?5)`;
+      //
+      // A build that keeps the stored chunks also requires them to be the
+      // ones it compared (`kept`, by id: every build inserts new ids), in
+      // every statement of the batch, so another build's chunks committed
+      // in between are not kept under this build's key.
+      const keep = options.keepChunks;
+      const keptParam = keep === undefined ? [] : [JSON.stringify([...new Set(keep)])];
+      // The guard, with the kept-chunks check reading its id list from `?slot`.
+      const guard = (slot: number) =>
+        `content_hash = ?3 AND (indexed_hash IS NULL OR indexed_hash != ?3 OR ingest_version < ?4 OR repeated_key IS NOT ?5)` +
+        (keep === undefined
+          ? ""
+          : ` AND (SELECT COUNT(*) FROM chunks WHERE org_id = ?1 AND document_id = ?2) = json_array_length(?${slot})
+              AND NOT EXISTS (SELECT 1 FROM chunks WHERE org_id = ?1 AND document_id = ?2
+                               AND id NOT IN (SELECT value FROM json_each(?${slot})))`);
       const key = options.blocks?.key ?? null;
       const stmts: D1PreparedStatement[] = [];
-      if (options.keepChunks !== true) {
+      if (keep === undefined) {
+        // Nothing kept, so the guard has no kept-chunks check here.
+        const owed = guard(0);
         stmts.push(
           prepare(
             db,
@@ -802,13 +839,13 @@ export function documentsFor(db: D1Database, orgId: string) {
             db,
             `DELETE FROM document_blocks
              WHERE org_id = ?1 AND document_id = ?2
-               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${owed})`,
-          ).bind(orgId, documentId, expectedContentHash, ingestVersion, key),
+               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${guard(6)})`,
+          ).bind(orgId, documentId, expectedContentHash, ingestVersion, key, ...keptParam),
           prepareInsert(
             db,
             `INSERT INTO document_blocks (org_id, source_id, document_id, block_hash)
              SELECT ?1, ?6, ?2, value FROM json_each(?7)
-             WHERE EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND source_id = ?6 AND ${owed})`,
+             WHERE EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND source_id = ?6 AND ${guard(8)})`,
           ).bind(
             orgId,
             documentId,
@@ -817,6 +854,7 @@ export function documentsFor(db: D1Database, orgId: string) {
             key,
             options.blocks.sourceId,
             JSON.stringify([...new Set(options.blocks.hashes)]),
+            ...keptParam,
           ),
         );
       }
@@ -825,8 +863,8 @@ export function documentsFor(db: D1Database, orgId: string) {
           db,
           `UPDATE documents
            SET indexed_hash = ?3, ingest_version = ?4, repeated_key = ?5
-           WHERE org_id = ?1 AND id = ?2 AND ${owed}`,
-        ).bind(orgId, documentId, expectedContentHash, ingestVersion, key),
+           WHERE org_id = ?1 AND id = ?2 AND ${guard(6)}`,
+        ).bind(orgId, documentId, expectedContentHash, ingestVersion, key, ...keptParam),
       );
       const results = await db.batch(stmts);
       return (results[results.length - 1]?.meta.changes ?? 0) > 0;

@@ -3,6 +3,7 @@ import { newId } from "@solvchat/core";
 import { forPrincipal, type Tenant } from "../../src/db/tenant.js";
 import { runIngestBatch } from "../../src/ingest/consumer.js";
 import type { IngestQueueMessage } from "../../src/ingest/documents.js";
+import type { RepeatedSourceMessage } from "../../src/ingest/repeatedSource.js";
 import type { Embedder, Retriever } from "../../src/providers/retrieval.js";
 import type { UsageSink } from "../../src/seams/types.js";
 import { acceptQueuedOrg, TEST_ORG_ID } from "./app.js";
@@ -109,7 +110,7 @@ export async function runConsumer(
  * are delivered too. `batchSize` messages go to the consumer at a time.
  */
 export async function drainConsumer(
-  messages: IngestQueueMessage[],
+  messages: Array<IngestQueueMessage | RepeatedSourceMessage>,
   deps: { embedder: Embedder; retriever: Retriever; usage?: UsageSink | undefined },
   batchSize = 4,
 ): Promise<{ acked: number; retried: number; rounds: number }> {
@@ -117,7 +118,7 @@ export async function drainConsumer(
   let retried = 0;
   let rounds = 0;
   const queue = {
-    async sendBatch(batch: Array<{ body: IngestQueueMessage }>) {
+    async sendBatch(batch: Array<{ body: IngestQueueMessage | RepeatedSourceMessage }>) {
       messages.push(...batch.map((m) => m.body));
     },
   };

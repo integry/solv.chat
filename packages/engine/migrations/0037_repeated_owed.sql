@@ -1,0 +1,12 @@
+-- A source whose repeated blocks must be worked out again (issue #127; see
+-- "Repeated blocks" in docs/architecture.md).
+--
+-- sources.repeated_owed: counts the removals of the source's pages whose
+-- reconciliation is not yet known to have run. Raised in the batch that
+-- deletes the pages, so a removal cannot complete without leaving it, and
+-- reset to 0 by a reconciliation that read it and then ran through (stored
+-- the set and queued every page it owes), only if no removal raised it
+-- again meanwhile. While it is above 0 a `repeated_source` queue message is
+-- retried until a reconciliation succeeds, and any message for one of the
+-- source's indexed pages reconciles too.
+ALTER TABLE sources ADD COLUMN repeated_owed INTEGER NOT NULL DEFAULT 0;

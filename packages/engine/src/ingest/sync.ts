@@ -30,6 +30,7 @@ import {
   SyncRunEnded,
   TooLarge,
 } from "./documents.js";
+import type { RepeatedSourceMessage } from "./repeatedSource.js";
 import { INGEST_VERSION, PAGE_TEXT_VERSION } from "./version.js";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -107,7 +108,9 @@ export function isSyncPageMessage(body: unknown): body is SyncPageMessage {
 
 export interface SyncQueue {
   send(message: IngestQueueMessage): Promise<unknown>;
-  sendBatch(messages: Array<{ body: SyncPageMessage | IngestQueueMessage }>): Promise<unknown>;
+  sendBatch(
+    messages: Array<{ body: SyncPageMessage | IngestQueueMessage | RepeatedSourceMessage }>,
+  ): Promise<unknown>;
 }
 
 export interface SyncCaps {
@@ -423,19 +426,18 @@ export async function startSourceSyncFor(
     return { status: "finished", runId };
   }
 
-  const removed =
-    plan.removed.length > 0
-      ? await removeSourceDocuments(
-          {
-            tenant,
-            docs: deps.docs,
-            retriever: deps.retriever,
-            repeated: { queue: deps.queue, orgId },
-          },
-          source.id,
-          plan.removed,
-        )
-      : 0;
+  // Called with nothing to remove too: it then only runs a reconciliation
+  // of repeated blocks an earlier run's removals still owe.
+  const removed = await removeSourceDocuments(
+    {
+      tenant,
+      docs: deps.docs,
+      retriever: deps.retriever,
+      repeated: { queue: deps.queue, orgId },
+    },
+    source.id,
+    plan.removed,
+  );
   if (!truncated) {
     // Pages no longer listed need no place in the order.
     const listed = new Set(entries.map((entry) => entry.url));
