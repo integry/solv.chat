@@ -29,6 +29,8 @@ const EXPECTED_TABLES = [
   "sync_org_refusals",
   "document_blocks",
   "source_blocks",
+  "visitor_check_tokens",
+  "visitor_counters",
   "retired_chunks",
 ];
 

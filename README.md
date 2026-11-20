@@ -40,6 +40,7 @@ Required Worker secrets (set with `wrangler secret put` or `.dev.vars` locally; 
 - `SOLV_ANTHROPIC_KEY` — Anthropic API key (optional if entered in **Settings → Providers**)
 - `SOLV_OPENAI_KEY` — OpenAI API key (optional if entered in **Settings → Providers**)
 - `SOLV_OPENROUTER_KEY` — OpenRouter API key (optional if entered in **Settings → Providers**)
+- `SOLV_TURNSTILE_SECRET` — Cloudflare Turnstile secret key for the visitor security check, set together with the `SOLV_TURNSTILE_SITE_KEY` variable (optional; without both, visitor chat runs unprotected and the admin says so). See [docs/self-hosting.md](docs/self-hosting.md#visitor-security-check-cloudflare-turnstile), which also lists the cap variables.
 
 ## Page actions
 

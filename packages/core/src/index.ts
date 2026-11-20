@@ -32,6 +32,7 @@ export { type AssistantInput, checkOrigin, parseAssistantInput } from "./schemas
 export {
   type ActionResult,
   CHAT_PROTOCOL_VERSION,
+  type ChatErrorCode,
   type ChatEvent,
   type ChatHistoryTurn,
   type ChatRequest,
@@ -42,6 +43,7 @@ export {
   MAX_CHAT_HISTORY_TURNS,
   MAX_CHAT_MESSAGE_LENGTH,
   MAX_PAGE_ACTIONS,
+  MAX_VISITOR_SESSION_LENGTH,
   type PageAction,
   parseChatEventLine,
   parseChatRequest,
@@ -105,6 +107,13 @@ export {
   type WidgetConfig,
   type WidgetPosition,
 } from "./schemas/versionConfig.js";
+export {
+  MAX_TURNSTILE_TOKEN_LENGTH,
+  parseVisitorSessionRequest,
+  type VisitorSessionErrorCode,
+  type VisitorSessionRequest,
+  type VisitorSessionResponse,
+} from "./schemas/visitorSession.js";
 export { parseSseBlock, type ReadSseOptions, readSseBlocks, type SseBlock } from "./sse.js";
 export type {
   SourceSyncRun,

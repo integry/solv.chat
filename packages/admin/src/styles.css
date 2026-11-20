@@ -176,6 +176,21 @@ a {
   border-bottom: 1px solid var(--tone-danger-border);
 }
 
+/* The standing warning about visitor chat's security check. */
+.shell-check-alert {
+  padding: var(--space-2) var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.check-error-banner {
+  margin: 0;
+  padding: 0.75rem 0.9rem;
+  border-radius: 6px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 0.875rem;
+}
+
 .shell-brand {
   font-weight: 700;
   font-size: 1rem;
@@ -3223,4 +3238,17 @@ a {
 .topic-edit .field-error,
 .topic-edit-note {
   flex-basis: 100%;
+}
+
+.policy-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.policy-list code {
+  word-break: break-all;
+}
+
+.install-policy {
+  margin-top: var(--space-3);
 }

@@ -11,6 +11,16 @@ import {
   resolveChatProviders,
 } from "./chat/route.js";
 import type { ScoreFloorEnv } from "./chat/scoreFloor.js";
+import {
+  resolveVisitorCheck,
+  type VisitorCheckEnv,
+  visitorCheckStatus,
+} from "./chat/visitorCheck.js";
+import {
+  checkFrameRoute,
+  checkFrameScript,
+  visitorSessionRoute,
+} from "./chat/visitorSessionRoute.js";
 import { forPrincipal, forQueuedIngest, forScheduledSync, type Tenant } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
 import { plainPageFetcher } from "./ingest/pageFetcher.js";
@@ -62,7 +72,7 @@ function widgetAsset(): Response {
   });
 }
 
-export interface Env extends ProviderEnv, ScoreFloorEnv {
+export interface Env extends ProviderEnv, ScoreFloorEnv, VisitorCheckEnv {
   DB: D1Database;
   VECTORS: VectorizeIndex;
   DOCS: R2Bucket;
@@ -179,6 +189,15 @@ export function createApp(seams: Seams, options?: AppOptions): App {
       if (url.pathname === "/v1/feedback") {
         return feedbackRoute(request, env, seams);
       }
+      if (url.pathname === "/v1/session") {
+        return visitorSessionRoute(request, env, { seams, fetchImpl: options?.fetch });
+      }
+      if (url.pathname === "/v1/check/frame") {
+        return checkFrameRoute(request, env, { seams });
+      }
+      if (request.method === "GET" && url.pathname === "/v1/check/frame.js") {
+        return checkFrameScript();
+      }
       const publicConfigMatch = /^\/v1\/assistants\/([^/]+)$/.exec(url.pathname);
       if (publicConfigMatch?.[1]) {
         const publicKey = decodeSegment(publicConfigMatch[1]);
@@ -246,6 +265,8 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         }
         const tenant = forPrincipal(env.DB, principal);
         return adminRoutes(request, url, {
+          visitorCheck: async () =>
+            visitorCheckStatus(await resolveVisitorCheck(env, seams.visitorCheck)),
           tenant,
           orgId: principal.orgId,
           docs: env.DOCS,

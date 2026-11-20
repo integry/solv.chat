@@ -29,13 +29,14 @@ Two secrets are required for the admin and encrypted storage, plus keys for the 
 
 Run `npx wrangler secret put <name>` inside `packages/engine` for each secret you set via Worker secrets:
 
-| Secret                | What it is                                                                                   | Where it comes from                                                                                               |
-| --------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `SOLV_ADMIN_PASSWORD` | The one password that signs you in to `/admin`.                                              | You choose it (or generate one with `openssl rand -base64 24`).                                                   |
-| `SOLV_SECRET_KEY`     | Signs session cookies and encrypts stored MCP server credentials and provider API keys.      | `openssl rand -base64 32`. Changing it signs you out everywhere and makes stored credentials and keys unreadable. |
-| `SOLV_ANTHROPIC_KEY`  | Your Anthropic key, if the instance uses Anthropic (or enter in **Settings → Providers**).   | console.anthropic.com                                                                                             |
-| `SOLV_OPENAI_KEY`     | Your OpenAI key. Needed for embeddings by default (or enter in **Settings → Providers**).    | platform.openai.com                                                                                               |
-| `SOLV_OPENROUTER_KEY` | Your OpenRouter key, if `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`. | openrouter.ai                                                                                                     |
+| Secret                  | What it is                                                                                   | Where it comes from                                                                                               |
+| ----------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `SOLV_ADMIN_PASSWORD`   | The one password that signs you in to `/admin`.                                              | You choose it (or generate one with `openssl rand -base64 24`).                                                   |
+| `SOLV_SECRET_KEY`       | Signs session cookies and encrypts stored MCP server credentials and provider API keys.      | `openssl rand -base64 32`. Changing it signs you out everywhere and makes stored credentials and keys unreadable. |
+| `SOLV_ANTHROPIC_KEY`    | Your Anthropic key, if the instance uses Anthropic (or enter in **Settings → Providers**).   | console.anthropic.com                                                                                             |
+| `SOLV_OPENAI_KEY`       | Your OpenAI key. Needed for embeddings by default (or enter in **Settings → Providers**).    | platform.openai.com                                                                                               |
+| `SOLV_OPENROUTER_KEY`   | Your OpenRouter key, if `SOLV_LLM_PROVIDER` or `SOLV_EMBEDDINGS_PROVIDER` is `"openrouter"`. | openrouter.ai                                                                                                     |
+| `SOLV_TURNSTILE_SECRET` | The secret key of your Turnstile widget, for the visitor security check (below).             | Cloudflare dashboard → Turnstile. Never sent to a browser or logged.                                              |
 
 ### Provider settings in the admin and OpenRouter
 
@@ -69,6 +70,43 @@ Content is only given to the model when its similarity to the question is at lea
 ```
 
 Any other value (not a number, or out of range) is ignored with a warning in the Worker logs, and the default is used. Each answer's trace shows the floor it used and every candidate's score, which is the way to pick a value. There is no admin setting for it.
+
+### Visitor security check (Cloudflare Turnstile)
+
+Without it, anything that can send an HTTP request can talk to your assistant: the `Origin` header is checked, but a script can set it, and the per-IP rate limit is beaten by changing addresses, so a script can use up the assistant's daily spend cap and leave real visitors with "reached its limit for today". The security check makes every visitor's browser pass [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/) before the chat answers, and adds per-visitor caps behind it. Until it is set up, the admin shows a warning on every screen.
+
+1. In the Cloudflare dashboard, open **Turnstile** and select **Add widget** ([guide](https://developers.cloudflare.com/turnstile/get-started/widget-management/dashboard/)). Choose **Managed** mode and, under **Hostname management**, add the hostname of **this Worker** (for example `solvchat-engine.example.workers.dev` or `chat.example.com`), not the hostnames of the sites the widget is embedded on. The challenge runs in a frame served by the Worker, so one hostname covers every site and assistant on the instance.
+2. Put the site key under `vars` in `packages/engine/wrangler.jsonc` (it is public) and the secret key in a Worker secret:
+
+   ```jsonc
+   "vars": {
+     "SOLV_TURNSTILE_SITE_KEY": "0x4AAAAAAA..."
+   }
+   ```
+
+   ```sh
+   npx wrangler secret put SOLV_TURNSTILE_SECRET
+   ```
+
+   `SOLV_SECRET_KEY` must be set too: visitor sessions are signed with a key derived from it.
+3. Deploy. With both keys set, the widget runs the check when a visitor first focuses or types in the message box, and the engine refuses chat and feedback requests without a valid session. With only one of the two set, the public chat refuses every request and the admin says which setting is missing. With neither, the chat runs without the check, as before.
+
+For a local or test instance you can use Turnstile's [test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/) (site key `1x00000000000000000000AA` with secret `1x0000000000000000000000000000000AA` always passes). They let everyone through, so the admin keeps warning while they are in use.
+
+**Your site's security policy.** Nothing from Turnstile loads on your pages. If your site sends a `Content-Security-Policy`, the widget needs the Worker's origin, and only it, in `script-src` (the widget script), `connect-src` (its requests) and, with the check on, `frame-src` (the check's frame). The Install screen lists the exact lines.
+
+**Your privacy notice.** Turnstile processes the visitor's IP address, their browser's TLS fingerprint and user agent, and the site key and the origin it runs on ([Turnstile Privacy Addendum](https://www.cloudflare.com/turnstile-privacy-policy/)); it does not read what visitors type. Mention Cloudflare Turnstile in your privacy notice. The engine stores no Turnstile token, session or IP with conversations.
+
+**Caps behind the check.** Turnstile stops scripts, not a person or a browser someone drives. These caps apply to visitor chat when the check is on (owner previews and test runs are not counted), each a whole number under `vars`, `0` to turn it off:
+
+| Variable                      | Default | What it limits                                                         |
+| ----------------------------- | ------- | ---------------------------------------------------------------------- |
+| `SOLV_VISITOR_DAILY_MESSAGES` | 100     | Questions from one visitor to one assistant per UTC day.               |
+| `SOLV_IP_DAILY_MESSAGES`      | 500     | Questions from one IP address to one assistant per UTC day.            |
+| `SOLV_CONVERSATION_MESSAGES`  | 50      | Questions in one conversation; the next one starts a new conversation. |
+| `SOLV_IP_HOURLY_SESSIONS`     | 30      | Security checks passed from one IP address per hour, per assistant.    |
+
+They sit behind the per-IP rate limit and the daily spend cap, which are unchanged.
 
 ## 3. Build and deploy
 
@@ -213,12 +251,14 @@ Open **Reports** and pick **7**, **30**, or **90** days to see questions asked, 
   longer be read. Open **Tools** to re-enter MCP server credentials, and open
   **Settings → Providers** to re-enter any stored provider keys; until you do,
   those servers' tools cannot be called and answering with a stored provider key
-  will fail rather than falling back to a Worker secret.
+  will fail rather than falling back to a Worker secret. Visitors' security-check
+  sessions stop working too; each visitor's next message runs the check again.
 
 Signing out clears the session cookie in that browser only. The engine keeps no list of sessions, so a copy of the cookie stays valid until it expires after 30 days. If you think a session cookie was copied, rotate `SOLV_SECRET_KEY`.
 
 - An ingest key — rotate it on the **Install** screen in `/admin` and replace it in CI; the old one stops working at once.
 - A provider key — takes effect on the next request; nothing else changes.
+- `SOLV_TURNSTILE_SECRET` — rotate it in the Turnstile dashboard ([guide](https://developers.cloudflare.com/turnstile/troubleshooting/rotate-secret-key/)) and put the new one with `wrangler secret put`. Sessions already issued keep working until they expire (one hour).
 
 ## Upgrading an existing instance
 

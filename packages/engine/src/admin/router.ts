@@ -1,4 +1,5 @@
 import { isPlainObject } from "@solvchat/core";
+import type { VisitorCheckStatus } from "../chat/visitorCheck.js";
 import type { Tenant } from "../db/tenant.js";
 import { expectedVersionConfig, type VersionRow } from "../db/versions.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
@@ -81,6 +82,12 @@ import {
 } from "./versions.js";
 
 export interface AdminRouteDeps {
+  /**
+   * Whether visitor chat runs the visitor check, for the admin's warning
+   * and the Install screen. Optional so callers written before it compile;
+   * absent, the admin says nothing about it.
+   */
+  visitorCheck?: (() => Promise<VisitorCheckStatus>) | undefined;
   tenant: Tenant;
   orgId: string;
   docs: Pick<R2Bucket, "get" | "put" | "delete">;
@@ -209,7 +216,10 @@ async function assistantRoutes(
 
   if (segments.length === 1) {
     if (method === "GET") {
-      return Response.json({ assistants: await listAssistants(tenant) });
+      return Response.json({
+        assistants: await listAssistants(tenant),
+        ...(deps.visitorCheck ? { visitorCheck: await deps.visitorCheck() } : {}),
+      });
     }
     if (method === "POST") {
       const result = await createAssistant(tenant, await readJsonBody(request));
@@ -429,7 +439,9 @@ async function assistantRoutes(
       return Response.json(await listTopics(tenant, assistantId));
     }
     if (action === "install" && method === "GET") {
-      return Response.json(await getInstallInfo(tenant, assistantId, deps.publicBaseUrl));
+      return Response.json(
+        await getInstallInfo(tenant, assistantId, deps.publicBaseUrl, await deps.visitorCheck?.()),
+      );
     }
     if (action === "mcp-servers" && method === "GET") {
       return Response.json({ servers: await listMcpServers(tenant, assistantId) });

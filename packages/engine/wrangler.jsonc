@@ -10,6 +10,7 @@
   //   SOLV_ANTHROPIC_KEY
   //   SOLV_OPENAI_KEY
   //   SOLV_OPENROUTER_KEY
+  //   SOLV_TURNSTILE_SECRET   (the Turnstile widget's secret key; see docs/self-hosting.md)
   // Scheduled re-sync of sitemap sources (off unless a source's schedule is
   // daily or weekly). Hourly: each tick starts at most three due sources, and
   // a tick with nothing due costs one D1 query. A host running its own cron
@@ -18,6 +19,11 @@
   "triggers": {
     "crons": ["17 * * * *"]
   },
+  // The visitor check also needs SOLV_TURNSTILE_SITE_KEY (a variable, not a
+  // secret: the site key is public). Set it in "vars" or the dashboard; with
+  // neither Turnstile key set, visitor chat runs without the check. The caps
+  // behind the check are optional variables: SOLV_VISITOR_DAILY_MESSAGES,
+  // SOLV_IP_DAILY_MESSAGES, SOLV_CONVERSATION_MESSAGES, SOLV_IP_HOURLY_SESSIONS.
   "vars": {
     "SOLV_LLM_PROVIDER": "anthropic",
     "SOLV_LLM_TIER": "fast"

@@ -80,7 +80,43 @@ export interface ChatRequest {
   actionResults?: ActionResult[];
   /** The assistant message to continue; required with `actionResults`. */
   resumeMessageId?: string;
+  /**
+   * The signed visitor session from `POST /v1/session`. Required by an
+   * engine that runs the visitor check; absent otherwise.
+   */
+  session?: string;
 }
+
+/**
+ * Longest session string the engine accepts. Its sessions are about 80
+ * characters; the bound keeps a hostile body from making the engine hash
+ * kilobytes.
+ */
+export const MAX_VISITOR_SESSION_LENGTH = 256;
+
+/**
+ * Codes an `error` event may carry so the widget can act on a refusal, not
+ * only show it. Older widgets ignore the field and show the message.
+ *
+ * - `check_required`: no valid visitor session; run the check again.
+ * - `check_config`: the engine's visitor check is set up wrongly.
+ * - `visitor_cap`, `ip_cap`: today's messages for this visitor or network are used up.
+ * - `conversation_cap`: this conversation is full; start a new one.
+ */
+export type ChatErrorCode =
+  | "check_required"
+  | "check_config"
+  | "visitor_cap"
+  | "ip_cap"
+  | "conversation_cap";
+
+const CHAT_ERROR_CODES: readonly string[] = [
+  "check_required",
+  "check_config",
+  "visitor_cap",
+  "ip_cap",
+  "conversation_cap",
+];
 
 export type ChatEvent =
   | { type: "token"; text: string }
@@ -111,7 +147,7 @@ export type ChatEvent =
       /** Call ids the engine is waiting on: the answer paused, not finished. */
       awaitingActions?: string[];
     }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; code?: ChatErrorCode };
 
 export type UnknownChatEvent = { type: "unknown"; name: string };
 
@@ -222,6 +258,16 @@ function parseActionResults(raw: unknown, errors: Errors): ActionResult[] {
   return out;
 }
 
+/** Reads the optional `session` field shared by the chat and feedback bodies. */
+export function parseSessionField(raw: unknown, errors: Errors): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "string" || raw.length < 1 || raw.length > MAX_VISITOR_SESSION_LENGTH) {
+    errors.add("session", `must be 1 to ${MAX_VISITOR_SESSION_LENGTH} characters`);
+    return undefined;
+  }
+  return raw;
+}
+
 /** Validates an incoming public chat request. */
 export function parseChatRequest(value: unknown): Result<ChatRequest> {
   if (!isPlainObject(value)) return fail("body: must be a JSON object");
@@ -280,6 +326,8 @@ export function parseChatRequest(value: unknown): Result<ChatRequest> {
   if (value.pageActions !== undefined) {
     pageActions = parsePageActions(value.pageActions, errors);
   }
+
+  const session = parseSessionField(value.session, errors);
 
   let conversationId: string | undefined;
   if (value.conversationId !== undefined) {
@@ -347,6 +395,7 @@ export function parseChatRequest(value: unknown): Result<ChatRequest> {
   if (pageActions !== undefined) result.pageActions = pageActions;
   if (actionResults !== undefined) result.actionResults = actionResults;
   if (resumeMessageId !== undefined) result.resumeMessageId = resumeMessageId;
+  if (session !== undefined) result.session = session;
   return ok(result);
 }
 
@@ -408,9 +457,10 @@ function isKnownChatEvent(name: string, payload: Record<string, unknown>): ChatE
           : {}),
       };
     case "error":
-      return typeof payload.message === "string"
-        ? { type: "error", message: payload.message }
-        : null;
+      if (typeof payload.message !== "string") return null;
+      return typeof payload.code === "string" && CHAT_ERROR_CODES.includes(payload.code)
+        ? { type: "error", message: payload.message, code: payload.code as ChatErrorCode }
+        : { type: "error", message: payload.message };
     default:
       return null;
   }

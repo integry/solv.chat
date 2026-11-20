@@ -60,6 +60,19 @@ export {
   type ToolRunner,
   type ToolRunResult,
 } from "./chat/toolLoop.js";
+export {
+  SITEVERIFY_TIMEOUT_MS,
+  SITEVERIFY_URL,
+  TURNSTILE_ACTION,
+  TURNSTILE_TOKEN_TTL_MS,
+} from "./chat/turnstile.js";
+export {
+  DEFAULT_VISITOR_CAPS,
+  type VisitorCaps,
+  type VisitorCheckEnv,
+  type VisitorCheckMissing,
+  type VisitorCheckStatus,
+} from "./chat/visitorCheck.js";
 export type {
   SourceSyncState,
   SyncCounts,
@@ -179,6 +192,8 @@ export {
   type SyncLimitRequest,
   type UsageEvent,
   type UsageSink,
+  type VisitorCheckKeys,
+  type VisitorCheckProvider,
 } from "./seams/types.js";
 export {
   MAX_SECRET_LENGTH,
@@ -187,3 +202,4 @@ export {
   sealSecret,
 } from "./security/secretBox.js";
 export type { HostResolver } from "./security/urlGuard.js";
+export { VISITOR_SESSION_TTL_MS } from "./security/visitorSession.js";

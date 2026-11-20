@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "./api/client.js";
-import type { Assistant } from "./api/types.js";
+import type { Assistant, VisitorCheckStatus } from "./api/types.js";
 import { useResource } from "./api/useResource.js";
 import {
   ADMIN_API_HELPERS,
@@ -47,6 +47,7 @@ import {
   useAssistantMutation,
 } from "./shell/useAssistantMutations.js";
 import { useSession } from "./shell/useSession.js";
+import { VisitorCheckNotice } from "./shell/VisitorCheckNotice.js";
 import { ConfirmDialog } from "./ui/Dialog.js";
 import { useFocusTrap, useMediaQuery } from "./ui/focus.js";
 import { Icon } from "./ui/Icon.js";
@@ -240,7 +241,10 @@ function AdminShell({
     },
     [shows, stayPut, guardLeave, navigate],
   );
-  const assistantsRes = useResource<{ assistants: Assistant[] }>("/api/admin/assistants");
+  const assistantsRes = useResource<{
+    assistants: Assistant[];
+    visitorCheck?: VisitorCheckStatus;
+  }>("/api/admin/assistants");
   const assistants = assistantsRes.value?.assistants ?? [];
   // The address names the assistant on show, so a link, a reload and Back all
   // show the one they were made under. Start from it; an id that is not in the
@@ -312,7 +316,7 @@ function AdminShell({
     assistantsRes.setValue((prev) => {
       const current = prev?.assistants ?? [];
       if (current.some((a) => a.id === assistant.id)) return prev ?? { assistants: current };
-      return { assistants: [...current, assistant] };
+      return { ...prev, assistants: [...current, assistant] };
     });
     selectAssistant(assistant.id, options);
     setDrawerOpen(false);
@@ -620,6 +624,7 @@ function AdminShell({
             </div>
           </div>
         </header>
+        <VisitorCheckNotice status={assistantsRes.value?.visitorCheck} />
         {signOutError && (
           <div className="shell-alert" role="alert">
             <p className="error-text">{signOutError}</p>

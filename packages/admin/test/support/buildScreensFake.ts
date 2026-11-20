@@ -1,6 +1,11 @@
 import { defaultVersionConfig, parseVersionConfig } from "@solvchat/core";
 import { vi } from "vitest";
-import type { Assistant, InstallInfo, VersionRow } from "../../src/api/types.js";
+import type {
+  Assistant,
+  InstallInfo,
+  VersionRow,
+  VisitorCheckStatus,
+} from "../../src/api/types.js";
 
 export function makeAssistant(id: string, name: string, allowedOrigins: string[] = []): Assistant {
   return {
@@ -19,6 +24,8 @@ export interface BuildScreensFakeOptions {
   lastSeen?: InstallInfo["lastSeen"];
   /** Paths answered with a 500 until `recover()` is called. */
   failing?: string[];
+  /** The engine's visitor check, on the assistants list and Install; absent says nothing. */
+  visitorCheck?: VisitorCheckStatus;
 }
 
 /**
@@ -58,7 +65,10 @@ export function installBuildScreensFake(options: BuildScreensFakeOptions = {}) {
       return Response.json({ error: "The server had a problem." }, { status: 500 });
     }
     if (path === "/api/admin/assistants" && method === "GET") {
-      return Response.json({ assistants });
+      return Response.json({
+        assistants,
+        ...(options.visitorCheck ? { visitorCheck: options.visitorCheck } : {}),
+      });
     }
     const m = /^\/api\/admin\/assistants\/([^/]+)(?:\/(.*))?$/.exec(path);
     const assistant = m ? assistants.find((a) => a.id === m[1]) : undefined;
@@ -90,6 +100,18 @@ export function installBuildScreensFake(options: BuildScreensFakeOptions = {}) {
           allowedOrigins: assistant.allowedOrigins,
           snippet: `<script src="https://example.com/widget.js" defer></script>\n<solv-chat assistant="${assistant.publicKey}"></solv-chat>`,
           lastSeen: options.lastSeen ?? null,
+          ...(options.visitorCheck
+            ? {
+                visitorCheck: options.visitorCheck,
+                hostPolicy: [
+                  { directive: "script-src", value: "https://example.com" },
+                  { directive: "connect-src", value: "https://example.com" },
+                  ...(options.visitorCheck.state === "on"
+                    ? [{ directive: "frame-src", value: "https://example.com" }]
+                    : []),
+                ],
+              }
+            : {}),
         };
         return Response.json(info);
       }
