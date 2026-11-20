@@ -771,7 +771,7 @@ describe("chat: answer review catch-up", () => {
   });
 
   it("runs from the scheduled handler", async () => {
-    const turn = await seedReply({ ageMs: 10 * 60 * 1000 - (NOW - Date.now()) });
+    const turn = await seedReply({ ageMs: 10 * 60 * 1000 + (NOW - Date.now()) });
     const { app } = setup({ replies: [ok("answered")] });
     // `scheduled` uses the real clock: the reply is 10 minutes old now.
     const ctx = createExecutionContext();
