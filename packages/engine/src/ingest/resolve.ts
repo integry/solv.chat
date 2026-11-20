@@ -1,5 +1,7 @@
+import type { ResolvedChunkRow } from "../db/documents.js";
 import type { Tenant } from "../db/tenant.js";
 import type { RetrievedChunk } from "../providers/retrieval.js";
+import { RETIRED_CHUNK_KEEP_MS } from "./indexLag.js";
 
 export interface ResolvedChunk {
   chunkId: string;
@@ -13,26 +15,72 @@ export interface ResolvedChunk {
   sourceKind: "push" | "sitemap" | "entry";
 }
 
+// "Maximum bound parameters per query: 100", two taken by org and assistant.
+// Source: https://developers.cloudflare.com/d1/platform/limits/ — checked 2026-11-14
+const IDS_PER_READ = 98;
+
+async function liveRows(
+  tenant: Tenant,
+  assistantId: string,
+  ids: string[],
+): Promise<ResolvedChunkRow[]> {
+  const out: ResolvedChunkRow[] = [];
+  for (let i = 0; i < ids.length; i += IDS_PER_READ) {
+    out.push(...(await tenant.documents.chunksByIds(assistantId, ids.slice(i, i + IDS_PER_READ))));
+  }
+  return out;
+}
+
 /**
  * Resolves retrieved vector hits against D1 for the tenant org and assistant,
- * dropping any ids with no live chunk row and returning survivors in score order.
+ * dropping any ids with no chunk row and returning survivors in score order.
+ *
+ * A hit whose chunk a re-index or update replaced within
+ * `RETIRED_CHUNK_KEEP_MS` resolves to that chunk's text (`retired_chunks`):
+ * the index still returns the old vector until it applies the delete, and
+ * may not show the new ones yet, so the page stays answerable meanwhile
+ * (see "Index lag"). It is left out when a current chunk of the same
+ * document is among the hits: the index already shows the new content.
+ * Otherwise only the newest replaced version of a document among the hits
+ * is read: after two quick updates the index can return vectors of both
+ * older versions, and they may say different things.
  */
 export async function resolveChunks(
   tenant: Tenant,
   assistantId: string,
   retrieved: RetrievedChunk[],
+  options: { now?: number | undefined } = {},
 ): Promise<ResolvedChunk[]> {
   if (retrieved.length === 0) return [];
 
   const uniqueIds = [...new Set(retrieved.map((item) => item.chunkId))];
-  const rows = await tenant.documents.chunksByIds(assistantId, uniqueIds);
+  const rows = await liveRows(tenant, assistantId, uniqueIds);
   const byId = new Map(rows.map((row) => [row.id, row]));
+  const missing = uniqueIds.filter((id) => !byId.has(id));
+  if (missing.length > 0) {
+    const since = (options.now ?? Date.now()) - RETIRED_CHUNK_KEEP_MS;
+    const liveDocuments = new Set(rows.map((row) => row.documentId));
+    const retired = (await tenant.documents.retiredChunksByIds(assistantId, missing, since)).filter(
+      (row) => !liveDocuments.has(row.documentId),
+    );
+    // One version per document: two updates in quick succession can leave
+    // both older versions' vectors visible, and they may disagree.
+    const newest = new Map<string, number>();
+    for (const row of retired) {
+      newest.set(row.documentId, Math.max(newest.get(row.documentId) ?? 0, row.revision));
+    }
+    for (const row of retired) {
+      if (row.revision === newest.get(row.documentId)) byId.set(row.id, row);
+    }
+  }
 
   const sorted = [...retrieved].sort((a, b) => b.score - a.score);
   const out: ResolvedChunk[] = [];
+  const seen = new Set<string>();
   for (const hit of sorted) {
     const row = byId.get(hit.chunkId);
-    if (!row) continue;
+    if (!row || seen.has(row.id)) continue;
+    seen.add(row.id);
     out.push({
       chunkId: row.id,
       documentId: row.documentId,

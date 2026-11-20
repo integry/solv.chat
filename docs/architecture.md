@@ -49,7 +49,9 @@ from the auth seam and pass it down.
 - `orgs` — id, name.
 - `assistants` — id, org_id, name, public_key (used by the widget), allowed_origins,
   tried_at and widget_seen_at (first "Try it" question and first widget load on an
-  allowed origin; set once, for the Overview checklist).
+  allowed origin; set once, for the Overview checklist), and content_changed_at
+  (when its searchable content last changed: chunks committed with new
+  vectors, documents deleted, a Rebuild queued; see "Index lag").
 - `assistant_versions` — id, assistant_id, state (`draft` | `published` | `archived`),
   config JSON (behaviour, widget, tool allowlist), created_at, published_at.
   Exactly one draft and at most one published version per assistant. Publishing
@@ -108,6 +110,11 @@ from the auth seam and pass it down.
   keyed by chunk id, with `org_id` and `assistant_id` as metadata filters. A
   written answer has one more chunk than its text needs: the same text as its
   first chunk, embedded as its question alone (see "Chunks and embeddings").
+- `retired_chunks` — id, org_id, document_id, text, heading_path, retired_at,
+  revision: the chunks a re-index or update replaced, kept for
+  `RETIRED_CHUNK_KEEP_MS` so a search that still returns their vectors finds
+  their text. `revision` counts the document's replacements (one value per
+  commit). Deleted with the document; see "Index lag".
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
   the widget's localStorage), started_at, page_url, last_message_at (when the
   newest message was written, `started_at` while there is none; kept by
@@ -478,6 +485,52 @@ its part would make existing documents worse than new ones.
   the per-run page cap) and pay for their embeddings once. The one-time
   import records the current `page_version` for the pages it fetched.
 
+### Index lag
+
+Vectorize applies every write asynchronously ("It typically takes a few
+seconds for inserted vectors to be available for querying", and the same
+for upserts and deletes; a large batched load is visible "within minutes"),
+in the order the writes were made (`processedUpToMutation`: "All changes
+before this mutation will be reflected in the index state"). The sources
+are cited in `ingest/indexLag.ts`. No upper bound is documented. So for a
+while after content is imported, rebuilt, updated or deleted, a search
+returns vectors whose chunks are gone and not yet the new ones (issue #131).
+
+- **Order of a rebuild.** The consumer writes the new vectors, then commits
+  the new chunks, then deletes the old vectors. Since the index applies
+  writes in order, a rebuilt page always has vectors in it: the old ones
+  until the delete is applied, by then the new ones too. The commit moves
+  the old chunks to `retired_chunks` instead of dropping them, and a hit on
+  one of their vectors resolves to that text for `RETIRED_CHUNK_KEEP_MS`
+  (an hour, ours: the slowest the documentation describes is "at least an
+  hour" for unbatched writes), unless a current chunk of the same document
+  is among the hits (the new content already shows). When none is, only
+  the newest replaced version among the hits is read: after two updates in
+  quick succession the index can return vectors of both older versions,
+  which may disagree. So a rebuilt or
+  updated page is not unsearchable in between, for as long as the index
+  takes up to that hour; that is as far as it can be guaranteed, since the
+  index promises no bound. Past it, a hit on a leftover vector is stale and
+  is handled as below. A deleted document's chunks are not kept: deleting
+  content takes it out of answers at once. Expired rows are cleared by the
+  org's later commits and skipped by every read.
+- **Stale hits.** A hit with no chunk (`not_found`) does not use up the
+  candidate pool: see "Answering a message", step 2.
+- **Telling the owner.** `GET …/assistants/:id/content-status` answers
+  `{ settling, indexing, settlesAt }`: `settling` while documents are
+  waiting to be indexed or for `INDEX_SETTLE_MS` (ten minutes, ours: the
+  documentation's "within minutes" with room) after `content_changed_at`.
+  Sources and Try it then say "Recent changes to your content can take a few
+  minutes to appear in answers." and check again every 30 seconds until it
+  ends. Visitors see nothing of it.
+- **Leftovers.** A test (`test/chat/indexLag.test.ts`) drives a fake index
+  that applies writes only when told, through an update, a Rebuild, a
+  document and a source deletion, and checks that once it has caught up no
+  vector is left without a chunk. An admin count of leftovers is not offered:
+  the Workers binding cannot list an index's vectors, only fetch known ids,
+  so counting them would mean reading every chunk id. A leftover shows in
+  traces as a `not_found` candidate long after the change.
+
 ### Scheduled sitemap sync
 
 A sitemap source can stay in step with its sitemap. Its `sync` setting is
@@ -634,6 +687,9 @@ The Monitor screens read:
   same view for a "Try it" answer (the id its `done` event carried) or a test
   run's answer (`traceId` on its result), with `source` `try_it` or
   `test_run` (`visitor` on the first); 404 for any other id, assistant or org.
+- Content status: `GET …/assistants/:id/content-status` answers
+  `{ settling, indexing, settlesAt }` (see "Index lag"); 404 for an
+  assistant of another org.
 - Sources: the list (`GET …/assistants/:id/sources`) gives each sitemap
   source a `sync` object: `schedule`, `last` (the current or latest run:
   start and end times, outcome, counts, error code, and while running
@@ -685,7 +741,16 @@ The Monitor screens read:
 1. Load the published version (or the draft, for the admin "Try it" pane).
 2. Retrieve: embed the question, query the retriever for the assistant for 20
    candidates (`CANDIDATE_POOL`; Vectorize returns up to 100 without values or
-   metadata), and give the model at most 6 (`TOP_K`) above a score floor
+   metadata). When some hits have no chunk (the index has not caught up; see
+   "Index lag") and the index may hold more above the floor (the query came
+   back full and its last hit cleared it), it is queried once more, with the
+   same org and assistant filters, for 100 (`REFILL_TOP_K`), and the pool is
+   the best 20 live candidates of both, resolved together so a current chunk
+   of a page leaves out its replaced chunks whichever query returned them.
+   Never more than two queries; the cost is one more vector query and one
+   more D1 read (of both queries' hits), only on answers that met
+   stale hits, and it is counted in the trace's retrieval time. Then give
+   the model at most 6 (`TOP_K`) above a score floor
    (0.2), chosen by `selectCandidates` (below). The floor only keeps out
    unrelated content: the model already declines when given content that does
    not hold the answer. Measured with `text-embedding-3-small` against short
@@ -1040,8 +1105,11 @@ ignored what it was given. A small recorder (`answerRecorder` in
 `chat/trace.ts`) is threaded through the answer path and is the only clock
 the trace reads.
 
-- Retrieval: every candidate the retriever returned (at most 20, the
-  candidate pool; `TOP_K` of them at most reach the model), best first, with
+- Retrieval: the candidate pool (at most 20; `TOP_K` of them at most reach
+  the model) and the hits that had no chunk, at most 40 in all
+  (`MAX_TRACE_CANDIDATES`; over it, the lowest unused rows go first), best
+  first, with `stale` (how many hits had no chunk, across both queries) and
+  `searchedAgain` (whether the second query ran); each candidate with
   chunk id, document id, similarity score (four decimal places), and whether
   it was passed to the model or dropped: `below_floor` (under the score floor
   this answer used, which is recorded too; a chunk kept in the same-document
@@ -1541,6 +1609,10 @@ Install
   an entry source and removes the gap; Conversations' "Write an answer for this"
   opens it on Gaps, filled in), "Dismiss" with undo on Gaps, "Add to tests" on both.
 - Plain words on every control. No model, temperature or chunking settings.
+- Sources and Try it say "Recent changes to your content can take a few
+  minutes to appear in answers." while the content status is `settling`
+  (see "Index lag"). The answer trace says how many matches were for
+  content that has since changed, and whether it searched again.
 - Sources offers "Rebuild" while some of the assistant's content was indexed
   by an older ingest version, saying what it does and what it costs before
   it starts (see "Re-indexing").

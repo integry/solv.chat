@@ -10,7 +10,13 @@ import type { Tenant } from "../db/tenant.js";
 import { type ResolvedChunk, resolveChunks } from "../ingest/resolve.js";
 import type { ModelInfo } from "../models.js";
 import { ProviderError } from "../providers/error.js";
-import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
+import {
+  type Embedder,
+  embeddingCostMicros,
+  type RetrievedChunk,
+  type Retriever,
+  VECTORIZE_MAX_TOP_K,
+} from "../providers/retrieval.js";
 import type {
   LlmMessage,
   LlmProvider,
@@ -36,10 +42,10 @@ import {
   type AnswerRecorder,
   answerRecorder,
   type KeySource,
-  MAX_TRACE_CANDIDATES,
   type PreviewTraceSource,
   type TraceCandidate,
   type TracePart,
+  type TraceSearch,
   type TraceStop,
   traceCandidates,
 } from "./trace.js";
@@ -51,18 +57,21 @@ import {
 export const SCORE_FLOOR = DEFAULT_SCORE_FLOOR;
 export const TOP_K = 6;
 /**
- * How many hits the retriever is asked for, of which at most `TOP_K` reach
- * the model. More than `TOP_K`, so that setting aside duplicates and a
- * document's extra chunks (see `selectCandidates`) still leaves enough, and
- * so a written answer below six page chunks is among the hits at all.
- * Vectorize returns up to 100 matches when no values or metadata are asked
- * for, as here ("Maximum returned results (topK) without values and
- * metadata: 100").
- * Source: https://developers.cloudflare.com/vectorize/platform/limits/ — checked 2026-11-20
- * Every hit is resolved in one D1 query and kept in the trace, whose ceiling
- * is the same number.
+ * How many live candidates retrieval works from, of which at most `TOP_K`
+ * reach the model. More than `TOP_K`, so that setting aside duplicates and
+ * a document's extra chunks (see `selectCandidates`) still leaves enough,
+ * and so a written answer below six page chunks is among the hits at all.
+ * Every candidate is kept in the trace (`MAX_TRACE_CANDIDATES`).
  */
-export const CANDIDATE_POOL = MAX_TRACE_CANDIDATES;
+export const CANDIDATE_POOL = 20;
+/**
+ * What the one further query asks for when some of the first query's hits
+ * had no chunk (see `searchPool`): the most Vectorize returns when no
+ * values or metadata are asked for ("Maximum returned results (topK)
+ * without values and metadata: 100").
+ * Source: https://developers.cloudflare.com/vectorize/platform/limits/ — checked 2026-11-20
+ */
+export const REFILL_TOP_K = VECTORIZE_MAX_TOP_K;
 /** Lease duration for an active resume claim before a stalled worker's lock expires. */
 export const RESUME_CLAIM_TTL_MS = 60_000;
 const RESUME_CLAIM_RENEW_INTERVAL_MS = Math.floor(RESUME_CLAIM_TTL_MS / 4);
@@ -310,6 +319,7 @@ async function recordEmbeddingOnly(
 interface TraceFacts {
   kind: TracePart["kind"];
   candidates: TraceCandidate[];
+  search: TraceSearch;
   timing: ReturnType<AnswerRecorder["snapshot"]>;
   modelCalled: boolean;
   stop: TraceStop;
@@ -342,7 +352,13 @@ async function tracePartFor(
     kind: facts.kind,
     version: { ...context.version },
     model: keySource === null ? null : { provider: provider.name, id: provider.model, keySource },
-    retrieval: { floor, ms: facts.timing.retrievalMs, candidates: facts.candidates },
+    retrieval: {
+      floor,
+      ms: facts.timing.retrievalMs,
+      candidates: facts.candidates,
+      stale: facts.search.stale,
+      searchedAgain: facts.search.searchedAgain,
+    },
     timing: { firstTokenMs: facts.timing.firstTokenMs, totalMs: facts.timing.totalMs },
     tools: { rounds: facts.timing.toolRounds, ms: facts.timing.toolMs },
     stop: facts.stop,
@@ -413,26 +429,103 @@ function floorFor(deps: Pick<AnswerDeps, "scoreFloor">): number {
   return deps.scoreFloor ?? SCORE_FLOOR;
 }
 
+interface Retrieved {
+  chunks: ResolvedChunk[];
+  candidates: TraceCandidate[];
+  search: TraceSearch;
+}
+
 /**
  * The resolved chunks that reach the model (see `selectChunks`) and every
  * hit as a trace candidate, both against the floor this answer uses.
  */
-function keptChunks(
-  deps: Pick<AnswerDeps, "scoreFloor">,
-  hits: readonly { chunkId: string; score: number }[],
-  resolved: ResolvedChunk[],
-): { chunks: ResolvedChunk[]; candidates: TraceCandidate[] } {
+function keptChunks(deps: Pick<AnswerDeps, "scoreFloor">, pool: SearchPool): Retrieved {
   const floor = floorFor(deps);
-  const { chunks, dropped } = selectCandidates(resolved, floor, { topK: TOP_K });
+  const { chunks, dropped } = selectCandidates(pool.resolved, floor, { topK: TOP_K });
   return {
     chunks,
     candidates: traceCandidates(
-      hits,
+      pool.hits,
       floor,
-      resolved,
+      pool.resolved,
       new Set(chunks.map((c) => c.chunkId)),
       dropped,
     ),
+    search: { stale: pool.stale, searchedAgain: pool.searchedAgain },
+  };
+}
+
+interface SearchPool {
+  /** The pool's hits and every stale hit seen, best first. */
+  hits: RetrievedChunk[];
+  /** The pool's live candidates: at most `CANDIDATE_POOL`, best first. */
+  resolved: ResolvedChunk[];
+  /** Distinct hits with no chunk, across both queries. */
+  stale: number;
+  /** Whether the further query ran. */
+  searchedAgain: boolean;
+}
+
+/**
+ * Queries the retriever for `CANDIDATE_POOL` hits and resolves them. The
+ * index applies changes asynchronously (see "Index lag"), so for a while
+ * after content is replaced or deleted some hits are vectors whose chunks
+ * are gone; they would use up the pool. When some were, and the index may
+ * hold more above the floor (the first query came back full and its last
+ * hit cleared the floor), it is asked once more for `REFILL_TOP_K`, with
+ * the same org and assistant filters, and the pool is the best
+ * `CANDIDATE_POOL` live candidates of both, resolved together. Never more
+ * than two queries: the cost is one more vector query and one more D1 read
+ * (of both queries' hits), only for an
+ * answer that met stale hits, and it is counted in the trace's retrieval
+ * time.
+ */
+async function searchPool(
+  deps: AnswerDeps,
+  input: Pick<AnswerInput, "orgId" | "assistantId">,
+  vector: number[],
+  floor: number,
+): Promise<SearchPool> {
+  const query = (topK: number) =>
+    deps.retriever.query({
+      vector,
+      orgId: input.orgId,
+      assistantId: input.assistantId,
+      topK,
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    });
+  const now = (deps.now ?? Date.now)();
+  const first = await query(CANDIDATE_POOL);
+  const firstResolved = await resolveChunks(deps.tenant, input.assistantId, first, { now });
+  const live = new Set(firstResolved.map((c) => c.chunkId));
+  const staleFirst = first.filter((hit) => !live.has(hit.chunkId));
+  const lowest = first.reduce((min, hit) => Math.min(min, hit.score), Number.POSITIVE_INFINITY);
+  const mayHaveMore = first.length >= CANDIDATE_POOL && lowest >= floor;
+  if (staleFirst.length === 0 || !mayHaveMore) {
+    return { hits: first, resolved: firstResolved, stale: staleFirst.length, searchedAgain: false };
+  }
+
+  const second = await query(REFILL_TOP_K);
+  const seen = new Set(first.map((hit) => hit.chunkId));
+  const added = second.filter((hit) => !seen.has(hit.chunkId));
+  // Both queries' hits are resolved together, not each on its own: a
+  // replaced chunk is left out only when a current chunk of its document
+  // is among the hits it is resolved with, and during an update the old
+  // and new vectors of one page can fall on either side of the first
+  // query's cut-off.
+  const union = [...first, ...added];
+  const unionResolved = await resolveChunks(deps.tenant, input.assistantId, union, { now });
+  const unionLive = new Set(unionResolved.map((c) => c.chunkId));
+  const resolved = unionResolved.slice(0, CANDIDATE_POOL);
+  const inPool = new Set(resolved.map((c) => c.chunkId));
+  const hits = union
+    .filter((hit) => inPool.has(hit.chunkId) || !unionLive.has(hit.chunkId))
+    .sort((a, b) => b.score - a.score);
+  return {
+    hits,
+    resolved,
+    stale: union.filter((hit) => !unionLive.has(hit.chunkId)).length,
+    searchedAgain: true,
   };
 }
 
@@ -463,7 +556,7 @@ async function retrieve(
   question: string,
   recorder: AnswerRecorder,
   clock: () => number,
-): Promise<{ chunks: ResolvedChunk[]; candidates: TraceCandidate[] } | null> {
+): Promise<Retrieved | null> {
   return recorder.retrieval(async () => {
     // The question's embedding is billed whatever happens next — a failing
     // retriever, D1 read or model call must not make it vanish — so it is
@@ -476,15 +569,7 @@ async function retrieve(
     );
     const [vector] = embedded.vectors;
     if (!vector) return null;
-    const hits = await deps.retriever.query({
-      vector,
-      orgId: input.orgId,
-      assistantId: input.assistantId,
-      topK: CANDIDATE_POOL,
-      ...(deps.signal ? { signal: deps.signal } : {}),
-    });
-    const resolved = await resolveChunks(deps.tenant, input.assistantId, hits);
-    return keptChunks(deps, hits, resolved);
+    return keptChunks(deps, await searchPool(deps, input, vector, floorFor(deps)));
   });
 }
 
@@ -527,7 +612,7 @@ export async function* answerMessage(
     yield { type: "error", message: "The assistant could not complete this response." };
     return;
   }
-  const { chunks, candidates } = retrieved;
+  const { chunks, candidates, search } = retrieved;
 
   if (chunks.length === 0) {
     // No model call at all: there is nothing to answer from, so spending a
@@ -562,7 +647,7 @@ export async function* answerMessage(
     await saveTrace(
       deps,
       { messageId, assistantId: input.assistantId, preview: input.preview === true },
-      { kind: "answer", candidates, timing, modelCalled: false, stop: "complete" },
+      { kind: "answer", candidates, search, timing, modelCalled: false, stop: "complete" },
       clock,
     );
     if (!input.preview) {
@@ -769,7 +854,7 @@ export async function* answerMessage(
         tokensOut,
         costMicros: messageCost,
       },
-      { kind: "answer", candidates, timing, modelCalled: true, stop: "paused" },
+      { kind: "answer", candidates, search, timing, modelCalled: true, stop: "paused" },
       clock,
     );
     return;
@@ -820,7 +905,7 @@ export async function* answerMessage(
       tokensOut,
       costMicros: messageCost,
     },
-    { kind: "answer", candidates, timing, modelCalled: true, stop: stopFor(stopReason) },
+    { kind: "answer", candidates, search, timing, modelCalled: true, stop: stopFor(stopReason) },
     clock,
   );
   if (!input.preview) {
@@ -1008,16 +1093,9 @@ export async function* answerWithActionResults(
       return;
     }
 
-    const { chunks, candidates } = await recorder.retrieval(async () => {
-      const hits = await deps.retriever.query({
-        vector,
-        orgId: input.orgId,
-        assistantId: input.assistantId,
-        topK: CANDIDATE_POOL,
-      });
-      const resolved = await resolveChunks(deps.tenant, input.assistantId, hits);
-      return keptChunks(deps, hits, resolved);
-    });
+    const { chunks, candidates, search } = await recorder.retrieval(async () =>
+      keptChunks(deps, await searchPool(deps, input, vector, floorFor(deps))),
+    );
 
     const request = buildPrompt({
       behaviour: input.behaviour,
@@ -1136,6 +1214,7 @@ export async function* answerWithActionResults(
           {
             kind: "resume",
             candidates,
+            search,
             timing: recorder.snapshot(),
             modelCalled: true,
             stop: "error",
@@ -1219,7 +1298,7 @@ export async function* answerWithActionResults(
       await saveTrace(
         deps,
         { messageId: pendingReply.id, assistantId: input.assistantId, preview: false },
-        { kind: "resume", candidates, timing, modelCalled: true, stop: "paused" },
+        { kind: "resume", candidates, search, timing, modelCalled: true, stop: "paused" },
         clock,
       );
       return;
@@ -1236,7 +1315,7 @@ export async function* answerWithActionResults(
     await saveTrace(
       deps,
       { messageId: pendingReply.id, assistantId: input.assistantId, preview: false },
-      { kind: "resume", candidates, timing, modelCalled: true, stop: stopFor(stopReason) },
+      { kind: "resume", candidates, search, timing, modelCalled: true, stop: stopFor(stopReason) },
       clock,
     );
     // Reviewed once complete, never while paused: a paused reply is not the

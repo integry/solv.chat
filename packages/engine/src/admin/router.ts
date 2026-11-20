@@ -25,6 +25,7 @@ import {
   rotateIngestKey,
   updateAssistant,
 } from "./assistants.js";
+import { contentStatus } from "./contentStatus.js";
 import {
   getAnswerTrace,
   getConversation,
@@ -330,6 +331,9 @@ async function assistantRoutes(
     }
     if (action === "sources" && method === "GET") {
       return Response.json({ sources: await listSources(tenant, assistantId) });
+    }
+    if (action === "content-status" && method === "GET") {
+      return Response.json(await contentStatus(tenant, assistantId));
     }
     if (action === "reindex" && method === "GET") {
       return Response.json(await reindexStatus(tenant, assistantId));

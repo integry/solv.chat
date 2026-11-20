@@ -12,7 +12,6 @@ import {
 import type { ChatRouteOverrides } from "../../src/chat/route.js";
 import {
   MAX_TRACE_BYTES,
-  MAX_TRACE_CANDIDATES,
   MAX_TRACE_PARTS,
   REVIEW_CLAIM_EXPIRY_MS,
   type StoredTrace,
@@ -192,6 +191,9 @@ const byteSize = (text: string) => encoder.encode(text).byteLength;
 /** The bytes `json_set` adds to a trace that has no note yet, writing this one in place. */
 const inPlaceBytes = (note: TraceReviewNote) => byteSize(`,"review":${JSON.stringify(note)}`);
 
+/** Candidates per part when these traces were stored (the cap was 20 until issue #131). */
+const PRE_CHANGE_CANDIDATES = 20;
+
 /**
  * A trace as the engine stored it before `boundTrace` kept room for the
  * review's note: within every bound it had (at most 8 parts of 20
@@ -204,7 +206,7 @@ function preChangeTrace(bytes: number): StoredTrace {
   const size = () => byteSize(JSON.stringify(trace));
   while (size() < bytes) {
     let current = parts[parts.length - 1];
-    if (current === undefined || current.retrieval.candidates.length === MAX_TRACE_CANDIDATES) {
+    if (current === undefined || current.retrieval.candidates.length === PRE_CHANGE_CANDIDATES) {
       current = {
         kind: parts.length === 0 ? "answer" : "resume",
         version: { id: "ver_1", state: "published" },

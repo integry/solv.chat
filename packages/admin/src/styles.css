@@ -1333,6 +1333,14 @@ a {
   margin: 0;
 }
 
+.recent-changes-notice {
+  margin: 0;
+}
+
+.try-it-notice {
+  font-size: var(--text-sm);
+}
+
 .notice-warning {
   background: var(--tone-warning-bg);
   color: var(--tone-warning-text);

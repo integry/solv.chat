@@ -29,6 +29,7 @@ const EXPECTED_TABLES = [
   "sync_org_refusals",
   "document_blocks",
   "source_blocks",
+  "retired_chunks",
 ];
 
 describe("migrations", () => {

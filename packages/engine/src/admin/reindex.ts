@@ -79,5 +79,10 @@ export async function reindexAssistant(
       })),
     );
   }
+  // The old chunks keep answering until each rebuild commits, and then the
+  // index shows the new vectors a little later: the admin says so from now
+  // (see "Index lag").
+  if (documents.length > 0)
+    await deps.tenant.assistants.markContentChanged(assistantId, Date.now());
   return { queued: documents.length, remaining: Math.max(0, total - documents.length) };
 }
