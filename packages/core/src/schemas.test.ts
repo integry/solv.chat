@@ -134,6 +134,7 @@ describe("parseVersionConfig", () => {
         persona: "Helpful guide",
         fallbackText: "Custom fallback",
         suggestedQuestions: ["How do I start?"],
+        showSources: false,
       },
       widget: {
         title: "Docs Bot",
@@ -151,12 +152,40 @@ describe("parseVersionConfig", () => {
         persona: "Helpful guide",
         fallbackText: "Custom fallback",
         suggestedQuestions: ["How do I start?"],
+        showSources: false,
       });
       expect(res.value.widget).toEqual(base.widget);
       expect(res.value.limits).toEqual({ dailyCostCapMicros: 500 });
       expect(res.value.allowedTools).toEqual(["search_docs"]);
     }
     expect(base.behaviour.greeting).toBe("Custom greeting");
+  });
+
+  it("shows sources by default, so a config stored before the setting keeps citing", () => {
+    expect(defaultVersionConfig().behaviour.showSources).toBe(true);
+    const stored = parseVersionConfig({ behaviour: { greeting: "Hi", persona: "" } });
+    expect(stored.ok && stored.value.behaviour.showSources).toBe(true);
+  });
+
+  it("reads Show sources in answers as a boolean and refuses anything else", () => {
+    const off = parseVersionConfig({ behaviour: { showSources: false } });
+    expect(off.ok && off.value.behaviour.showSources).toBe(false);
+    const on = parseVersionConfig(
+      { behaviour: { showSources: true } },
+      off.ok ? off.value : undefined,
+    );
+    expect(on.ok && on.value.behaviour.showSources).toBe(true);
+    // A partial save of another field keeps the stored choice.
+    const kept = parseVersionConfig(
+      { behaviour: { greeting: "Hey" } },
+      off.ok ? off.value : undefined,
+    );
+    expect(kept.ok && kept.value.behaviour.showSources).toBe(false);
+    for (const bad of ["false", 0, null]) {
+      const res = parseVersionConfig({ behaviour: { showSources: bad } });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.errors).toContain("behaviour.showSources: must be true or false");
+    }
   });
 
   it("rejects bad hex colour, bad position, negative cap, and over-cap suggestedQuestions", () => {

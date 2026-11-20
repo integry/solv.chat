@@ -246,6 +246,15 @@ function installServer(options: ServerOptions = {}) {
     if (url.pathname === "/api/admin/conversations/cnv_1") {
       return Response.json(DETAIL);
     }
+    if (url.pathname === "/api/admin/conversations/cnv_quiet") {
+      // "Show sources in answers" was off: the visitor saw no citations.
+      return Response.json({
+        conversation: { ...DETAIL.conversation, id: "cnv_quiet" },
+        turns: DETAIL.turns.map((turn) =>
+          turn.id === "msg_a2" ? { ...turn, citationsShown: false } : turn,
+        ),
+      });
+    }
     if (url.pathname === "/api/admin/conversations/cnv_3") {
       const hold = options.holdThirdConversation;
       if (hold) await new Promise<void>((release) => hold(release));
@@ -1415,6 +1424,22 @@ describe("Monitor screens", () => {
       expect(await screen.findByText("Could not load conversations.")).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Try again" }));
       expect(await screen.findByRole("link", { name: /Do you ship to Spain\?/ })).toBeTruthy();
+    });
+
+    it("lists a reply's pages as Used content when the visitor was shown no sources", async () => {
+      installServer({ gaps: [] });
+      await open("/admin/conversations?id=cnv_quiet");
+
+      const transcript = await screen.findByRole("list", { name: "Messages" });
+      const top = within(transcript)
+        .getAllByRole("listitem")
+        .filter((li) => li.parentElement === transcript);
+      const used = within(top[3] as HTMLElement).getByRole("list", { name: "Used content" });
+      expect(within(used).getByRole("link", { name: "Returns policy" }).getAttribute("href")).toBe(
+        "https://docs.example.com/returns",
+      );
+      expect(top[3]?.querySelector(".turn-sources-label")?.textContent).toBe("Used content");
+      expect(within(top[3] as HTMLElement).queryByRole("list", { name: "Sources" })).toBeNull();
     });
 
     it("shows turns with times and sources, and sends an unanswered turn to Gaps prefilled", async () => {

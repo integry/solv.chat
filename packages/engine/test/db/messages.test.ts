@@ -74,7 +74,28 @@ describe("db/messages", () => {
       totalMs: 1250,
       outcome: null,
       outcomeConfidence: null,
+      citationsShown: true,
     });
+  });
+
+  it("stores whether the visitor was shown a reply's citations, keeping them either way", async () => {
+    const citations = [{ url: "https://example.com/docs", title: "Docs" }];
+    const base = {
+      conversationId: "cnv_1",
+      role: "assistant" as const,
+      content: "Here is the answer.",
+      citations,
+      toolCalls: null,
+      tokensIn: 1,
+      tokensOut: 1,
+      answered: true,
+      createdAt: 2000,
+    };
+    const hidden = await tenant.messages.create({ ...base, id: "msg_h", citationsShown: false });
+    expect(hidden.citationsShown).toBe(false);
+    await tenant.messages.create({ ...base, id: "msg_s" });
+    expect(await tenant.messages.get("msg_h")).toMatchObject({ citations, citationsShown: false });
+    expect(await tenant.messages.get("msg_s")).toMatchObject({ citations, citationsShown: true });
   });
 
   it("preserves null toolCalls and maps answered = 0 to false", async () => {

@@ -74,6 +74,12 @@ export const VERSION_DIFF_FIELDS: readonly DiffField[] = [
     screen: "Behaviour",
     kind: "list",
   },
+  {
+    path: "behaviour.showSources",
+    label: "Show sources in answers",
+    screen: "Behaviour",
+    kind: "boolean",
+  },
   { path: "widget.title", label: "Title", screen: "Widget", kind: "text" },
   { path: "widget.accentColor", label: "Accent colour", screen: "Widget", kind: "colour" },
   {

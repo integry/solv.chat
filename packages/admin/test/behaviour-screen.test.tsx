@@ -139,6 +139,32 @@ describe("Behaviour screen", () => {
     expect(await screen.findByLabelText("First thing it says")).toBeTruthy();
   });
 
+  it("turns Show sources in answers off and saves it with the draft", async () => {
+    const server = installBuildScreensFake();
+    render(<App />);
+    const toggle = (await screen.findByRole("checkbox", {
+      name: "Show sources in answers",
+    })) as HTMLInputElement;
+    const region = screen.getByRole("region", { name: "Sources" });
+    expect(within(region).getByRole("heading", { name: "Sources" })).toBeTruthy();
+    // On by default, as for every assistant made before the setting.
+    expect(toggle.checked).toBe(true);
+    expect(screen.queryByText("Unsaved changes")).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle.checked).toBe(false);
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Draft saved.")).toBeTruthy();
+    const put = server.calls.filter((c) => c.method === "PUT" && c.path.endsWith("/draft")).at(-1);
+    const sent = put?.body as { behaviour: { showSources: boolean } } | undefined;
+    expect(sent?.behaviour.showSources).toBe(false);
+    expect(server.drafts.get("ast_1")?.config.behaviour.showSources).toBe(false);
+    await waitFor(() => expect(screen.queryByText("Unsaved changes")).toBeNull());
+    expect(toggle.checked).toBe(false);
+  });
+
   it("has no serious accessibility problems", async () => {
     installBuildScreensFake();
     const { container } = render(<App />);

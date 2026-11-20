@@ -592,6 +592,20 @@ function answerAdminApi(req: IncomingMessage, res: ServerResponse): void {
     res.end(JSON.stringify(monitorConversationDetail(Date.now())));
     return;
   }
+  if (pathname === "/conversations/cnv_quiet") {
+    // Replies written with "Show sources in answers" off.
+    const detail = monitorConversationDetail(Date.now());
+    res.end(
+      JSON.stringify({
+        ...detail,
+        conversation: { ...detail.conversation, id: "cnv_quiet" },
+        turns: detail.turns.map((turn) =>
+          turn.role === "assistant" ? { ...turn, citationsShown: false } : turn,
+        ),
+      }),
+    );
+    return;
+  }
   if (pathname === `/assistants/${ASSISTANT.id}/gaps`) {
     const gaps = monitorGaps(Date.now());
     res.end(JSON.stringify({ gaps, total: gaps.length, limit: 25, offset: 0 }));
@@ -602,6 +616,57 @@ function answerAdminApi(req: IncomingMessage, res: ServerResponse): void {
 
 const WORKSPACE_ROOT = resolve(ADMIN_ROOT, "../..");
 const WIDGET_BUNDLE = resolve(WORKSPACE_ROOT, "packages/widget/dist/widget.js");
+
+/**
+ * A plain page with the real widget, for answers from an assistant with
+ * "Show sources in answers" off: the stream carries tokens and no citation.
+ * `?sources=on` adds one, for comparison.
+ */
+function answerWidgetPage(req: IncomingMessage, res: ServerResponse, next: () => void): void {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+  if (url.pathname === "/widget-check.html") {
+    res.setHeader("content-type", CONTENT_TYPES[".html"] ?? "text/html");
+    res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Widget check</title></head>
+<body><solv-chat assistant="pk_ast_1" endpoint="http://${req.headers.host}"></solv-chat>
+<script src="/widget.js"></script></body></html>`);
+    return;
+  }
+  if (url.pathname === "/widget.js") {
+    res.setHeader("content-type", CONTENT_TYPES[".js"] ?? "application/javascript");
+    res.end(readFileSync(WIDGET_BUNDLE));
+    return;
+  }
+  if (url.pathname === "/v1/assistants/pk_ast_1") {
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({ title: "Ask a question", greeting: "Hello.", suggestedQuestions: [] }),
+    );
+    return;
+  }
+  if (url.pathname === "/v1/chat" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => {
+      body += chunk.toString("utf8");
+    });
+    req.on("end", () => {
+      const message = (JSON.parse(body || "{}") as { message?: string }).message ?? "";
+      res.setHeader("content-type", "text/event-stream");
+      const events = [
+        `event: token\ndata: ${JSON.stringify({ text: "Click Forgot Password on the sign-in page, then follow the link in the email we send you." })}\n\n`,
+        ...(message.includes("sources on")
+          ? [
+              `event: citation\ndata: ${JSON.stringify({ url: "https://docs.example.com/reset", title: "Reset your password" })}\n\n`,
+            ]
+          : []),
+        `event: done\ndata: ${JSON.stringify({ messageId: `msg_${Date.now()}`, conversationId: "cnv_w" })}\n\n`,
+      ];
+      res.end(events.join(""));
+    });
+    return;
+  }
+  next();
+}
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
@@ -674,6 +739,7 @@ describe("Admin layout regressions (Chromium)", () => {
           name: "admin-layout-test-api-stub",
           configureServer(server) {
             server.middlewares.use("/api/admin", answerAdminApi);
+            server.middlewares.use(answerWidgetPage);
           },
         },
       ],
@@ -1206,6 +1272,152 @@ describe("Admin layout regressions (Chromium)", () => {
       }
     }
   }, 90_000);
+
+  it("keeps Show sources in answers on one row, inside the form, at 1280px and 380px", async () => {
+    for (const width of [1280, 380]) {
+      await openScreen("/admin/behaviour", width, "#behaviour-show-sources");
+      const box = await cdp.evaluate<{
+        checkboxTop: number;
+        checkboxBottom: number;
+        textTop: number;
+        textBottom: number;
+        labelRight: number;
+        mainRight: number;
+        heading: string;
+      }>(`(() => {
+        const input = document.getElementById("behaviour-show-sources");
+        input.scrollIntoView({ block: "center" });
+        const label = input.closest("label");
+        const text = label.querySelector("span").getBoundingClientRect();
+        const check = input.getBoundingClientRect();
+        const group = document.getElementById("behaviour-sources-group-heading");
+        return {
+          checkboxTop: check.top, checkboxBottom: check.bottom,
+          textTop: text.top, textBottom: text.bottom,
+          labelRight: label.getBoundingClientRect().right,
+          mainRight: document.querySelector(".shell-main").getBoundingClientRect().right,
+          heading: group.textContent,
+        };
+      })()`);
+      expect(box.heading).toBe("Sources");
+      // The box sits beside its words, and the words fit on one line.
+      expect(box.checkboxBottom).toBeGreaterThan(box.textTop);
+      expect(box.checkboxTop).toBeLessThan(box.textBottom);
+      expect(box.textBottom - box.textTop).toBeLessThan(30);
+      expect(box.labelRight).toBeLessThanOrEqual(box.mainRight);
+      expect(await horizontalOverflow()).toBe(0);
+    }
+  }, 30_000);
+
+  it("labels a reply's pages Used content when the visitor saw no sources, at 1280px and 380px", async () => {
+    for (const width of [1280, 380]) {
+      await openScreen("/admin/conversations?id=cnv_quiet", width, ".transcript .turn-sources");
+      const labels = await cdp.evaluate<string[]>(
+        `[...document.querySelectorAll(".turn-sources-label")].map((el) => el.textContent)`,
+      );
+      expect(labels.length).toBeGreaterThan(0);
+      expect(new Set(labels)).toEqual(new Set(["Used content"]));
+      expect(await horizontalOverflow()).toBe(0);
+      await cdp.evaluate<void>(axe.source);
+      const violations = await cdp.evaluate<string[]>(`axe
+        .run(document.querySelector(".transcript"), { resultTypes: ["violations"] })
+        .then((r) =>
+          r.violations
+            .filter((v) => v.impact === "serious" || v.impact === "critical")
+            .map((v) => v.id + ": " + v.nodes.map((n) => n.target.join(" ")).join(", ")),
+        )`);
+      expect({ width, violations }).toEqual({ width, violations: [] });
+    }
+  }, 30_000);
+
+  describe("Widget answers with sources off", () => {
+    beforeAll(() => {
+      if (!existsSync(WIDGET_BUNDLE)) {
+        execFileSync("npm", ["run", "build", "-w", "@solvchat/widget"], {
+          cwd: WORKSPACE_ROOT,
+          stdio: "pipe",
+        });
+      }
+    }, 120_000);
+
+    interface Answer {
+      citations: number;
+      text: string;
+      /** Space between the bubble's last content and its bottom edge, less its padding. */
+      extraBottom: number;
+      bubbleRight: number;
+      viewport: number;
+    }
+
+    async function ask(width: number, question: string): Promise<Answer> {
+      await openScreen("/widget-check.html", width, "solv-chat");
+      const opened = await cdp.evaluate<boolean>(`(async () => {
+        for (let i = 0; i < 100; i++) {
+          const root = document.querySelector("solv-chat")?.shadowRoot;
+          const launcher = root?.querySelector(".solv-launcher");
+          if (launcher) {
+            launcher.click();
+            const input = root.querySelector("#solv-input");
+            input.value = ${JSON.stringify(question)};
+            root.querySelector(".solv-form").requestSubmit();
+            return true;
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        return false;
+      })()`);
+      expect(opened).toBe(true);
+      return cdp.evaluate<Answer>(`(async () => {
+        const root = document.querySelector("solv-chat").shadowRoot;
+        for (let i = 0; i < 100; i++) {
+          const bubbles = root.querySelectorAll(".solv-bubble--assistant");
+          const bubble = bubbles[bubbles.length - 1];
+          const text = bubble?.querySelector(".solv-bubble-text");
+          if (text && text.textContent.includes("Click Forgot Password")) {
+            await new Promise((r) => setTimeout(r, 100));
+            const box = bubble.getBoundingClientRect();
+            const style = getComputedStyle(bubble);
+            const last = Math.max(
+              ...[...bubble.children]
+                .map((el) => el.getBoundingClientRect())
+                .filter((r) => r.height > 0)
+                .map((r) => r.bottom),
+            );
+            return {
+              citations: root.querySelectorAll(".solv-citations").length,
+              text: text.textContent,
+              extraBottom:
+                box.bottom - parseFloat(style.borderBottomWidth) - parseFloat(style.paddingBottom) - last,
+              bubbleRight: box.right,
+              viewport: document.documentElement.clientWidth,
+            };
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        throw new Error("no answer: " + root.textContent.slice(0, 200));
+      })()`);
+    }
+
+    it("shows no sources block and no leftover space under the answer at 1280px and 380px", async () => {
+      for (const width of [1280, 380]) {
+        await cdp.evaluate<void>("sessionStorage.clear(); localStorage.clear()").catch(() => {});
+        const off = await ask(width, "How do I reset my password?");
+        expect(off.citations).toBe(0);
+        expect(off.text).toBe(
+          "Click Forgot Password on the sign-in page, then follow the link in the email we send you.",
+        );
+        expect(Math.abs(off.extraBottom)).toBeLessThanOrEqual(1);
+        expect(off.bubbleRight).toBeLessThanOrEqual(off.viewport);
+        expect(await horizontalOverflow()).toBe(0);
+
+        // The same answer with a source has its list where the space would be.
+        await cdp.evaluate<void>("sessionStorage.clear(); localStorage.clear()");
+        const on = await ask(width, "How do I reset my password, sources on?");
+        expect(on.citations).toBe(1);
+        await cdp.evaluate<void>("sessionStorage.clear(); localStorage.clear()");
+      }
+    }, 60_000);
+  });
 
   it("puts the widget preview beside the form when there is room, and under it at 380px", async () => {
     const layout = () =>

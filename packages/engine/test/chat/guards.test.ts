@@ -65,6 +65,7 @@ describe("chat/guards", () => {
           persona: "",
           fallbackText: "Not found.",
           suggestedQuestions: [],
+          showSources: true,
         },
         widget: {
           title: "Docs",
