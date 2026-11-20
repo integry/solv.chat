@@ -1,4 +1,5 @@
 import { Errors, fail, ok, type Result } from "../result.js";
+import { parseSessionField } from "./chat.js";
 import { isPlainObject, readTrimmedString } from "./shared.js";
 
 export type FeedbackVote = "up" | "down";
@@ -8,6 +9,8 @@ export interface FeedbackRequest {
   visitorId: string;
   value: FeedbackVote;
   note: string;
+  /** The signed visitor session, when the engine runs the visitor check. */
+  session?: string;
 }
 
 /** Validates an incoming public feedback request. */
@@ -36,9 +39,17 @@ export function parseFeedbackRequest(value: unknown): Result<FeedbackRequest> {
     else note = parsedNote;
   }
 
+  const session = parseSessionField(value.session, errors);
+
   if (errors.failed || messageId === null || visitorId === null || vote === null) {
     return fail(...errors.list);
   }
 
-  return ok({ messageId, visitorId, value: vote, note });
+  return ok({
+    messageId,
+    visitorId,
+    value: vote,
+    note,
+    ...(session !== undefined ? { session } : {}),
+  });
 }

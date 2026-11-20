@@ -92,6 +92,66 @@ function PlatformNotes({ snippet }: { snippet: string }) {
   );
 }
 
+/**
+ * What a host site's Content-Security-Policy must allow, and, when the
+ * security check runs, what an owner should tell visitors about it.
+ * What Turnstile processes is from Cloudflare's Turnstile Privacy Addendum
+ * (https://www.cloudflare.com/turnstile-privacy-policy/ — checked 2026-11-20):
+ * "client IP address, TLS Fingerprint, User-Agent Header and Sitekey and
+ * associated origin"; the overview page says it does not read page inputs
+ * (https://developers.cloudflare.com/turnstile/ — checked 2026-11-20).
+ */
+function SitePolicyNotes({ info }: { info: InstallInfo }) {
+  const policy = info.hostPolicy ?? [];
+  const checkRuns = info.visitorCheck?.state === "on" || info.visitorCheck?.state === "test_keys";
+  if (policy.length === 0 && !checkRuns) return null;
+  return (
+    <div className="stack install-policy">
+      {policy.length > 0 && (
+        <section aria-labelledby="install-csp-heading">
+          <h3 id="install-csp-heading" className="section-heading">
+            If your site sets a Content-Security-Policy
+          </h3>
+          <p className="muted">
+            Add these to it. Each names this chat's own address only; nothing else needs allowing.
+          </p>
+          <ul className="policy-list" aria-label="Content-Security-Policy additions">
+            {policy.map((entry) => (
+              <li key={entry.directive}>
+                <code>
+                  {entry.directive} {entry.value}
+                </code>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {checkRuns && (
+        <section aria-labelledby="install-privacy-heading">
+          <h3 id="install-privacy-heading" className="section-heading">
+            Tell visitors about the security check
+          </h3>
+          <p className="muted">
+            When a visitor starts typing, the chat runs a short check from Cloudflare Turnstile to
+            keep scripts out. It runs in a frame from this chat's address. Turnstile receives the
+            visitor's IP address, details of their browser and connection (its TLS fingerprint and
+            user agent) and this chat's address. It does not see what the visitor types. Mention
+            Cloudflare Turnstile in your privacy notice and link to{" "}
+            <a
+              href="https://www.cloudflare.com/turnstile-privacy-policy/"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Cloudflare's Turnstile privacy addendum
+            </a>
+            .
+          </p>
+        </section>
+      )}
+    </div>
+  );
+}
+
 function ForDevelopers({ assistantId }: { assistantId: string }) {
   const toast = useToast();
   const [confirming, setConfirming] = useState(false);
@@ -273,6 +333,7 @@ export function Install({ assistantId }: InstallProps) {
             />
           </div>
           <PlatformNotes snippet={info.snippet} />
+          <SitePolicyNotes info={info} />
         </li>
 
         <li className="install-step source-card">

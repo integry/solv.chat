@@ -20,6 +20,7 @@ import {
   setHighlightHost,
   setOnExternalNavigate,
 } from "./builtins.js";
+import { CheckController } from "./check.js";
 import { askToConfirm, type ConfirmHandle } from "./confirm.js";
 import { parseSafeHttpUrl, renderMarkdown } from "./markdown.js";
 import { readEventLines } from "./sse.js";
@@ -42,6 +43,8 @@ interface WidgetPublicConfig {
   greeting: string;
   suggestedQuestions: string[];
   actions: BuiltinSettings;
+  /** The engine runs the visitor check: every request needs a session. */
+  visitorCheck: boolean;
 }
 
 const DEFAULT_CONFIG: WidgetPublicConfig = {
@@ -51,6 +54,7 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
   greeting: "Hello. Ask me anything about this site.",
   suggestedQuestions: [],
   actions: { enabled: false, allowedOrigins: [] },
+  visitorCheck: false,
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
@@ -122,6 +126,7 @@ export function parsePublicConfig(raw: unknown): Partial<WidgetPublicConfig> {
     typeof data.actions === "object" && data.actions !== null
       ? (data.actions as Record<string, unknown>)
       : {};
+  out.visitorCheck = data.visitorCheck === true;
   out.actions = {
     enabled: actions.builtins === true,
     allowedOrigins: Array.isArray(actions.allowedOrigins)
@@ -154,6 +159,11 @@ export class SolvChat extends HTMLElement {
   #config: WidgetPublicConfig = { ...DEFAULT_CONFIG };
   /** Set by `preview()`: the element then loads and sends nothing. */
   #previewing = false;
+  /** The visitor has focused or typed in the input, or picked a suggestion. */
+  #interacted = false;
+  /** Set while the widget itself moves focus to the input, which is not the visitor's doing. */
+  #focusingInput = false;
+  #check!: CheckController;
 
   #launcher!: HTMLButtonElement;
   #panel!: HTMLDivElement;
@@ -211,6 +221,7 @@ export class SolvChat extends HTMLElement {
     for (const handle of this.#openConfirms) handle.dismiss();
     this.#openConfirms.clear();
     this.#dismissedTurn = null;
+    this.#check?.destroy();
     clearHighlight();
     setBeforeNavigate(null);
     setOnExternalNavigate(null);
@@ -311,6 +322,12 @@ export class SolvChat extends HTMLElement {
     input.rows = 1;
     input.placeholder = "Ask a question...";
     input.setAttribute("aria-describedby", "solv-input-error");
+    // The visitor check starts here and nowhere earlier: not on page load,
+    // not when the panel opens (which moves focus here by itself).
+    input.addEventListener("focus", () => {
+      if (!this.#focusingInput) this.#visitorInteracted();
+    });
+    input.addEventListener("keydown", () => this.#visitorInteracted());
     input.addEventListener("input", () => {
       if (this.#inputEl.value.trim().length <= MAX_CHAT_MESSAGE_LENGTH) {
         this.#clearInputError();
@@ -346,7 +363,23 @@ export class SolvChat extends HTMLElement {
     });
 
     form.append(label, input, sendBtn);
-    panel.append(header, messages, suggestions, inputError, form);
+
+    // Always in the panel and collapsed, so creating the frame inside it
+    // moves nothing; it opens only when Turnstile asks the visitor to act.
+    const checkHost = document.createElement("div");
+    checkHost.className = "solv-check";
+    this.#check = new CheckController({
+      host: checkHost,
+      endpoint: () => this.#endpoint(),
+      assistant: () => this.#assistant(),
+      visitorId: () => visitorId(),
+      theme: () =>
+        typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light",
+    });
+
+    panel.append(header, messages, suggestions, inputError, checkHost, form);
 
     const launcher = document.createElement("button");
     launcher.type = "button";
@@ -422,6 +455,26 @@ export class SolvChat extends HTMLElement {
     // Registered after the config says so, and removed if it says not to.
     installBuiltins(this.#config.actions);
     this.#renderSuggestions();
+    // The visitor got to the input before the config arrived.
+    if (this.#interacted) this.#visitorInteracted();
+  }
+
+  #checkRequired(): boolean {
+    return this.#config.visitorCheck && !this.#previewing;
+  }
+
+  #visitorInteracted(): void {
+    this.#interacted = true;
+    if (this.#checkRequired() && this.#assistant()) this.#check.start();
+  }
+
+  #focusInput(): void {
+    this.#focusingInput = true;
+    try {
+      this.#inputEl.focus();
+    } finally {
+      this.#focusingInput = false;
+    }
   }
 
   #renderSuggestions(): void {
@@ -437,6 +490,7 @@ export class SolvChat extends HTMLElement {
       chip.textContent = question;
       chip.addEventListener("click", () => {
         if (!this.#sending) {
+          this.#visitorInteracted();
           void this.#send(question);
         }
       });
@@ -453,7 +507,7 @@ export class SolvChat extends HTMLElement {
     this.#launcher.setAttribute("aria-label", "Close chat");
     this.#persist();
     if (moveFocus) {
-      this.#inputEl.focus();
+      this.#focusInput();
     }
   }
 
@@ -621,7 +675,7 @@ export class SolvChat extends HTMLElement {
     }
     // Opening the panel first: a prompt the visitor cannot see is not consent.
     if (!this.#open) this.#openPanel(false);
-    const handle = askToConfirm(this.#messagesEl, request, action, () => this.#inputEl.focus());
+    const handle = askToConfirm(this.#messagesEl, request, action, () => this.#focusInput());
     this.#openConfirms.add(handle);
     try {
       return await handle.answer;
@@ -697,6 +751,8 @@ export class SolvChat extends HTMLElement {
       ack.textContent = "";
 
       try {
+        const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
+        if (session === null) throw new Error("No visitor session");
         const response = await fetch(`${this.#endpoint()}/v1/feedback`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -706,6 +762,7 @@ export class SolvChat extends HTMLElement {
             visitorId: visitorId(),
             messageId: turn.messageId,
             value,
+            ...(session ? { session } : {}),
           }),
         });
         if (!response.ok) {
@@ -777,6 +834,22 @@ export class SolvChat extends HTMLElement {
     this.#messagesEl.scrollTop = this.#messagesEl.scrollHeight;
   }
 
+  /** Why the last check failed, for the bubble that waited on it. */
+  #checkFailure = "";
+
+  /**
+   * The session to send: undefined when the engine runs no check, null when
+   * the check could not be completed (`#checkFailure` says why).
+   */
+  async #sessionFor(): Promise<string | null | undefined> {
+    if (!this.#checkRequired()) return undefined;
+    this.#interacted = true;
+    const result = await this.#check.ensure();
+    if (result.ok) return result.session;
+    this.#checkFailure = result.message;
+    return null;
+  }
+
   async #send(message: string, onAccepted?: () => void): Promise<void> {
     const assistant = this.#assistant();
     const trimmed = message.trim();
@@ -823,6 +896,14 @@ export class SolvChat extends HTMLElement {
         // reporting request or stream never blocks the visitor's new message.
         void this.#reportDroppedResume(pending, signal);
       }
+      // With the visitor check on, the message waits here, in the same
+      // empty "thinking" bubble, until the check has a session for it.
+      const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
+      if (session !== undefined && signal.aborted) return;
+      if (session === null) {
+        this.#setTurnError(bubble, assistantTurn, this.#checkFailure);
+        return;
+      }
       const requestBody: Record<string, unknown> = {
         // Sent on every request so the engine can refuse a version it does not
         // support instead of guessing what this widget means.
@@ -831,6 +912,7 @@ export class SolvChat extends HTMLElement {
         visitorId: visitorId(),
         message: trimmed,
       };
+      if (session) requestBody.session = session;
       if (this.#conversationId !== null) {
         requestBody.conversationId = this.#conversationId;
       }
@@ -957,6 +1039,10 @@ export class SolvChat extends HTMLElement {
         } else if (event.type === "error") {
           terminated = true;
           delete assistantTurn.awaiting;
+          if (event.code === "check_required") this.#check.clear();
+          // The engine will not take more in this conversation; the next
+          // question starts a new one, as the message says.
+          if (event.code === "conversation_cap") this.#conversationId = null;
           const msg = event.message.trim() || "Something went wrong. Please try again.";
           this.#setTurnError(bubble, assistantTurn, msg);
           this.#persist();
@@ -1016,11 +1102,19 @@ export class SolvChat extends HTMLElement {
             )
           : pending.actionResults;
 
+      const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
+      if (signal.aborted) return;
+      if (session === null) {
+        delete target.turn.awaiting;
+        this.#setTurnError(target.bubble, target.turn, this.#checkFailure);
+        return;
+      }
       const response = await this.#sendActionResumeRequest(
         pending.conversationId,
         pending.resumeMessageId,
         actionResults,
         signal,
+        session,
       );
       await this.#consumeStream(
         response,
@@ -1073,11 +1167,16 @@ export class SolvChat extends HTMLElement {
       signal.addEventListener("abort", onAbort, { once: true });
     }
     try {
+      // Best effort: with the check on, only a session already held is used;
+      // this notice never starts a check of its own.
+      const session = this.#checkRequired() ? this.#check.session() : undefined;
+      if (session === null) return;
       const response = await this.#sendActionResumeRequest(
         pending.conversationId,
         pending.resumeMessageId,
         buildMovedOnResults(pending),
         controller.signal,
+        session,
       );
       await response.text().catch(() => {});
     } catch {
@@ -1108,6 +1207,7 @@ export class SolvChat extends HTMLElement {
     resumeMessageId: string,
     actionResults: ActionResult[],
     signal: AbortSignal,
+    session: string | undefined,
   ): Promise<Response> {
     const requestBody: Record<string, unknown> = {
       protocol: CHAT_PROTOCOL_VERSION,
@@ -1119,6 +1219,7 @@ export class SolvChat extends HTMLElement {
       resumeMessageId,
       actionResults,
     };
+    if (session) requestBody.session = session;
     if (location.href.startsWith("http://") || location.href.startsWith("https://")) {
       requestBody.pageUrl = location.href;
     }
@@ -1243,11 +1344,19 @@ export class SolvChat extends HTMLElement {
       setOnExternalNavigate(null);
     }
 
+    const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
+    if (signal.aborted) return;
+    if (session === null) {
+      delete assistantTurn.awaiting;
+      this.#setTurnError(bubble, assistantTurn, this.#checkFailure);
+      return;
+    }
     const response = await this.#sendActionResumeRequest(
       done.conversationId,
       done.messageId,
       results,
       signal,
+      session,
     );
 
     await this.#consumeStream(response, bubble, textEl, assistantTurn, controller, depth);

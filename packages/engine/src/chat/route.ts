@@ -31,7 +31,13 @@ import {
   answerMessage,
   answerWithActionResults,
 } from "./answer.js";
-import { checkLimits, corsHeaders, matchedOrigin, runPublicChecks } from "./checks.js";
+import {
+  checkLimits,
+  corsHeaders,
+  matchedOrigin,
+  ORIGIN_REFUSAL_MESSAGE,
+  runPublicChecks,
+} from "./checks.js";
 import { mcpRunnerFor } from "./mcpRunner.js";
 import {
   type AnswerReviewer,
@@ -42,8 +48,16 @@ import {
 import { type ScoreFloorEnv, scoreFloorFrom } from "./scoreFloor.js";
 import type { ToolRunner } from "./toolLoop.js";
 import { modelKeySource } from "./trace.js";
+import {
+  CONFIG_REFUSAL,
+  checkMessageCaps,
+  checkSession,
+  resolveVisitorCheck,
+  type VisitorCheckEnv,
+  type VisitorRefusal,
+} from "./visitorCheck.js";
 
-export interface ChatEnv extends ProviderEnv, ScoreFloorEnv {
+export interface ChatEnv extends ProviderEnv, ScoreFloorEnv, VisitorCheckEnv {
   DB: D1Database;
   VECTORS: VectorizeIndex;
   /** Opens stored MCP credentials at call time. */
@@ -112,7 +126,7 @@ function preflightResponse(
  * allow-list is told no as early as the browser asks. The org comes from the
  * auth seam, as for every session-less request.
  */
-async function bodyKeyedPreflight(
+export async function bodyKeyedPreflight(
   request: Request,
   db: D1Database,
   auth: Pick<AuthProvider, "resolveOrg">,
@@ -126,7 +140,7 @@ async function bodyKeyedPreflight(
 }
 
 /** The org's assistant for a public key, with the org taken from the auth seam. */
-async function publicAssistant(
+export async function publicAssistant(
   db: D1Database,
   auth: Pick<AuthProvider, "resolveOrg">,
   publicKey: string,
@@ -699,9 +713,47 @@ export async function chatRoute(
   // `target: "draft"` is ignored rather than rejected so a stale client
   // cannot be made to fail.
   const origin = matchedOrigin(assistant, request);
+  // The checks, in order, each refusing before any model, embedding or tool
+  // call: Origin; the visitor session (when the visitor check is on); the
+  // per-IP rate limit and the spend cap (the Limits seam); then the
+  // per-visitor caps on a new message.
+  const refusal = (failure: VisitorRefusal) =>
+    eventStreamOf({ type: "error", message: failure.message, code: failure.code }, origin);
+  if (origin === null) {
+    // The same sentence `runPublicChecks` gives, so a prober learns nothing.
+    return eventStreamOf({ type: "error", message: ORIGIN_REFUSAL_MESSAGE }, null);
+  }
+  const visitorCheck = await resolveVisitorCheck(env, seams.visitorCheck);
+  if (visitorCheck.state === "misconfigured") return refusal(CONFIG_REFUSAL);
+  const now = Date.now();
+  if (visitorCheck.state === "on") {
+    const failure = await checkSession(
+      visitorCheck,
+      { orgId: assistant.orgId, assistantId: assistant.id, visitorId: parsed.value.visitorId },
+      parsed.value.session,
+      now,
+    );
+    if (failure !== null) return refusal(failure);
+  }
   const failure = await runPublicChecks(seams.limits, assistant, request);
   if (failure !== null) {
     return eventStreamOf({ type: "error", message: failure.message }, origin);
+  }
+  // Caps count new questions only: a continuation of a paused answer is not one.
+  if (visitorCheck.state === "on" && parsed.value.actionResults === undefined) {
+    const capped = await checkMessageCaps(
+      env.DB,
+      visitorCheck,
+      {
+        orgId: assistant.orgId,
+        assistantId: assistant.id,
+        visitorId: parsed.value.visitorId,
+        ip: request.headers.get("cf-connecting-ip") ?? "",
+        conversationId: parsed.value.conversationId,
+      },
+      now,
+    );
+    if (capped !== null) return refusal(capped);
   }
 
   const tenant = forPublicScope(env.DB, {
@@ -770,8 +822,8 @@ export async function chatRoute(
 /** Handles `POST /v1/feedback` and its `OPTIONS` preflight. */
 export async function feedbackRoute(
   request: Request,
-  env: Pick<ChatEnv, "DB">,
-  seams: Pick<Seams, "limits" | "auth">,
+  env: Pick<ChatEnv, "DB"> & VisitorCheckEnv,
+  seams: Pick<Seams, "limits" | "auth" | "visitorCheck">,
 ): Promise<Response> {
   if (request.method === "OPTIONS") {
     return bodyKeyedPreflight(request, env.DB, seams.auth, "POST, OPTIONS");
@@ -800,6 +852,31 @@ export async function feedbackRoute(
   }
 
   const origin = matchedOrigin(assistant, request);
+  if (origin !== null) {
+    // Feedback writes a row, so it needs a session too, checked after Origin.
+    const visitorCheck = await resolveVisitorCheck(env, seams.visitorCheck);
+    const failure =
+      visitorCheck.state === "misconfigured"
+        ? CONFIG_REFUSAL
+        : visitorCheck.state === "on"
+          ? await checkSession(
+              visitorCheck,
+              {
+                orgId: assistant.orgId,
+                assistantId: assistant.id,
+                visitorId: parsed.value.visitorId,
+              },
+              parsed.value.session,
+              Date.now(),
+            )
+          : null;
+    if (failure !== null) {
+      return Response.json(
+        { error: failure.message, code: failure.code },
+        { status: failure.code === "check_config" ? 503 : 403, headers: corsHeaders(origin) },
+      );
+    }
+  }
   const failure = await runPublicChecks(seams.limits, assistant, request);
   if (failure !== null) {
     return Response.json(
@@ -828,8 +905,8 @@ export async function feedbackRoute(
 /** Handles `GET /v1/assistants/:publicKey` and its `OPTIONS` preflight. */
 export async function publicConfigRoute(
   request: Request,
-  env: Pick<ChatEnv, "DB">,
-  seams: Pick<Seams, "limits" | "auth">,
+  env: Pick<ChatEnv, "DB"> & VisitorCheckEnv,
+  seams: Pick<Seams, "limits" | "auth" | "visitorCheck">,
   publicKey: string,
 ): Promise<Response> {
   const assistant = await publicAssistant(env.DB, seams.auth, publicKey);
@@ -872,6 +949,8 @@ export async function publicConfigRoute(
     );
   }
 
+  const visitorCheckOn = (await resolveVisitorCheck(env, seams.visitorCheck)).state === "on";
+
   return Response.json(
     {
       title: published.config.widget.title,
@@ -885,6 +964,10 @@ export async function publicConfigRoute(
         builtins: published.config.actions.builtins,
         allowedOrigins: [...published.config.actions.allowedOrigins],
       },
+      // Present only when the visitor check runs: the widget then starts it
+      // on the first focus or keystroke. Left out otherwise, so an engine
+      // without it answers exactly as before.
+      ...(visitorCheckOn ? { visitorCheck: true } : {}),
     },
     { status: 200, headers: corsHeaders(origin) },
   );

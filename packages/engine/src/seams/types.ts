@@ -222,6 +222,30 @@ export interface PageFetcher {
   fetchPage(url: string, validators?: PageValidators): Promise<PageFetchResult>;
 }
 
+/**
+ * The Cloudflare Turnstile keys for the visitor check (see "Visitor check"
+ * in docs/architecture.md). Either may be absent; the engine decides what
+ * that means.
+ */
+export interface VisitorCheckKeys {
+  /** The widget's site key: public, rendered in the check frame. */
+  siteKey?: string | undefined;
+  /** The widget's secret key: sent only to Turnstile's `siteverify`, never to a browser or a log. */
+  secret?: string | undefined;
+}
+
+/**
+ * Where the visitor check's keys come from. The open build reads
+ * `SOLV_TURNSTILE_SITE_KEY` and `SOLV_TURNSTILE_SECRET` from the Worker's
+ * configuration and treats "neither set" as "run without the check". A host
+ * that must never run unprotected sets `required`: then a missing key is a
+ * configuration error and the public chat refuses every request.
+ */
+export interface VisitorCheckProvider {
+  readonly required?: boolean | undefined;
+  keys(): VisitorCheckKeys | Promise<VisitorCheckKeys>;
+}
+
 export interface Seams {
   auth: AuthProvider;
   keys: KeyProvider;
@@ -229,4 +253,9 @@ export interface Seams {
   limits: Limits;
   /** Optional so hosts written before this seam keep working: `createApp` applies `plainPageFetcher`. */
   pages?: PageFetcher | undefined;
+  /**
+   * Optional so hosts written before it keep working: left out, the keys are
+   * read from the Worker's configuration and the check is not required.
+   */
+  visitorCheck?: VisitorCheckProvider | undefined;
 }

@@ -321,6 +321,18 @@ export interface InstallInfo {
   snippet: string;
   /** Page and time of the newest conversation; null until a visitor writes. */
   lastSeen?: { pageUrl: string; at: number } | null;
+  /** Directives a host site's Content-Security-Policy must allow, each naming the engine's origin. */
+  hostPolicy?: { directive: string; value: string }[];
+  visitorCheck?: VisitorCheckStatus;
+}
+
+/** What is missing when the visitor check is half set up. */
+export type VisitorCheckMissing = "site_key" | "secret" | "secret_key";
+
+/** Whether visitor chat runs the security check (Cloudflare Turnstile). */
+export interface VisitorCheckStatus {
+  state: "on" | "off" | "test_keys" | "misconfigured";
+  missing: VisitorCheckMissing[];
 }
 
 export type McpAuthKind = "none" | "static_header";

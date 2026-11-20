@@ -167,6 +167,13 @@ from the auth seam and pass it down.
   default, on).
 - `gap_dismissals` — org_id, assistant_id, question_key, dismissed_at. A dismissed gap
   group is hidden until the question is asked again after `dismissed_at`.
+- `visitor_check_tokens` — token_hash (SHA-256 of a Turnstile token, the key),
+  org_id, expires_at: tokens already exchanged for a visitor session, kept for
+  the token's 300-second life. Keyed on the hash alone, because a token is the
+  operator's and may be spent once across every org. See "Visitor check".
+- `visitor_counters` — org_id, assistant_id, counter (`visitor_day` | `ip_day` |
+  `ip_sessions_hour`), subject (an HMAC of the visitor id or IP, never the value),
+  window_start, hits: the per-visitor caps. See "Visitor check".
 
 Migrations are plain SQL files under `packages/engine/migrations`, applied with
 `wrangler d1 migrations`.
@@ -187,12 +194,168 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
   the page the stream belongs to.
 - `POST /v1/feedback` — thumbs up or down on a message.
 - `GET /v1/assistants/:publicKey` — published widget config (title, colours, greeting,
-  suggested questions). No secrets, no prompts.
+  suggested questions, and `visitorCheck: true` when the visitor check runs).
+  No secrets, no prompts.
+- `POST /v1/session` — exchanges a Turnstile token for a visitor session (see
+  "Visitor check"). Answers 404 when the check is off.
+- `GET /v1/check/frame` and `GET /v1/check/frame.js` — the page the widget
+  frames to run Turnstile on the engine's origin, and its script. 404 when the
+  check is off.
 - `GET /widget.js` — the widget bundle.
 
+With the visitor check on, the requests that cost money or write carry the
+visitor session in the body's `session` field: `POST /v1/chat` (model,
+embedding and tool calls; it writes the conversation), including a request
+continuing a paused answer, and `POST /v1/feedback` (it writes a row). The
+config read writes only the Overview's one-time "widget seen" mark and costs
+nothing, and the widget must read it before any check may run, so it carries
+none.
+
 Checks on every public request, in this order: Origin against the assistant's
-`allowed_origins`; per-IP rate limit; the assistant's daily spend cap. A request
-that fails one gets a plain error event and costs nothing.
+`allowed_origins`; the visitor session, when the check is on (and a
+configuration refusal when it is half set up); per-IP rate limit; the
+assistant's daily spend cap; then, on a new visitor message, the per-visitor
+caps. A request that fails one gets a plain error event (or a JSON error) and
+costs nothing: no model, embedding or tool call. Error events from the
+visitor check and the caps carry a `code` (`check_required`, `check_config`,
+`visitor_cap`, `ip_cap`, `conversation_cap`) so the widget can act on them;
+older widgets ignore it and show the message.
+
+## Visitor check
+
+Nothing else proves that a chat request comes from a real browser on the
+owner's page: a script can set `Origin`, and rotating addresses beats the
+per-IP rate limit, so a script could use up an assistant's daily spend cap
+and lock real visitors out. When an instance is configured for it, every
+visitor's browser passes Cloudflare Turnstile and the engine issues a signed
+session that public requests must carry.
+
+**Configuration.** `SOLV_TURNSTILE_SITE_KEY` (a variable) and
+`SOLV_TURNSTILE_SECRET` (a secret), read through the optional
+`VisitorCheckProvider` seam (below). Neither set: the check is off and the
+public chat behaves exactly as before; the admin shows a standing warning
+that visitor chat is unprotected. One set, or both without `SOLV_SECRET_KEY`
+to sign sessions with: the public chat refuses every request with
+`check_config` ("This chat is not set up correctly.") and the admin names
+what is missing. There is no per-assistant switch. Turnstile's documented
+test keys work and are flagged: the admin warns that they let everyone
+through.
+
+**Where the challenge renders.** A Turnstile widget runs only on the
+hostnames registered for it (at least one, no wildcards, a registered
+hostname covers its subdomains, 10 per widget on the free plan; "Any
+Hostname" is Enterprise only:
+https://developers.cloudflare.com/turnstile/additional-configuration/hostname-management/).
+Owners' sites are hostnames the operator does not control, so the challenge
+runs in a frame served by the engine's own origin (`/v1/check/frame`): the
+operator registers the engine's hostname once, and `siteverify` reports that
+hostname, which the engine checks. The documentation does not rule frames
+out; the frame's page carries the policy Turnstile documents (`script-src`
+and `frame-src` `https://challenges.cloudflare.com`) and `frame-ancestors`
+naming the one host origin it was opened for, accepted only when that
+origin is in the assistant's allowed websites. The frame posts to that origin
+only; the widget accepts a message only when `event.origin` is the engine's
+origin and `event.source` is its own frame. Nothing from Turnstile loads on
+the host page, so a host site's Content-Security-Policy needs the engine
+origin in `script-src`, `connect-src` and `frame-src` and nothing else.
+
+**When it runs.** Nothing loads with the page or when the panel opens (which
+moves focus into the input by itself). The widget creates the frame on the
+visitor's first focus or keystroke in the message input, or when they pick a
+suggested question. The frame renders Turnstile explicitly, in managed mode
+with `appearance: "interaction-only"`, `retry: "never"` and action
+`solv-chat`, and posts back the token, an error, or that the challenge needs
+the visitor (`before-interactive-callback`). The frame sits in a collapsed
+area of the panel, so creating it moves nothing; it opens above the input
+only for an interactive challenge, at Turnstile's flexible size (100% wide,
+at least 300 px, 65 px high), and is in the tab order only then. Its theme
+follows the widget's. A message sent while the check runs waits in the
+usual empty "thinking" bubble and is sent once a session arrives. If the
+frame says nothing for 15 s, Turnstile says nothing for 30 s without asking
+the visitor to act, or it reports an error, the check has failed: the
+waiting message's bubble (or, with none waiting, a notice with **Try again**)
+says "The security check could not be completed. Check your connection, then
+try again." and no request is sent. A continuation after a page action's
+navigation uses the stored session and runs the check only if it has
+expired; the best-effort "visitor moved on" notice never starts one.
+
+**Session.** As soon as Turnstile issues a token the widget posts it to
+`POST /v1/session` (`protocol`, `assistant`, `visitorId`, `token`). In order:
+Origin; a configuration refusal; the Limits seam's `config` action (per-IP
+rate limit and spend cap: an exchange costs no model call); the token's hash
+is inserted into `visitor_check_tokens`, and a token already there is refused
+(Turnstile's own reuse detection is eventually consistent, so two exchanges
+seconds apart could both pass it); `siteverify` with the secret, the token and
+`cf-connecting-ip`, within 5 s; `success` must be `true`, `hostname` the
+engine's own and `action` `solv-chat` (a test secret always answers
+`example.com` and no action, which is accepted only for a test secret);
+anything else, including a timeout, a non-200 or a body that is not JSON, is a
+refusal (`check_failed`, logged with Turnstile's error codes only); then the
+sessions-per-IP cap (`session_cap`). The answer is `{ session, expiresAt }`.
+
+A session is `vs1.<expiry>.<nonce>.<mac>`: an HMAC-SHA-256, under a key
+derived from `SOLV_SECRET_KEY` with HKDF under its own label (`solv.chat
+visitor session v1`, apart from the admin cookie and stored-credential keys),
+over the org, assistant and visitor id, the expiry and the nonce. The org and
+assistant are signed, not written, so a session verifies only for the
+assistant (and so the org) the engine resolved from the request's public key
+and only for the visitor id in the body, and shows a reader nothing else. It
+lasts one hour (`VISITOR_SESSION_TTL_MS`): a Turnstile token lasts 300 s and
+may be redeemed once, so the session must carry a whole visit (some pages,
+several questions) on one check; an hour does, matches the window the
+sessions-per-IP cap counts in, and bounds a session copied from a browser.
+The widget keeps it in `sessionStorage` per assistant and renews it with a
+fresh check when it has under a minute left, or after the engine refuses it
+(`check_required`).
+
+**Owner surfaces are not challenged.** "Try it", test runs and everything
+under `/api/admin/*` use the admin session and are not counted against the
+caps.
+
+**Caps.** Turnstile stops scripts, not a person or a driven browser, so
+behind the session, the rate limit and the spend cap (which are unchanged),
+a new visitor message is refused when:
+
+| Cap                              | Variable                      | Default | Code and message                                                                                                                                  |
+| -------------------------------- | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Messages per visitor per UTC day | `SOLV_VISITOR_DAILY_MESSAGES` | 100     | `visitor_cap`: "You have reached today's limit for questions. Please come back tomorrow."                                                         |
+| Messages per IP per UTC day      | `SOLV_IP_DAILY_MESSAGES`      | 500     | `ip_cap`: "Too many questions have come from your network today. Please come back tomorrow."                                                      |
+| Messages per conversation        | `SOLV_CONVERSATION_MESSAGES`  | 50      | `conversation_cap`: "This conversation has reached its limit. Your next question starts a new one." (the widget then forgets the conversation id) |
+| Sessions per IP per hour         | `SOLV_IP_HOURLY_SESSIONS`     | 30      | `session_cap` on `POST /v1/session`: "Too many security checks have come from your network. Please try again in an hour."                         |
+
+Each is per assistant (so per org), a whole number, `0` for none. The
+visitor cap is keyed by the session's visitor id, so renewing a session does
+not reset it; a script minting visitor ids is held by the IP caps. The engine
+has no usage history to set the defaults from, so they come from the limits
+it has: the per-IP rate limit allows 20 questions a minute, and a person
+reading answers asks at most about one a minute, so 100 a day is more than an
+hour of non-stop questions to one assistant; an IP is often shared (an office,
+a school, a carrier), so 500 is five such visitors; the model only sees the
+last 6 turns, and 50 questions in one conversation is far past a support
+exchange; one session an hour per tab makes 30 an hour thirty people behind
+one address.
+
+Counters live in D1, like the rate limit: per new message, one read of the
+conversation's length (only when the request names a conversation) and one
+batch of two upserts that increment and return the count in one statement;
+per session issued, one upsert, plus the spent-token insert and an expired-row
+delete. The first hit of a new window deletes the org's older windows of that
+counter. A session check is CPU only (one HKDF and one HMAC).
+
+**Privacy.** No token, session or IP is stored with conversations; the two
+tables above hold a token hash and keyed hashes. Nothing records a refusal
+beyond the refused response and, for a refused token, a log line with
+Turnstile's error codes. Turnstile processes the visitor's IP address, TLS
+fingerprint, user agent, and the site key and origin it runs on (Turnstile
+Privacy Addendum, https://www.cloudflare.com/turnstile-privacy-policy/), not
+what the visitor types; the Install screen tells owners to mention Cloudflare
+Turnstile in their privacy notice and lists the policy allowances.
+
+**Hosted build.** The cloud layer passes `visitorCheck: { required: true,
+keys: () => ({ siteKey, secret }) }` in `Seams` to supply its own keys and to
+make missing keys a configuration error rather than "unprotected", and
+registers its engine hostname on its Turnstile widget. It must set
+`SOLV_SECRET_KEY`.
 
 ## Ingest API
 
@@ -1127,6 +1290,10 @@ were recorded for this answer."
   is added for messages must cover `message_traces` with them.
 - `preview_traces` holds the same ids and numbers for the owner's own "Try
   it" and test-run answers: the newest 200 per assistant, deleted with it.
+- The visitor check stores no Turnstile token, session or IP with
+  conversations: `visitor_check_tokens` holds token hashes for five minutes
+  and `visitor_counters` keyed hashes of visitor ids and IPs for about a day
+  (see "Visitor check").
 
 ## Providers
 
@@ -1477,7 +1644,10 @@ Streams tokens, renders citations as links, restores the open conversation after
 page change or reload (conversation id, transcript and open state in sessionStorage,
 so it ends with the tab), thumbs up and down, keyboard and
 screen-reader usable, respects `prefers-reduced-motion` and `prefers-color-scheme`.
-It sets no cookies and loads nothing from third parties.
+It sets no cookies and loads nothing from third parties into the host page:
+with the visitor check on, Turnstile runs inside a frame served by the
+engine's origin, created only once the visitor starts typing (see "Visitor
+check").
 
 The element's `preview(config)` method (same shape as the public config
 response) shows a config with the panel open and from then on makes no
@@ -1565,8 +1735,14 @@ Install
   Widget screen's list, read-only), the snippet with notes for plain HTML,
   WordPress, Shopify and Next.js, and whether the widget has been seen, taken
   from the page of the newest conversation (`lastSeen` on the install
-  response; a load with no message is not counted). The ingest key and CLI
-  sit in a collapsed "For developers" section.
+  response; a load with no message is not counted). Under the snippet it lists
+  the Content-Security-Policy lines a host site needs (`hostPolicy` on the
+  install response: the engine origin in `script-src`, `connect-src` and,
+  with the visitor check on, `frame-src`) and, with the check on, what
+  Turnstile receives and that the owner's privacy notice should mention it.
+  The ingest key and CLI sit in a collapsed "For developers" section. Every
+  screen shows a standing warning while the visitor check is off, on test
+  keys or half set up (`visitorCheck` on the assistants list).
 
 ### Extending the admin
 
@@ -1694,6 +1870,12 @@ The cloud layer replaces these and nothing else:
   `{ ok: false, reason: "suspended" | "plan_limit" }`. Left out, every run may
   go ahead, so hosts written before it compile unchanged. A host keeps a
   suspended org from syncing by refusing here (or in `resolveOrg`).
+- `VisitorCheckProvider` (optional, `seams.visitorCheck`) — supplies the
+  Turnstile keys (`keys()` returns `{ siteKey, secret }`) and whether the
+  check is `required`. Left out, the keys come from `SOLV_TURNSTILE_SITE_KEY`
+  and `SOLV_TURNSTILE_SECRET` and the check is not required, so a host
+  written before it compiles unchanged. With `required`, missing keys refuse
+  the public chat instead of running it unprotected.
 - `PageFetcher` — turns one https URL into
   `{ finalUrl, status, markdown, title, etag, lastModified, notModified }`.
   `fetchPage(url, { etag, lastModified })` sends those validators as
@@ -1719,7 +1901,11 @@ cron handler) and `runDueSyncs(env)` (the same work, for a host's own cron).
 `packages/engine` exports `createApp(seams)` and the open seam implementations
 (`passwordAuth`, `PasswordAuthEnv`, `SINGLE_ORG_ID`, `secretKeys`, `SecretKeyEnv`,
 `usageDaily`, `basicLimits`, `CapMicrosResolver`, `DEFAULT_DAILY_CAP_MICROS`,
-`plainPageFetcher`, `PlainPageFetcherOptions`) and the `PageFetcher` types
+`plainPageFetcher`, `PlainPageFetcherOptions`), the visitor check's types and
+constants (`VisitorCheckProvider`, `VisitorCheckKeys`, `VisitorCheckEnv`,
+`VisitorCheckStatus`, `VisitorCheckMissing`, `VisitorCaps`,
+`DEFAULT_VISITOR_CAPS`, `VISITOR_SESSION_TTL_MS`, `SITEVERIFY_URL`,
+`SITEVERIFY_TIMEOUT_MS`, `TURNSTILE_ACTION`, `TURNSTILE_TOKEN_TTL_MS`) and the `PageFetcher` types
 (`PageFetcher`, `PageFetchResult`, `PageContent`, `PageNotModified`,
 `PageNoContent`, `PageValidators`), the sync types (`SyncLimitDecision`,
 `SyncLimitRequest`, `SourceSyncState`, `SyncCounts`, `SyncOutcome`,

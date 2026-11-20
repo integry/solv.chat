@@ -536,6 +536,53 @@ textarea:focus-visible {
   color: var(--solv-muted);
 }
 
+/* The visitor check. Collapsed (no height) while Turnstile works unseen,
+   so creating its frame moves nothing; opened only when Turnstile asks the
+   visitor to act, or to say the check failed. */
+.solv-check {
+  flex: none;
+  height: 0;
+  overflow: hidden;
+  padding: 0 14px;
+}
+
+.solv-check[data-state] {
+  height: auto;
+  padding: 8px 14px 0;
+}
+
+.solv-check-note {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--solv-muted);
+}
+
+.solv-check:not([data-state="interactive"]) .solv-check-note {
+  display: none;
+}
+
+.solv-check-frame {
+  display: block;
+  width: 100%;
+  /* Turnstile's flexible size is 100% wide (at least 300px) and 65px high;
+     the rest is room for its border, so the frame never scrolls. */
+  height: 72px;
+  border: 0;
+  background: transparent;
+}
+
+.solv-check-failed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--solv-error-bg);
+  color: var(--solv-error);
+  font-size: 12px;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

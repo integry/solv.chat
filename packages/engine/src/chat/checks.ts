@@ -9,6 +9,9 @@ export type CheckFailureReason = "origin" | "rate_limit" | "spend_cap";
  */
 export type PublicActionKind = "chat" | "config";
 
+/** The one sentence every Origin refusal gives. */
+export const ORIGIN_REFUSAL_MESSAGE = "This assistant is not available on this page.";
+
 export interface CheckFailure {
   reason: CheckFailureReason;
   message: string;
@@ -84,7 +87,7 @@ export async function runPublicChecks(
   if (matchedOrigin(assistant, request) === null) {
     // One plain sentence for every reason, so the error does not tell a prober
     // which origins are configured.
-    return { reason: "origin", message: "This assistant is not available on this page." };
+    return { reason: "origin", message: ORIGIN_REFUSAL_MESSAGE };
   }
   return checkLimits(limits, assistant, request, kind);
 }

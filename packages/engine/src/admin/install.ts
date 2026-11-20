@@ -1,3 +1,4 @@
+import type { VisitorCheckStatus } from "../chat/visitorCheck.js";
 import type { Tenant } from "../db/tenant.js";
 import { NotFound } from "./errors.js";
 
@@ -12,6 +13,15 @@ export interface InstallInfo {
    * comes from the visitor's browser, so the admin shows it as text only.
    */
   lastSeen: { pageUrl: string; at: number } | null;
+  /**
+   * What a host site's Content-Security-Policy must allow for the widget,
+   * one directive per entry, all naming this engine's origin only. The
+   * visitor check adds `frame-src` (its challenge runs in a frame served
+   * from this origin); nothing from Turnstile is loaded by the host page.
+   */
+  hostPolicy: { directive: string; value: string }[];
+  /** Whether the visitor check runs; absent when the caller did not say. */
+  visitorCheck?: VisitorCheckStatus | undefined;
 }
 
 /** Returns the embed snippet (with public key and deployed origin) and allowed origins. */
@@ -19,6 +29,7 @@ export async function getInstallInfo(
   tenant: Tenant,
   assistantId: string,
   publicBaseUrl: string,
+  visitorCheck?: VisitorCheckStatus,
 ): Promise<InstallInfo> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
@@ -26,11 +37,26 @@ export async function getInstallInfo(
   const baseUrl = publicBaseUrl.replace(/\/+$/, "");
   const snippet = `<script src="${baseUrl}/widget.js" defer></script>\n<solv-chat assistant="${assistant.publicKey}"></solv-chat>`;
 
+  let engineOrigin = baseUrl;
+  try {
+    engineOrigin = new URL(baseUrl).origin;
+  } catch {
+    // Keep the configured base as written.
+  }
+  const checkRuns = visitorCheck?.state === "on" || visitorCheck?.state === "test_keys";
+  const hostPolicy = [
+    { directive: "script-src", value: engineOrigin },
+    { directive: "connect-src", value: engineOrigin },
+    ...(checkRuns ? [{ directive: "frame-src", value: engineOrigin }] : []),
+  ];
+
   return {
     assistantId: assistant.id,
     publicKey: assistant.publicKey,
     allowedOrigins: assistant.allowedOrigins,
     snippet,
     lastSeen: await tenant.conversations.latestPageSeen(assistant.id),
+    hostPolicy,
+    ...(visitorCheck ? { visitorCheck } : {}),
   };
 }
