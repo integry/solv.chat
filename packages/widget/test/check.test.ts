@@ -201,6 +201,127 @@ describe("visitor check in the widget", () => {
     expect(requests.filter((r) => r.url.endsWith("/v1/chat"))).toHaveLength(2);
   });
 
+  describe("when the page blocks sessionStorage", () => {
+    let restore: (() => void) | null = null;
+
+    beforeEach(() => {
+      // A browser policy that blocks storage throws on access to it.
+      const owner = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage")
+        ? globalThis
+        : Object.getPrototypeOf(globalThis);
+      const original = Object.getOwnPropertyDescriptor(owner, "sessionStorage");
+      Object.defineProperty(globalThis, "sessionStorage", {
+        configurable: true,
+        get() {
+          throw new DOMException("The operation is insecure.", "SecurityError");
+        },
+      });
+      restore = () => {
+        if (owner === globalThis && original) {
+          Object.defineProperty(globalThis, "sessionStorage", original);
+        } else {
+          delete (globalThis as { sessionStorage?: unknown }).sessionStorage;
+        }
+      };
+    });
+
+    afterEach(() => {
+      restore?.();
+      restore = null;
+    });
+
+    it("keeps a session from a focus-started check for the visit", async () => {
+      expect(() => sessionStorage.getItem("x")).toThrow();
+      const requests = fakeEngine();
+      const { root } = mount();
+      await flushAsync();
+      mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+      const input = mustQuery<HTMLTextAreaElement>(root, "#solv-input");
+      input.dispatchEvent(new FocusEvent("focus"));
+      const frame = mustQuery<HTMLIFrameElement>(root, ".solv-check iframe");
+      fromFrame(frame, { type: "ready" });
+      fromFrame(frame, { type: "token", token: "XXXX.DUMMY.TOKEN.XXXX" });
+      await flushAsync();
+      expect(requests.filter((r) => r.url.endsWith("/v1/session"))).toHaveLength(1);
+
+      // Typing does not start another check.
+      for (const key of ["H", "i", "!"]) {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+      }
+      await flushAsync();
+      expect(root.querySelector(".solv-check iframe")).toBeNull();
+
+      // Both messages go out with the one session.
+      for (const text of ["How do I start?", "And then?"]) {
+        input.value = text;
+        mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+        await flushAsync();
+      }
+      expect(root.querySelector(".solv-check iframe")).toBeNull();
+      expect(requests.filter((r) => r.url.endsWith("/v1/session"))).toHaveLength(1);
+      const chats = requests.filter((r) => r.url.endsWith("/v1/chat"));
+      expect(chats.map((r) => r.body?.session)).toEqual([
+        "vs1.session-for-test",
+        "vs1.session-for-test",
+      ]);
+    });
+
+    it("forgets the in-memory session when the engine refuses it, and when it nears expiry", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const requests: Recorded[] = [];
+      let chatReply = "";
+      let issued = 0;
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        requests.push({
+          url,
+          body: init?.body ? JSON.parse(String(init.body)) : null,
+        });
+        if (url.includes("/v1/assistants/")) return Response.json({ visitorCheck: true });
+        if (url.endsWith("/v1/session")) {
+          issued += 1;
+          return Response.json({
+            session: `vs1.s${issued}`,
+            expiresAt: Date.now() + 3_600_000,
+          });
+        }
+        return new Response(sseStream([chatReply]), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }) as typeof fetch;
+      const { root } = mount();
+      await flushAsync();
+      mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+      const input = mustQuery<HTMLTextAreaElement>(root, "#solv-input");
+      const send = async (text: string) => {
+        input.value = text;
+        mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+        await flushAsync();
+        const frame = root.querySelector<HTMLIFrameElement>(".solv-check iframe");
+        if (frame) fromFrame(frame, { type: "token", token: `t-${text}` });
+        await flushAsync();
+      };
+      const done = (n: number) =>
+        `event: done\ndata: {"messageId":"m${n}","conversationId":"cnv_1"}\n\n`;
+      chatReply = done(1);
+      await send("one");
+      chatReply =
+        'event: error\ndata: {"message":"The security check has expired. Please send your message again.","code":"check_required"}\n\n';
+      await send("two");
+      chatReply = done(3);
+      await send("three");
+      // Close to expiry, the held session is renewed rather than sent.
+      vi.setSystemTime(Date.now() + 3_600_000 - 30_000);
+      chatReply = done(4);
+      await send("four");
+      const sessions = requests
+        .filter((r) => r.url.endsWith("/v1/chat"))
+        .map((r) => r.body?.session);
+      expect(sessions).toEqual(["vs1.s1", "vs1.s1", "vs1.s2", "vs1.s3"]);
+    });
+  });
+
   it("starts the check when a suggested question is clicked, and sends it after", async () => {
     const requests = fakeEngine();
     const { root } = mount();

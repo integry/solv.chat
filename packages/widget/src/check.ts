@@ -39,6 +39,11 @@ interface StoredSession {
   visitorId: string;
 }
 
+/** The in-memory copy also names its assistant; storage keys by it instead. */
+interface HeldSession extends StoredSession {
+  assistant: string;
+}
+
 export interface CheckControllerOptions {
   /** The element the frame and the notice live in, inside the panel. */
   host: HTMLElement;
@@ -68,35 +73,44 @@ export class CheckController {
   /** Bumped whenever an attempt settles, so a late exchange cannot settle the next one. */
   #attempt = 0;
   #exchangeAbort: AbortController | null = null;
+  /**
+   * The last session issued, kept in memory too, so a page whose storage
+   * throws (a browser policy, say) still serves the whole visit from one
+   * check instead of starting another on every keystroke.
+   */
+  #held: HeldSession | null = null;
 
   constructor(opts: CheckControllerOptions) {
     this.#opts = opts;
   }
 
-  /** The stored session when it is still good for a while, or null. */
+  /**
+   * The stored session, or the one held in memory, when it is for this
+   * assistant and visitor and still good for a while; otherwise null.
+   */
   session(): string | null {
     const assistant = this.#opts.assistant();
     if (!assistant) return null;
+    const good = (saved: Partial<StoredSession> | null): saved is StoredSession =>
+      saved !== null &&
+      typeof saved.session === "string" &&
+      typeof saved.expiresAt === "number" &&
+      saved.visitorId === this.#opts.visitorId() &&
+      saved.expiresAt - Date.now() > SESSION_RENEW_MARGIN_MS;
     try {
       const raw = sessionStorage.getItem(STORAGE_PREFIX + assistant);
-      if (!raw) return null;
-      const saved = JSON.parse(raw) as Partial<StoredSession>;
-      if (
-        typeof saved.session === "string" &&
-        typeof saved.expiresAt === "number" &&
-        saved.visitorId === this.#opts.visitorId() &&
-        saved.expiresAt - Date.now() > SESSION_RENEW_MARGIN_MS
-      ) {
-        return saved.session;
-      }
+      const saved = raw ? (JSON.parse(raw) as Partial<StoredSession> | null) : null;
+      if (good(saved)) return saved.session;
     } catch {
-      // Storage unavailable or unreadable: run the check again.
+      // Storage unavailable or unreadable: fall back to the copy in memory.
     }
-    return null;
+    const held = this.#held;
+    return held !== null && held.assistant === assistant && good(held) ? held.session : null;
   }
 
-  /** Forgets the stored session, after the engine refused it. */
+  /** Forgets the session, stored and in memory, after the engine refused it. */
   clear(): void {
+    this.#held = null;
     try {
       sessionStorage.removeItem(STORAGE_PREFIX + this.#opts.assistant());
     } catch {
@@ -225,13 +239,15 @@ export class CheckController {
     // check and `#finish` aborts the request.
     this.#arm(CHECK_EXCHANGE_TIMEOUT_MS);
     try {
+      // The session is for the assistant and visitor it was asked for.
+      const assistant = this.#opts.assistant();
       const visitorId = this.#opts.visitorId();
       const response = await fetch(`${this.#opts.endpoint()}/v1/session`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           protocol: CHAT_PROTOCOL_VERSION,
-          assistant: this.#opts.assistant(),
+          assistant,
           visitorId,
           token,
         }),
@@ -250,13 +266,16 @@ export class CheckController {
         typeof body.session === "string" &&
         typeof body.expiresAt === "number"
       ) {
+        const saved: StoredSession = {
+          session: body.session,
+          expiresAt: body.expiresAt,
+          visitorId,
+        };
+        this.#held = { ...saved, assistant };
         try {
-          sessionStorage.setItem(
-            STORAGE_PREFIX + this.#opts.assistant(),
-            JSON.stringify({ session: body.session, expiresAt: body.expiresAt, visitorId }),
-          );
+          sessionStorage.setItem(STORAGE_PREFIX + assistant, JSON.stringify(saved));
         } catch {
-          // Kept for this request only; the next one checks again.
+          // Storage refused: the copy in memory serves this page.
         }
         this.#finish({ ok: true, session: body.session });
         return;

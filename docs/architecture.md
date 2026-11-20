@@ -319,7 +319,10 @@ lasts one hour (`VISITOR_SESSION_TTL_MS`): a Turnstile token lasts 300 s and
 may be redeemed once, so the session must carry a whole visit (some pages,
 several questions) on one check; an hour does, matches the window the
 sessions-per-IP cap counts in, and bounds a session copied from a browser.
-The widget keeps it in `sessionStorage` per assistant and renews it with a
+The widget keeps it in `sessionStorage` per assistant, and in memory as
+well, so a page that blocks storage still uses one check for the visit
+(both copies are checked against the assistant, visitor id and expiry, and
+both are forgotten on `check_required`). It renews it with a
 fresh check when it has under a minute left, or after the engine refuses it
 (`check_required`). The exchange, response body included, has 15 s
 (`CHECK_EXCHANGE_TIMEOUT_MS`: the engine's 5 s for `siteverify` and room for
@@ -360,8 +363,12 @@ names a conversation, one update that takes a slot of its cap
 and the conversation's stored visitor messages, so two simultaneous requests
 cannot both take the last slot; one more read when no conversation of this
 assistant and visitor has the id, which then starts a new one), and one
-batch of two upserts that increment and return the count in one statement
-(when a daily cap then refuses the message, its slot is given back);
+batch of one upsert and one read: the upsert adds a hit to both daily
+counters only when both are under their caps, judged in the same statement,
+so a refused message uses up neither (a visitor past their own cap cannot
+use up their network's) and two simultaneous requests cannot both take a
+last hit; the read says which cap refused (when a daily cap refuses the
+message, its conversation slot is given back);
 per session issued, one upsert, plus the spent-token insert and an expired-row
 delete. A slot stays taken once a message is admitted, even if its answer
 then fails: the question is stored before any answer. The first hit of a new window deletes the org's older windows of that

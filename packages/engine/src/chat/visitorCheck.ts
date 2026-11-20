@@ -217,18 +217,11 @@ async function bump(
   const counts = results.map((result) => result.results[0]?.hits ?? 0);
   // The first hit of a new window is a cheap moment to drop windows that
   // can no longer refuse anything, so the table holds about one day.
-  const stale = hits.filter((_, i) => counts[i] === 1);
-  if (stale.length > 0) {
-    await db.batch(
-      stale.map((hit) =>
-        db
-          .prepare(
-            "DELETE FROM visitor_counters WHERE org_id = ?1 AND counter = ?2 AND window_start < ?3",
-          )
-          .bind(orgId, hit.counter, hit.windowStart),
-      ),
-    );
-  }
+  await dropStaleWindows(
+    db,
+    orgId,
+    hits.filter((_, i) => counts[i] === 1),
+  );
   return counts;
 }
 
@@ -296,7 +289,7 @@ async function releaseConversationSlot(
  * the rate limit and the spend cap, and before any paid work. Costs, when
  * the request names a conversation, one D1 update that reserves the
  * conversation's slot (and one read when it does not), then one D1 batch of
- * two upserts. A slot stays taken once the message is admitted, even if the
+ * a conditional upsert of the daily counters and a read of them. A slot stays taken once the message is admitted, even if the
  * answer then fails: the visitor's message is stored before any answer, so
  * the cap counts what was accepted.
  */
@@ -326,6 +319,43 @@ export async function checkMessageCaps(
   return refusal;
 }
 
+/** Drops windows of these counters older than the current one; see `bump`. */
+async function dropStaleWindows(
+  db: D1Database,
+  orgId: string,
+  hits: readonly CounterHit[],
+): Promise<void> {
+  if (hits.length === 0) return;
+  await db.batch(
+    hits.map((hit) =>
+      db
+        .prepare(
+          "DELETE FROM visitor_counters WHERE org_id = ?1 AND counter = ?2 AND window_start < ?3",
+        )
+        .bind(orgId, hit.counter, hit.windowStart),
+    ),
+  );
+}
+
+interface DailyHit extends CounterHit {
+  cap: number;
+}
+
+/**
+ * Admits one message against the enabled daily caps, all or nothing: one
+ * statement adds a hit to every enabled counter only when each of them is
+ * still under its cap, so a refused message uses up neither the visitor's
+ * nor the network's allowance, and a visitor already at their own cap
+ * cannot spend the network's on refusals. The condition reads the counters
+ * in the statement that writes them, so two simultaneous requests cannot
+ * both take a last hit; SQLite runs the SELECT of an `INSERT ... SELECT`
+ * that reads its own table to completion before inserting, so each row is
+ * judged on the counts before this hit (the caps tests pin this: a
+ * visitor's last admitted message still counts against the network). The
+ * WHERE clause is also what lets SQLite parse the upsert after a SELECT
+ * (https://www.sqlite.org/lang_upsert.html). A refusal then reads the
+ * counts, in the same batch, to say which cap refused.
+ */
 async function checkDailyCaps(
   db: D1Database,
   check: Extract<VisitorCheck, { state: "on" }>,
@@ -334,12 +364,13 @@ async function checkDailyCaps(
 ): Promise<VisitorRefusal | null> {
   const { caps } = check;
   const day = Math.floor(now / DAY_MS) * DAY_MS;
-  const hits: CounterHit[] = [];
+  const hits: DailyHit[] = [];
   if (caps.visitorMessagesPerDay > 0) {
     hits.push({
       counter: "visitor_day",
       subject: await counterSubject(check.signingSecret, "visitor", input.visitorId),
       windowStart: day,
+      cap: caps.visitorMessagesPerDay,
     });
   }
   if (caps.ipMessagesPerDay > 0) {
@@ -347,20 +378,70 @@ async function checkDailyCaps(
       counter: "ip_day",
       subject: await counterSubject(check.signingSecret, "ip", input.ip),
       windowStart: day,
+      cap: caps.ipMessagesPerDay,
     });
   }
   if (hits.length === 0) return null;
-  const counts = await bump(db, input.orgId, input.assistantId, hits);
-  for (const [i, hit] of hits.entries()) {
-    const count = counts[i] ?? 0;
-    if (hit.counter === "visitor_day" && count > caps.visitorMessagesPerDay) {
-      return { code: "visitor_cap", message: VISITOR_CAP_MESSAGE };
-    }
-    if (hit.counter === "ip_day" && count > caps.ipMessagesPerDay) {
-      return { code: "ip_cap", message: IP_CAP_MESSAGE };
-    }
+
+  // ?1 org, ?2 assistant, ?3 window; then counter, subject, cap per hit.
+  const params: unknown[] = [input.orgId, input.assistantId, day];
+  const slot = (value: unknown): string => {
+    params.push(value);
+    return `?${params.length}`;
+  };
+  const current = (counter: string, subject: string) =>
+    `COALESCE((SELECT hits FROM visitor_counters
+                WHERE org_id = ?1 AND assistant_id = ?2 AND counter = ${counter}
+                  AND subject = ${subject} AND window_start = ?3), 0)`;
+  const rows: string[] = [];
+  const under: string[] = [];
+  for (const hit of hits) {
+    const counter = slot(hit.counter);
+    const subject = slot(hit.subject);
+    rows.push(`SELECT ${counter} AS counter, ${subject} AS subject`);
+    under.push(`${current(counter, subject)} < ${slot(hit.cap)}`);
   }
-  return null;
+  const admit = db
+    .prepare(
+      `INSERT INTO visitor_counters (org_id, assistant_id, counter, subject, window_start, hits)
+       SELECT ?1, ?2, wanted.counter, wanted.subject, ?3, 1
+         FROM (${rows.join(" UNION ALL ")}) AS wanted
+        WHERE ${under.join(" AND ")}
+       ON CONFLICT(org_id, assistant_id, counter, subject, window_start)
+       DO UPDATE SET hits = hits + 1
+       RETURNING counter, hits`,
+    )
+    .bind(...params);
+  const read = db
+    .prepare(
+      `SELECT counter, hits FROM visitor_counters
+        WHERE org_id = ?1 AND assistant_id = ?2 AND window_start = ?3
+          AND ((counter = 'visitor_day' AND subject = ?4) OR (counter = 'ip_day' AND subject = ?5))`,
+    )
+    .bind(
+      input.orgId,
+      input.assistantId,
+      day,
+      hits.find((hit) => hit.counter === "visitor_day")?.subject ?? "",
+      hits.find((hit) => hit.counter === "ip_day")?.subject ?? "",
+    );
+  const [admitted, counts] = await db.batch<{ counter: CounterName; hits: number }>([admit, read]);
+  const added = admitted?.results ?? [];
+  if (added.length > 0) {
+    // The first hit of a new window: see `bump`.
+    await dropStaleWindows(
+      db,
+      input.orgId,
+      hits.filter((hit) => added.some((row) => row.counter === hit.counter && row.hits === 1)),
+    );
+    return null;
+  }
+  const count = (name: CounterName) =>
+    counts?.results.find((row) => row.counter === name)?.hits ?? 0;
+  if (caps.visitorMessagesPerDay > 0 && count("visitor_day") >= caps.visitorMessagesPerDay) {
+    return { code: "visitor_cap", message: VISITOR_CAP_MESSAGE };
+  }
+  return { code: "ip_cap", message: IP_CAP_MESSAGE };
 }
 
 /**

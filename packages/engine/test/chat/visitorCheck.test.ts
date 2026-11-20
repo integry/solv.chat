@@ -681,6 +681,98 @@ describe("visitor check", () => {
       expect(elsewhere.events.at(-1)?.type).toBe("done");
     });
 
+    it("lets no refused message use up a cap shared with other visitors", async () => {
+      const h = harness(
+        capEnv({
+          SOLV_VISITOR_DAILY_MESSAGES: "2",
+          SOLV_IP_DAILY_MESSAGES: "4",
+        }),
+      );
+      const sessionA = await sessionFor(h, "vis_a");
+      for (let i = 0; i < 2; i++) {
+        const { events } = await chat(h, {
+          visitorId: "vis_a",
+          message: `A${i}`,
+          session: sessionA,
+        });
+        expect(events.at(-1)?.type).toBe("done");
+      }
+      // Visitor A keeps asking past their own cap from the shared network.
+      for (let i = 0; i < 5; i++) {
+        const { events } = await chat(h, {
+          visitorId: "vis_a",
+          message: `More${i}`,
+          session: sessionA,
+        });
+        expect(events).toEqual([expect.objectContaining({ type: "error", code: "visitor_cap" })]);
+      }
+      // The network still has two messages left, and B's last admitted one counts against it.
+      const sessionB = await sessionFor(h, "vis_b");
+      for (let i = 0; i < 2; i++) {
+        const { events } = await chat(h, {
+          visitorId: "vis_b",
+          message: `B${i}`,
+          session: sessionB,
+        });
+        expect(events.at(-1)?.type).toBe("done");
+      }
+      const { events } = await chat(h, {
+        visitorId: "vis_c",
+        message: "C",
+        session: await sessionFor(h, "vis_c"),
+      });
+      expect(events).toEqual([expect.objectContaining({ type: "error", code: "ip_cap" })]);
+      const counts = await env.DB.prepare(
+        "SELECT counter, hits FROM visitor_counters ORDER BY counter, hits",
+      ).all<{ counter: string; hits: number }>();
+      expect(counts.results).toEqual([
+        { counter: "ip_day", hits: 4 },
+        { counter: "visitor_day", hits: 2 },
+        { counter: "visitor_day", hits: 2 },
+      ]);
+
+      // Refused by the network's cap, a visitor keeps their own allowance for elsewhere.
+      const elsewhere = { ip: "198.51.100.1" };
+      const sessionD = await sessionFor(h, "vis_d");
+      for (let i = 0; i < 3; i++) {
+        const refused = await chat(h, {
+          visitorId: "vis_d",
+          message: `D${i}`,
+          session: sessionD,
+        });
+        expect(refused.events[0]).toMatchObject({ code: "ip_cap" });
+      }
+      for (let i = 0; i < 2; i++) {
+        const away = await chat(
+          h,
+          { visitorId: "vis_d", message: `D-away${i}`, session: sessionD },
+          elsewhere,
+        );
+        expect(away.events.at(-1)?.type).toBe("done");
+      }
+    });
+
+    it("admits only one of two simultaneous requests for a visitor's last daily message", async () => {
+      const h = harness(
+        capEnv({
+          SOLV_VISITOR_DAILY_MESSAGES: "1",
+          SOLV_IP_DAILY_MESSAGES: "5",
+        }),
+      );
+      const session = await sessionFor(h);
+      const results = await Promise.all([
+        chat(h, { message: "Qa", session }),
+        chat(h, { message: "Qb", session }),
+      ]);
+      const last = results.map((r) => r.events.at(-1));
+      expect(last.filter((e) => e?.type === "done")).toHaveLength(1);
+      expect(last.filter((e) => e?.type === "error" && e.code === "visitor_cap")).toHaveLength(1);
+      const ip = await env.DB.prepare(
+        "SELECT hits FROM visitor_counters WHERE counter = 'ip_day'",
+      ).first<{ hits: number }>();
+      expect(ip?.hits).toBe(1);
+    });
+
     it("refuses the message after the conversation's cap", async () => {
       const h = harness(capEnv({ SOLV_CONVERSATION_MESSAGES: "2" }));
       const session = await sessionFor(h);
