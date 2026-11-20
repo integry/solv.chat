@@ -22,6 +22,8 @@
  *   definition. The text must be more than numbers: `[42][1]` and `[1][2]` are
  *   citations (a label alone, `[1]` with a definition, cannot be told from
  *   one and goes).
+ * - never a bracket escaped as literal text (`\[1]`, as Markdown shows "[1]"),
+ *   while an escaped backslash leaves the bracket real (`\\[1]` is a citation).
  * The spaces before a marker go with it: "open at 9 [1]." becomes "open at 9.".
  * Each bracket is judged on its own, so in "option [42] [1]." the "[42]"
  * stays and the "[1]" still goes.
@@ -79,7 +81,11 @@ function stripAll(text: string, from: number, end: number, maxSource: number): s
     if (markerEnd > end) break;
     const marker = match[0].trimStart();
     const markerStart = markerEnd - marker.length;
-    if (withinRange(marker, maxSource) && !linkTextBefore(text, markerStart)) {
+    if (
+      withinRange(marker, maxSource) &&
+      !escapedAt(text, markerStart) &&
+      !linkTextBefore(text, markerStart)
+    ) {
       out += text.slice(at, match.index);
       at = markerEnd;
     }

@@ -319,6 +319,28 @@ describe("chat/citationMarkers", () => {
     );
   });
 
+  it("keeps an escaped bracket as literal text, however it is streamed", () => {
+    const answer = "Use \\[1] for the first label [2].";
+    const clean = "Use \\[1] for the first label.";
+    expect(stripCitationMarkers(answer, MAX)).toBe(clean);
+    expect(stripCitationMarkers("Use \\[1] for the first label.", MAX)).toBe(
+      "Use \\[1] for the first label.",
+    );
+    // The marker's "[" split from its backslash, or from its number.
+    expect(streamed(["Use \\", "[1] for the first label [", "2]."]).text).toBe(clean);
+    expect(streamed(["Use \\[", "1] for the first label [2", "]."]).text).toBe(clean);
+    expect(streamed(["[1] for the first label [2]."], "Use \\").text).toBe(
+      clean.slice("Use \\".length),
+    );
+    // An escaped backslash leaves the bracket a real citation; an escaped
+    // bracket is no link's text, so the marker after it still goes.
+    expect(stripCitationMarkers("A \\\\[1] real.", MAX)).toBe("A \\\\ real.");
+    expect(stripCitationMarkers("Label \\[1][2] here.", MAX)).toBe("Label \\[1] here.");
+    expect(stripCitationMarkers("See [guide]\\[1] and [1, 2]\\[3].", MAX)).toBe(
+      "See [guide]\\[1] and\\[3].",
+    );
+  });
+
   it("keeps a fence open past a fence-like line with text after it", () => {
     const answer = "```text\n```not-a-close\nitems[1]\n```\nDone[1].";
     const expected = "```text\n```not-a-close\nitems[1]\n```\nDone.";
