@@ -193,12 +193,12 @@ function isSelfClosing(tag: string, name: string): boolean {
 /**
  * Removes landmark chrome: `nav`, `aside`, `footer` (and menus, dialogs,
  * templates), elements whose `role` is a chrome landmark, and a `header`
- * that is not inside an article, section or `main` (`scoped` says the whole
- * input already is, as the inside of `main` is). Nesting-aware and linear:
+ * that is not inside an article, section, `main` or `role="main"`.
+ * Content inside any of these goes with it. Nesting-aware and linear:
  * an element is skipped to its own matching close, and one that is never
  * closed is kept rather than swallowing the rest of the page.
  */
-function stripChrome(html: string, scoped: boolean): string {
+function stripChrome(html: string): string {
   const lower = html.toLowerCase();
   const lastClose = new Map<string, number>();
   const closesAfter = (name: string, end: number): boolean => {
@@ -211,6 +211,8 @@ function stripChrome(html: string, scoped: boolean): string {
   };
   const out: string[] = [];
   const stack: string[] = [];
+  // Parallel to `stack`: whether that element scopes a `header`.
+  const scopes: boolean[] = [];
   let sectioning = 0;
   let skip: { name: string; depth: number } | null = null;
   scanTags(
@@ -236,9 +238,10 @@ function stripChrome(html: string, scoped: boolean): string {
         const at = stack.lastIndexOf(name);
         if (at !== -1) {
           for (let i = at; i < stack.length; i++) {
-            if (SECTIONING.has(stack[i] as string)) sectioning--;
+            if (scopes[i]) sectioning--;
           }
           stack.length = at;
+          scopes.length = at;
         }
         out.push(`<${tag}>`);
         return;
@@ -251,15 +254,19 @@ function stripChrome(html: string, scoped: boolean): string {
       const chrome =
         CHROME_ELEMENTS.has(name) ||
         (role !== null && CHROME_ROLES.has(role)) ||
-        (name === "header" && !scoped && sectioning === 0);
+        (name === "header" && sectioning === 0);
       if (chrome && closesAfter(name, end)) {
         skip = { name, depth: 1 };
         out.push("\n");
         return;
       }
       if (stack.length < MAX_TRACKED_DEPTH) {
+        // `role="main"` scopes a header as `main` does, so the page's own
+        // header inside it stays.
+        const scope = SECTIONING.has(name) || role === "main";
         stack.push(name);
-        if (SECTIONING.has(name)) sectioning++;
+        scopes.push(scope);
+        if (scope) sectioning++;
       }
       out.push(`<${tag}>`);
     },
@@ -418,12 +425,15 @@ export function extractHtml(
   for (const name of ["script", "style", "noscript", "title"]) {
     page = replaceElements(page, name, () => "\n");
   }
-  // The page's own content when it marks it, else the whole page; either
-  // way without its chrome. A `main` that holds no text (a page that fills
-  // it by script) falls back to the whole page.
+  // Chrome goes first, so a `main` or `article` inside it (a related-post
+  // preview in an `aside`, a `main` in a `template`) is never taken for the
+  // page's content. Then the page's own content when it marks it, else the
+  // whole page. A `main` that holds no text (a page that fills it by
+  // script) falls back to the whole page.
+  page = stripChrome(page);
   const region = contentRegion(page);
-  let markdown = region === null ? "" : toMarkdown(stripChrome(region, true));
-  if (markdown === "") markdown = toMarkdown(stripChrome(page, false));
+  let markdown = region === null ? "" : toMarkdown(region);
+  if (markdown === "") markdown = toMarkdown(page);
   return { title, markdown };
 }
 

@@ -102,6 +102,30 @@ describe("extractHtml: page chrome", () => {
     ).toBe("One.\n\nTwo.");
   });
 
+  it("does not take an article inside chrome for the page's content", () => {
+    const html = `<h1>Setup</h1><p>Install the CLI and run it.</p>
+      <aside><article><p>Related post preview.</p></article></aside>`;
+    expect(extractHtml(html, URL_).markdown).toBe("# Setup\n\nInstall the CLI and run it.");
+  });
+
+  it("uses the real article when another one sits inside chrome", () => {
+    const html = `<nav><article><p>Menu card.</p></article></nav>
+      <article><p>The post.</p></article><p>Outside.</p>`;
+    expect(extractHtml(html, URL_).markdown).toBe("The post.");
+  });
+
+  it("skips a main inside a template or role chrome and uses the real main", () => {
+    const html = `<template><main><p>Template text.</p></main></template>
+      <div role="complementary"><div role="main"><p>Sidebar text.</p></div></div>
+      <main><p>Real text.</p></main><p>Outside.</p>`;
+    expect(extractHtml(html, URL_).markdown).toBe("Real text.");
+  });
+
+  it('keeps the header inside a role="main" region', () => {
+    const html = `<header>Site</header><div role="main"><header><h1>Title</h1></header><p>Body.</p></div>`;
+    expect(extractHtml(html, URL_).markdown).toBe("# Title\n\nBody.");
+  });
+
   it("falls back to the whole page when main holds no text", () => {
     expect(extractHtml(`<main><div id="app"></div></main><p>Server text.</p>`, URL_).markdown).toBe(
       "Server text.",
