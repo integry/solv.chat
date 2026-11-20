@@ -110,10 +110,11 @@ from the auth seam and pass it down.
   keyed by chunk id, with `org_id` and `assistant_id` as metadata filters. A
   written answer has one more chunk than its text needs: the same text as its
   first chunk, embedded as its question alone (see "Chunks and embeddings").
-- `retired_chunks` — id, org_id, document_id, text, heading_path, retired_at:
-  the chunks a re-index or update replaced, kept for `RETIRED_CHUNK_KEEP_MS`
-  so a search that still returns their vectors finds their text. Deleted
-  with the document; see "Index lag".
+- `retired_chunks` — id, org_id, document_id, text, heading_path, retired_at,
+  revision: the chunks a re-index or update replaced, kept for
+  `RETIRED_CHUNK_KEEP_MS` so a search that still returns their vectors finds
+  their text. `revision` counts the document's replacements (one value per
+  commit). Deleted with the document; see "Index lag".
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
   the widget's localStorage), started_at, page_url, last_message_at (when the
   newest message was written, `started_at` while there is none; kept by
@@ -503,7 +504,10 @@ returns vectors whose chunks are gone and not yet the new ones (issue #131).
   one of their vectors resolves to that text for `RETIRED_CHUNK_KEEP_MS`
   (an hour, ours: the slowest the documentation describes is "at least an
   hour" for unbatched writes), unless a current chunk of the same document
-  is among the hits (the new content already shows). So a rebuilt or
+  is among the hits (the new content already shows). When none is, only
+  the newest replaced version among the hits is read: after two updates in
+  quick succession the index can return vectors of both older versions,
+  which may disagree. So a rebuilt or
   updated page is not unsearchable in between, for as long as the index
   takes up to that hour; that is as far as it can be guaranteed, since the
   index promises no bound. Past it, a hit on a leftover vector is stale and

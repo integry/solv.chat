@@ -95,6 +95,12 @@ export interface ResolvedChunkRow {
   sourceKind: "push" | "sitemap" | "entry";
 }
 
+/** A replaced chunk, with which replacement of its document retired it. */
+export interface RetiredChunkRow extends ResolvedChunkRow {
+  /** Counts up per document; every chunk one commit retires shares it. */
+  revision: number;
+}
+
 export interface UpsertDocumentInput {
   id: string;
   sourceId: string;
@@ -723,14 +729,14 @@ export function documentsFor(db: D1Database, orgId: string) {
       assistantId: string,
       chunkIds: string[],
       since: number,
-    ): Promise<ResolvedChunkRow[]> {
-      const out: ResolvedChunkRow[] = [];
+    ): Promise<RetiredChunkRow[]> {
+      const out: RetiredChunkRow[] = [];
       // Three parameters are taken by org, assistant and `since`.
       for (let i = 0; i < chunkIds.length; i += IN_LIST_LIMIT - 1) {
         const group = chunkIds.slice(i, i + IN_LIST_LIMIT - 1);
         const res = await prepare(
           db,
-          `SELECT r.id, r.document_id, r.text, r.heading_path, d.url, d.title, s.kind
+          `SELECT r.id, r.document_id, r.text, r.heading_path, r.revision, d.url, d.title, s.kind
            FROM retired_chunks r
            JOIN documents d ON d.org_id = r.org_id AND d.id = r.document_id
            JOIN sources s ON s.org_id = d.org_id AND s.id = d.source_id
@@ -745,6 +751,7 @@ export function documentsFor(db: D1Database, orgId: string) {
             document_id: string;
             text: string;
             heading_path: string;
+            revision: number;
             url: string;
             title: string;
             kind: "push" | "sitemap" | "entry";
@@ -758,6 +765,7 @@ export function documentsFor(db: D1Database, orgId: string) {
             url: row.url,
             title: row.title,
             sourceKind: row.kind,
+            revision: row.revision,
           });
         }
       }
@@ -892,10 +900,18 @@ export function documentsFor(db: D1Database, orgId: string) {
             orgId,
             now - RETIRED_CHUNK_KEEP_MS,
           ),
+          // Each replacement retires its chunks under the document's next
+          // revision, so a search that returns two older versions' vectors
+          // reads only one of them (`resolveChunks`). The batch is one
+          // transaction (above), so no other commit takes the same revision;
+          // `indexLag.test.ts` checks every chunk of a commit gets one value.
           prepare(
             db,
-            `INSERT OR REPLACE INTO retired_chunks (id, org_id, document_id, text, heading_path, retired_at)
-             SELECT id, org_id, document_id, text, heading_path, ?6 FROM chunks
+            `INSERT OR REPLACE INTO retired_chunks (id, org_id, document_id, text, heading_path, retired_at, revision)
+             SELECT id, org_id, document_id, text, heading_path, ?6,
+                    (SELECT COALESCE(MAX(revision), 0) + 1 FROM retired_chunks
+                     WHERE org_id = ?1 AND document_id = ?2)
+             FROM chunks
              WHERE org_id = ?1 AND document_id = ?2
                AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${owed})`,
           ).bind(orgId, documentId, expectedContentHash, ingestVersion, key, now),

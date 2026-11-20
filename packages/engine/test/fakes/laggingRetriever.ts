@@ -4,6 +4,8 @@ import { type MemoryRetriever, memoryRetriever } from "./memoryRetriever.js";
 export interface LaggingRetriever extends Retriever {
   /** Applies every write made so far, in the order it was made, as the index would. */
   catchUp(): Promise<void>;
+  /** Applies the next `count` writes only, in order: the index partway through. */
+  advance(count: number): Promise<void>;
   /** Writes made but not yet visible to queries. */
   pending(): number;
   /** The vectors queries see now. */
@@ -38,6 +40,9 @@ export function laggingRetriever(): LaggingRetriever {
     },
     async catchUp() {
       for (const apply of log.splice(0)) await apply();
+    },
+    async advance(count) {
+      for (const apply of log.splice(0, count)) await apply();
     },
     pending: () => log.length,
     all: () => index.all(),

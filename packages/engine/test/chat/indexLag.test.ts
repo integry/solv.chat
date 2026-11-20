@@ -295,6 +295,9 @@ Backups run every night at two and keep thirty days of snapshots for restore.`;
 const PAGE_V2 = `# Backups
 
 Backups run every hour and keep seven days of snapshots for restore.`;
+const PAGE_V3 = `# Backups
+
+Backups run every minute and keep ninety days of snapshots for restore.`;
 
 /** Every vector the index shows that has no chunk: leftovers once it has caught up. */
 describe("issue #131: a replaced chunk is left out whichever query returned it", () => {
@@ -316,8 +319,8 @@ describe("issue #131: a replaced chunk is left out whichever query returned it",
       { id: "chk_new", text: "Backups are kept for seven days.", score: scores.current },
     ]);
     await env.DB.prepare(
-      `INSERT INTO retired_chunks (id, org_id, document_id, text, heading_path, retired_at)
-       VALUES ('chk_old', ?1, 'doc_backups', 'Backups are kept for thirty days.', '', ?2)`,
+      `INSERT INTO retired_chunks (id, org_id, document_id, text, heading_path, retired_at, revision)
+       VALUES ('chk_old', ?1, 'doc_backups', 'Backups are kept for thirty days.', '', ?2, 1)`,
     )
       .bind(TEST_ORG_ID, Date.now())
       .run();
@@ -355,6 +358,43 @@ describe("issue #131: a replaced chunk is left out whichever query returned it",
   });
 });
 
+describe("issue #131: one older version of a page, whichever query returned each", () => {
+  it("reads the newer replaced version when the older one scored higher and only it came in the first query", async () => {
+    const site = await seedSite();
+    const retriever = laggingRetriever();
+    // The page's current chunk exists, but its vector is not shown yet.
+    await seedLive(site, laggingRetriever(), "doc_backups", [
+      { id: "chk_c", text: "Backups are kept for ninety days.", score: 0.9 },
+    ]);
+    const now = Date.now();
+    await env.DB.batch(
+      [
+        ["chk_a", "Backups are kept for thirty days.", 1],
+        ["chk_b", "Backups are kept for seven days.", 2],
+      ].map(([id, text, revision]) =>
+        env.DB.prepare(
+          `INSERT INTO retired_chunks (id, org_id, document_id, text, heading_path, retired_at, revision)
+           VALUES (?1, ?2, 'doc_backups', ?3, '', ?4, ?5)`,
+        ).bind(id, TEST_ORG_ID, text, now, revision),
+      ),
+    );
+    await retriever.upsert([
+      { chunkId: "chk_a", vector: at(0.7), orgId: TEST_ORG_ID, assistantId: site.assistantId },
+      { chunkId: "chk_b", vector: at(0.6), orgId: TEST_ORG_ID, assistantId: site.assistantId },
+      ...staleVectors(CANDIDATE_POOL - 1, 0.65, site.assistantId),
+    ]);
+    await retriever.catchUp();
+
+    const asked = await ask(site, axisEmbedder, retriever, "How long are backups kept?");
+
+    expect(asked.trace?.retrieval.searchedAgain).toBe(true);
+    expect(asked.prompt).toContain("seven days");
+    expect(asked.prompt).not.toContain("thirty days");
+    const used = asked.trace?.retrieval.candidates.filter((c) => c.used).map((c) => c.chunkId);
+    expect(used).toEqual(["chk_b"]);
+  });
+});
+
 async function vectorsWithoutChunk(retriever: { all(): VectorRecord[] }): Promise<string[]> {
   const ids = retriever.all().map((v) => v.chunkId);
   if (ids.length === 0) return [];
@@ -372,6 +412,16 @@ describe("issue #131: a page stays answerable while the index catches up", () =>
   const embedder = tokenEmbedder();
   let retriever: ReturnType<typeof laggingRetriever>;
   const scope = () => ({ orgId: TEST_ORG_ID, assistantId: site.assistantId });
+
+  async function backupsId(): Promise<string> {
+    const row = await env.DB.prepare(
+      "SELECT id FROM documents WHERE external_id = 'backups'",
+    ).first<{
+      id: string;
+    }>();
+    if (!row) throw new Error("no backups document");
+    return row.id;
+  }
 
   async function push(markdown: string) {
     const queue = capturingQueue();
@@ -479,6 +529,74 @@ describe("issue #131: a page stays answerable while the index catches up", () =>
     expect(retriever.all().length).toBeLessThan(before);
     expect(retriever.all().length).toBeGreaterThan(0);
     expect(await vectorsWithoutChunk(retriever)).toEqual([]);
+  });
+
+  it("reads one older version, the newest returned, when two quick updates leave both visible", async () => {
+    // Update 1: B's vectors are written, B is committed, A's delete queued.
+    await push(PAGE_V2);
+    // The index shows B's vectors but has not yet applied A's delete.
+    await retriever.advance(1);
+    // Update 2 commits C before the index moves on: A and B are both
+    // replaced, both still returned, and C's vectors are not shown yet.
+    await push(PAGE_V3);
+    expect(retriever.pending()).toBeGreaterThan(0);
+
+    const asked = await ask(site, embedder, retriever, "How long are backups kept?");
+    expect(asked.answer).toBe("Answered.");
+    expect(asked.prompt).toContain("seven days");
+    expect(asked.prompt).not.toContain("thirty days");
+    expect(asked.prompt).not.toContain("ninety days");
+
+    // Each commit retired its chunks under one revision of its own.
+    const revisions = await env.DB.prepare(
+      "SELECT revision, COUNT(DISTINCT retired_at) AS commits FROM retired_chunks GROUP BY revision ORDER BY revision",
+    ).all<{ revision: number; commits: number }>();
+    expect(revisions.results).toEqual([
+      { revision: 1, commits: 1 },
+      { revision: 2, commits: 1 },
+    ]);
+
+    await retriever.catchUp();
+    const after = await ask(site, embedder, retriever, "How long are backups kept?");
+    expect(after.prompt).toContain("ninety days");
+    expect(after.prompt).not.toContain("seven days");
+    expect(after.prompt).not.toContain("thirty days");
+    expect(await vectorsWithoutChunk(retriever)).toEqual([]);
+  });
+
+  it("still reads the oldest version when the index shows only that one", async () => {
+    // Two updates committed before the index applied either: only A's
+    // vectors are shown, and B's never were.
+    await push(PAGE_V2);
+    await push(PAGE_V3);
+
+    const asked = await ask(site, embedder, retriever, "How long are backups kept?");
+    expect(asked.answer).toBe("Answered.");
+    expect(asked.prompt).toContain("thirty days");
+    expect(asked.prompt).not.toContain("seven days");
+    expect(asked.prompt).not.toContain("ninety days");
+  });
+
+  it("gives every chunk one commit retires the same revision", async () => {
+    // Sections over `MIN_CHUNK_CHARS`, so each is a chunk of its own.
+    const section = (heading: string, sentence: string) =>
+      `## ${heading}\n\n${Array.from({ length: 6 }, () => sentence).join(" ")}`;
+    await push(
+      [
+        "# Backups",
+        section("Schedule", "Backups run every night at two and keep thirty days."),
+        section("Restores", "Restores take about ten minutes from the snapshot you pick."),
+        section("Encryption", "Every snapshot is encrypted at rest with the owner's key."),
+      ].join("\n\n"),
+    );
+    expect((await site.tenant.documents.listChunks(await backupsId())).length).toBeGreaterThan(1);
+    await push(PAGE_V2);
+    const rows = await env.DB.prepare(
+      "SELECT revision, COUNT(*) AS chunks FROM retired_chunks GROUP BY revision ORDER BY revision",
+    ).all<{ revision: number; chunks: number }>();
+    // The first page's single chunk, then all of the three-section page's.
+    expect(rows.results.map((r) => r.revision)).toEqual([1, 2]);
+    expect(rows.results[1]?.chunks).toBeGreaterThan(1);
   });
 
   it("stops reading a replaced chunk once its window has passed", async () => {
