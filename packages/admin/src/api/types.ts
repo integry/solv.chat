@@ -70,6 +70,8 @@ export interface SourceSummary {
   indexError?: IndexErrorCode | null;
   /** A sitemap source's sync schedule and latest run. Absent for other kinds and older engines. */
   sync?: SourceSyncStatus;
+  /** Blocks of text left out because they repeat across most of the source's pages. */
+  repeatedBlockCount?: number;
 }
 
 export type IndexErrorCode = "too_long" | "missing_body" | "embedding_failed";

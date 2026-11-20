@@ -7,6 +7,7 @@ import type { Retriever } from "../providers/retrieval.js";
 import type { AuthProvider, Limits } from "../seams/types.js";
 import { ingestScopeFor } from "./auth.js";
 import { deleteDocuments, type IngestQueueMessage, pushDocuments, TooLarge } from "./documents.js";
+import type { RepeatedQueue } from "./repeatedSource.js";
 
 export type IngestResource = "documents" | "config" | "tests" | "test-runs" | "mcp-servers";
 
@@ -110,7 +111,13 @@ export async function ingestRoutes(
     }
 
     const result = await deleteDocuments(
-      { tenant, docs: deps.docs, retriever: deps.retriever },
+      {
+        tenant,
+        docs: deps.docs,
+        retriever: deps.retriever,
+        // The same queue carries a source's `repeated_source` message.
+        repeated: { queue: deps.queue as unknown as RepeatedQueue, orgId: scope.orgId },
+      },
       scope,
       body,
       pushOnly,

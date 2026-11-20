@@ -2791,6 +2791,63 @@ a {
   color: var(--muted);
 }
 
+/* A link-looking button: the Status column's "repeated parts left out". */
+.text-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  text-align: start;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.text-button:hover {
+  color: var(--text);
+}
+
+.repeated-blocks {
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+
+.repeated-blocks-heading {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.repeated-block-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.repeated-block-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.4rem 0.65rem;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  font-size: var(--text-sm);
+}
+
+.repeated-block-text {
+  overflow-wrap: anywhere;
+}
+
+.repeated-block-pages {
+  flex: none;
+  white-space: nowrap;
+}
+
 .source-sync {
   display: flex;
   flex-direction: column;

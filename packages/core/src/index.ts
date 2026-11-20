@@ -18,6 +18,7 @@ export {
   type TopicReportRow,
   type TopicsReport,
 } from "./monitor.js";
+export type { RepeatedBlock, RepeatedBlocks } from "./repeated.js";
 export { Errors, fail, ok, type Result } from "./result.js";
 export {
   MAX_TEST_PHRASE_LENGTH,

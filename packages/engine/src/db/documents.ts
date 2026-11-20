@@ -15,6 +15,7 @@ interface DocumentDbRow {
   updated_at: number;
   ingest_version: number;
   page_version: number | null;
+  repeated_key: string | null;
 }
 
 interface ChunkDbRow {
@@ -41,6 +42,12 @@ export interface DocumentRow {
   ingestVersion: number;
   /** For a fetched page, the extraction version of its stored text; null otherwise or before. */
   pageVersion: number | null;
+  /**
+   * Which of its blocks were repeated across its source when its chunks
+   * were built (see `repeatedKey` in `ingest/repeated.ts`); null when its
+   * blocks are not recorded (a written answer, or not built since).
+   */
+  repeatedKey: string | null;
 }
 
 /**
@@ -140,6 +147,30 @@ export interface DocumentSyncCheck {
   pageVersion?: number | undefined;
 }
 
+/**
+ * A page's recorded blocks, committed with its chunks (see "Repeated
+ * blocks" in docs/architecture.md): its distinct block hashes and its
+ * `repeatedKey`.
+ */
+export interface BlocksInput {
+  sourceId: string;
+  hashes: readonly string[];
+  key: string;
+}
+
+export interface CommitOptions {
+  /** Recorded in the same guarded batch; left out for a written answer. */
+  blocks?: BlocksInput | undefined;
+  /**
+   * The ids of the stored chunks this build compared and found to be what
+   * it makes: they (and so their vectors) stay, and only the document's
+   * state and blocks are written. The commit is refused unless the
+   * document's chunks are still exactly these, so a build that replaced
+   * them after the comparison is never recorded over by this one.
+   */
+  keepChunks?: readonly string[] | undefined;
+}
+
 export interface ChunkInput {
   id: string;
   ordinal: number;
@@ -148,7 +179,7 @@ export interface ChunkInput {
 }
 
 const DOC_COLUMNS =
-  "id, org_id, source_id, external_id, url, title, content_hash, indexed_hash, body_key, updated_at, ingest_version, page_version";
+  "id, org_id, source_id, external_id, url, title, content_hash, indexed_hash, body_key, updated_at, ingest_version, page_version, repeated_key";
 const CHUNK_COLUMNS = "id, org_id, document_id, ordinal, text, heading_path";
 
 const mapDocument = (row: DocumentDbRow): DocumentRow => ({
@@ -164,6 +195,7 @@ const mapDocument = (row: DocumentDbRow): DocumentRow => ({
   updatedAt: row.updated_at,
   ingestVersion: row.ingest_version,
   pageVersion: row.page_version,
+  repeatedKey: row.repeated_key,
 });
 
 const mapChunk = (row: ChunkDbRow): ChunkRow => ({
@@ -534,9 +566,27 @@ export function documentsFor(db: D1Database, orgId: string) {
      * the caller can clean up vectors. Each group's chunk ids are read in the
      * same batch, just before its delete.
      */
-    async removeMany(ids: string[]): Promise<Map<string, string[]>> {
+    /**
+     * Deletes these documents (cascading chunks) in one batch. With
+     * `oweRepeated`, the same batch raises that source's `repeated_owed`
+     * (see "Repeated blocks"), so the removal cannot be committed without
+     * the reconciliation it owes being recorded.
+     */
+    async removeMany(
+      ids: string[],
+      options: { oweRepeated?: string | undefined } = {},
+    ): Promise<Map<string, string[]>> {
       const removed = new Map<string, string[]>();
       if (ids.length === 0) return removed;
+      const owe: D1PreparedStatement[] =
+        options.oweRepeated === undefined
+          ? []
+          : [
+              prepare(
+                db,
+                "UPDATE sources SET repeated_owed = repeated_owed + 1 WHERE org_id = ?1 AND id = ?2",
+              ).bind(orgId, options.oweRepeated),
+            ];
       const statements = inGroups(ids).flatMap((group) => [
         prepare(
           db,
@@ -549,7 +599,7 @@ export function documentsFor(db: D1Database, orgId: string) {
            RETURNING id`,
         ).bind(orgId, ...group),
       ]);
-      const results = await db.batch(statements);
+      const results = (await db.batch([...owe, ...statements])).slice(owe.length);
       for (let i = 0; i < results.length; i += 2) {
         const chunks = (results[i]?.results ?? []) as Array<{ id: string; document_id: string }>;
         for (const row of (results[i + 1]?.results ?? []) as Array<{ id: string }>) {
@@ -701,6 +751,7 @@ export function documentsFor(db: D1Database, orgId: string) {
       chunks: ChunkInput[],
       expectedContentHash?: string,
       ingestVersion: number = INGEST_VERSION,
+      options: CommitOptions = {},
     ): Promise<boolean> {
       if (expectedContentHash === undefined) {
         const stmts: D1PreparedStatement[] = [
@@ -722,47 +773,99 @@ export function documentsFor(db: D1Database, orgId: string) {
 
       // One batch on purpose: the content-hash guard only protects the
       // commit if every insert runs in the same transaction. Each statement
-      // binds 8 parameters (limit 100) and the largest document yields about
+      // binds at most 9 parameters (limit 100) and the largest document yields about
       // 900 chunks; Cloudflare documents that "a batch containing 2,000
       // statements executes in a single Worker invocation".
       // Source: https://developers.cloudflare.com/d1/platform/limits/ — checked 2026-11-14
       //
-      // The guard admits content not yet indexed, and content indexed by an
-      // older ingest version (a re-index of unchanged text). Two re-index
-      // messages for one document cannot both commit: the first sets the
-      // version, and the second's guard is then false.
-      const owed = `content_hash = ?3 AND (indexed_hash IS NULL OR indexed_hash != ?3 OR ingest_version < ?4)`;
-      const stmts: D1PreparedStatement[] = [
-        prepare(
-          db,
-          `DELETE FROM chunks
-           WHERE org_id = ?1 AND document_id = ?2
-             AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${owed})`,
-        ).bind(orgId, documentId, expectedContentHash, ingestVersion),
-        ...chunks.map((chunk) =>
+      // The guard admits content not yet indexed, content indexed by an
+      // older ingest version (a re-index of unchanged text), and a page
+      // built with other repeated blocks than this build's (`repeated_key`;
+      // see "Repeated blocks"). Two re-index messages for one document with
+      // the same result cannot both commit: the first sets the version and
+      // key, and the second's guard is then false.
+      //
+      // A build that keeps the stored chunks also requires them to be the
+      // ones it compared (`kept`, by id: every build inserts new ids), in
+      // every statement of the batch, so another build's chunks committed
+      // in between are not kept under this build's key.
+      const keep = options.keepChunks;
+      const keptParam = keep === undefined ? [] : [JSON.stringify([...new Set(keep)])];
+      // The guard, with the kept-chunks check reading its id list from `?slot`.
+      const guard = (slot: number) =>
+        `content_hash = ?3 AND (indexed_hash IS NULL OR indexed_hash != ?3 OR ingest_version < ?4 OR repeated_key IS NOT ?5)` +
+        (keep === undefined
+          ? ""
+          : ` AND (SELECT COUNT(*) FROM chunks WHERE org_id = ?1 AND document_id = ?2) = json_array_length(?${slot})
+              AND NOT EXISTS (SELECT 1 FROM chunks WHERE org_id = ?1 AND document_id = ?2
+                               AND id NOT IN (SELECT value FROM json_each(?${slot})))`);
+      const key = options.blocks?.key ?? null;
+      const stmts: D1PreparedStatement[] = [];
+      if (keep === undefined) {
+        // Nothing kept, so the guard has no kept-chunks check here.
+        const owed = guard(0);
+        stmts.push(
+          prepare(
+            db,
+            `DELETE FROM chunks
+             WHERE org_id = ?1 AND document_id = ?2
+               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${owed})`,
+          ).bind(orgId, documentId, expectedContentHash, ingestVersion, key),
+          ...chunks.map((chunk) =>
+            prepareInsert(
+              db,
+              `INSERT INTO chunks (id, org_id, document_id, ordinal, text, heading_path)
+               SELECT ?6, ?1, ?2, ?7, ?8, ?9
+               WHERE EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${owed})`,
+            ).bind(
+              orgId,
+              documentId,
+              expectedContentHash,
+              ingestVersion,
+              key,
+              chunk.id,
+              chunk.ordinal,
+              chunk.text,
+              chunk.headingPath,
+            ),
+          ),
+        );
+      }
+      if (options.blocks !== undefined) {
+        // Replaced as a set; the triggers on `document_blocks` keep the
+        // source's counts (`source_blocks`) in step in the same batch.
+        stmts.push(
+          prepare(
+            db,
+            `DELETE FROM document_blocks
+             WHERE org_id = ?1 AND document_id = ?2
+               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${guard(6)})`,
+          ).bind(orgId, documentId, expectedContentHash, ingestVersion, key, ...keptParam),
           prepareInsert(
             db,
-            `INSERT INTO chunks (id, org_id, document_id, ordinal, text, heading_path)
-             SELECT ?5, ?1, ?2, ?6, ?7, ?8
-             WHERE EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${owed})`,
+            `INSERT INTO document_blocks (org_id, source_id, document_id, block_hash)
+             SELECT ?1, ?6, ?2, value FROM json_each(?7)
+             WHERE EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND source_id = ?6 AND ${guard(8)})`,
           ).bind(
             orgId,
             documentId,
             expectedContentHash,
             ingestVersion,
-            chunk.id,
-            chunk.ordinal,
-            chunk.text,
-            chunk.headingPath,
+            key,
+            options.blocks.sourceId,
+            JSON.stringify([...new Set(options.blocks.hashes)]),
+            ...keptParam,
           ),
-        ),
+        );
+      }
+      stmts.push(
         prepare(
           db,
           `UPDATE documents
-           SET indexed_hash = ?3, ingest_version = ?4
-           WHERE org_id = ?1 AND id = ?2 AND ${owed}`,
-        ).bind(orgId, documentId, expectedContentHash, ingestVersion),
-      ];
+           SET indexed_hash = ?3, ingest_version = ?4, repeated_key = ?5
+           WHERE org_id = ?1 AND id = ?2 AND ${guard(6)}`,
+        ).bind(orgId, documentId, expectedContentHash, ingestVersion, key, ...keptParam),
+      );
       const results = await db.batch(stmts);
       return (results[results.length - 1]?.meta.changes ?? 0) > 0;
     },

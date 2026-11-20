@@ -1,0 +1,13 @@
+-- Keeps each removal's owed reconciliation apart from the others (issue
+-- #127; see "Repeated blocks" in docs/architecture.md).
+--
+-- sources.repeated_owed (0037) is no longer reset: it only counts up, once
+-- per removal of the source's pages, so each removal leaves a value no
+-- other removal had. sources.repeated_reconciled is the highest
+-- repeated_owed that a reconciliation read before it counted and then ran
+-- through; it only rises. The source owes a reconciliation while
+-- repeated_owed is above it. A reconciliation that read 1 and finishes
+-- after a later removal raised repeated_owed to 2 records 1, and the later
+-- removal stays owed; with the reset, both had the value 1, and the earlier
+-- reconciliation cleared the later one's.
+ALTER TABLE sources ADD COLUMN repeated_reconciled INTEGER NOT NULL DEFAULT 0;

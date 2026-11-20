@@ -60,7 +60,16 @@ from the auth seam and pass it down.
 - `sources` — id, assistant_id, kind (`push` | `sitemap` | `entry`), label, settings.
   A sitemap source's settings are `url` (the sitemap), `sync` (`off` | `daily` |
   `weekly`; left out means `off`), `maxRemovePercent` (1–100, default 50) and
-  `recheckDays` (1–365, default 7); see "Scheduled sitemap sync".
+  `recheckDays` (1–365, default 7); see "Scheduled sitemap sync". Every
+  source also has repeated_blocks: the hashes of the text blocks that repeat
+  across most of its pages, as last worked out, with repeated_pending (the
+  hashes whose change of status some pages may not have been queued for yet),
+  repeated_rev (how many times repeated_blocks was stored), repeated_owed
+  (how many times its pages were removed; never lowered), repeated_reconciled
+  (the repeated_owed a reconciliation read and then ran through; it owes one
+  while repeated_owed is higher) and repeated_pages_rev (how many times one
+  of its pages was committed with its blocks or deleted, kept by triggers on
+  `documents`); see "Repeated blocks".
 - `documents` — id, source_id, external_id, url, title, content_hash, updated_at,
   indexed_hash (the content last made searchable), index_error and
   index_error_hash (a short code saying why the content with that hash could
@@ -71,6 +80,15 @@ from the auth seam and pass it down.
   were built with) and page_version (for a fetched page, the version of the
   HTML extraction its stored text came from; NULL otherwise); see
   "Re-indexing".
+  Also repeated_key: which of its blocks were repeated across its source
+  when its chunks were built (`''` for none, a hash of their hashes
+  otherwise; NULL until its blocks are recorded, and always for written
+  answers); see "Repeated blocks".
+- `document_blocks` — org_id, source_id, document_id, block_hash: the
+  distinct block hashes of each indexed page of a push or sitemap source.
+  Hashes only, never text. Deleted with the document.
+- `source_blocks` — org_id, source_id, block_hash, pages: on how many of the
+  source's pages each hash is, kept by triggers on `document_blocks`.
 - `source_syncs` — org_id, source_id, run_id, lease_until (set while a run
   holds the source), started_at, finished_at, outcome (`running` |
   `succeeded` | `partial` | `failed`), counts (added, updated, unchanged,
@@ -275,7 +293,113 @@ matched every question about that title better than the page's real text
   is one link (an email address) and a heading that is a link (a permalink)
   stay.
 
-Pushed and written content is Markdown the owner chose and is not filtered.
+Pushed and written content is Markdown the owner chose and is not
+filtered by markup. Pushed pages, like fetched ones, are still checked for
+repeated blocks; written answers never are.
+
+### Repeated blocks
+
+The markup rules above miss a site built from plain `div`s with no
+landmarks, and chrome that is prose rather than links: a cookie notice, a
+newsletter pitch, a "need help?" box, an address. So a page of a push or
+sitemap source also loses the blocks of text that repeat across a large
+share of its source's pages, however they are marked up (issue #127;
+`ingest/repeated.ts`, `ingest/repeatedSource.ts`). Written answers are
+never touched. Nothing calls a model.
+
+- **Blocks.** A page's stored Markdown is cut where the conversion cuts it:
+  paragraphs, lists and fenced code blocks (each one block), and heading
+  lines. Each paragraph, list or code block is one unit, and so is each
+  heading together with the blocks up to the next heading; a heading is
+  never a unit alone. Units are compared on their text in Unicode NFKC,
+  lower case, with whitespace runs as one space. Digits are not folded: a
+  site renders its footer the same on every page at one time, so its
+  "© 2026" is shared already, and folding digits would make template text
+  that differs only in its figures ("Price: $10 a month", "$20") one
+  repeated block and lose each page's own figure. Only a 64-bit hash of
+  each unit is stored (`document_blocks`; `b…` for a block, `h…` for a
+  heading with its body), never the text.
+- **Rule.** A unit is repeated when it is on at least 3 pages
+  (`REPEATED_MIN_PAGES`) and at least half (`REPEATED_MIN_PERCENT`, 50) of
+  the source's indexed pages; a source with fewer than 5 indexed pages
+  (`REPEATED_MIN_SOURCE_PAGES`) has none. Chrome comes from the template, so
+  it is on (nearly) every page; text reused on purpose (a "needs the Pro
+  plan" note, a shared prerequisite) is on the pages it concerns, usually a
+  minority, and its meaning depends on the page it is on. Half keeps that
+  text, at the cost of missing chrome that only one section of a site
+  carries. 3 pages only matters at 5 pages, where half is 2.5. The numbers
+  are ours, from that reasoning and the #123 site, not from a measured set
+  of sites.
+- **What is left out.** A repeated block, unless it is more than half of
+  its page's text (`REPEATED_MAX_PAGE_SHARE`: a contact page that is the
+  footer's address keeps it); a heading, when the heading with its body is
+  repeated and every block of that body is left out. "Overview" over a
+  different body on each page is not repeated and stays. When this would
+  leave a page no text but headings, nothing is left out of that page.
+- **When.** The check runs in the queue consumer, before chunking, against
+  the source's stored repeated blocks; the stored text (R2) keeps every
+  block, so a page can be rebuilt without fetching it again. The commit
+  records the page's hashes and its `repeated_key` in the same guarded
+  batch as its chunks, and triggers keep `source_blocks` in step on every
+  insert and delete (a commit, a prune, a sync's removals, a deleted
+  source). After each commit, and after a push prune or a sync removes
+  pages, `reconcileRepeated` works the repeated blocks out again from the
+  counts (one statement: the source's page count and the `source_blocks`
+  rows over the threshold) and stores them with a compare-and-set on both
+  the set and `repeated_pages_rev`, read before counting: a page committed
+  or removed while it counted changed the counts, even when it left the set
+  as it was, so the run counts again rather than store a set from older
+  counts (it tries three times; when every try loses it reports that it did
+  not run through, and its message is retried). When they changed, every
+  indexed page holding a hash whose status changed is
+  queued (an ordinary chunk-and-embed message), and so is the page just
+  committed if it was built with an older set. A queued page whose key
+  still matches is acknowledged without work. The hashes whose status
+  changed are added to `repeated_pending` in the statement that stores the
+  new set, and every reconciliation queues the pages holding the pending
+  hashes too, then removes them only after all its sends succeeded (and
+  only if the set was not stored again meanwhile, by `repeated_rev`). So a
+  send that fails after the set is stored, or a run that stops between its
+  batches, loses no page: the next reconciliation queues them again, though
+  the set itself is unchanged.
+- **Determinism.** A page's chunks depend only on its text and which of its
+  own hashes are repeated, and the repeated hashes depend only on the set
+  of pages' hashes, so once the queue has run the same pages give the same
+  chunks in any import order. The first four pages of a new source are
+  indexed with their chrome; the fifth commit finds it repeated and queues
+  them to be cleaned. Removing pages can bring a block back the same way.
+- **Cost.** A block crossing the threshold (or falling back under it)
+  re-embeds the pages it is on, once each: a new source pays its first
+  four pages twice, and a block that hovers around half the pages can be
+  paid for again on each crossing. Pages without the block are not
+  touched. A page rebuilt into the very chunks it has (same text, heading
+  paths and order, by an ingest version from `EMBEDDINGS_REUSABLE_FROM` on)
+  keeps its vectors and costs a D1 write, not an embedding; that write is
+  refused unless the document's chunks are still the ones compared (by id),
+  and the message is then retried, so a build that replaced them in between
+  is never recorded under this build's key. If the counting
+  fails after a commit, the page stays committed and its message is retried
+  rather than acknowledged; the retry rebuilds the page if it was built with
+  an older set, and otherwise reconciles again (as does any message for an
+  indexed page while hashes are pending). A removal raises the source's
+  `repeated_owed` in the batch that deletes the pages, and a reconciliation
+  that read it before counting and ran through records that value as
+  `repeated_reconciled` (which only rises), so a removal after that read,
+  which raised `repeated_owed` past it, stays owed even when the earlier
+  reconciliation finishes after the later one. When the reconciliation after
+  a removal fails, at any step, the removal sends a `repeated_source`
+  message on the ingest queue, which is retried until a reconciliation runs
+  through; any message for one of the source's indexed pages reconciles too
+  while it is owed. Only when
+  that send fails as well does the removal fail; the pages are gone and
+  the obligation stays recorded, and the same request again (or the next
+  sync run of the source), with nothing left to remove, reconciles.
+- **Owner view.** Sources says on a source's row how many repeated blocks
+  (paragraphs, lists and code blocks) are left out, and its documents panel
+  lists them, with the first 80 characters of each and on how many pages it
+  is, most first (`GET /api/admin/sources/:id/repeated-blocks`). The text is
+  read back from the stored text of a few of the source's pages (at most
+  five R2 reads), not stored for this. There is no setting.
 
 ### Chunks and embeddings
 
@@ -319,8 +443,13 @@ Documents are cut by heading into chunks of at most 1,200 characters
 Each document records the ingest version it was built with (`ingest_version`)
 and, for a fetched page, the extraction version of its stored text
 (`page_version`); the engine's are `INGEST_VERSION` and `PAGE_TEXT_VERSION`
-in `ingest/version.ts` (2 for both since issue #123; everything stored
-before is 1, and `page_version` NULL). A version is bumped when a change to
+in `ingest/version.ts` (`PAGE_TEXT_VERSION` 3 since issue #128,
+`INGEST_VERSION` 3 since issue #127; everything stored before #123 is 1,
+and `page_version` NULL). Version 3 adds the repeated-block check, so each
+document indexed by version 2 is read once to record its blocks; one whose
+chunks come out the same keeps its vectors (see "Repeated blocks"), so
+after the upgrade only pages that lose a repeated block are embedded
+again. A version is bumped when a change to
 its part would make existing documents worse than new ones.
 
 - A document indexed by an older ingest version is rebuilt from its stored
@@ -526,7 +655,12 @@ The Monitor screens read:
   same way. `GET …/assistants/:id/reindex` answers `{ outdated }`, how many
   documents were indexed by an older ingest version, and
   `POST …/assistants/:id/reindex` queues them ("Rebuild"; `202` with
-  `{ queued, remaining }`; see "Re-indexing").
+  `{ queued, remaining }`; see "Re-indexing"). Each source in the list has
+  `repeatedBlockCount`, and `GET /api/admin/sources/:id/repeated-blocks`
+  answers `{ blocks: [{ text, truncated, pages }] }`: the source's repeated
+  blocks, `text` their first 80 characters (null when none of the pages
+  read for the list holds it), most pages first; empty for a written-answer
+  source (see "Repeated blocks").
 - Gaps: a group's questions are those whose reply was reviewed as `declined`
   (a retrieval miss or not), or, with no outcome (older rows, a review not yet
   run), found nothing above the score floor (`answered = 0`). A reply reviewed
@@ -1410,6 +1544,9 @@ Install
 - Sources offers "Rebuild" while some of the assistant's content was indexed
   by an older ingest version, saying what it does and what it costs before
   it starts (see "Re-indexing").
+- Sources says on a source's row how many repeated parts of its pages are
+  left out ("3 repeated parts left out"); choosing it opens the source's
+  documents with the start of each (see "Repeated blocks").
 - Sources gives a sitemap source a Sync column: how often it syncs (Off,
   Every day, Every week), when it last synced with the outcome and counts or
   the last error in plain words, when it next syncs, and "Sync now". A

@@ -45,12 +45,12 @@ interface Block {
   isFence: boolean;
 }
 
-interface FenceState {
+export interface FenceState {
   char: "`" | "~";
   length: number;
 }
 
-function parseFenceOpen(line: string): FenceState | null {
+export function parseFenceOpen(line: string): FenceState | null {
   const match = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
   if (match === null) return null;
   const marker = match[1];
@@ -62,7 +62,7 @@ function parseFenceOpen(line: string): FenceState | null {
   return { char, length: marker.length };
 }
 
-function isFenceClose(line: string, fence: FenceState): boolean {
+export function isFenceClose(line: string, fence: FenceState): boolean {
   const match = /^\s*(`{3,}|~{3,})\s*$/.exec(line);
   if (match === null) return false;
   const marker = match[1];

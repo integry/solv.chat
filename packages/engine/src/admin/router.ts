@@ -63,6 +63,7 @@ import { getSourceSync, readSyncNowBody, syncSourceNow } from "./sourceSync.js";
 import {
   createSource,
   deleteSource,
+  getRepeatedBlocks,
   getSourceDocument,
   listSourceDocuments,
   listSources,
@@ -537,6 +538,9 @@ async function sourceRoutes(
     const sub = segments[2];
     if (sub === "documents" && method === "GET") {
       return Response.json(await listSourceDocuments(tenant, sourceId, readPagingParams(url)));
+    }
+    if (sub === "repeated-blocks" && method === "GET") {
+      return Response.json(await getRepeatedBlocks(tenant, deps.docs, sourceId));
     }
     if (sub === "sync" && method === "GET") {
       return Response.json({ sync: await getSourceSync(tenant, sourceId) });
