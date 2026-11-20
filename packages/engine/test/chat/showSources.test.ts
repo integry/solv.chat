@@ -517,6 +517,59 @@ describe("chat: Show sources in answers", () => {
     );
   });
 
+  it("off: markers in a link's destination stay, in the answer and in its continuation", async () => {
+    await configure(withSources(false, true));
+    const navigate: ToolCall = {
+      callId: "call_nav_1",
+      name: "navigate",
+      input: { path: "/docs/reset" },
+    };
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder,
+        retriever,
+        model: ANTHROPIC_MODELS.balanced,
+        provider: scriptedProvider([
+          {
+            chunks: ["Get [Download](https://example.com/files/report[", "1].pdf) [1]."],
+            calls: [navigate],
+          },
+          {
+            chunks: [
+              " Or ![Chart](https://example.com/chart[2",
+              "].png) and <https://example.com/files/report[3].pdf> [2].",
+            ],
+          },
+        ]),
+      },
+    });
+
+    const first = parseSseBody(
+      await post(app, { message: QUESTION, pageActions: [NAVIGATE_ACTION] }),
+    );
+    expect(tokenText(first)).toBe("Get [Download](https://example.com/files/report[1].pdf).");
+    const done1 = first.at(-1);
+    if (done1?.type !== "done") throw new Error("expected done last");
+
+    const second = parseSseBody(
+      await post(app, {
+        conversationId: done1.conversationId,
+        resumeMessageId: done1.messageId,
+        actionResults: [{ callId: "call_nav_1", ok: true, result: "opened" }],
+      }),
+    );
+    expect(tokenText(second)).toBe(
+      " Or ![Chart](https://example.com/chart[2].png) and <https://example.com/files/report[3].pdf>.",
+    );
+
+    const [reply] = (await tenant.messages.list(done1.conversationId)).filter(
+      (m) => m.role === "assistant",
+    );
+    expect(reply?.content).toBe(
+      "Get [Download](https://example.com/files/report[1].pdf). Or ![Chart](https://example.com/chart[2].png) and <https://example.com/files/report[3].pdf>.",
+    );
+  });
+
   it("off: a test run's cites check reads the pages the answer used", async () => {
     await configure(withSources(true), withSources(false));
     await tenant.tests.create({

@@ -11,7 +11,11 @@
  *   indented block, also within a list item or a quote), so `items[1]` in a
  *   code sample stays. In prose a marker goes wherever it is, also straight
  *   after a word ("Forgot Password[1].");
- * - never a Markdown link (`[1](https://…)`).
+ * - never a Markdown link (`[1](https://…)`), and never in a link's
+ *   destination, so a link still goes where it did: an inline link's or
+ *   image's (`[Download](https://…/report[1].pdf)`), an autolink's
+ *   (`<https://…/report[1].pdf>`) or a reference definition's
+ *   (`[report]: https://…/report[1].pdf`).
  * The spaces before a marker go with it: "open at 9 [1]." becomes "open at 9.".
  * Each bracket is judged on its own, so in "option [42] [1]." the "[42]"
  * stays and the "[1]" still goes.
@@ -188,8 +192,54 @@ function startsBlock(text: string, at: number, width: number): boolean {
   );
 }
 
+/** An autolink's start up to its scheme's ":" (`<https:`), and the rest of its address. */
+const AUTOLINK_SCHEME = /<[A-Za-z][A-Za-z0-9+.-]{1,31}:/uy;
+const AUTOLINK_REST = /[^\s<>]*>?/uy;
+/** A reference definition's label and colon (`[report]:`), at the start of a line's text. */
+const DEFINITION_LABEL = /\[(?:[^[\]\\\n]|\\[^\n])+\]:/uy;
+
+/** Where `pattern` (sticky) matching at `at` ends, or null if it does not match there. */
+function matchEnd(pattern: RegExp, text: string, at: number): number | null {
+  pattern.lastIndex = at;
+  return pattern.exec(text) === null ? null : pattern.lastIndex;
+}
+
 /**
- * The `[start, end)` ranges of `text` that are prose, not Markdown code.
+ * Where a link destination that may start at `at` ends: past the spaces
+ * before it, either `<…>` up to its ">" or a run up to a space, a line break
+ * or a ")" that closes no "(" in it. Never past a line break, so lines are
+ * still read one by one; unfinished, it runs to the end of the text.
+ */
+function destinationEnd(text: string, at: number): number {
+  let p = at;
+  while (text[p] === " " || text[p] === "\t") p++;
+  const angle = text[p] === "<";
+  if (angle) p++;
+  let depth = 0;
+  for (; p < text.length; p++) {
+    const char = text[p];
+    if (char === "\n") return p;
+    if (char === "\\") {
+      // An escaped character is part of the address, a line break never.
+      if (text[p + 1] !== "\n") p++;
+    } else if (angle) {
+      if (char === ">") return p + 1;
+      if (char === "<") return p;
+    } else if (char === " " || char === "\t") {
+      return p;
+    } else if (char === "(") {
+      depth++;
+    } else if (char === ")") {
+      if (depth === 0) return p;
+      depth--;
+    }
+  }
+  return text.length;
+}
+
+/**
+ * The `[start, end)` ranges of `text` that are prose, not Markdown code nor
+ * a link's destination.
  *
  * Lines are read inside their containers, as Markdown does: block quotes
  * (">") and list items (text indented to the item's column), nested either
@@ -210,10 +260,17 @@ function startsBlock(text: string, at: number, width: number): boolean {
  * closing fence or another indented line. Elsewhere a run of backticks opens
  * an inline span that ends at the same number of backticks or at a blank line.
  *
- * Read strictly left to right: whether a character is code depends only on
- * the text before it, so appending text never turns already-sent prose into
- * code or back. (Markdown proper would wait for a closing backtick; a stray
- * one here only protects the rest of its paragraph, which keeps markers in.)
+ * A link's destination is left out too: what follows "](" (an inline link's
+ * or an image's), "<" and a scheme's ":" (an autolink's), or a line's opening
+ * "[label]:" (a reference definition's), up to where `destinationEnd` (or,
+ * for an autolink, a space, "<" or ">") ends it. The "(" stays with the prose
+ * before it, so a marker there is still seen to be a link's text.
+ *
+ * Read strictly left to right: whether a character is code (or a destination)
+ * depends only on the text before it, so appending text never turns
+ * already-sent prose into code or back. (Markdown proper would wait for a
+ * closing backtick or ")"; a stray one here only protects the rest of its
+ * paragraph or the word after it, which keeps markers in.)
  */
 function proseRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
@@ -244,6 +301,13 @@ function proseRanges(text: string): Array<[number, number]> {
     let p = at;
     while (text[p] === " " || text[p] === "\t") p++;
     return p === text.length || text[p] === "\n";
+  };
+  // Leaves `[start, end)` out of the prose (a link's destination) and
+  // returns where to go on from.
+  const skip = (start: number, end: number): number => {
+    ranges.push([proseStart, start]);
+    proseStart = end;
+    return end;
   };
   /**
    * Reads the line starting at `start`, as code or not, and returns where to
@@ -319,6 +383,12 @@ function proseRanges(text: string): Array<[number, number]> {
       fence = { char: opener.char, length: opener.length, plain };
       return lineEnd(opener.end);
     }
+    const label = !held && width <= 3 ? matchEnd(DEFINITION_LABEL, text, indent.end) : null;
+    if (label !== null) {
+      // A reference definition: its destination is the word after the label.
+      codeMayStart = false;
+      return skip(label, destinationEnd(text, label));
+    }
     codeMayStart = ATX_HEADING.test(text.slice(indent.end, indent.end + 8));
     return next();
   };
@@ -329,6 +399,17 @@ function proseRanges(text: string): Array<[number, number]> {
       const next = readLine(i);
       if (next !== i) {
         i = next;
+        continue;
+      }
+    }
+    if (text[i] === "]" && text[i + 1] === "(") {
+      i = skip(i + 2, destinationEnd(text, i + 2));
+      continue;
+    }
+    if (text[i] === "<") {
+      const scheme = matchEnd(AUTOLINK_SCHEME, text, i);
+      if (scheme !== null) {
+        i = skip(scheme, matchEnd(AUTOLINK_REST, text, scheme) ?? scheme);
         continue;
       }
     }

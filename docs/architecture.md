@@ -480,9 +480,11 @@ visitors once published and by "Try it" and test runs from the draft.
   anywhere in prose (also straight after a word, "Password[1]") but never
   inside Markdown code, an inline span or a fenced or indented block, also
   one within a list item or a quote (so `items[1]` stays), never a Markdown
-  link, with the spaces before them. No `citation` event is sent, so the
-  widget shows no sources block. Page actions do not depend on citations and
-  work as before.
+  link and never in a link's destination (an inline link's, an image's, an
+  autolink's or a reference definition's, so `report[1].pdf` in a link's
+  address stays), with the spaces before them. No `citation` event is sent,
+  so the widget shows no sources block. Page actions do not depend on
+  citations and work as before.
 - **Kept either way.** Everything the owner sees: the trace, the stored
   citations, `message_documents` (Reports' "Content used most / never used"
   count the same), and the conversation view, which shows a reply's pages

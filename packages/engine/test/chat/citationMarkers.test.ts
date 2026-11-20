@@ -85,6 +85,96 @@ describe("chat/citationMarkers", () => {
     expect(streamed(["Done [1]"]).text).toBe("Done");
   });
 
+  it("leaves markers inside a link's destination alone, however it is streamed", () => {
+    const cases: Array<[string, string]> = [
+      // The reported case: a file name with brackets in a link.
+      [
+        "[Download](https://example.com/files/report[1].pdf)",
+        "[Download](https://example.com/files/report[1].pdf)",
+      ],
+      // A citation after the link still goes.
+      [
+        "Get [Download](https://example.com/files/report[1].pdf) [2].",
+        "Get [Download](https://example.com/files/report[1].pdf).",
+      ],
+      [
+        "[Download](https://example.com/files/report[1][2].pdf)[3] now[1].",
+        "[Download](https://example.com/files/report[1][2].pdf) now.",
+      ],
+      // An image, nested and escaped parentheses, a title, spaces before it.
+      [
+        "![Chart](https://example.com/chart[2].png) [1]",
+        "![Chart](https://example.com/chart[2].png)",
+      ],
+      [
+        "[Spec](https://example.com/a_(b)[1].pdf) and [Raw](https://example.com/a\\)[2].txt)",
+        "[Spec](https://example.com/a_(b)[1].pdf) and [Raw](https://example.com/a\\)[2].txt)",
+      ],
+      [
+        '[Spec](https://example.com/s[1].pdf "Spec [2]") [3].',
+        '[Spec](https://example.com/s[1].pdf "Spec").',
+      ],
+      ["[Spec]( https://example.com/s[1].pdf ) [2].", "[Spec]( https://example.com/s[1].pdf )."],
+      [
+        "[Spec](<https://example.com/my report[1].pdf>) [2].",
+        "[Spec](<https://example.com/my report[1].pdf>).",
+      ],
+      // A link label that is a marker, with a bracket in its destination.
+      ["Read [1](https://example.com/p[2]) [3].", "Read [1](https://example.com/p[2])."],
+      // An autolink.
+      [
+        "Get <https://example.com/files/report[1].pdf> [2].",
+        "Get <https://example.com/files/report[1].pdf>.",
+      ],
+      // A reference definition, also in a list item and a quote.
+      [
+        "Get [the report][report] [2].\n\n[report]: https://example.com/files/report[1].pdf\n",
+        "Get [the report][report].\n\n[report]: https://example.com/files/report[1].pdf\n",
+      ],
+      [
+        "- [a]: https://example.com/a[1].pdf\n> [b]: <https://example.com/b[2].pdf> 'B [3]'\n",
+        "- [a]: https://example.com/a[1].pdf\n> [b]: <https://example.com/b[2].pdf> 'B'\n",
+      ],
+      // In a list item and a quote, and across lines.
+      [
+        "- [Download](https://example.com/r[1].pdf) [2]\n> ![x](https://example.com/c[3].png)[1]\nNext [2].",
+        "- [Download](https://example.com/r[1].pdf)\n> ![x](https://example.com/c[3].png)\nNext.",
+      ],
+    ];
+    for (const [answer, expected] of cases) {
+      expect(stripCitationMarkers(answer, MAX)).toBe(expected);
+      // The same in every two- and three-chunk split of the stream.
+      for (let a = 0; a <= answer.length; a++) {
+        expect(streamed([answer.slice(0, a), answer.slice(a)]).text).toBe(expected);
+        for (let b = a; b <= answer.length; b++) {
+          const { text } = streamed([answer.slice(0, a), answer.slice(a, b), answer.slice(b)]);
+          expect(text).toBe(expected);
+        }
+      }
+    }
+    // A paused reply's continuation that starts inside a destination.
+    expect(streamed(["[1].pdf) [2]."], "[Download](https://example.com/files/report").text).toBe(
+      "[1].pdf).",
+    );
+    expect(streamed(["1].pdf> [2]."], "<https://example.com/files/report[").text).toBe("1].pdf>.");
+  });
+
+  it("still takes markers out next to text that only looks like a link", () => {
+    const cases: Array<[string, string]> = [
+      // A ")" or a space ends a destination.
+      ["Read [a](https://example.com/a) then [1].", "Read [a](https://example.com/a) then."],
+      ["Call (555) 0100 [1].", "Call (555) 0100."],
+      ["Open <8 am [1] or <b>Sundays</b> [2].", "Open <8 am or <b>Sundays</b>."],
+      // A definition's label starts its line's text.
+      ["Note [x]: see https://example.com/a[1].", "Note [x]: see https://example.com/a."],
+      // Code still keeps its markers, and a link in code is code.
+      ["`[a](x[1])` and [b](y[2]) [3].", "`[a](x[1])` and [b](y[2])."],
+    ];
+    for (const [answer, expected] of cases) {
+      expect(stripCitationMarkers(answer, MAX)).toBe(expected);
+    }
+  });
+
   it("sends a held tail once it cannot be a marker", () => {
     const { sent, text } = streamed(["Room [", "42] is upstairs."]);
     expect(text).toBe("Room [42] is upstairs.");
@@ -105,6 +195,7 @@ describe("chat/citationMarkers", () => {
       "1. Example [1]:\n\n    ~~~js\n    items[1]\n\n    b[2]\n    ~~~\n\n> ~~~\n> row[3]\n>\n> col[4]\n\nDone [1].",
       "> 1. Run [2]:\n>    ```\n>    x[1]\n>    ```\n> Then [3].\n- ~~~\n  y[2]\n- Next [1]\n   > ~~~\n   > z[3]\n",
       "1. Step:\n   ```sh\nls dir[1]\n```\nDone [1].\n```\n\nAfter [2].",
+      "Get [Download](https://example.com/r[1].pdf)[2], ![c](x[3].png) and <https://e.example/x[3]> [1]\n\n[r]: https://example.com/r[2].pdf [3]\n> [s]: <a b[1]> [2]",
     ];
     let seed = 7;
     const random = () => {
