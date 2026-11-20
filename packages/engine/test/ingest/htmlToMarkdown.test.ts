@@ -87,6 +87,37 @@ describe("extractHtml: page chrome", () => {
     expect(extractHtml(html, URL_).markdown).toBe("## Section title\n\nBody.");
   });
 
+  it("keeps an aside inside an article, with the requirement it states", () => {
+    const html = `<main><article><h1>Remote setup</h1><p>Connect using HTTPS.</p><aside><h2>Authentication requirement</h2><p>You must supply an Authorization header when connecting to a private server.</p></aside></article></main>`;
+    expect(extractHtml(html, URL_).markdown).toBe(
+      [
+        "# Remote setup",
+        "Connect using HTTPS.",
+        "## Authentication requirement",
+        "You must supply an Authorization header when connecting to a private server.",
+      ].join("\n\n"),
+    );
+  });
+
+  it("keeps a named aside in a section, and still drops the sidebar beside it", () => {
+    const html = `<body><aside><h3>Guides</h3><p>Sidebar blurb.</p></aside>
+      <main><aside><p>On this page</p></aside>
+        <section><h2>Limits</h2><p>Requests are rate limited.</p>
+          <aside aria-label="Note"><p>Each key allows 60 requests a minute.</p></aside>
+          <aside role="complementary"><p>Sponsored.</p></aside>
+        </section>
+      </main></body>`;
+    expect(extractHtml(html, URL_).markdown).toBe(
+      "## Limits\n\nRequests are rate limited.\n\nEach key allows 60 requests a minute.",
+    );
+  });
+
+  it("judges an aside with a role of its own by that role", () => {
+    const html = `<main><p>Body.</p><aside role="note"><p>Keep this note.</p></aside>
+      <aside role="navigation"><p>Menu.</p></aside><aside role=""><p>Sidebar.</p></aside></main>`;
+    expect(extractHtml(html, URL_).markdown).toBe("Body.\n\nKeep this note.");
+  });
+
   it("handles nested chrome of the same element and role", () => {
     const html = `<div role="navigation"><div><div>Deep menu</div></div><div>More menu</div></div>
       <div><p>Real text.</p></div>`;

@@ -254,11 +254,14 @@ matched every question about that title better than the page's real text
   `role="main"`), else its only `article`; a page with neither, or with
   several articles, is read whole. A `main` that holds no text (filled by a
   script) falls back to the whole page.
-- Landmark regions are left out: `nav`, `aside`, `footer`, `menu`, `dialog`
-  and `template` wherever they are; any element whose `role` is
-  `navigation`, `banner`, `contentinfo`, `complementary`, `search`, `menu` or
-  `menubar`; and a `header` outside an article, section or `main` (inside
-  one it is that content's own header, with its title). Matching is
+- Landmark regions are left out: `nav`, `footer`, `menu`, `dialog` and
+  `template` wherever they are; any element whose `role` is `navigation`,
+  `banner`, `contentinfo`, `complementary`, `search`, `menu` or `menubar`;
+  an `aside` with no `role` that is not inside an article or section (in the
+  body or directly in `main` it is the page's sidebar; inside an article or
+  section it is part of that text, such as a note or a requirement); and a
+  `header` outside an article, section or `main` (inside one it is that
+  content's own header, with its title). Matching is
   nesting-aware, and an element never closed is kept rather than swallowing
   the rest of the page.
 - What is left is split into blocks (paragraphs, lists, headings). A block

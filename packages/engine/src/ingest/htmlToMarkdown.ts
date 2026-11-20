@@ -152,7 +152,7 @@ const VOID_ELEMENTS = new Set([
 ]);
 
 /** Elements that are page chrome wherever they appear. */
-const CHROME_ELEMENTS = new Set(["nav", "aside", "footer", "menu", "dialog", "template"]);
+const CHROME_ELEMENTS = new Set(["nav", "footer", "menu", "dialog", "template"]);
 /**
  * ARIA landmark roles that are page chrome. `main` and the content roles are
  * not; `search` and the menu roles are site furniture like navigation.
@@ -176,6 +176,17 @@ const CHROME_ROLES = new Set([
  * buttons and "related" links, not the article's text.
  */
 const SECTIONING = new Set(["article", "section", "main"]);
+/**
+ * An `aside` inside one of these is part of that article or section (a note,
+ * a requirement, a worked example), so it is kept. One in the body or
+ * directly in `main` is the page's sidebar and is dropped: HTML maps `aside`
+ * to the complementary landmark only when it is scoped to `body` or `main`.
+ * Source: https://www.w3.org/TR/html-aam-1.0/#el-aside — checked 2026-11-20
+ * (The spec also makes a named `aside` inside an article complementary; it is
+ * kept anyway, since a labelled "Note" callout is still the article's text.)
+ * An `aside` with a `role` of its own is judged by that role alone.
+ */
+const ASIDE_SCOPES = new Set(["article", "section"]);
 /** Nesting deeper than this is not tracked; no real page comes near it. */
 const MAX_TRACKED_DEPTH = 256;
 
@@ -191,9 +202,10 @@ function isSelfClosing(tag: string, name: string): boolean {
 }
 
 /**
- * Removes landmark chrome: `nav`, `aside`, `footer` (and menus, dialogs,
- * templates), elements whose `role` is a chrome landmark, and a `header`
- * that is not inside an article, section, `main` or `role="main"`.
+ * Removes landmark chrome: `nav`, `footer` (and menus, dialogs, templates),
+ * elements whose `role` is a chrome landmark, an `aside` that is not inside
+ * an article or section, and a `header` that is not inside an article,
+ * section, `main` or `role="main"`.
  * Content inside any of these goes with it. Nesting-aware and linear:
  * an element is skipped to its own matching close, and one that is never
  * closed is kept rather than swallowing the rest of the page.
@@ -211,9 +223,12 @@ function stripChrome(html: string): string {
   };
   const out: string[] = [];
   const stack: string[] = [];
-  // Parallel to `stack`: whether that element scopes a `header`.
+  // Parallel to `stack`: whether that element scopes a `header`, and
+  // whether it scopes an `aside`.
   const scopes: boolean[] = [];
+  const asideScopes: boolean[] = [];
   let sectioning = 0;
+  let asideScoped = 0;
   let skip: { name: string; depth: number } | null = null;
   scanTags(
     html,
@@ -239,9 +254,11 @@ function stripChrome(html: string): string {
         if (at !== -1) {
           for (let i = at; i < stack.length; i++) {
             if (scopes[i]) sectioning--;
+            if (asideScopes[i]) asideScoped--;
           }
           stack.length = at;
           scopes.length = at;
+          asideScopes.length = at;
         }
         out.push(`<${tag}>`);
         return;
@@ -254,6 +271,7 @@ function stripChrome(html: string): string {
       const chrome =
         CHROME_ELEMENTS.has(name) ||
         (role !== null && CHROME_ROLES.has(role)) ||
+        (name === "aside" && !role && asideScoped === 0) ||
         (name === "header" && sectioning === 0);
       if (chrome && closesAfter(name, end)) {
         skip = { name, depth: 1 };
@@ -264,9 +282,12 @@ function stripChrome(html: string): string {
         // `role="main"` scopes a header as `main` does, so the page's own
         // header inside it stays.
         const scope = SECTIONING.has(name) || role === "main";
+        const asideScope = ASIDE_SCOPES.has(name);
         stack.push(name);
         scopes.push(scope);
+        asideScopes.push(asideScope);
         if (scope) sectioning++;
+        if (asideScope) asideScoped++;
       }
       out.push(`<${tag}>`);
     },
