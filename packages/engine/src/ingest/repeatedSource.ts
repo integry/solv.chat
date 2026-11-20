@@ -40,7 +40,11 @@ export interface RepeatedQueue {
 // "100 (or 256KB in total)" messages per `sendBatch`.
 // Source: https://developers.cloudflare.com/queues/platform/limits/ — checked 2026-11-18
 const QUEUE_SEND_BATCH_MESSAGES = 100;
-/** Tries at storing a changed set before leaving it to the source's next commit. */
+/**
+ * Tries at storing a changed set; when all lose, the run reports it did not
+ * run through and its caller retries (a commit's message, a removal's
+ * `repeated_source` message).
+ */
 const SWAP_ATTEMPTS = 3;
 
 /** True when the source kind's pages are checked for repeated blocks: never written answers. */
@@ -80,7 +84,8 @@ export interface CommittedPage {
  * `ranThrough` is true when the set was confirmed or stored and every page
  * it owes was queued; the source's owed reconciliation (`repeated_owed`,
  * raised by a removal) is then cleared, unless a removal raised it since
- * it was read. It is false when every compare-and-set lost to another run.
+ * it was read. It is false when every compare-and-set lost (to another
+ * run's store, or to a page committed or removed while this one counted).
  */
 export async function reconcileRepeated(
   tenant: Tenant,
@@ -113,8 +118,11 @@ export async function reconcileRepeated(
       break;
     }
     // Compare-and-set: two commits that both see a change store it once,
-    // and the one that loses reads again.
-    if (!(await tenant.blocks.swap(sourceId, stored.raw, next, changed))) continue;
+    // and the one that loses reads again. It is fenced on the pages too: a
+    // page committed or removed after `stored` was read changed the counts
+    // `next` came from, even when it left the set as it was, so `next` may
+    // be out of date; this run then counts again.
+    if (!(await tenant.blocks.swap(sourceId, stored, next, changed))) continue;
     current = after;
     owed = [...new Set([...stored.pending, ...changed])];
     rev = stored.rev + 1;

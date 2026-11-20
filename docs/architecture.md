@@ -64,9 +64,10 @@ from the auth seam and pass it down.
   source also has repeated_blocks: the hashes of the text blocks that repeat
   across most of its pages, as last worked out, with repeated_pending (the
   hashes whose change of status some pages may not have been queued for yet),
-  repeated_rev (how many times repeated_blocks was stored) and repeated_owed
-  (removals of its pages whose reconciliation has not yet run through); see
-  "Repeated blocks".
+  repeated_rev (how many times repeated_blocks was stored), repeated_owed
+  (removals of its pages whose reconciliation has not yet run through) and
+  repeated_pages_rev (how many times one of its pages was committed with its
+  blocks or deleted, kept by triggers on `documents`); see "Repeated blocks".
 - `documents` — id, source_id, external_id, url, title, content_hash, updated_at,
   indexed_hash (the content last made searchable), index_error and
   index_error_hash (a short code saying why the content with that hash could
@@ -342,8 +343,13 @@ never touched. Nothing calls a model.
   source). After each commit, and after a push prune or a sync removes
   pages, `reconcileRepeated` works the repeated blocks out again from the
   counts (one statement: the source's page count and the `source_blocks`
-  rows over the threshold) and stores them with a compare-and-set; when
-  they changed, every indexed page holding a hash whose status changed is
+  rows over the threshold) and stores them with a compare-and-set on both
+  the set and `repeated_pages_rev`, read before counting: a page committed
+  or removed while it counted changed the counts, even when it left the set
+  as it was, so the run counts again rather than store a set from older
+  counts (it tries three times; when every try loses it reports that it did
+  not run through, and its message is retried). When they changed, every
+  indexed page holding a hash whose status changed is
   queued (an ordinary chunk-and-embed message), and so is the page just
   committed if it was built with an older set. A queued page whose key
   still matches is acknowledged without work. The hashes whose status

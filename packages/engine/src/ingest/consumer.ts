@@ -228,9 +228,11 @@ async function processIngestMessage(
       checked &&
       deps.queue !== undefined &&
       stored !== null &&
-      (stored.pending.length > 0 || stored.owed > 0 || message.attempts > 1)
+      (stored.pending.length > 0 || stored.owed > 0 || message.attempts > 1) &&
+      !(await reconcileRepeated(tenant, document.sourceId, deps.queue, orgId)).ranThrough
     ) {
-      await reconcileRepeated(tenant, document.sourceId, deps.queue, orgId);
+      message.retry();
+      return;
     }
     message.ack();
     return;
@@ -307,11 +309,24 @@ async function indexDocument(
   // fails, the page stays committed and the message is retried instead:
   // the retry rebuilds this page if it was built with an older set, and
   // otherwise reconciles again, queuing the pages a change still owes
-  // (they stay pending in D1 until their sends succeed).
+  // (they stay pending in D1 until their sends succeed). So does a
+  // reconciliation that lost every compare-and-set (to other runs, or to
+  // pages committed or removed while it counted): it did not check this
+  // page against the set stored since.
   const reconcileAndAck = async () => {
     if (deps.queue !== undefined && committedPage !== undefined) {
       try {
-        await reconcileRepeated(tenant, document.sourceId, deps.queue, orgId, committedPage);
+        const { ranThrough } = await reconcileRepeated(
+          tenant,
+          document.sourceId,
+          deps.queue,
+          orgId,
+          committedPage,
+        );
+        if (!ranThrough) {
+          message.retry();
+          return;
+        }
       } catch (err) {
         console.warn("ingest consumer: could not update repeated blocks, scheduling retry", {
           documentId: document.id,

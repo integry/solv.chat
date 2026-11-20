@@ -830,4 +830,117 @@ describe("repeated blocks across a source's pages", { timeout: 60_000 }, () => {
     expect((await indexedText(site.sitemapSourceId)).get(doc.externalId)).toBe(before);
     expect((await tenant.documents.get(doc.id))?.repeatedKey).toBe("");
   });
+
+  /** A page of the site without its chrome, so it holds none of the repeated blocks. */
+  function plainPage(i: number): Page {
+    const [title, own] = TOPICS[i % TOPICS.length] as readonly [string, string];
+    const name = `${title} (plain ${i})`;
+    return {
+      externalId: `plain-${i}`,
+      title: name,
+      html: divPage(
+        name,
+        `${own} This is plain step ${i} and only this page says it.`,
+        `This page covers ${name.toLowerCase()}, with the screens you will see on the way.`,
+        false,
+      ),
+    };
+  }
+
+  async function expectChromeLeftOut(pages: number) {
+    const text = await indexedText(site.sitemapSourceId);
+    expect(text.size).toBe(pages);
+    for (const indexed of text.values()) {
+      expect(indexed).not.toContain(COOKIE);
+      expect(indexed).not.toContain(FOOTER);
+    }
+    const stored = await tenant.blocks.stored(site.sitemapSourceId);
+    expect(stored?.hashes.length).toBeGreaterThan(0);
+    expect(stored?.pending).toEqual([]);
+    expect(stored?.owed).toBe(0);
+  }
+
+  it("does not store a set counted before a page was added, and ends right once the queue has run", async () => {
+    const pages = sitePages(5);
+    await importPages(pages.slice(0, 4), 1);
+    // The fifth page makes the chrome repeated; the rebuilds it queues are
+    // held back, so all five pages still hold their chrome (key "").
+    const held = capturingQueue();
+    expect(await deliverOnce(await push(pages.slice(4, 5)), held)).toEqual({
+      acked: 1,
+      retried: 0,
+    });
+    expect(held.messages).toHaveLength(5);
+    const chrome = (await tenant.blocks.stored(site.sitemapSourceId))?.hashes ?? [];
+    expect(chrome.length).toBeGreaterThan(0);
+    for (const doc of await tenant.documents.listBySource(site.sitemapSourceId)) {
+      expect(doc.repeatedKey).toBe("");
+    }
+
+    // A page without the chrome, pushed now and built while the removal
+    // below has counted the four pages left (too few: no repeated block)
+    // but not yet stored that. Built and reconciled, it finds the chrome on
+    // four of five pages, as stored, and changes nothing.
+    const added = await push([plainPage(0)]);
+    const addedQueue = capturingQueue();
+    let interleaved = false;
+    const counting: Tenant = {
+      ...tenant,
+      blocks: {
+        ...tenant.blocks,
+        async compute(sourceId: string) {
+          const next = await tenant.blocks.compute(sourceId);
+          if (!interleaved) {
+            interleaved = true;
+            expect(next).toEqual([]);
+            expect(await deliverOnce(added, addedQueue)).toEqual({ acked: 1, retried: 0 });
+            expect(addedQueue.messages).toEqual([]);
+          }
+          return next;
+        },
+      },
+    };
+    const removalQueue = capturingQueue();
+    await removePages(["page-4"], removalQueue, counting);
+    expect(interleaved).toBe(true);
+    // The removal counted again: the chrome is still repeated.
+    expect((await tenant.blocks.stored(site.sitemapSourceId))?.hashes).toEqual(chrome);
+
+    // Everything still queued is delivered: the five pages are built
+    // without the chrome, as a source that only ever had them would be.
+    await drainConsumer([...held.messages, ...removalQueue.messages, ...addedQueue.messages], {
+      embedder,
+      retriever,
+    });
+    await expectChromeLeftOut(5);
+  });
+
+  it("retries a committed page whose reconciliation lost every compare-and-set", async () => {
+    const pages = sitePages(5);
+    await importPages(pages.slice(0, 4), 1);
+    // Another page of the source is committed each time this one has counted.
+    const db = interleavedDb(/WITH n AS/, async () => {
+      await env.DB.prepare(
+        "UPDATE sources SET repeated_pages_rev = repeated_pages_rev + 1 WHERE id = ?1",
+      )
+        .bind(site.sitemapSourceId)
+        .run();
+    });
+    const fifth = await push(pages.slice(4, 5));
+    const retry = [...fifth];
+    const queue = capturingQueue();
+    expect(await deliverOnce(fifth, queue, 1, db)).toEqual({ acked: 0, retried: 1 });
+    expect((await tenant.blocks.stored(site.sitemapSourceId))?.hashes).toEqual([]);
+    expect(queue.messages).toEqual([]);
+    // Its retry finds the page built with the set stored, and reconciles;
+    // losing every compare-and-set again, it is retried again.
+    expect(await deliverOnce([...retry], queue, 2, db)).toEqual({ acked: 0, retried: 1 });
+    expect((await tenant.blocks.stored(site.sitemapSourceId))?.hashes).toEqual([]);
+
+    // The retry reconciles, stores the chrome and queues the five pages.
+    expect(await deliverOnce(retry, queue, 2)).toEqual({ acked: 1, retried: 0 });
+    expect(queue.messages).toHaveLength(5);
+    await drainConsumer(queue.messages, { embedder, retriever });
+    await expectChromeLeftOut(5);
+  });
 });

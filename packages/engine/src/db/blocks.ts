@@ -17,6 +17,12 @@ export interface StoredRepeated {
   rev: number;
   /** Removals whose reconciliation has not yet run through (`repeated_owed`); 0 when none. */
   owed: number;
+  /**
+   * The count of changes to the source's counted pages (`repeated_pages_rev`:
+   * a page committed with its blocks, or deleted), as read with the set; a
+   * changed set worked out after this read is stored only while it holds.
+   */
+  pagesRev: number;
 }
 
 const stringArray = (raw: string): string[] =>
@@ -38,7 +44,7 @@ export function blocksFor(db: D1Database, orgId: string) {
     async stored(sourceId: string): Promise<StoredRepeated | null> {
       const row = await prepare(
         db,
-        `SELECT repeated_blocks, repeated_pending, repeated_rev, repeated_owed
+        `SELECT repeated_blocks, repeated_pending, repeated_rev, repeated_owed, repeated_pages_rev
            FROM sources WHERE org_id = ?1 AND id = ?2`,
       )
         .bind(orgId, sourceId)
@@ -47,6 +53,7 @@ export function blocksFor(db: D1Database, orgId: string) {
           repeated_pending: string;
           repeated_rev: number;
           repeated_owed: number;
+          repeated_pages_rev: number;
         }>();
       if (row === null) return null;
       return {
@@ -55,6 +62,7 @@ export function blocksFor(db: D1Database, orgId: string) {
         pending: stringArray(row.repeated_pending),
         rev: Number(row.repeated_rev),
         owed: Number(row.repeated_owed),
+        pagesRev: Number(row.repeated_pages_rev),
       };
     },
 
@@ -86,13 +94,15 @@ export function blocksFor(db: D1Database, orgId: string) {
 
     /**
      * Stores `next` as the source's repeated hashes if they are still
-     * `expectedRaw`, and in the same statement adds `changed` (the hashes
-     * whose status this changes) to the pending ones, so the pages holding
-     * them stay owed a rebuild until `settle` removes them.
+     * `expected.raw` and no page of the source was committed or deleted
+     * since `expected.pagesRev` was read (`next` was counted from the pages
+     * as they were then), and in the same statement adds `changed` (the
+     * hashes whose status this changes) to the pending ones, so the pages
+     * holding them stay owed a rebuild until `settle` removes them.
      */
     async swap(
       sourceId: string,
-      expectedRaw: string,
+      expected: Pick<StoredRepeated, "raw" | "pagesRev">,
       next: readonly string[],
       changed: readonly string[],
     ): Promise<boolean> {
@@ -108,9 +118,9 @@ export function blocksFor(db: D1Database, orgId: string) {
                   )
                 ),
                 repeated_rev = repeated_rev + 1
-          WHERE org_id = ?1 AND id = ?2 AND repeated_blocks = ?3`,
+          WHERE org_id = ?1 AND id = ?2 AND repeated_blocks = ?3 AND repeated_pages_rev = ?6`,
       )
-        .bind(orgId, sourceId, expectedRaw, hashList(next), hashList(changed))
+        .bind(orgId, sourceId, expected.raw, hashList(next), hashList(changed), expected.pagesRev)
         .run();
       return (res.meta.changes ?? 0) > 0;
     },
