@@ -17,12 +17,15 @@ export interface ToolCall {
 }
 
 /**
- * Why the stream ended. The tool loop needs to tell "the model finished" from
- * "the model is waiting for tool results"; without it the loop would have to
- * guess from whether a tool_call chunk arrived, which breaks the moment a
- * provider streams text after a call.
+ * Why the stream ended, in the same words for every provider. The tool loop
+ * needs to tell "the model finished" from "the model is waiting for tool
+ * results"; without it the loop would have to guess from whether a tool_call
+ * chunk arrived, which breaks the moment a provider streams text after a call.
+ * `length`: the output limit (reasoning included) was reached, so the reply
+ * is cut short. `refused`: the provider or model declined to go on (a
+ * refusal or a content filter).
  */
-export type StopReason = "end" | "tools" | "length";
+export type StopReason = "end" | "tools" | "length" | "refused";
 
 export type LlmChunk =
   | { kind: "text"; text: string }

@@ -252,9 +252,10 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
             }
 
             if (eventType === "response.incomplete") {
-              const reason = payload.response?.incomplete_details?.reason;
-              stopReason =
-                reason === "max_output_tokens" ? "length" : sawToolCall ? "tools" : "end";
+              stopReason = openaiIncompleteReason(
+                payload.response?.incomplete_details?.reason,
+                sawToolCall,
+              );
             } else {
               const hasOutputCall =
                 sawToolCall ||
@@ -304,6 +305,22 @@ export function openaiProvider(options: OpenAiOptions): LlmProvider {
       if (failure !== undefined) throw failure;
     },
   };
+}
+
+/**
+ * An incomplete response's `incomplete_details.reason` in the provider-neutral
+ * words: `max_output_tokens` (reasoning tokens count against it, so it can be
+ * reached before any visible text) cuts the reply short, `content_filter`
+ * interrupts it.
+ * Source: https://developers.openai.com/api/docs/guides/reasoning — checked 2026-11-20
+ */
+export function openaiIncompleteReason(
+  reason: string | undefined,
+  sawToolCall: boolean,
+): StopReason {
+  if (reason === "max_output_tokens") return "length";
+  if (reason === "content_filter") return "refused";
+  return sawToolCall ? "tools" : "end";
 }
 
 // Source: https://developers.openai.com/api/docs/guides/function-calling — checked 2026-11-15

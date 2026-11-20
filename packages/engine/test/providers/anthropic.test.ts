@@ -698,4 +698,39 @@ describe("anthropicProvider", () => {
       expect(chunks[0]).toEqual({ kind: "text", text: "hi" });
     });
   });
+
+  describe("stop reasons", () => {
+    // A reply that thought, then wrote text. `output_tokens` includes the
+    // thinking tokens (`output_tokens_details.thinking_tokens` is a breakdown).
+    function thoughtThenText(stopReason: string): string {
+      return [
+        'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":30}}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Your server must still validate"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+        `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason }, usage: { output_tokens: 1024, output_tokens_details: { thinking_tokens: 700 } } })}\n\n`,
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ].join("");
+    }
+
+    it.each([
+      ["end_turn", "end"],
+      ["stop_sequence", "end"],
+      ["max_tokens", "length"],
+      ["model_context_window_exceeded", "length"],
+      ["refusal", "refused"],
+      ["pause_turn", "end"],
+    ] as const)("maps %s to %s and bills thinking tokens as output", async (raw, neutral) => {
+      const fetchImpl = vi.fn(async () => sseResponse(thoughtThenText(raw)));
+      const provider = anthropicProvider({ apiKey: "k", model: "claude-haiku-5-5", fetchImpl });
+      const chunks = await collect(provider.stream(SAMPLE_REQUEST));
+      expect(chunks).toEqual([
+        { kind: "text", text: "Your server must still validate" },
+        // 1024 billed output tokens, thinking included: nothing is subtracted.
+        { kind: "usage", tokensIn: 30, tokensOut: 1024, stopReason: neutral },
+      ]);
+    });
+  });
 });

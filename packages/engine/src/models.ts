@@ -16,17 +16,23 @@ export interface ModelInfo {
   contextTokens: number;
   inputCostMicrosPerMillion: number;
   outputCostMicrosPerMillion: number;
+  /** The most output tokens (reasoning included) one request may ask for. */
+  maxOutputTokens: number;
   longPrompt?: LongPromptPricing;
 }
 
 export type Tier = "fast" | "balanced";
 
+// Max output is 128K tokens on all four ("Max output", synchronous Messages API / model details).
+// Source: https://platform.claude.com/docs/en/about-claude/models/overview and
+// https://developers.openai.com/api/docs/models/gpt-6-luna and .../gpt-6.1-sol — checked 2026-11-20
 // Haiku 5.5 bills prompts >100,000 input tokens at $0.50/$2.50 per MTok; Sonnet 5.5 (and Opus 5.5) have no threshold.
 // Source: https://platform.claude.com/docs/en/about-claude/models/overview and https://platform.claude.com/docs/en/about-claude/pricing — checked 2026-11-14
 export const ANTHROPIC_MODELS: Record<Tier, ModelInfo> = {
   fast: {
     id: "claude-haiku-5-5",
     contextTokens: 1_000_000,
+    maxOutputTokens: 128_000,
     inputCostMicrosPerMillion: 100_000,
     outputCostMicrosPerMillion: 500_000,
     longPrompt: {
@@ -38,6 +44,7 @@ export const ANTHROPIC_MODELS: Record<Tier, ModelInfo> = {
   balanced: {
     id: "claude-sonnet-5-5",
     contextTokens: 1_000_000,
+    maxOutputTokens: 128_000,
     inputCostMicrosPerMillion: 2_000_000,
     outputCostMicrosPerMillion: 10_000_000,
   },
@@ -49,6 +56,7 @@ export const OPENAI_MODELS: Record<Tier, ModelInfo> = {
   fast: {
     id: "gpt-6-luna",
     contextTokens: 1_050_000,
+    maxOutputTokens: 128_000,
     inputCostMicrosPerMillion: 100_000,
     outputCostMicrosPerMillion: 500_000,
     longPrompt: {
@@ -60,6 +68,7 @@ export const OPENAI_MODELS: Record<Tier, ModelInfo> = {
   balanced: {
     id: "gpt-6.1-sol",
     contextTokens: 1_050_000,
+    maxOutputTokens: 128_000,
     inputCostMicrosPerMillion: 2_000_000,
     outputCostMicrosPerMillion: 10_000_000,
     longPrompt: {

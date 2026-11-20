@@ -175,7 +175,7 @@ export interface AnswerTraceCandidate {
 
 export interface AnswerTracePart {
   kind: "answer" | "resume";
-  stop: "complete" | "length" | "spend_cap" | "error" | "paused";
+  stop: "complete" | "length" | "tool" | "refused" | "spend_cap" | "error" | "paused";
   version: {
     id: string;
     state: "published" | "draft";

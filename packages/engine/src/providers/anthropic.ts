@@ -207,9 +207,9 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
             if (typeof outputTokens === "number" && Number.isFinite(outputTokens)) {
               tokensOut = outputTokens;
             }
-            if (payload.delta?.stop_reason === "tool_use") stopReason = "tools";
-            else if (payload.delta?.stop_reason === "max_tokens") stopReason = "length";
-            else if (typeof payload.delta?.stop_reason === "string") stopReason = "end";
+            if (typeof payload.delta?.stop_reason === "string") {
+              stopReason = anthropicStopReason(payload.delta.stop_reason);
+            }
             continue;
           }
 
@@ -258,6 +258,29 @@ export function anthropicProvider(options: AnthropicOptions): LlmProvider {
       if (failure !== undefined) throw failure;
     },
   };
+}
+
+/**
+ * Anthropic's `stop_reason` in the provider-neutral words. `max_tokens` and
+ * `model_context_window_exceeded` both cut the reply short; `refusal` is the
+ * model declining; `end_turn`, `stop_sequence` and anything newer are a
+ * finished reply. Thinking tokens count toward `max_tokens`, so `max_tokens`
+ * can be reached during thinking as well as during the text.
+ * Source: https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons and
+ * https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting — checked 2026-11-20
+ */
+export function anthropicStopReason(value: string): StopReason {
+  switch (value) {
+    case "tool_use":
+      return "tools";
+    case "max_tokens":
+    case "model_context_window_exceeded":
+      return "length";
+    case "refusal":
+      return "refused";
+    default:
+      return "end";
+  }
 }
 
 /**

@@ -417,7 +417,7 @@ Documents are cut by heading into chunks of at most 1,200 characters
 Each document records the ingest version it was built with (`ingest_version`)
 and, for a fetched page, the extraction version of its stored text
 (`page_version`); the engine's are `INGEST_VERSION` and `PAGE_TEXT_VERSION`
-in `ingest/version.ts` (`PAGE_TEXT_VERSION` 2 since issue #123,
+in `ingest/version.ts` (`PAGE_TEXT_VERSION` 3 since issue #128,
 `INGEST_VERSION` 3 since issue #127; everything stored before #123 is 1,
 and `page_version` NULL). Version 3 adds the repeated-block check, so each
 document indexed by version 2 is read once to record its blocks; one whose
@@ -686,14 +686,30 @@ The Monitor screens read:
    chunks with their URLs (capped at 2000 characters each), the last 6 turns.
 4. Call the model through the provider interface, streaming. If tools are allowed,
    run the MCP loop: the model asks for a tool, the Worker calls the MCP server,
-   the result goes back as untrusted data.
-5. Persist messages, citations, token counts, cost and the two timings; update
+   the result goes back as untrusted data. Each call's output limit is the
+   visible answer's allowance (`ANSWER_VISIBLE_TOKENS`, 1024) plus room for
+   reasoning (`ANSWER_REASONING_TOKENS`, 4096), never above the model's own
+   maximum (`maxOutputTokens` in `models.ts`): visitor answers run with the
+   model's default reasoning, and on all three providers reasoning counts
+   against the one limit sent, so 1024 alone left the answer less than that
+   and cut it mid-sentence. The fixed frame asks for a focused answer that
+   finishes in the space it has (lead with the answer, prefer one code
+   example, name the page for the rest). Every billed output token,
+   reasoning included, is still metered: providers report it in their output
+   total.
+5. **Cut short.** When the last call stopped at the output limit (`length`),
+   an unclosed code fence is closed and one fixed line is added
+   (`CUT_SHORT_LINE`, "That answer was cut short. Ask me to continue."),
+   streamed as a last token before the citations and stored with the reply,
+   the same after a page-action resume. The answer counts as answered as any
+   other. There is no "show sources" setting, so citations are always sent.
+6. Persist messages, citations, token counts, cost and the two timings; update
    `usage_daily`. After the `done` event, in the same deferred pipeline, write
    the answer's trace.
-6. If nothing was retrieved above the floor and no tool answered, say so, use the
+7. If nothing was retrieved above the floor and no tool answered, say so, use the
    owner's fallback text, and mark the message `answered = false` so it shows
    under Gaps.
-7. Once the reply is complete, stored and sent, hand it to the answer review
+8. Once the reply is complete, stored and sent, hand it to the answer review
    (below), which runs as separate deferred work.
 
 ## Answer review
@@ -976,8 +992,13 @@ the trace reads.
   (`KeyProvider.managed`). Never any key material.
 - Timing in milliseconds: retrieval (embedding, vector query and D1 lookup),
   first token sent to the visitor, total; tool rounds run and their total time.
-- Stop reason: `complete`, `length` (the model hit its output limit),
-  `spend_cap`, `error`, or `paused` (waiting for page actions). The open
+- Stop reason, the same for every provider: `complete`, `length` (the model
+  hit its output limit and the answer was cut short), `tool` (it still asked
+  for a tool when none was allowed), `refused` (the model or the provider's
+  filter declined: Anthropic `refusal`, OpenAI and OpenRouter
+  `content_filter`), `spend_cap`, `error`, or `paused` (waiting for page
+  actions). Each adapter maps its own values (`anthropicStopReason`,
+  `openaiIncompleteReason`, `openrouterFinishReason`). The open
   engine refuses an over-cap request before answering and stores no reply for
   a failed one, so `spend_cap` never appears on its own replies and `error`
   only on a paused reply whose continuation failed.
@@ -1011,8 +1032,9 @@ under each result that has one (`traceId`), labelled "The draft (Try it)" or
 The admin's Conversation screen shows it under each assistant reply as "How
 this answer was made", closed and loaded on first open: the content it was
 given, ranked, with scores and a plain label for what was not used; the
-settings version with a link to History; the model; the three timings; tokens
-and cost. Chunk ids are resolved to the document's current title and text when
+settings version with a link to History; the model; the three timings; how
+it stopped ("Cut short at the length limit" for a `length` stop); tokens and
+cost. Reports do not count cut answers. Chunk ids are resolved to the document's current title and text when
 the view is read, and a chunk that no longer exists says "This content has
 since changed or been removed." Replies from before traces say "No details
 were recorded for this answer."
@@ -1047,7 +1069,8 @@ fixed to `openai/text-embedding-3-small` at 1536 dimensions). `Retriever` has on
 Cloudflare AI Search can be added as a second backend.
 
 A request may ask for `reasoning: "off"` (the answer review does; visitor
-answers do not, and their request body is unchanged). Each provider sends its
+answers do not, and send no reasoning field: only their output limit
+leaves room for reasoning, under "Answering a message"). Each provider sends its
 own switch: Anthropic `thinking: {type: "disabled"}`, or `{type:
 "between_tools"}` on Claude Sonnet 5.5, and nothing on models whose thinking
 is always on (Opus 5.5, Fable, Mythos); OpenAI and OpenRouter `reasoning:
