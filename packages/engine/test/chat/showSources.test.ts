@@ -374,6 +374,59 @@ describe("chat: Show sources in answers", () => {
     expect(reply?.citations).toEqual([PAGE]);
   });
 
+  it("off: a marker attached to a word or in a long unfinished group is taken out, the rest kept", async () => {
+    await configure(withSources(false, true));
+    const navigate: ToolCall = {
+      callId: "call_nav_1",
+      name: "navigate",
+      input: { path: "/docs/reset" },
+    };
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder,
+        retriever,
+        model: ANTHROPIC_MODELS.balanced,
+        provider: scriptedProvider([
+          {
+            chunks: ["Answer [1, 2, 3, 4, 5, 6, 1, 2, 3", "]. Click Forgot Password[1]. "],
+            calls: [navigate],
+          },
+          {
+            chunks: [
+              "Then sign in[1",
+              ", 2, 3, 4, 5, 6, 1, 2, 3, 4",
+              "]. Done[2]. Use `items[1]`.",
+            ],
+          },
+        ]),
+      },
+    });
+
+    const first = parseSseBody(
+      await post(app, { message: QUESTION, pageActions: [NAVIGATE_ACTION] }),
+    );
+    expect(tokenText(first)).toBe("Answer. Click Forgot Password. ");
+    const done1 = first.at(-1);
+    if (done1?.type !== "done") throw new Error("expected done last");
+
+    const second = parseSseBody(
+      await post(app, {
+        conversationId: done1.conversationId,
+        resumeMessageId: done1.messageId,
+        actionResults: [{ callId: "call_nav_1", ok: true, result: "opened" }],
+      }),
+    );
+    expect(second.some((e) => e.type === "citation")).toBe(false);
+    expect(tokenText(second)).toBe("Then sign in. Done. Use `items[1]`.");
+
+    const [reply] = (await tenant.messages.list(done1.conversationId)).filter(
+      (m) => m.role === "assistant",
+    );
+    expect(reply?.content).toBe(
+      "Answer. Click Forgot Password. Then sign in. Done. Use `items[1]`.",
+    );
+  });
+
   it("off: a test run's cites check reads the pages the answer used", async () => {
     await configure(withSources(true), withSources(false));
     await tenant.tests.create({

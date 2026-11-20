@@ -475,8 +475,10 @@ visitors once published and by "Try it" and test runs from the draft.
   (`chat/citationMarkers.ts`), from the streamed tokens and from the stored
   text, so an API client gets the same as the widget: the end of the stream
   that could still be a marker split across chunks is held back until the
-  next chunk (or the end) settles it. Only numbers 1 to `TOP_K` are taken,
-  only after a space, punctuation or the start of the text (so `items[1]`
+  next chunk (or the end) settles it, however long the unfinished marker is,
+  so nothing sent is ever taken back. Only numbers 1 to `TOP_K` are taken,
+  anywhere in prose (also straight after a word, "Password[1]") but never
+  inside Markdown code, an inline span or a fenced block (so `items[1]`
   stays), never a Markdown link, with the spaces before them. No `citation`
   event is sent, so the widget shows no sources block. Page actions do not
   depend on citations and work as before.

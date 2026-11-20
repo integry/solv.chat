@@ -71,6 +71,9 @@ describe("chat/citationMarkers", () => {
       "Click Forgot Password [1]. Then check your email [2][3].\n\nStill stuck? Room [42] helps [1, 2].",
       "Use `items[1]` [2] and read [1](https://a.example) [3] at 9.[1]",
       "  [1] [2]  spaced  [3]   end [4]",
+      "Click Forgot Password[1]. Answer [1, 2, 3, 4, 5, 6, 1, 2, 3]. More[2].",
+      "Run:\n```sh\nls dir[1]\n```\nThen `x[2]`[3] and ``y`[1]`` z[4].\n\nOdd ` tick[1]\n  \nAfter[2].",
+      "Codes [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 99] stay [5].",
     ];
     let seed = 7;
     const random = () => {
@@ -95,9 +98,53 @@ describe("chat/citationMarkers", () => {
     }
   });
 
-  it("reads the text before a continuation to decide whether a marker follows a word", () => {
-    expect(streamed(["[1] more."], "Let me check").text).toBe("[1] more.");
+  it("takes out a marker attached to a word in prose", () => {
+    expect(stripCitationMarkers("Click Forgot Password[1].", MAX)).toBe("Click Forgot Password.");
+    expect(stripCitationMarkers("Open at 9[2][3] daily[1, 2].", MAX)).toBe("Open at 9 daily.");
+    expect(streamed(["Click Forgot Password[", "1]. Then sign in[2]."]).text).toBe(
+      "Click Forgot Password. Then sign in.",
+    );
+  });
+
+  it("leaves markers inside code spans and fenced blocks alone", () => {
+    for (const text of [
+      "Use `items[1]` and ``list[2]`` here.",
+      "```js\nconst first = items[1];\nconst pair = [1, 2];\n```",
+      "~~~\nrow[3]\n~~~",
+      "Unclosed fence:\n```\nitems[1]",
+    ]) {
+      expect(stripCitationMarkers(text, MAX)).toBe(text);
+    }
+    expect(stripCitationMarkers("```\nitems[1]\n```\nDone[1].", MAX)).toBe(
+      "```\nitems[1]\n```\nDone.",
+    );
+    // A stray backtick protects only its own paragraph.
+    expect(stripCitationMarkers("It's ` odd[1].\n\nNext[2].", MAX)).toBe("It's ` odd[1].\n\nNext.");
+  });
+
+  it("holds a long unfinished marker group instead of sending it early", () => {
+    const { sent, text } = streamed(["Answer [1, 2, 3, 4, 5, 6, 1, 2, 3", "]. More instructions."]);
+    expect(sent[0]).toBe("Answer");
+    expect(text).toBe("Answer. More instructions.");
+    const stripper = markerStripper(MAX);
+    stripper.push("Answer [1, 2, 3, 4, 5, 6, 1, 2, 3");
+    stripper.push("]. More instructions.");
+    stripper.flush();
+    expect(stripper.text).toBe("Answer. More instructions.");
+  });
+
+  it("sends a long bracket of digits once it cannot be a marker", () => {
+    expect(streamed(["Codes [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5", ", 99] apply."]).text).toBe(
+      "Codes [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 99] apply.",
+    );
+  });
+
+  it("reads the text before a continuation to know whether it starts in code", () => {
+    expect(streamed(["[1] more."], "Let me check").text).toBe(" more.");
     expect(streamed(["[1] more."], "Done.").text).toBe(" more.");
-    expect(streamed([" [1] more."], "Let me check").text).toBe(" more.");
+    expect(streamed(["[1];\n```\nDone[2]."], "```js\nconst a = items").text).toBe(
+      "[1];\n```\nDone.",
+    );
+    expect(streamed(["[1]` works."], "Try `items").text).toBe("[1]` works.");
   });
 });
