@@ -251,6 +251,8 @@ describe("chat/citationMarkers", () => {
       "Get [Download](https://example.com/r[1].pdf)[2], ![c](x[3].png) and <https://e.example/x[3]> [1]\n\n[r]: https://example.com/r[2].pdf [3]\n> [s]: <a b[1]> [2]",
       "Read [guide][1][2], ![c][3] [1] and [`x[1]`][2][] [3].\n\n[1]: https://example.com/g[2] 'G [1]'\n- [2]: <c [1]>\n[3] [4] [guide]\n\n[1] done [1].",
       "Use \\` for a backtick, then `items[1]`. Done [2]. A real \\\\`tick[3]` [4] and `a\\`b[5]` [1] x\\](y [2]) \\<https://e.example/z[3]> [4]",
+      "```js\r\nitems[1]\r\n```\r\nDone [1].\r\n\r\n    x[2]\r\nAfter[3].\r\n- Step [2]\r\n\r\n      y[4]\r\n> ~~~\r\n> z[3]\r\nEnd [1].",
+      "```js\ritems[1]\r```\rDone [1].\r\r    x[2]\rAfter[3].\n\r\n[r]: https://e.example/r[2] [3]\r\nEnd [1].",
     ];
     let seed = 7;
     const random = () => {
@@ -388,6 +390,47 @@ describe("chat/citationMarkers", () => {
     expect(stripCitationMarkers("- Step:\n\n      items[1]\n", MAX)).toBe(
       "- Step:\n\n      items[1]\n",
     );
+  });
+
+  it("reads CRLF and bare CR line endings as line breaks, and keeps them", () => {
+    // A closing fence followed by "\r\n" still closes, so the prose after it
+    // loses its marker; the text keeps the endings the model wrote.
+    const fenced = "```js\r\nitems[1]\r\n```\r\nDone [1].";
+    const fencedClean = "```js\r\nitems[1]\r\n```\r\nDone.";
+    expect(stripCitationMarkers(fenced, MAX)).toBe(fencedClean);
+    expect(stripCitationMarkers("```js\ritems[1]\r```\rDone [1].", MAX)).toBe(
+      "```js\ritems[1]\r```\rDone.",
+    );
+    // A blank line of "\r\n" lets indented code start.
+    const indented = "Example:\r\n\r\n    items[1]\r\n";
+    expect(stripCitationMarkers(indented, MAX)).toBe(indented);
+    expect(stripCitationMarkers("Example:\r\r    items[1]\r", MAX)).toBe(
+      "Example:\r\r    items[1]\r",
+    );
+    // A span still ends at a blank line, and a list item's code is still code.
+    expect(stripCitationMarkers("Odd ` tick[1]\r\n  \r\nAfter[2].", MAX)).toBe(
+      "Odd ` tick[1]\r\n  \r\nAfter.",
+    );
+    expect(stripCitationMarkers("- Step:\r\n\r\n      items[1]\r\nDone [2].", MAX)).toBe(
+      "- Step:\r\n\r\n      items[1]\r\nDone.",
+    );
+    // Streamed, with the break split between its "\r" and its "\n".
+    const stream = streamed(["```js\r\nitems[1]\r", "\n```\r", "\nDone [", "1]."]);
+    expect(stream.text).toBe(fencedClean);
+    expect(stream.sent.slice(0, 2)).toEqual(["```js\r\nitems[1]\r", "\n```\r"]);
+    expect(streamed(["Example:\r", "\n\r", "\n    items[1]\r\n"]).text).toBe(indented);
+    // A continuation whose first part used CRLF: it ends inside the fence, or
+    // at a blank line that lets code start.
+    expect(streamed(["[1];\r\n```\r\nDone[2]."], "```js\r\nconst a = items").text).toBe(
+      "[1];\r\n```\r\nDone.",
+    );
+    expect(streamed(["    items[1]\r\nDone[2]."], "Example:\r\n\r\n").text).toBe(
+      "    items[1]\r\nDone.",
+    );
+    expect(streamed(["\n    items[1]\r\nDone[2]."], "Example:\r\n\r").text).toBe(
+      "\n    items[1]\r\nDone.",
+    );
+    expect(streamed(["[1] more [2]."], "Done\r\n\r\n").text).toBe(" more.");
   });
 
   it("still takes markers out of indented text that is not code", () => {

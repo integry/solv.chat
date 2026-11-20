@@ -27,6 +27,11 @@
  * The spaces before a marker go with it: "open at 9 [1]." becomes "open at 9.".
  * Each bracket is judged on its own, so in "option [42] [1]." the "[42]"
  * stays and the "[1]" still goes.
+ *
+ * A line ends at "\n", "\r\n" or a bare "\r" alike, as the widget reads the
+ * answer (it turns the latter two into "\n" before parsing), so a closing
+ * fence or a blank line is found whatever line endings the model used; the
+ * text itself keeps its own endings.
  */
 
 const NUMBER = String.raw`\d{1,2}`;
@@ -71,10 +76,14 @@ function linkTextBefore(text: string, at: number): boolean {
   return false;
 }
 
-/** `text` with its markers from `from` up to `end` taken out. */
-function stripAll(text: string, from: number, end: number, maxSource: number): string {
-  let out = "";
-  let at = from;
+/** The `[start, end)` spans of `text` from `from` up to `end` that are markers (with their spaces). */
+function markersIn(
+  text: string,
+  from: number,
+  end: number,
+  maxSource: number,
+): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
   MARKER.lastIndex = from;
   for (let match = MARKER.exec(text); match !== null; match = MARKER.exec(text)) {
     const markerEnd = match.index + match[0].length;
@@ -86,11 +95,37 @@ function stripAll(text: string, from: number, end: number, maxSource: number): s
       !escapedAt(text, markerStart) &&
       !linkTextBefore(text, markerStart)
     ) {
-      out += text.slice(at, match.index);
-      at = markerEnd;
+      spans.push([match.index, markerEnd]);
     }
   }
-  return out + text.slice(at, end);
+  return spans;
+}
+
+/**
+ * `text` with every "\r\n" and bare "\r" read as a "\n", the way the widget
+ * reads an answer before parsing it, and `offset`, which gives the index in
+ * `text` of each index in the normalized text (its length included). The
+ * normalized text of any prefix of `text` is a prefix of this one, so reading
+ * a stream through it never changes what was read before.
+ */
+function normalizeBreaks(text: string): {
+  normalized: string;
+  offset: (at: number) => number;
+} {
+  if (!text.includes("\r")) return { normalized: text, offset: (at) => at };
+  const offsets: number[] = [];
+  let normalized = "";
+  for (let p = 0; p < text.length; p++) {
+    offsets.push(p);
+    if (text[p] === "\r") {
+      normalized += "\n";
+      if (text[p + 1] === "\n") p++;
+    } else {
+      normalized += text[p];
+    }
+  }
+  offsets.push(text.length);
+  return { normalized, offset: (at) => offsets[at] ?? text.length };
 }
 
 /**
@@ -521,13 +556,26 @@ function proseRanges(text: string): Array<[number, number]> {
  */
 export function stripCitationMarkers(text: string, maxSource: number, before = ""): string {
   const whole = before + text;
+  // Markdown is read with line breaks normalized, as the widget reads it; the
+  // markers found are then cut out of `whole` itself, so its line endings
+  // stay as the model wrote them. A marker holds no line break, so its span
+  // maps back as it is.
+  const { normalized, offset } = normalizeBreaks(whole);
   let out = "";
   let at = before.length;
-  for (const [start, end] of proseRanges(whole)) {
-    if (end <= at) continue;
-    const from = Math.max(start, at);
-    out += whole.slice(at, from) + stripAll(whole, from, end, maxSource);
-    at = end;
+  let from = 0;
+  while (offset(from) < at) from++;
+  for (const [start, end] of proseRanges(normalized)) {
+    if (end <= from) continue;
+    for (const [markerStart, markerEnd] of markersIn(
+      normalized,
+      Math.max(start, from),
+      end,
+      maxSource,
+    )) {
+      out += whole.slice(at, offset(markerStart));
+      at = offset(markerEnd);
+    }
   }
   return out + whole.slice(at);
 }

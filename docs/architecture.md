@@ -482,7 +482,9 @@ visitors once published and by "Try it" and test runs from the draft.
   one within a list item or a quote (so `items[1]` stays), never a Markdown
   link and never in a link's destination (an inline link's, an image's, an
   autolink's or a reference definition's, so `report[1].pdf` in a link's
-  address stays), with the spaces before them. No `citation` event is sent,
+  address stays), with the spaces before them. Lines end at LF, CRLF or a
+  bare CR alike, as the widget reads them, and keep the endings the model
+  wrote. No `citation` event is sent,
   so the widget shows no sources block. Page actions do not depend on
   citations and work as before.
 - **Kept either way.** Everything the owner sees: the trace, the stored
