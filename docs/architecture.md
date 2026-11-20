@@ -741,8 +741,10 @@ The Monitor screens read:
    "Index lag") and the index may hold more above the floor (the query came
    back full and its last hit cleared it), it is queried once more, with the
    same org and assistant filters, for 100 (`REFILL_TOP_K`), and the pool is
-   the best 20 live candidates of both. Never more than two queries; the cost
-   is one more vector query and one more D1 read, only on answers that met
+   the best 20 live candidates of both, resolved together so a current chunk
+   of a page leaves out its replaced chunks whichever query returned them.
+   Never more than two queries; the cost is one more vector query and one
+   more D1 read (of both queries' hits), only on answers that met
    stale hits, and it is counted in the trace's retrieval time. Then give
    the model at most 6 (`TOP_K`) above a score floor
    (0.2), chosen by `selectCandidates` (below). The floor only keeps out

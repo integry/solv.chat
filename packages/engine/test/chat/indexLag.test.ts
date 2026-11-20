@@ -297,6 +297,64 @@ const PAGE_V2 = `# Backups
 Backups run every hour and keep seven days of snapshots for restore.`;
 
 /** Every vector the index shows that has no chunk: leftovers once it has caught up. */
+describe("issue #131: a replaced chunk is left out whichever query returned it", () => {
+  let site: Awaited<ReturnType<typeof seedSite>>;
+
+  beforeEach(async () => {
+    site = await seedSite();
+  });
+
+  /**
+   * Mid-update: page A's current chunk is committed and its vector shown,
+   * and the replaced chunk's vector is not yet deleted. 19 stale vectors
+   * fill the first query with whichever of A's two chunks scores higher;
+   * the other comes back only from the further query.
+   */
+  async function midUpdate(scores: { retired: number; current: number }) {
+    const retriever = laggingRetriever();
+    await seedLive(site, retriever, "doc_backups", [
+      { id: "chk_new", text: "Backups are kept for seven days.", score: scores.current },
+    ]);
+    await env.DB.prepare(
+      `INSERT INTO retired_chunks (id, org_id, document_id, text, heading_path, retired_at)
+       VALUES ('chk_old', ?1, 'doc_backups', 'Backups are kept for thirty days.', '', ?2)`,
+    )
+      .bind(TEST_ORG_ID, Date.now())
+      .run();
+    await retriever.upsert([
+      {
+        chunkId: "chk_old",
+        vector: at(scores.retired),
+        orgId: TEST_ORG_ID,
+        assistantId: site.assistantId,
+      },
+      ...staleVectors(CANDIDATE_POOL - 1, 0.65, site.assistantId),
+    ]);
+    await retriever.catchUp();
+    return ask(site, axisEmbedder, retriever, "How long are backups kept?");
+  }
+
+  it("leaves out the replaced chunk from the first query when the current one comes only from the second", async () => {
+    const asked = await midUpdate({ retired: 0.7, current: 0.6 });
+
+    expect(asked.trace?.retrieval.searchedAgain).toBe(true);
+    expect(asked.prompt).toContain("seven days");
+    expect(asked.prompt).not.toContain("thirty days");
+    const used = asked.trace?.retrieval.candidates.filter((c) => c.used).map((c) => c.chunkId);
+    expect(used).toEqual(["chk_new"]);
+  });
+
+  it("leaves out the replaced chunk from the second query when the current one came in the first", async () => {
+    const asked = await midUpdate({ retired: 0.6, current: 0.7 });
+
+    expect(asked.trace?.retrieval.searchedAgain).toBe(true);
+    expect(asked.prompt).toContain("seven days");
+    expect(asked.prompt).not.toContain("thirty days");
+    const used = asked.trace?.retrieval.candidates.filter((c) => c.used).map((c) => c.chunkId);
+    expect(used).toEqual(["chk_new"]);
+  });
+});
+
 async function vectorsWithoutChunk(retriever: { all(): VectorRecord[] }): Promise<string[]> {
   const ids = retriever.all().map((v) => v.chunkId);
   if (ids.length === 0) return [];

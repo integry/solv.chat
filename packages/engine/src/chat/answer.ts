@@ -474,8 +474,9 @@ interface SearchPool {
  * hold more above the floor (the first query came back full and its last
  * hit cleared the floor), it is asked once more for `REFILL_TOP_K`, with
  * the same org and assistant filters, and the pool is the best
- * `CANDIDATE_POOL` live candidates of both. Never more than two queries:
- * the cost is one more vector query and one more D1 read, only for an
+ * `CANDIDATE_POOL` live candidates of both, resolved together. Never more
+ * than two queries: the cost is one more vector query and one more D1 read
+ * (of both queries' hits), only for an
  * answer that met stale hits, and it is counted in the trace's retrieval
  * time.
  */
@@ -507,22 +508,23 @@ async function searchPool(
   const second = await query(REFILL_TOP_K);
   const seen = new Set(first.map((hit) => hit.chunkId));
   const added = second.filter((hit) => !seen.has(hit.chunkId));
-  const addedResolved = await resolveChunks(deps.tenant, input.assistantId, added, { now });
-  const addedLive = new Set(addedResolved.map((c) => c.chunkId));
-  const staleAdded = added.filter((hit) => !addedLive.has(hit.chunkId));
-  const resolved = [...firstResolved, ...addedResolved]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, CANDIDATE_POOL);
+  // Both queries' hits are resolved together, not each on its own: a
+  // replaced chunk is left out only when a current chunk of its document
+  // is among the hits it is resolved with, and during an update the old
+  // and new vectors of one page can fall on either side of the first
+  // query's cut-off.
+  const union = [...first, ...added];
+  const unionResolved = await resolveChunks(deps.tenant, input.assistantId, union, { now });
+  const unionLive = new Set(unionResolved.map((c) => c.chunkId));
+  const resolved = unionResolved.slice(0, CANDIDATE_POOL);
   const inPool = new Set(resolved.map((c) => c.chunkId));
-  const hits = [...first, ...added]
-    .filter(
-      (hit) => inPool.has(hit.chunkId) || (!live.has(hit.chunkId) && !addedLive.has(hit.chunkId)),
-    )
+  const hits = union
+    .filter((hit) => inPool.has(hit.chunkId) || !unionLive.has(hit.chunkId))
     .sort((a, b) => b.score - a.score);
   return {
     hits,
     resolved,
-    stale: staleFirst.length + staleAdded.length,
+    stale: union.filter((hit) => !unionLive.has(hit.chunkId)).length,
     searchedAgain: true,
   };
 }
