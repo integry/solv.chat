@@ -83,6 +83,14 @@ function installServer(initial: Status) {
   };
 }
 
+/**
+ * The Sources page itself. Try it is open beside it on wide screens and shows
+ * the same notice, so Sources' own notice is looked up inside `<main>`.
+ */
+function sourcesPage() {
+  return within(screen.getByRole("main"));
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -95,14 +103,14 @@ describe("recent changes notice", () => {
     window.history.replaceState(null, "", "/admin/sources");
     render(<App />);
     expect(await screen.findByText("Answers you wrote")).toBeTruthy();
-    expect(screen.queryByText(RECENT_CHANGES_TEXT)).toBeNull();
+    expect(sourcesPage().queryByText(RECENT_CHANGES_TEXT)).toBeNull();
 
     fireEvent.click(await screen.findByRole("button", { name: "Actions for Answers you wrote" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
     const dialog = await screen.findByRole("dialog", { name: "Delete Answers you wrote?" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete source" }));
 
-    const notice = await screen.findByText(RECENT_CHANGES_TEXT);
+    const notice = await sourcesPage().findByText(RECENT_CHANGES_TEXT);
     expect(notice.getAttribute("role")).toBe("status");
   });
 
@@ -115,9 +123,10 @@ describe("recent changes notice", () => {
     });
     window.history.replaceState(null, "", "/admin/sources");
     render(<App />);
-    expect(await screen.findByText(RECENT_CHANGES_TEXT)).toBeTruthy();
+    expect(await screen.findByText("Answers you wrote")).toBeTruthy();
+    expect(await sourcesPage().findByText(RECENT_CHANGES_TEXT)).toBeTruthy();
     server.set({ settling: false, indexing: 0, settlesAt: null });
-    await waitFor(() => expect(screen.queryByText(RECENT_CHANGES_TEXT)).toBeNull(), {
+    await waitFor(() => expect(sourcesPage().queryByText(RECENT_CHANGES_TEXT)).toBeNull(), {
       timeout: 4_000,
     });
   });
