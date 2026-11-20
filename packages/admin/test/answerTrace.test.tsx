@@ -385,7 +385,7 @@ describe("How this answer was made", () => {
     expect(await view.findByText("First reply")).toBeTruthy();
     expect(view.getByText("After page action 1")).toBeTruthy();
     expect(view.getByText("Waited for the visitor's page")).toBeTruthy();
-    expect(view.getByText("Cut off at the length limit")).toBeTruthy();
+    expect(view.getByText("Cut short at the length limit")).toBeTruthy();
     expect(view.getByText("0.02 credits")).toBeTruthy();
     expect(view.getByText(/key set in Settings/)).toBeTruthy();
     expect(view.getByText("Some details were left out to keep this record small.")).toBeTruthy();
