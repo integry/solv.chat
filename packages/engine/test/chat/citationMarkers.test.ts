@@ -159,6 +159,59 @@ describe("chat/citationMarkers", () => {
     expect(streamed(["1].pdf> [2]."], "<https://example.com/files/report[").text).toBe("1].pdf>.");
   });
 
+  it("leaves a reference link's numeric label and definition alone, however it is streamed", () => {
+    const cases: Array<[string, string]> = [
+      // The reported case: a reference link with a numeric label.
+      [
+        "Read [guide][1].\n\n[1]: https://example.com/guide",
+        "Read [guide][1].\n\n[1]: https://example.com/guide",
+      ],
+      // A citation after the link still goes, and so does one elsewhere.
+      [
+        'Read [guide][1] [2].\n\nMore [3]\n\n[1]: https://example.com/guide[2].html "Guide [3]"\n',
+        'Read [guide][1].\n\nMore\n\n[1]: https://example.com/guide[2].html "Guide"\n',
+      ],
+      // An image, a collapsed label, nested brackets, and a code span in the text.
+      [
+        "See ![chart][2] and [the [full] guide][1] or [guide][] [3].\n\n[2]: </c[1].png>\n[guide]: https://example.com/g",
+        "See ![chart][2] and [the [full] guide][1] or [guide][].\n\n[2]: </c[1].png>\n[guide]: https://example.com/g",
+      ],
+      [
+        "Use [`items[1]`][1] [2].\n\n[1]: https://example.com/a",
+        "Use [`items[1]`][1].\n\n[1]: https://example.com/a",
+      ],
+      // Definitions in a list item and a quote, with spaces before the label.
+      [
+        "- [1]: https://example.com/a [2]\n>  [2]: <b c[1]>\n",
+        "- [1]: https://example.com/a\n>  [2]: <b c[1]>\n",
+      ],
+      // Numbers alone are a run of citations, not a link's text and label.
+      ["Choose option [42][1] and [1][2].", "Choose option [42] and."],
+      // A label after a space is no reference link.
+      [
+        "Read [guide] [1].\n\n[1]: https://example.com/guide",
+        "Read [guide].\n\n[1]: https://example.com/guide",
+      ],
+      // A bracket in another paragraph is not this link's text.
+      ["[guide]\n\n[1] Start here.", "[guide]\n\n Start here."],
+    ];
+    for (const [answer, expected] of cases) {
+      expect(stripCitationMarkers(answer, MAX)).toBe(expected);
+      // The same in every two- and three-chunk split of the stream.
+      for (let a = 0; a <= answer.length; a++) {
+        expect(streamed([answer.slice(0, a), answer.slice(a)]).text).toBe(expected);
+        for (let b = a; b <= answer.length; b++) {
+          const { text } = streamed([answer.slice(0, a), answer.slice(a, b), answer.slice(b)]);
+          expect(text).toBe(expected);
+        }
+      }
+    }
+    // A paused reply's continuation that starts at the label.
+    expect(streamed(["[1] [2].\n\n[1]: https://example.com/g"], "Read [guide]").text).toBe(
+      "[1].\n\n[1]: https://example.com/g",
+    );
+  });
+
   it("still takes markers out next to text that only looks like a link", () => {
     const cases: Array<[string, string]> = [
       // A ")" or a space ends a destination.
@@ -196,6 +249,7 @@ describe("chat/citationMarkers", () => {
       "> 1. Run [2]:\n>    ```\n>    x[1]\n>    ```\n> Then [3].\n- ~~~\n  y[2]\n- Next [1]\n   > ~~~\n   > z[3]\n",
       "1. Step:\n   ```sh\nls dir[1]\n```\nDone [1].\n```\n\nAfter [2].",
       "Get [Download](https://example.com/r[1].pdf)[2], ![c](x[3].png) and <https://e.example/x[3]> [1]\n\n[r]: https://example.com/r[2].pdf [3]\n> [s]: <a b[1]> [2]",
+      "Read [guide][1][2], ![c][3] [1] and [`x[1]`][2][] [3].\n\n[1]: https://example.com/g[2] 'G [1]'\n- [2]: <c [1]>\n[3] [4] [guide]\n\n[1] done [1].",
     ];
     let seed = 7;
     const random = () => {

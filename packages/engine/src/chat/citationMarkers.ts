@@ -15,7 +15,13 @@
  *   destination, so a link still goes where it did: an inline link's or
  *   image's (`[Download](https://…/report[1].pdf)`), an autolink's
  *   (`<https://…/report[1].pdf>`) or a reference definition's
- *   (`[report]: https://…/report[1].pdf`).
+ *   (`[report]: https://…/report[1].pdf`);
+ * - never a reference link's label: not the label of a definition
+ *   (`[1]: https://…`), nor one straight after a link's text (`[guide][1]`,
+ *   `![chart][2]`, or the empty `[guide][]`), so the link still reaches its
+ *   definition. The text must be more than numbers: `[42][1]` and `[1][2]` are
+ *   citations (a label alone, `[1]` with a definition, cannot be told from
+ *   one and goes).
  * The spaces before a marker go with it: "open at 9 [1]." becomes "open at 9.".
  * Each bracket is judged on its own, so in "option [42] [1]." the "[42]"
  * stays and the "[1]" still goes.
@@ -23,10 +29,12 @@
 
 const NUMBER = String.raw`\d{1,2}`;
 const ONE_MARKER = String.raw`\[[ \t]*${NUMBER}(?:[ \t]*[,–-][ \t]*${NUMBER})*[ \t]*\]`;
-const MARKER = new RegExp(String.raw`[ \t]*${ONE_MARKER}(?!\()`, "gu");
+const MARKER = new RegExp(String.raw`[ \t]*${ONE_MARKER}(?!\(|\[\])`, "gu");
+/** What a run of citation markers is made of; a bracket of only this is no link text. */
+const NUMERIC_BRACKET = /^\[[ \t\d,–-]*\]$/u;
 /**
  * The end of a stream that could still turn into a marker (or be the spaces
- * before one, or a marker that a following "(" would make a link), so it is
+ * before one, or a marker that a following "(" or "[]" would make a link), so it is
  * held back until the next chunk says which. It holds a whole run of
  * brackets, however long: any text it lets through can never become part of
  * a marker later, so what was sent is never taken back. A stray "[" is held only until a letter (or any
@@ -42,8 +50,41 @@ function withinRange(marker: string, maxSource: number): boolean {
   });
 }
 
-function stripAll(text: string, maxSource: number): string {
-  return text.replace(MARKER, (match) => (withinRange(match, maxSource) ? "" : match));
+/**
+ * Whether the bracket closing right before `at` is a link's text, which makes
+ * a marker at `at` the label of a reference link (`[guide][1]`). The text is
+ * found by walking back to its "[" over nested brackets, within the paragraph;
+ * a bracket of numbers alone (`[42][1]`, `[1][2]`) is a run of citations.
+ */
+function linkTextBefore(text: string, at: number): boolean {
+  if (text[at - 1] !== "]") return false;
+  let depth = 0;
+  for (let p = at - 1; p >= 0; p--) {
+    const char = text[p];
+    if (char === "\n" && blankLineAt(text, p) !== null) return false;
+    if (p > 0 && text[p - 1] === "\\") continue;
+    if (char === "]") depth++;
+    else if (char === "[" && --depth === 0) return !NUMERIC_BRACKET.test(text.slice(p, at));
+  }
+  return false;
+}
+
+/** `text` with its markers from `from` up to `end` taken out. */
+function stripAll(text: string, from: number, end: number, maxSource: number): string {
+  let out = "";
+  let at = from;
+  MARKER.lastIndex = from;
+  for (let match = MARKER.exec(text); match !== null; match = MARKER.exec(text)) {
+    const markerEnd = match.index + match[0].length;
+    if (markerEnd > end) break;
+    const marker = match[0].trimStart();
+    const markerStart = markerEnd - marker.length;
+    if (withinRange(marker, maxSource) && !linkTextBefore(text, markerStart)) {
+      out += text.slice(at, match.index);
+      at = markerEnd;
+    }
+  }
+  return out + text.slice(at, end);
 }
 
 /**
@@ -262,8 +303,8 @@ function destinationEnd(text: string, at: number): number {
  *
  * A link's destination is left out too: what follows "](" (an inline link's
  * or an image's), "<" and a scheme's ":" (an autolink's), or a line's opening
- * "[label]:" (a reference definition's), up to where `destinationEnd` (or,
- * for an autolink, a space, "<" or ">") ends it. The "(" stays with the prose
+ * "[label]:" (a reference definition's, left out with its label), up to where
+ * `destinationEnd` (or, for an autolink, a space, "<" or ">") ends it. The "(" stays with the prose
  * before it, so a marker there is still seen to be a link's text.
  *
  * Read strictly left to right: whether a character is code (or a destination)
@@ -385,9 +426,10 @@ function proseRanges(text: string): Array<[number, number]> {
     }
     const label = !held && width <= 3 ? matchEnd(DEFINITION_LABEL, text, indent.end) : null;
     if (label !== null) {
-      // A reference definition: its destination is the word after the label.
+      // A reference definition: its label is no marker, and its destination
+      // is the word after the label.
       codeMayStart = false;
-      return skip(label, destinationEnd(text, label));
+      return skip(indent.end, destinationEnd(text, label));
     }
     codeMayStart = ATX_HEADING.test(text.slice(indent.end, indent.end + 8));
     return next();
@@ -458,7 +500,7 @@ export function stripCitationMarkers(text: string, maxSource: number, before = "
   for (const [start, end] of proseRanges(whole)) {
     if (end <= at) continue;
     const from = Math.max(start, at);
-    out += whole.slice(at, from) + stripAll(whole.slice(from, end), maxSource);
+    out += whole.slice(at, from) + stripAll(whole, from, end, maxSource);
     at = end;
   }
   return out + whole.slice(at);
