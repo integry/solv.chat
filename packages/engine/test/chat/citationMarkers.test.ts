@@ -250,6 +250,7 @@ describe("chat/citationMarkers", () => {
       "1. Step:\n   ```sh\nls dir[1]\n```\nDone [1].\n```\n\nAfter [2].",
       "Get [Download](https://example.com/r[1].pdf)[2], ![c](x[3].png) and <https://e.example/x[3]> [1]\n\n[r]: https://example.com/r[2].pdf [3]\n> [s]: <a b[1]> [2]",
       "Read [guide][1][2], ![c][3] [1] and [`x[1]`][2][] [3].\n\n[1]: https://example.com/g[2] 'G [1]'\n- [2]: <c [1]>\n[3] [4] [guide]\n\n[1] done [1].",
+      "Use \\` for a backtick, then `items[1]`. Done [2]. A real \\\\`tick[3]` [4] and `a\\`b[5]` [1] x\\](y [2]) \\<https://e.example/z[3]> [4]",
     ];
     let seed = 7;
     const random = () => {
@@ -296,6 +297,26 @@ describe("chat/citationMarkers", () => {
     );
     // A stray backtick protects only its own paragraph.
     expect(stripCitationMarkers("It's ` odd[1].\n\nNext[2].", MAX)).toBe("It's ` odd[1].\n\nNext.");
+  });
+
+  it("reads an escaped backtick as text, not as a span's start, however it is streamed", () => {
+    const answer = "Use \\` for a backtick, then `items[1]`. Done [2].";
+    const clean = "Use \\` for a backtick, then `items[1]`. Done.";
+    expect(stripCitationMarkers(answer, MAX)).toBe(clean);
+    expect(streamed(["Use \\", "` for a backtick, then `items[", "1]`. Done [", "2]."]).text).toBe(
+      clean,
+    );
+    expect(streamed(["` for a backtick, then `items[1]`. Done [2]."], "Use \\").text).toBe(
+      clean.slice("Use \\".length),
+    );
+    // An escaped backslash before a backtick leaves the backtick real, and
+    // inside a span a backslash escapes nothing.
+    expect(stripCitationMarkers("A \\\\`tick[1]` [2].", MAX)).toBe("A \\\\`tick[1]`.");
+    expect(stripCitationMarkers("A `tick\\`[1] [2].", MAX)).toBe("A `tick\\`.");
+    // Nor does an escaped "]" or "<" start a link's destination.
+    expect(stripCitationMarkers("x\\](y [1]) and \\<https://e.example/z[2]> [3].", MAX)).toBe(
+      "x\\](y) and \\<https://e.example/z>.",
+    );
   });
 
   it("keeps a fence open past a fence-like line with text after it", () => {

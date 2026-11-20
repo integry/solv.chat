@@ -128,6 +128,17 @@ function listItemAt(text: string, at: number): { marker: number; gap: number } |
   return { marker: marker[0].length, gap };
 }
 
+/**
+ * Whether the character at `at` is escaped by a Markdown backslash before it:
+ * an odd run of backslashes (`\\\`` is an escaped backslash and a real
+ * backtick). Only in prose; inside code a backslash is a backslash.
+ */
+function escapedAt(text: string, at: number): boolean {
+  let backslashes = 0;
+  for (let p = at - 1; p >= 0 && text[p] === "\\"; p--) backslashes++;
+  return backslashes % 2 === 1;
+}
+
 /** How many times `char` repeats from `at`. */
 function runAt(text: string, at: number, char: string): number {
   let end = at;
@@ -299,7 +310,9 @@ function destinationEnd(text: string, at: number): number {
  * An indented block is a line indented four columns, where a paragraph cannot
  * hold it: first in its container, or after a blank line, a heading, a
  * closing fence or another indented line. Elsewhere a run of backticks opens
- * an inline span that ends at the same number of backticks or at a blank line.
+ * an inline span that ends at the same number of backticks or at a blank line;
+ * a backtick escaped with a backslash (`\``) opens none, while inside a span
+ * a backslash is a backslash, as in Markdown.
  *
  * A link's destination is left out too: what follows "](" (an inline link's
  * or an image's), "<" and a scheme's ":" (an autolink's), or a line's opening
@@ -443,6 +456,13 @@ function proseRanges(text: string): Array<[number, number]> {
         i = next;
         continue;
       }
+    }
+    // An escaped "]", "<" or "`" (`\``) is plain text, as in Markdown, and
+    // opens nothing; inside a span the closing backticks are found as they
+    // are, since code does not escape.
+    if (escapedAt(text, i)) {
+      i++;
+      continue;
     }
     if (text[i] === "]" && text[i + 1] === "(") {
       i = skip(i + 2, destinationEnd(text, i + 2));
