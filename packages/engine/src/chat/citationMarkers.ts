@@ -43,8 +43,8 @@ function stripAll(text: string, maxSource: number): string {
  * The `[start, end)` ranges of `text` that are prose, not Markdown code.
  * A fence is a line starting (after up to three spaces) with three or more
  * backticks or tildes, and runs to a line starting with at least as many of
- * the same; unclosed, to the end. Elsewhere a run of backticks opens an inline
- * span that ends at the same number of backticks or at a blank line.
+ * the same and nothing else but spaces; unclosed, to the end. Elsewhere a run
+ * of backticks opens an inline span that ends at the same number of backticks or at a blank line.
  *
  * Read strictly left to right: whether a character is code depends only on
  * the text before it, so appending text never turns already-sent prose into
@@ -79,6 +79,16 @@ function proseRanges(text: string): Array<[number, number]> {
     const length = runAt(p, char);
     return length >= 3 ? { char, length, end: p + length } : null;
   };
+  // A closing fence carries nothing after it but spaces: a line such as
+  // "```not-a-close" is still code. At the very end of the text the rest of
+  // the line is not known yet, so the fence counts as closed for now; any
+  // later text on that line can only make it code again, and the stream holds
+  // nothing back that this would change (prose after it is empty or spaces).
+  const onlySpacesToLineEnd = (at: number): boolean => {
+    let p = at;
+    while (text[p] === " " || text[p] === "\t") p++;
+    return p === text.length || text[p] === "\n";
+  };
   while (i < text.length) {
     const atLineStart = i === 0 || text[i - 1] === "\n";
     const fence = atLineStart ? lineStartFence(i) : null;
@@ -89,7 +99,12 @@ function proseRanges(text: string): Array<[number, number]> {
       let close = text.length;
       while (p !== -1) {
         const closer = lineStartFence(p + 1);
-        if (closer !== null && closer.char === fence.char && closer.length >= fence.length) {
+        if (
+          closer !== null &&
+          closer.char === fence.char &&
+          closer.length >= fence.length &&
+          onlySpacesToLineEnd(closer.end)
+        ) {
           close = closer.end;
           break;
         }

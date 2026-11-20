@@ -74,6 +74,7 @@ describe("chat/citationMarkers", () => {
       "Click Forgot Password[1]. Answer [1, 2, 3, 4, 5, 6, 1, 2, 3]. More[2].",
       "Run:\n```sh\nls dir[1]\n```\nThen `x[2]`[3] and ``y`[1]`` z[4].\n\nOdd ` tick[1]\n  \nAfter[2].",
       "Codes [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 99] stay [5].",
+      "```text\n```not-a-close\nitems[1]\n```  [2]\n``` \nDone[1].",
     ];
     let seed = 7;
     const random = () => {
@@ -120,6 +121,34 @@ describe("chat/citationMarkers", () => {
     );
     // A stray backtick protects only its own paragraph.
     expect(stripCitationMarkers("It's ` odd[1].\n\nNext[2].", MAX)).toBe("It's ` odd[1].\n\nNext.");
+  });
+
+  it("keeps a fence open past a fence-like line with text after it", () => {
+    const answer = "```text\n```not-a-close\nitems[1]\n```\nDone[1].";
+    const expected = "```text\n```not-a-close\nitems[1]\n```\nDone.";
+    expect(stripCitationMarkers(answer, MAX)).toBe(expected);
+    expect(stripCitationMarkers("~~~\n~~~ x [2]\nrow[3]\n~~~", MAX)).toBe(
+      "~~~\n~~~ x [2]\nrow[3]\n~~~",
+    );
+    // Only spaces may follow a real closing fence.
+    expect(stripCitationMarkers("```\nitems[1]\n```  \t\nDone[1].", MAX)).toBe(
+      "```\nitems[1]\n```  \t\nDone.",
+    );
+    // Streamed, split at every point, including right after the fake closer.
+    for (let cut = 1; cut < answer.length; cut++) {
+      const stripper = markerStripper(MAX);
+      const joined =
+        stripper.push(answer.slice(0, cut)) + stripper.push(answer.slice(cut)) + stripper.flush();
+      expect(joined).toBe(expected);
+      expect(stripper.text).toBe(expected);
+    }
+    expect(streamed(["```text\n```", "not-a-close\nitems[", "1]\n```\nDone[1]."]).text).toBe(
+      expected,
+    );
+    // A continuation that starts on the fake closer's line.
+    expect(streamed(["not-a-close\nitems[1]\n```\nDone[1]."], "```text\n```").text).toBe(
+      "not-a-close\nitems[1]\n```\nDone.",
+    );
   });
 
   it("holds a long unfinished marker group instead of sending it early", () => {
