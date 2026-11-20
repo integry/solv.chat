@@ -75,6 +75,7 @@ describe("chat/citationMarkers", () => {
       "Run:\n```sh\nls dir[1]\n```\nThen `x[2]`[3] and ``y`[1]`` z[4].\n\nOdd ` tick[1]\n  \nAfter[2].",
       "Codes [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 99] stay [5].",
       "```text\n```not-a-close\nitems[1]\n```  [2]\n``` \nDone[1].",
+      "Example:\n\n    items[1]\n\n\tx[2]\nDone[1].\n- Step [2]\n\n    Save [3].\n\n      y[4]\n",
     ];
     let seed = 7;
     const random = () => {
@@ -149,6 +150,63 @@ describe("chat/citationMarkers", () => {
     expect(streamed(["not-a-close\nitems[1]\n```\nDone[1]."], "```text\n```").text).toBe(
       "not-a-close\nitems[1]\n```\nDone.",
     );
+  });
+
+  it("leaves markers inside indented code blocks alone", () => {
+    expect(stripCitationMarkers("Example:\n\n    items[1]\n", MAX)).toBe(
+      "Example:\n\n    items[1]\n",
+    );
+    expect(stripCitationMarkers("    first = items[1]", MAX)).toBe("    first = items[1]");
+    expect(stripCitationMarkers("Tab:\n\n\titems[2]\n", MAX)).toBe("Tab:\n\n\titems[2]\n");
+    // Several lines, a blank line inside the block, then prose again.
+    expect(
+      stripCitationMarkers("Run:\n\n    a = x[1]\n\n    b = x[2]\nDone[1].\n\nNext[3].", MAX),
+    ).toBe("Run:\n\n    a = x[1]\n\n    b = x[2]\nDone.\n\nNext.");
+    // Right after a heading or a closing fence, no blank line needed.
+    expect(stripCitationMarkers("## Usage\n    items[1]", MAX)).toBe("## Usage\n    items[1]");
+    expect(stripCitationMarkers("```\nx\n```\n    items[1]", MAX)).toBe(
+      "```\nx\n```\n    items[1]",
+    );
+    // Inside a list item, code is indented four past the item's text.
+    expect(stripCitationMarkers("- Step:\n\n      items[1]\n", MAX)).toBe(
+      "- Step:\n\n      items[1]\n",
+    );
+  });
+
+  it("still takes markers out of indented text that is not code", () => {
+    // A paragraph's next line, however indented, is still the paragraph.
+    expect(stripCitationMarkers("Open at 9\n    daily [1].", MAX)).toBe("Open at 9\n    daily.");
+    // Text indented to stay inside a list item is the item's text.
+    expect(stripCitationMarkers("1. Go to Settings.\n\n    Then click Save [1].", MAX)).toBe(
+      "1. Go to Settings.\n\n    Then click Save.",
+    );
+    expect(stripCitationMarkers("- Go to Settings.\n\n    Then click Save [1].", MAX)).toBe(
+      "- Go to Settings.\n\n    Then click Save.",
+    );
+    // After the list ends, four spaces make code again.
+    expect(stripCitationMarkers("- One [1]\n\nDone [2].\n\n    items[3]", MAX)).toBe(
+      "- One\n\nDone.\n\n    items[3]",
+    );
+  });
+
+  it("keeps indented code when streamed in any split", () => {
+    const answer = "Example:\n\n    items[1]\n    pair[2]\n\nUse it [1].";
+    const expected = "Example:\n\n    items[1]\n    pair[2]\n\nUse it.";
+    for (let cut = 1; cut < answer.length; cut++) {
+      for (let second = cut + 1; second < answer.length; second++) {
+        const stripper = markerStripper(MAX);
+        const joined =
+          stripper.push(answer.slice(0, cut)) +
+          stripper.push(answer.slice(cut, second)) +
+          stripper.push(answer.slice(second)) +
+          stripper.flush();
+        expect(joined).toBe(expected);
+        expect(stripper.text).toBe(expected);
+      }
+    }
+    // A continuation whose first part ended at a blank line.
+    expect(streamed(["    items[1]\nDone[2]."], "Example:\n\n").text).toBe("    items[1]\nDone.");
+    expect(streamed(["items[1]\n"], "Example:\n\n    ").text).toBe("items[1]\n");
   });
 
   it("holds a long unfinished marker group instead of sending it early", () => {

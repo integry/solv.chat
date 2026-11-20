@@ -427,6 +427,50 @@ describe("chat: Show sources in answers", () => {
     );
   });
 
+  it("off: markers in indented code stay, in the answer and in its continuation", async () => {
+    await configure(withSources(false, true));
+    const navigate: ToolCall = {
+      callId: "call_nav_1",
+      name: "navigate",
+      input: { path: "/docs/reset" },
+    };
+    const app = createApp(fakeSeams(), {
+      chat: {
+        embedder,
+        retriever,
+        model: ANTHROPIC_MODELS.balanced,
+        provider: scriptedProvider([
+          {
+            chunks: ["Example [1]:\n\n  ", "  items[", "1]\n\n"],
+            calls: [navigate],
+          },
+          { chunks: ["    pair[2", "]\n\nDone [1]."] },
+        ]),
+      },
+    });
+
+    const first = parseSseBody(
+      await post(app, { message: QUESTION, pageActions: [NAVIGATE_ACTION] }),
+    );
+    expect(tokenText(first)).toBe("Example:\n\n    items[1]\n\n");
+    const done1 = first.at(-1);
+    if (done1?.type !== "done") throw new Error("expected done last");
+
+    const second = parseSseBody(
+      await post(app, {
+        conversationId: done1.conversationId,
+        resumeMessageId: done1.messageId,
+        actionResults: [{ callId: "call_nav_1", ok: true, result: "opened" }],
+      }),
+    );
+    expect(tokenText(second)).toBe("    pair[2]\n\nDone.");
+
+    const [reply] = (await tenant.messages.list(done1.conversationId)).filter(
+      (m) => m.role === "assistant",
+    );
+    expect(reply?.content).toBe("Example:\n\n    items[1]\n\n    pair[2]\n\nDone.");
+  });
+
   it("off: a test run's cites check reads the pages the answer used", async () => {
     await configure(withSources(true), withSources(false));
     await tenant.tests.create({

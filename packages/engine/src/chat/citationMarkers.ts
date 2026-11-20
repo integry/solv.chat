@@ -7,8 +7,8 @@
  * Narrow on purpose, so a site's own text survives:
  * - only numbers from 1 to `maxSource` (the most sources a prompt can carry),
  *   so "[2024]" or "[42]" stay;
- * - never inside Markdown code (an inline code span or a fenced block), so
- *   `items[1]` in a code sample stays. In prose a marker goes wherever it is,
+ * - never inside Markdown code (an inline code span, a fenced block or an
+ *   indented block), so `items[1]` in a code sample stays. In prose a marker goes wherever it is,
  *   also straight after a word ("Forgot Password[1].");
  * - never a Markdown link (`[1](https://…)`).
  * The spaces before a marker go with it: "open at 9 [1]." becomes "open at 9.".
@@ -43,8 +43,12 @@ function stripAll(text: string, maxSource: number): string {
  * The `[start, end)` ranges of `text` that are prose, not Markdown code.
  * A fence is a line starting (after up to three spaces) with three or more
  * backticks or tildes, and runs to a line starting with at least as many of
- * the same and nothing else but spaces; unclosed, to the end. Elsewhere a run
- * of backticks opens an inline span that ends at the same number of backticks or at a blank line.
+ * the same and nothing else but spaces; unclosed, to the end. An indented
+ * block is a line indented four columns past the current list item's text
+ * (a tab reaching the next multiple of four), where a paragraph cannot hold
+ * it: first in the text, or after a blank line, a heading, a closing fence or
+ * another indented line. Elsewhere a run of backticks opens an inline span
+ * that ends at the same number of backticks or at a blank line.
  *
  * Read strictly left to right: whether a character is code depends only on
  * the text before it, so appending text never turns already-sent prose into
@@ -62,10 +66,47 @@ function blankLineAt(text: string, at: number): number | null {
   return text[p] === "\n" ? p : null;
 }
 
+/** How far `text` is indented from `at`, with tabs reaching the next multiple of four. */
+function indentAt(text: string, at: number): { width: number; end: number } {
+  let width = 0;
+  let end = at;
+  while (text[end] === " " || text[end] === "\t") {
+    width = text[end] === "\t" ? width + 4 - (width % 4) : width + 1;
+    end++;
+  }
+  return { width, end };
+}
+
+const LIST_MARKER = /^(?:[-*+]|\d{1,9}[.)])(?=[ \t]|$)/u;
+const ATX_HEADING = /^#{1,6}(?:[ \t\n]|$)/u;
+
+/**
+ * The column a list item's text starts at, if the line whose text starts at
+ * `at` (indented `width`) is a list item; otherwise null.
+ */
+function listItemColumn(text: string, at: number, width: number): number | null {
+  const lineEnd = text.indexOf("\n", at);
+  const line = text.slice(at, lineEnd === -1 ? text.length : lineEnd);
+  const marker = LIST_MARKER.exec(line);
+  if (marker === null) return null;
+  const after = indentAt(line, marker[0].length);
+  const gap = after.width;
+  // Text more than four columns past the marker is itself indented code; the
+  // item's text then starts one column after the marker, as with no text.
+  const textGap = gap >= 1 && gap <= 4 && after.end < line.length ? gap : 1;
+  return width + marker[0].length + textGap;
+}
+
 function proseRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   let proseStart = 0;
   let i = 0;
+  // Whether the next line may start an indented code block (it cannot
+  // continue a paragraph), and the column a list item's text starts at, so
+  // that text indented to stay in the item is not taken for code.
+  let codeMayStart = true;
+  let previousBlank = true;
+  let listColumn = 0;
   const runAt = (at: number, char: string): number => {
     let end = at;
     while (text[end] === char) end++;
@@ -91,6 +132,28 @@ function proseRanges(text: string): Array<[number, number]> {
   };
   while (i < text.length) {
     const atLineStart = i === 0 || text[i - 1] === "\n";
+    if (atLineStart) {
+      const indent = indentAt(text, i);
+      const blank = indent.end === text.length || text[indent.end] === "\n";
+      if (blank) {
+        codeMayStart = true;
+        previousBlank = true;
+      } else if (codeMayStart && indent.width >= listColumn + 4) {
+        // An indented code line, up to its line break.
+        ranges.push([proseStart, i]);
+        const lineEnd = text.indexOf("\n", i);
+        i = lineEnd === -1 ? text.length : lineEnd;
+        proseStart = i;
+        previousBlank = false;
+        continue;
+      } else {
+        const item = listItemColumn(text, indent.end, indent.width);
+        if (item !== null) listColumn = item;
+        else if (previousBlank && indent.width < listColumn) listColumn = 0;
+        codeMayStart = ATX_HEADING.test(text.slice(indent.end, indent.end + 8));
+        previousBlank = false;
+      }
+    }
     const fence = atLineStart ? lineStartFence(i) : null;
     if (fence !== null) {
       ranges.push([proseStart, i]);
@@ -112,6 +175,7 @@ function proseRanges(text: string): Array<[number, number]> {
       }
       i = close;
       proseStart = close;
+      codeMayStart = true;
       continue;
     }
     if (text[i] === "`") {
@@ -132,6 +196,8 @@ function proseRanges(text: string): Array<[number, number]> {
         const blank = text[p] === "\n" ? blankLineAt(text, p) : null;
         if (blank !== null) {
           close = blank;
+          codeMayStart = true;
+          previousBlank = true;
           break;
         }
         p++;
