@@ -73,6 +73,13 @@ export function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(1)} s`;
 }
 
+/** "3 matches were for content that has since changed": recent changes not yet caught up. */
+function staleText(count: number): string {
+  return count === 1
+    ? "1 match was for content that has since changed"
+    : `${count} matches were for content that has since changed`;
+}
+
 function statusFor(candidate: AnswerTraceCandidate): { tone: StatusTone; label: string } {
   if (candidate.used) return { tone: "success", label: "Used" };
   switch (candidate.dropped) {
@@ -196,7 +203,16 @@ function TracePartView({
             : `${PROVIDER_LABELS[part.model.provider]} ${part.model.id} (${KEY_SOURCE_LABELS[part.model.keySource]})`}
         </dd>
         <dt>Searching your content</dt>
-        <dd>{formatMs(part.retrieval.ms)}</dd>
+        <dd>
+          {formatMs(part.retrieval.ms)}
+          {typeof part.retrieval.stale === "number" && part.retrieval.stale > 0 && (
+            <>
+              {" "}
+              ({staleText(part.retrieval.stale)}
+              {part.retrieval.searchedAgain === true ? ", so it searched again" : ""})
+            </>
+          )}
+        </dd>
         <dt>First words shown</dt>
         <dd>
           {part.timing.firstTokenMs === null

@@ -28,6 +28,9 @@ export const VECTORIZE_UPSERT_BATCH_LIMIT = 1000;
 // The same page states no limit for `deleteByIds`; deletes use the upsert
 // batch size so one call never carries more ids than one upsert would.
 export const VECTORIZE_DELETE_BATCH_LIMIT = VECTORIZE_UPSERT_BATCH_LIMIT;
+// The same page: "Maximum returned results (`topK`) without values and
+// metadata: 100". Queries here ask for neither.
+export const VECTORIZE_MAX_TOP_K = 100;
 
 export interface EmbedResult {
   vectors: number[][];

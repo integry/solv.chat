@@ -204,6 +204,44 @@ describe("How this answer was made", () => {
     expect(calls.some((c) => c.includes("/conversations/"))).toBe(false);
   });
 
+  it("says how many matches were for changed content, and that it searched again", async () => {
+    const base = part();
+    const stale = part({ retrieval: { ...base.retrieval, stale: 12, searchedAgain: true } });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          trace({ messageId: "msg_test", trace: { parts: [stale], truncated: false } }),
+        ),
+      ),
+    );
+    render(<AnswerTraceView assistantId="ast_1" messageId="msg_test" />);
+    const details = await openTrace();
+    await waitFor(() =>
+      expect(details.textContent).toContain(
+        "Searching your content120 ms (12 matches were for content that has since changed, so it searched again)",
+      ),
+    );
+  });
+
+  it("says nothing of changed content on an answer that met none, or from before it was counted", async () => {
+    const base = part();
+    const none = part({ retrieval: { ...base.retrieval, stale: 0, searchedAgain: false } });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          trace({ messageId: "msg_test", trace: { parts: [none, base], truncated: false } }),
+        ),
+      ),
+    );
+    render(<AnswerTraceView assistantId="ast_1" messageId="msg_test" />);
+    const details = await openTrace();
+    await waitFor(() => expect(details.textContent).toContain("Searching your content120 ms"));
+    expect(details.textContent).not.toContain("has since changed, so");
+    expect(details.textContent).not.toContain("matches were for");
+  });
+
   it("labels a test run's answer as the draft in a test run", async () => {
     vi.stubGlobal(
       "fetch",

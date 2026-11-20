@@ -334,7 +334,15 @@ export interface AnswerTracePartView {
     } | null;
   };
   model: TracePart["model"];
-  retrieval: { floor: number; ms: number; candidates: AnswerTraceCandidate[] };
+  retrieval: {
+    floor: number;
+    ms: number;
+    candidates: AnswerTraceCandidate[];
+    /** Hits whose content was gone (the index had not caught up); null on older traces. */
+    stale: number | null;
+    /** Whether it searched again because of them; null on older traces. */
+    searchedAgain: boolean | null;
+  };
   timing: TracePart["timing"];
   tools: TracePart["tools"];
 }
@@ -445,7 +453,12 @@ async function traceView(
   ];
   const versionIds = [...new Set(stored.parts.map((p) => p.version.id))];
   const [chunks, versions] = await Promise.all([
-    tenant.documents.chunksByIds(assistantId, chunkIds),
+    // At most 98 ids per read (D1's 100 bound parameters, two for org and assistant).
+    Promise.all(
+      Array.from({ length: Math.ceil(chunkIds.length / 98) }, (_, i) =>
+        tenant.documents.chunksByIds(assistantId, chunkIds.slice(i * 98, (i + 1) * 98)),
+      ),
+    ).then((groups) => groups.flat()),
     Promise.all(versionIds.map((id) => tenant.versions.byId(assistantId, id))),
   ]);
   const chunkById = new Map(chunks.map((c) => [c.id, c]));
@@ -467,6 +480,9 @@ async function traceView(
       retrieval: {
         floor: part.retrieval.floor,
         ms: part.retrieval.ms,
+        stale: typeof part.retrieval.stale === "number" ? part.retrieval.stale : null,
+        searchedAgain:
+          typeof part.retrieval.searchedAgain === "boolean" ? part.retrieval.searchedAgain : null,
         candidates: part.retrieval.candidates.map((candidate): AnswerTraceCandidate => {
           const chunk = chunkById.get(candidate.chunkId);
           return {

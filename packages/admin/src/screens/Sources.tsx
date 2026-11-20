@@ -20,6 +20,7 @@ import { useToast } from "../ui/Toast.js";
 import { cliPushCommand } from "./cliCommand.js";
 import { EntryEditor } from "./EntryEditor.js";
 import { RebuildNotice } from "./RebuildNotice.js";
+import { RecentChangesNotice } from "./RecentChangesNotice.js";
 import { RepeatedBlocksList, repeatedBlocksText } from "./RepeatedBlocks.js";
 import {
   isSyncing,
@@ -1045,6 +1046,8 @@ export function Sources({ assistantId }: SourcesProps) {
           {actionError}
         </p>
       )}
+
+      <RecentChangesNotice assistantId={assistantId} refresh={sourcesRes.value} />
 
       <RebuildNotice assistantId={assistantId} onRebuilt={sourcesRes.reload} />
 
