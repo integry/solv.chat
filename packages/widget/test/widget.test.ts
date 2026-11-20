@@ -155,6 +155,50 @@ describe("<solv-chat>", () => {
     expect(links[0]?.textContent).toBe("Guide");
   });
 
+  it("renders no sources block for an answer sent without citations (Show sources in answers off), also after a reload", async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/assistants/pk_test_123")) {
+        return Response.json({ title: "Docs Helper", greeting: "Hi there!" });
+      }
+      if (url.endsWith("/v1/chat")) {
+        return new Response(
+          sseStream([
+            'event: token\ndata: {"text":"Click Forgot Password"}\n\n',
+            'event: token\ndata: {"text":" to reset."}\n\n',
+            'event: done\ndata: {"messageId":"msg_1","conversationId":"conv_1"}\n\n',
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    const el = mountWidget("pk_test_123");
+    await flushAsync();
+    const root = shadow(el);
+    mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "How do I reset it?";
+    mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    const bubble = mustQuery<HTMLElement>(root, ".solv-bubble--assistant:last-of-type");
+    expect(bubble.querySelector(".solv-bubble-text")?.textContent).toBe(
+      "Click Forgot Password to reset.",
+    );
+    // No empty container left to take up space under the answer.
+    expect(root.querySelector(".solv-citations")).toBeNull();
+    expect(root.querySelector(".solv-citation")).toBeNull();
+
+    // The restored transcript has none either.
+    el.remove();
+    const again = mountWidget("pk_test_123");
+    await flushAsync();
+    const restored = shadow(again);
+    expect(restored.textContent).toContain("Click Forgot Password to reset.");
+    expect(restored.querySelector(".solv-citations")).toBeNull();
+  });
+
   it("restores conversation for the same assistant key, isolates other keys, and resets when sessionStorage is cleared", async () => {
     const conversationIds: Array<string | undefined> = [];
 

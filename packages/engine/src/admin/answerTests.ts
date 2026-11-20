@@ -99,7 +99,12 @@ function notRun(test: TestRow, reason: string): TestResult {
  */
 function evaluate(
   expectation: TestExpectation,
-  answer: { text: string; citations: Array<{ url: string }>; usedFallback: boolean },
+  answer: {
+    text: string;
+    citations: Array<{ url: string }>;
+    citationsShown: boolean;
+    usedFallback: boolean;
+  },
   fallbackText: string,
 ): { passed: boolean; reason: string } {
   switch (expectation.kind) {
@@ -107,13 +112,22 @@ function evaluate(
       // Whole-URL comparison. A substring match would pass a test about
       // /pricing when the answer cited /pricing-archive.
       const found = answer.citations.some((citation) => citation.url === expectation.url);
+      const listed = answer.citations.map((citation) => citation.url).join(", ") || "nothing";
+      // With "Show sources in answers" off the visitor sees no citations, so
+      // the check is on the pages the answer used, and says so.
+      if (!answer.citationsShown) {
+        return {
+          passed: found,
+          reason: found
+            ? `Used ${expectation.url}.`
+            : `Did not use ${expectation.url}. Used: ${listed}.`,
+        };
+      }
       return {
         passed: found,
         reason: found
           ? `Cited ${expectation.url}.`
-          : `Did not cite ${expectation.url}. Cited: ${
-              answer.citations.map((citation) => citation.url).join(", ") || "nothing"
-            }.`,
+          : `Did not cite ${expectation.url}. Cited: ${listed}.`,
       };
     }
     case "contains": {
@@ -381,6 +395,7 @@ export async function runAnswerTests(
     const answer = {
       text: "",
       citations: [] as Array<{ url: string }>,
+      citationsShown: draft.config.behaviour.showSources,
       usedFallback: false,
       traceId: undefined as string | undefined,
     };
@@ -417,6 +432,15 @@ export async function runAnswerTests(
           scoreFloor: deps.scoreFloor,
           runners,
           signal: controller.signal,
+          // Off, no citation event is sent; the pages the answer used still
+          // decide a "cites" test.
+          ...(draft.config.behaviour.showSources
+            ? {}
+            : {
+                onCitable: (citations: readonly { url: string }[]) => {
+                  for (const c of citations) answer.citations.push({ url: c.url });
+                },
+              }),
           // Kept apart from visitor replies, marked as a test run of this run.
           trace: {
             version: { id: draft.id, state: "draft" },

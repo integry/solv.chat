@@ -55,6 +55,7 @@ describe("version diff field table", () => {
       c.behaviour.persona = "Warm and brief.";
       c.behaviour.fallbackText = "Sorry, no idea.";
       c.behaviour.suggestedQuestions = ["Price?"];
+      c.behaviour.showSources = false;
       c.widget.title = "Help";
       c.widget.accentColor = "#ff0000";
       c.widget.position = "left";
@@ -136,6 +137,26 @@ describe("diffVersionConfigs", () => {
       ),
     );
     expect(change).toMatchObject({ kind: "boolean", before: "Off", after: "On" });
+  });
+
+  it("names Show sources in answers on Behaviour when it is turned off", () => {
+    const change = only(
+      diffVersionConfigs(
+        defaultVersionConfig(),
+        config((c) => {
+          c.behaviour.showSources = false;
+        }),
+      ),
+    );
+    expect(change).toMatchObject({
+      path: "behaviour.showSources",
+      label: "Show sources in answers",
+      screen: "Behaviour",
+      kind: "boolean",
+      before: "On",
+      after: "Off",
+    });
+    expect(summarizeChanges([change])).toBe("1 change: show sources in answers");
   });
 
   it("lists items added and removed, origins in full", () => {

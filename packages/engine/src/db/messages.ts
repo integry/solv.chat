@@ -26,6 +26,7 @@ interface Row {
   total_ms: number | null;
   outcome: string | null;
   outcome_confidence: number | null;
+  citations_shown: number;
 }
 
 export interface MessageRow {
@@ -51,6 +52,12 @@ export interface MessageRow {
   outcome: AnswerOutcome | null;
   /** The reviewer's confidence, 0 to 1, when its backend gives one. Nothing reads it yet. */
   outcomeConfidence: number | null;
+  /**
+   * Whether the visitor was shown `citations` (the version's "Show sources in
+   * answers"). Off, `citations` is still kept: it is the owner's record of
+   * the pages the answer used. True for rows written before migration 0033.
+   */
+  citationsShown: boolean;
 }
 
 export interface PendingReplyRow extends MessageRow {
@@ -89,6 +96,8 @@ export interface CreateMessageInput {
    * Stored in `message_documents`, never in `citations`: see migration 0029.
    */
   documentIds?: readonly string[] | undefined;
+  /** Assistant replies only: whether the visitor saw the citations. Left out means yes. */
+  citationsShown?: boolean | undefined;
 }
 
 /**
@@ -171,10 +180,10 @@ const SEARCH_FILL_BATCH = 200;
 const SEARCH_FILL_ROUNDS = 10;
 
 const COLUMNS =
-  "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, first_token_ms, total_ms, outcome, outcome_confidence";
+  "id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, first_token_ms, total_ms, outcome, outcome_confidence, citations_shown";
 
 const QUALIFIED_COLUMNS =
-  "m.id, m.org_id, m.conversation_id, m.role, m.content, m.citations, m.tool_calls, m.tokens_in, m.tokens_out, m.cost_micros, m.answered, m.created_at, m.reply_to, m.first_token_ms, m.total_ms, m.outcome, m.outcome_confidence";
+  "m.id, m.org_id, m.conversation_id, m.role, m.content, m.citations, m.tool_calls, m.tokens_in, m.tokens_out, m.cost_micros, m.answered, m.created_at, m.reply_to, m.first_token_ms, m.total_ms, m.outcome, m.outcome_confidence, m.citations_shown";
 
 /**
  * A reply Gaps lists, on alias `a`: the answer review stored `declined`
@@ -282,6 +291,7 @@ const map = (row: Row): MessageRow => ({
   totalMs: row.total_ms ?? null,
   outcome: isAnswerOutcome(row.outcome) ? row.outcome : null,
   outcomeConfidence: row.outcome_confidence ?? null,
+  citationsShown: row.citations_shown !== 0,
 });
 
 interface PendingRow extends Row {
@@ -471,6 +481,8 @@ export function messagesFor(db: D1Database, orgId: string) {
       costMicros?: number | null | undefined;
       /** Documents this continuation was given, added to those the pause recorded. */
       documentIds?: readonly string[] | undefined;
+      /** Whether the visitor saw the citations of the completed reply. Left out means yes. */
+      citationsShown?: boolean | undefined;
       /**
        * When this continuation saved the reply (`resumed_at`). The review
        * catch-up counts its wait from here, so it never takes a reply whose
@@ -492,7 +504,8 @@ export function messagesFor(db: D1Database, orgId: string) {
                 resume_claim = NULL,
                 resume_claimed_at = NULL,
                 resume_revision = resume_revision + 1,
-                resumed_at = ?13
+                resumed_at = ?13,
+                citations_shown = ?14
           WHERE org_id = ?1
             AND id = ?2
             AND resume_claim = ?9
@@ -515,6 +528,7 @@ export function messagesFor(db: D1Database, orgId: string) {
           params.costMicros === undefined ? 0 : params.costMicros,
           searchableText(params.content),
           params.now,
+          params.citationsShown === false ? 0 : 1,
         );
       const documentIds = params.documentIds ?? [];
       if (documentIds.length === 0) {
@@ -632,8 +646,8 @@ export function messagesFor(db: D1Database, orgId: string) {
       const questionKey = input.role === "user" ? normalizeQuestionText(input.content) : null;
       const insert = prepareInsert(
         db,
-        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, question_key, resume_context, search_text, first_token_ms, total_ms)
-         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)`,
+        `INSERT INTO messages (id, org_id, conversation_id, role, content, citations, tool_calls, tokens_in, tokens_out, cost_micros, answered, created_at, reply_to, question_key, resume_context, search_text, first_token_ms, total_ms, citations_shown)
+         VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)`,
       ).bind(
         orgId,
         input.id,
@@ -653,6 +667,7 @@ export function messagesFor(db: D1Database, orgId: string) {
         searchableText(input.content),
         input.role === "assistant" ? (input.firstTokenMs ?? null) : null,
         input.role === "assistant" ? (input.totalMs ?? null) : null,
+        input.role === "assistant" && input.citationsShown === false ? 0 : 1,
       );
       const documentIds = input.role === "assistant" ? (input.documentIds ?? []) : [];
       // One transaction: a reply is never stored without the record of what
@@ -683,6 +698,7 @@ export function messagesFor(db: D1Database, orgId: string) {
         totalMs: input.role === "assistant" ? (input.totalMs ?? null) : null,
         outcome: null,
         outcomeConfidence: null,
+        citationsShown: !(input.role === "assistant" && input.citationsShown === false),
       };
     },
 

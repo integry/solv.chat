@@ -248,6 +248,36 @@ describe("Publish confirmation", () => {
     expect(onConfirm).toHaveBeenCalledWith({ draftId: "ver_draft", revision: "rev_ver_draft" });
   });
 
+  it("names Show sources in answers when the draft turns it off", async () => {
+    stubVersions([
+      row(
+        "ver_draft",
+        "draft",
+        config((c) => {
+          c.behaviour.showSources = false;
+        }),
+        null,
+        1_700_000_200_000,
+      ),
+      row("ver_pub", "published", LIVE, 1_700_000_100_000),
+    ]);
+    render(
+      <PublishConfirmDialog assistantId="ast_1" open onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    const region = within(screen.getByRole("dialog")).getByRole("region", {
+      name: "What will change",
+    });
+    const item = (await within(region).findByText("Show sources in answers")).closest(
+      "li",
+    ) as HTMLElement;
+    expect(item.textContent).toBe("Show sources in answersWasOnNowOff");
+    expect(
+      within(region)
+        .getAllByRole("heading", { level: 4 })
+        .map((h) => h.textContent),
+    ).toEqual(["Behaviour"]);
+  });
+
   it("says why it is asking again", async () => {
     stubVersions([
       row("ver_draft", "draft", EDITED, null, 1_700_000_200_000),

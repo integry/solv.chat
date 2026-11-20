@@ -13,6 +13,7 @@ import { ProviderError } from "../providers/error.js";
 import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
 import type { LlmMessage, LlmProvider, LlmToolResult, ToolCall } from "../providers/types.js";
 import type { UsageSink } from "../seams/types.js";
+import { type MarkerStripper, markerStripper } from "./citationMarkers.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
 import type { ReviewJob } from "./review.js";
 import { DEFAULT_SCORE_FLOOR, selectChunks } from "./scoreFloor.js";
@@ -79,6 +80,12 @@ export interface AnswerDeps {
    * trace, and runs as deferred work that cannot reach the visitor.
    */
   review?: AnswerReviewHook | undefined;
+  /**
+   * Given, once a reply is complete, the pages it could cite, whether or not
+   * the visitor is shown them ("Show sources in answers" off). Internal: a
+   * test run's "cites" check reads it, and nothing here reaches a visitor.
+   */
+  onCitable?: ((citations: readonly Citation[]) => void) | undefined;
 }
 
 export interface AnswerReviewHook {
@@ -160,6 +167,15 @@ function citableByUrl(chunks: readonly ResolvedChunk[]): ResolvedChunk[] {
  */
 function usedDocumentIds(chunks: readonly ResolvedChunk[]): string[] {
   return [...new Set(chunks.map((chunk) => chunk.documentId))];
+}
+
+/**
+ * The marker filter for a reply, or null when the version shows its sources
+ * (then the stream is passed on untouched, exactly as before the setting).
+ * `TOP_K` bounds the numbers: no prompt carries more sources than that.
+ */
+function strippingFor(behaviour: BehaviourConfig, before = ""): MarkerStripper | null {
+  return behaviour.showSources === false ? markerStripper(TOP_K, before) : null;
 }
 
 /**
@@ -545,6 +561,12 @@ export async function* answerMessage(
           MAX_TOOL_CALLS_PER_CONVERSATION,
         );
 
+  // "Show sources in answers" off: markers are taken out of the stream before
+  // the visitor gets it, and out of the stored text, and no citation event is
+  // sent. What the answer used is still recorded for the owner.
+  const showSources = input.behaviour.showSources !== false;
+  const stripper = strippingFor(input.behaviour);
+
   let text = "";
   let toolCalls: StoredToolCall[] = [];
   let pending: ToolCall[] = [];
@@ -605,8 +627,11 @@ export async function* answerMessage(
       }
       const event = step.value;
       if (event.kind === "text") {
-        recorder.firstToken();
-        yield { type: "token", text: event.text };
+        const out = stripper === null ? event.text : stripper.push(event.text);
+        if (stripper === null || out !== "") {
+          recorder.firstToken();
+          yield { type: "token", text: out };
+        }
       } else {
         // Detail the widget may show and a v1 widget ignores.
         yield {
@@ -625,6 +650,16 @@ export async function* answerMessage(
       return;
     }
     throw err;
+  }
+
+  if (stripper !== null) {
+    // What was held back in case it was the start of a marker.
+    const rest = stripper.flush();
+    if (rest !== "") {
+      recorder.firstToken();
+      yield { type: "token", text: rest };
+    }
+    text = stripper.text;
   }
 
   const cited = citableByUrl(chunks);
@@ -658,6 +693,7 @@ export async function* answerMessage(
         firstTokenMs: timing.firstTokenMs,
         totalMs: timing.totalMs,
         documentIds,
+        citationsShown: showSources,
       });
     }
     for (const call of pending) {
@@ -694,9 +730,12 @@ export async function* answerMessage(
 
   // Citations after the text: the widget renders them under the answer, and
   // emitting them first would show links before there is anything to link to.
-  for (const chunk of cited) {
-    yield { type: "citation", url: chunk.url, title: chunk.title };
+  if (showSources) {
+    for (const chunk of cited) {
+      yield { type: "citation", url: chunk.url, title: chunk.title };
+    }
   }
+  deps.onCitable?.(citations);
 
   if (!input.preview) {
     await deps.tenant.messages.create({
@@ -717,6 +756,7 @@ export async function* answerMessage(
       firstTokenMs: timing.firstTokenMs,
       totalMs: timing.totalMs,
       documentIds,
+      citationsShown: showSources,
     });
   }
 
@@ -966,6 +1006,10 @@ export async function* answerWithActionResults(
         MAX_TOOL_CALLS_PER_CONVERSATION,
       );
 
+    const showSources = input.behaviour.showSources !== false;
+    // The paused part was stored already clean; only the new text is filtered.
+    const stripper = strippingFor(input.behaviour, pendingReply.content);
+
     let text = pendingReply.content;
     let newCalls: StoredToolCall[] = [];
     let nextPending: ToolCall[] = [];
@@ -1017,8 +1061,11 @@ export async function* answerWithActionResults(
         }
         const event = step.value;
         if (event.kind === "text") {
-          recorder.firstToken();
-          yield { type: "token", text: event.text };
+          const out = stripper === null ? event.text : stripper.push(event.text);
+          if (stripper === null || out !== "") {
+            recorder.firstToken();
+            yield { type: "token", text: out };
+          }
         } else {
           yield {
             type: "tool",
@@ -1057,6 +1104,15 @@ export async function* answerWithActionResults(
       return;
     }
 
+    if (stripper !== null) {
+      const rest = stripper.flush();
+      if (rest !== "") {
+        recorder.firstToken();
+        yield { type: "token", text: rest };
+      }
+      text = pendingReply.content + stripper.text;
+    }
+
     const resumedCitations = citableByUrl(chunks).map((c) => ({ url: c.url, title: c.title }));
     // Retain citations that supported text generated before the pause alongside
     // newly retrieved sources so the combined answer stays consistently attributed.
@@ -1080,6 +1136,7 @@ export async function* answerWithActionResults(
       tokensOut,
       costMicros: resumeCost,
       documentIds: usedDocumentIds(chunks),
+      citationsShown: showSources,
       now: clock(),
     });
     if (!saved) {
@@ -1113,9 +1170,12 @@ export async function* answerWithActionResults(
       return;
     }
 
-    for (const citation of citations) {
-      yield { type: "citation", url: citation.url, title: citation.title };
+    if (showSources) {
+      for (const citation of citations) {
+        yield { type: "citation", url: citation.url, title: citation.title };
+      }
     }
+    deps.onCitable?.(citations);
 
     yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
     await saveTrace(

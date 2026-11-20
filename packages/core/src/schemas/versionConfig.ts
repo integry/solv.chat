@@ -9,6 +9,12 @@ export interface BehaviourConfig {
   persona: string;
   fallbackText: string;
   suggestedQuestions: string[];
+  /**
+   * "Show sources in answers". On: answers carry `[n]` markers and the
+   * visitor gets the cited pages under the answer. Off: neither, though the
+   * owner's own records of what an answer used are kept as before.
+   */
+  showSources: boolean;
 }
 
 export interface WidgetConfig {
@@ -64,6 +70,8 @@ export const defaultVersionConfig = (): VersionConfig => ({
     persona: "",
     fallbackText: "I could not find an answer to that on this site.",
     suggestedQuestions: [],
+    // On, so an assistant stored before the setting existed keeps citing.
+    showSources: true,
   },
   widget: {
     title: "Ask a question",
@@ -119,6 +127,13 @@ function parseBehaviourSection(raw: unknown, target: BehaviourConfig, errors: Er
         }
       });
       target.suggestedQuestions = questions;
+    }
+  }
+  if (raw.showSources !== undefined) {
+    if (typeof raw.showSources !== "boolean") {
+      errors.add("behaviour.showSources", "must be true or false");
+    } else {
+      target.showSources = raw.showSources;
     }
   }
 }
