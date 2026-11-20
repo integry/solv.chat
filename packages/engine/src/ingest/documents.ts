@@ -394,7 +394,10 @@ export async function removeSourceDocuments(
   for (let i = 0; i < bodyKeys.length; i += R2_DELETE_KEYS_LIMIT) {
     await tryDeleteObject(deps.docs, bodyKeys.slice(i, i + R2_DELETE_KEYS_LIMIT), sourceId);
   }
-  // Fewer pages: a block may now be over the threshold, or under it.
+  // Fewer pages: a block may now be over the threshold, or under it. A
+  // failure here does not fail the removal: once a changed set is stored,
+  // the pages it owes a rebuild stay pending in D1 and the source's next
+  // reconciliation (a commit, a removal, a queued page) queues them.
   const repeated = deps.repeated;
   if (removed.size > 0 && repeated !== undefined) {
     try {

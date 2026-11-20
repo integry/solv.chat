@@ -2,6 +2,7 @@
 // "Repeated blocks" in docs/architecture.md). The pure rules are in
 // `repeated.ts`; this is the part that reads and writes D1 and the queue.
 import type { RepeatedBlock, RepeatedBlocks } from "@solvchat/core";
+import type { StoredRepeated } from "../db/blocks.js";
 import type { Tenant } from "../db/tenant.js";
 import type { IngestQueueMessage } from "./documents.js";
 import { normalizeBlock, type PageBlocks, pageBlocks, repeatedKey } from "./repeated.js";
@@ -39,11 +40,17 @@ export interface CommittedPage {
  * and the stored blocks are not the ones it was built with (they changed
  * while it was built), that page is queued too.
  *
+ * The hashes whose status changed are stored as pending in the same
+ * statement as the new set, and removed only after every send succeeded: a
+ * send that fails (or a run that stops) after the set is stored leaves them
+ * pending, and the next run, which finds the set unchanged, queues their
+ * pages again. Queuing a page twice costs nothing; its key then matches.
+ *
  * Each page is then rebuilt from its stored text once by the consumer; a
  * page whose chunks come out the same is not embedded again. With the
  * counts held in `source_blocks`, nothing here reads more than the source's
  * page count, the rows over the threshold, and the pages holding a hash
- * whose status changed.
+ * whose status changed or is pending.
  */
 export async function reconcileRepeated(
   tenant: Tenant,
@@ -53,10 +60,14 @@ export async function reconcileRepeated(
   committed?: CommittedPage,
 ): Promise<{ queued: number }> {
   let current: Set<string> | null = null;
-  const toQueue = new Map<string, string>();
+  // The hashes whose pages this run queues, and the store they were read at.
+  let owed: string[] = [];
+  let rev = 0;
   for (let attempt = 0; attempt < SWAP_ATTEMPTS; attempt++) {
     const stored = await tenant.blocks.stored(sourceId);
     if (stored === null) return { queued: 0 };
+    owed = stored.pending;
+    rev = stored.rev;
     const next = await tenant.blocks.compute(sourceId);
     const before = new Set(stored.hashes);
     const after = new Set(next);
@@ -70,12 +81,15 @@ export async function reconcileRepeated(
     }
     // Compare-and-set: two commits that both see a change store it once,
     // and the one that loses reads again.
-    if (!(await tenant.blocks.swap(sourceId, stored.raw, next))) continue;
+    if (!(await tenant.blocks.swap(sourceId, stored.raw, next, changed))) continue;
     current = after;
-    for (const doc of await tenant.blocks.documentsWith(sourceId, changed)) {
-      toQueue.set(doc.id, doc.contentHash);
-    }
+    owed = [...new Set([...stored.pending, ...changed])];
+    rev = stored.rev + 1;
     break;
+  }
+  const toQueue = new Map<string, string>();
+  for (const doc of await tenant.blocks.documentsWith(sourceId, owed)) {
+    toQueue.set(doc.id, doc.contentHash);
   }
   if (committed !== undefined && current !== null) {
     if ((await repeatedKey(committed.page, current)) !== committed.key) {
@@ -88,6 +102,7 @@ export async function reconcileRepeated(
   for (let i = 0; i < messages.length; i += QUEUE_SEND_BATCH_MESSAGES) {
     await queue.sendBatch(messages.slice(i, i + QUEUE_SEND_BATCH_MESSAGES));
   }
+  await tenant.blocks.settle(sourceId, rev, owed);
   return { queued: messages.length };
 }
 
@@ -99,13 +114,11 @@ export async function reconcileRepeated(
 export async function builtWithCurrentRepeated(
   tenant: Tenant,
   document: { id: string; sourceId: string; repeatedKey: string | null },
+  stored: StoredRepeated | null,
 ): Promise<boolean> {
   if (document.repeatedKey === null) return false;
-  const [stored, hashes] = await Promise.all([
-    tenant.blocks.stored(document.sourceId),
-    tenant.blocks.forDocument(document.id),
-  ]);
   if (stored === null) return true;
+  const hashes = await tenant.blocks.forDocument(document.id);
   const repeated = new Set(stored.hashes);
   const page: PageBlocks = { blocks: [], units: [], hashes };
   return (await repeatedKey(page, repeated)) === document.repeatedKey;

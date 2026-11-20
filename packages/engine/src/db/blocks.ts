@@ -5,11 +5,22 @@ import {
 } from "../ingest/repeated.js";
 import { prepare, safeJsonArray } from "./sql.js";
 
-/** A source's repeated block hashes as stored: sorted, and the raw JSON for a compare-and-set. */
+/**
+ * A source's repeated block hashes as stored: sorted, and the raw JSON for a
+ * compare-and-set; with the hashes whose pages are still owed a rebuild
+ * (`pending`) and the count of stores (`rev`) that guards their removal.
+ */
 export interface StoredRepeated {
   hashes: string[];
   raw: string;
+  pending: string[];
+  rev: number;
 }
+
+const stringArray = (raw: string): string[] =>
+  safeJsonArray<unknown>(raw)
+    .filter((value): value is string => typeof value === "string")
+    .sort();
 
 /** Hashes for a JSON parameter: deduplicated and sorted. */
 const hashList = (hashes: readonly string[]): string => JSON.stringify([...new Set(hashes)].sort());
@@ -25,15 +36,18 @@ export function blocksFor(db: D1Database, orgId: string) {
     async stored(sourceId: string): Promise<StoredRepeated | null> {
       const row = await prepare(
         db,
-        "SELECT repeated_blocks FROM sources WHERE org_id = ?1 AND id = ?2",
+        `SELECT repeated_blocks, repeated_pending, repeated_rev
+           FROM sources WHERE org_id = ?1 AND id = ?2`,
       )
         .bind(orgId, sourceId)
-        .first<{ repeated_blocks: string }>();
+        .first<{ repeated_blocks: string; repeated_pending: string; repeated_rev: number }>();
       if (row === null) return null;
-      const hashes = safeJsonArray<unknown>(row.repeated_blocks)
-        .filter((value): value is string => typeof value === "string")
-        .sort();
-      return { hashes, raw: row.repeated_blocks };
+      return {
+        hashes: stringArray(row.repeated_blocks),
+        raw: row.repeated_blocks,
+        pending: stringArray(row.repeated_pending),
+        rev: Number(row.repeated_rev),
+      };
     },
 
     /**
@@ -62,13 +76,58 @@ export function blocksFor(db: D1Database, orgId: string) {
       return res.results.map((row) => row.block_hash);
     },
 
-    /** Stores `next` as the source's repeated hashes if they are still `expectedRaw`. */
-    async swap(sourceId: string, expectedRaw: string, next: readonly string[]): Promise<boolean> {
+    /**
+     * Stores `next` as the source's repeated hashes if they are still
+     * `expectedRaw`, and in the same statement adds `changed` (the hashes
+     * whose status this changes) to the pending ones, so the pages holding
+     * them stay owed a rebuild until `settle` removes them.
+     */
+    async swap(
+      sourceId: string,
+      expectedRaw: string,
+      next: readonly string[],
+      changed: readonly string[],
+    ): Promise<boolean> {
       const res = await prepare(
         db,
-        "UPDATE sources SET repeated_blocks = ?4 WHERE org_id = ?1 AND id = ?2 AND repeated_blocks = ?3",
+        `UPDATE sources
+            SET repeated_blocks = ?4,
+                repeated_pending = (
+                  SELECT json_group_array(value) FROM (
+                    SELECT value FROM json_each(sources.repeated_pending)
+                    UNION SELECT value FROM json_each(?5)
+                    ORDER BY value
+                  )
+                ),
+                repeated_rev = repeated_rev + 1
+          WHERE org_id = ?1 AND id = ?2 AND repeated_blocks = ?3`,
       )
-        .bind(orgId, sourceId, expectedRaw, hashList(next))
+        .bind(orgId, sourceId, expectedRaw, hashList(next), hashList(changed))
+        .run();
+      return (res.meta.changes ?? 0) > 0;
+    },
+
+    /**
+     * Removes `delivered` from the source's pending hashes once their pages
+     * are queued, unless the repeated hashes were stored again since `rev`
+     * was read (the pages that store owes may not be queued yet; the next
+     * reconciliation queues them and settles).
+     */
+    async settle(sourceId: string, rev: number, delivered: readonly string[]): Promise<boolean> {
+      if (delivered.length === 0) return true;
+      const res = await prepare(
+        db,
+        `UPDATE sources
+            SET repeated_pending = (
+                  SELECT json_group_array(value) FROM (
+                    SELECT value FROM json_each(sources.repeated_pending)
+                     WHERE value NOT IN (SELECT value FROM json_each(?4))
+                     ORDER BY value
+                  )
+                )
+          WHERE org_id = ?1 AND id = ?2 AND repeated_rev = ?3`,
+      )
+        .bind(orgId, sourceId, rev, hashList(delivered))
         .run();
       return (res.meta.changes ?? 0) > 0;
     },

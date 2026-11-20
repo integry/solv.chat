@@ -62,7 +62,10 @@ from the auth seam and pass it down.
   `weekly`; left out means `off`), `maxRemovePercent` (1–100, default 50) and
   `recheckDays` (1–365, default 7); see "Scheduled sitemap sync". Every
   source also has repeated_blocks: the hashes of the text blocks that repeat
-  across most of its pages, as last worked out (see "Repeated blocks").
+  across most of its pages, as last worked out, with repeated_pending (the
+  hashes whose change of status some pages may not have been queued for yet)
+  and repeated_rev (how many times repeated_blocks was stored); see
+  "Repeated blocks".
 - `documents` — id, source_id, external_id, url, title, content_hash, updated_at,
   indexed_hash (the content last made searchable), index_error and
   index_error_hash (a short code saying why the content with that hash could
@@ -339,7 +342,14 @@ never touched. Nothing calls a model.
   they changed, every indexed page holding a hash whose status changed is
   queued (an ordinary chunk-and-embed message), and so is the page just
   committed if it was built with an older set. A queued page whose key
-  still matches is acknowledged without work.
+  still matches is acknowledged without work. The hashes whose status
+  changed are added to `repeated_pending` in the statement that stores the
+  new set, and every reconciliation queues the pages holding the pending
+  hashes too, then removes them only after all its sends succeeded (and
+  only if the set was not stored again meanwhile, by `repeated_rev`). So a
+  send that fails after the set is stored, or a run that stops between its
+  batches, loses no page: the next reconciliation queues them again, though
+  the set itself is unchanged.
 - **Determinism.** A page's chunks depend only on its text and which of its
   own hashes are repeated, and the repeated hashes depend only on the set
   of pages' hashes, so once the queue has run the same pages give the same
@@ -352,9 +362,12 @@ never touched. Nothing calls a model.
   paid for again on each crossing. Pages without the block are not
   touched. A page rebuilt into the very chunks it has (same text, heading
   paths and order, by an ingest version from `EMBEDDINGS_REUSABLE_FROM` on)
-  keeps its vectors and costs a D1 write, not an embedding. The counting is
-  best effort: if it fails after a commit, the page stays committed and the
-  source's next commit or removal catches up.
+  keeps its vectors and costs a D1 write, not an embedding. If the counting
+  fails after a commit, the page stays committed and its message is retried
+  rather than acknowledged; the retry rebuilds the page if it was built with
+  an older set, and otherwise reconciles again (as does any message for an
+  indexed page while hashes are pending). A failure after a removal does
+  not fail the removal; the pending hashes keep what it owes.
 - **Owner view.** Sources says on a source's row how many repeated blocks
   (paragraphs, lists and code blocks) are left out, and its documents panel
   lists them, with the first 80 characters of each and on how many pages it

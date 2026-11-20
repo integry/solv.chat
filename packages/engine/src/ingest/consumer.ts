@@ -196,11 +196,24 @@ async function processIngestMessage(
   // block on it crossed (or fell back under) its source's threshold, is
   // rebuilt from its stored text (a re-index; see `ingest/version.ts` and
   // "Repeated blocks"), once: the commit records the version and key.
+  const checked = checksRepeated(source.kind);
+  const stored = checked ? await tenant.blocks.stored(document.sourceId) : null;
   if (
     document.indexedHash === contentHash &&
     document.ingestVersion >= INGEST_VERSION &&
-    (!checksRepeated(source.kind) || (await builtWithCurrentRepeated(tenant, document)))
+    (!checked || (await builtWithCurrentRepeated(tenant, document, stored)))
   ) {
+    // Nothing to build, but the source may still owe pages a rebuild: a
+    // change whose pages were not all queued, or this message's own retry
+    // after its reconciliation failed. A failure here retries the message.
+    if (
+      checked &&
+      deps.queue !== undefined &&
+      stored !== null &&
+      (stored.pending.length > 0 || message.attempts > 1)
+    ) {
+      await reconcileRepeated(tenant, document.sourceId, deps.queue, orgId);
+    }
     message.ack();
     return;
   }
@@ -271,15 +284,26 @@ async function indexDocument(
     return;
   }
   const chunks = chunksToIndex(markdown, document, source.kind);
-  const reconcile = async () => {
-    if (deps.queue === undefined || committedPage === undefined) return;
-    const queue = deps.queue;
-    const page = committedPage;
-    // Best effort: the page is committed either way, and the source's next
-    // commit (or removal) works the counts out again.
-    await bestEffort("ingest consumer: could not update repeated blocks", document.id, () =>
-      reconcileRepeated(tenant, document.sourceId, queue, orgId, page),
-    );
+  // Acknowledges the committed page once the source's repeated blocks are
+  // worked out again and the pages they changed are queued. When that
+  // fails, the page stays committed and the message is retried instead:
+  // the retry rebuilds this page if it was built with an older set, and
+  // otherwise reconciles again, queuing the pages a change still owes
+  // (they stay pending in D1 until their sends succeed).
+  const reconcileAndAck = async () => {
+    if (deps.queue !== undefined && committedPage !== undefined) {
+      try {
+        await reconcileRepeated(tenant, document.sourceId, deps.queue, orgId, committedPage);
+      } catch (err) {
+        console.warn("ingest consumer: could not update repeated blocks, scheduling retry", {
+          documentId: document.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        message.retry();
+        return;
+      }
+    }
+    message.ack();
   };
 
   // Content already indexed, rebuilt for its version or repeated blocks,
@@ -296,8 +320,8 @@ async function indexDocument(
       INGEST_VERSION,
       { blocks, keepChunks: true },
     );
-    if (committed) await reconcile();
-    message.ack();
+    if (committed) await reconcileAndAck();
+    else message.ack();
     return;
   }
 
@@ -365,8 +389,7 @@ async function indexDocument(
       deps.retriever.remove(previousChunkIds),
     );
   }
-  await reconcile();
-  message.ack();
+  await reconcileAndAck();
 }
 
 /**

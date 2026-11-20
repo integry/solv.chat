@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { saveEntry } from "../../src/admin/entries.js";
 import { getRepeatedBlocks, listSources } from "../../src/admin/sources.js";
 import { forPrincipal, type Tenant } from "../../src/db/tenant.js";
+import { runIngestBatch } from "../../src/ingest/consumer.js";
 import {
   deleteDocuments,
   type IngestQueueMessage,
@@ -21,7 +22,7 @@ import { INGEST_VERSION } from "../../src/ingest/version.js";
 import type { Embedder } from "../../src/providers/retrieval.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { tokenEmbedder } from "../fakes/tokenEmbedder.js";
-import { TEST_ORG_ID } from "../helpers/app.js";
+import { acceptQueuedOrg, TEST_ORG_ID } from "../helpers/app.js";
 import { capturingQueue, drainConsumer, seedSite } from "../helpers/pipeline.js";
 
 // A site built from plain `div`s: no `nav`, `footer`, `aside` or ARIA role
@@ -354,6 +355,129 @@ describe("repeated blocks across a source's pages", { timeout: 60_000 }, () => {
     const text = await indexedText(site.sitemapSourceId);
     expect(text.size).toBe(4);
     for (const indexed of text.values()) expect(indexed).toContain(COOKIE);
+  });
+
+  /** A queue whose first `failures` sends throw before anything is delivered. */
+  function flakyQueue(failures: number) {
+    const messages: IngestQueueMessage[] = [];
+    let left = failures;
+    return {
+      messages,
+      async sendBatch(batch: Array<{ body: IngestQueueMessage }>) {
+        if (left > 0) {
+          left--;
+          throw new Error("queue unavailable");
+        }
+        messages.push(...batch.map((m) => m.body));
+      },
+    };
+  }
+
+  /** Delivers messages once to the consumer with `queue` wired in. */
+  async function deliverOnce(
+    messages: IngestQueueMessage[],
+    queue: { sendBatch(batch: Array<{ body: IngestQueueMessage }>): Promise<unknown> },
+    attempts = 1,
+  ): Promise<{ acked: number; retried: number }> {
+    let acked = 0;
+    let retried = 0;
+    await runIngestBatch(
+      {
+        messages: messages.splice(0).map((body) => ({
+          id: newId("msg"),
+          timestamp: new Date(),
+          attempts,
+          body,
+          ack() {
+            acked++;
+          },
+          retry() {
+            retried++;
+          },
+        })),
+      },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, embedder, retriever, queue },
+    );
+    return { acked, retried };
+  }
+
+  async function pending(sourceId: string): Promise<string[]> {
+    return (await tenant.blocks.stored(sourceId))?.pending ?? [];
+  }
+
+  it("still cleans the earlier pages when queuing them fails after the change is stored", async () => {
+    const pages = sitePages(6);
+    await importPages(pages.slice(0, 4), 1);
+    // The fifth page makes the chrome repeated; sending the four earlier
+    // pages to be cleaned fails after the new set is stored.
+    const fifth = await push(pages.slice(4, 5));
+    expect(await deliverOnce(fifth, flakyQueue(1))).toEqual({ acked: 0, retried: 1 });
+    expect((await tenant.blocks.stored(site.sitemapSourceId))?.hashes.length).toBeGreaterThan(0);
+    expect(await pending(site.sitemapSourceId)).not.toEqual([]);
+    expect((await indexedText(site.sitemapSourceId)).get("page-0")).toContain(COOKIE);
+
+    // A sixth page leaves the set as it is, and still brings the four in.
+    await importPages(pages.slice(5, 6), 1);
+    const text = await indexedText(site.sitemapSourceId);
+    expect(text.size).toBe(6);
+    for (const indexed of text.values()) expect(indexed).not.toContain(COOKIE);
+    expect(await pending(site.sitemapSourceId)).toEqual([]);
+  });
+
+  it("cleans the earlier pages when the failed message is retried", async () => {
+    const pages = sitePages(5);
+    await importPages(pages.slice(0, 4), 1);
+    const fifth = await push(pages.slice(4, 5));
+    const retry = [...fifth];
+    expect(await deliverOnce(fifth, flakyQueue(1))).toEqual({ acked: 0, retried: 1 });
+
+    // The retry finds its own page current, and reconciles anyway.
+    const queue = capturingQueue();
+    expect(await deliverOnce(retry, queue, 2)).toEqual({ acked: 1, retried: 0 });
+    // The five pages holding the chrome; the fifth is then acknowledged.
+    expect(queue.messages).toHaveLength(5);
+    await drainConsumer(queue.messages, { embedder, retriever });
+    for (const indexed of (await indexedText(site.sitemapSourceId)).values()) {
+      expect(indexed).not.toContain(COOKIE);
+    }
+    expect(await pending(site.sitemapSourceId)).toEqual([]);
+  });
+
+  it("gives the blocks back after a removal whose queuing failed", async () => {
+    await importPages(sitePages(6));
+    const removed = await deleteDocuments(
+      {
+        tenant,
+        docs: env.DOCS,
+        retriever,
+        repeated: { queue: flakyQueue(1), orgId: TEST_ORG_ID },
+      },
+      { orgId: TEST_ORG_ID, assistantId: site.assistantId },
+      { sourceId: site.sitemapSourceId, externalIds: ["page-4", "page-5"] },
+    );
+    expect(removed).toMatchObject({ deleted: 2 });
+    expect((await tenant.blocks.stored(site.sitemapSourceId))?.hashes).toEqual([]);
+    expect(await pending(site.sitemapSourceId)).not.toEqual([]);
+
+    // Any later message for one of the source's pages queues them all.
+    const [doc] = await tenant.documents.listBySource(site.sitemapSourceId);
+    const queue = capturingQueue();
+    await deliverOnce(
+      [
+        {
+          orgId: TEST_ORG_ID,
+          documentId: doc?.id as string,
+          contentHash: doc?.contentHash as string,
+        },
+      ],
+      queue,
+    );
+    expect(queue.messages).toHaveLength(4);
+    await drainConsumer(queue.messages, { embedder, retriever });
+    const text = await indexedText(site.sitemapSourceId);
+    expect(text.size).toBe(4);
+    for (const indexed of text.values()) expect(indexed).toContain(COOKIE);
+    expect(await pending(site.sitemapSourceId)).toEqual([]);
   });
 
   it("never touches written answers", async () => {
