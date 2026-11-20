@@ -13,10 +13,12 @@
  * (`extractHtml`). A page's stored text cannot be re-read without the page,
  * so only a sync (which fetches it) brings a page from an older version up
  * to date. Version 1 is everything before issue #123; 2 leaves out page
- * chrome and link lists.
+ * chrome and link lists; 3 (issue #128) applies the end tags HTML lets a page
+ * leave out, so an unclosed `<li>` or `<p>` no longer runs on to the end of
+ * the page.
  *
  * Bump one when a change to its part would make existing documents worse
  * than new ones.
  */
 export const INGEST_VERSION = 2;
-export const PAGE_TEXT_VERSION = 2;
+export const PAGE_TEXT_VERSION = 3;

@@ -125,6 +125,163 @@ function trimTrailingBlanks(line: string): string {
   return line.slice(0, end);
 }
 
+// --- Implied end tags ----------------------------------------------------
+//
+// HTML lets a page leave out the end tag of a list item, a paragraph, a
+// table cell and a few others; the element ends where the next one starts
+// or where its parent ends. The steps below match an element to its own end
+// tag, so on a page that leaves them out one `<li>` would run on to the next
+// `</li>` anywhere later in the page (issue #128). `closeImpliedEndTags`
+// writes those end tags in first.
+//
+// The rules are the HTML Standard's, section 13.1.2.4 "Optional tags":
+// Source: https://html.spec.whatwg.org/multipage/syntax.html#optional-tags — checked 2026-11-20
+//   - li: ends at the next li, or when its parent has no more content.
+//   - dt: ends at the next dt or dd. dd: at the next dd or dt, or its parent's end.
+//   - p: ends at the next address, article, aside, blockquote, details,
+//     dialog, div, dl, fieldset, figcaption, figure, footer, form, h1-h6,
+//     header, hgroup, hr, main, menu, nav, ol, p, pre, search, section,
+//     table or ul, or its parent's end.
+//   - rt, rp: end at the next rt or rp, or their parent's end.
+//   - optgroup: ends at the next optgroup or hr, or its parent's end.
+//   - option: ends at the next option, optgroup or hr, or its parent's end.
+//   - thead: ends at the next tbody or tfoot. tbody: at the next tbody or
+//     tfoot, or its parent's end. tfoot: at its parent's end.
+//   - tr: ends at the next tr, or its parent's end.
+//   - td, th: end at the next td or th, or their parent's end.
+// "Its parent's end" is the parent's end tag (`</ul>` ends the open `li`),
+// and the end of the page for what is still open there.
+
+/** Elements whose end tag may be left out, and the start tags that end each one. */
+const ENDED_BY = new Map<string, Set<string>>([
+  ["li", new Set(["li"])],
+  ["dt", new Set(["dt", "dd"])],
+  ["dd", new Set(["dt", "dd"])],
+  [
+    "p",
+    new Set([
+      "address",
+      "article",
+      "aside",
+      "blockquote",
+      "details",
+      "dialog",
+      "div",
+      "dl",
+      "fieldset",
+      "figcaption",
+      "figure",
+      "footer",
+      "form",
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+      "header",
+      "hgroup",
+      "hr",
+      "main",
+      "menu",
+      "nav",
+      "ol",
+      "p",
+      "pre",
+      "search",
+      "section",
+      "table",
+      "ul",
+    ]),
+  ],
+  ["rt", new Set(["rt", "rp"])],
+  ["rp", new Set(["rt", "rp"])],
+  ["optgroup", new Set(["optgroup", "hr"])],
+  ["option", new Set(["option", "optgroup", "hr"])],
+  ["thead", new Set(["tbody", "tfoot"])],
+  ["tbody", new Set(["tbody", "tfoot"])],
+  ["tfoot", new Set<string>()],
+  ["tr", new Set(["tr"])],
+  ["td", new Set(["td", "th"])],
+  ["th", new Set(["td", "th"])],
+]);
+/**
+ * Of those, the ones that also end when their parent has no more content.
+ * A start tag that ends an element ends these first when they are open
+ * inside it: in `<li><p>One<li>Two` the paragraph is the last thing in the
+ * first item, and that item is followed by another.
+ */
+const ENDED_BY_PARENT = new Set([
+  "li",
+  "dd",
+  "p",
+  "rt",
+  "rp",
+  "optgroup",
+  "option",
+  "tbody",
+  "tfoot",
+  "tr",
+  "td",
+  "th",
+]);
+/** Open elements beyond this are not tracked; no real page comes near it. */
+const MAX_OPEN_ELEMENTS = 1024;
+
+/**
+ * Writes in the end tags a page left out where HTML implies them (see
+ * above). A page that closes its elements comes back unchanged: only end
+ * tags are added, and only for an element that is still open where a later
+ * tag ends it. One pass, with the open elements on a bounded stack.
+ */
+export function closeImpliedEndTags(html: string): string {
+  const out: string[] = [];
+  const open: string[] = [];
+  const closeFrom = (at: number) => {
+    for (let i = open.length - 1; i >= at; i--) {
+      const name = open[i] as string;
+      if (ENDED_BY.has(name)) out.push(`</${name}>`);
+    }
+    open.length = at;
+  };
+  scanTags(
+    html,
+    (text) => out.push(text),
+    (tag) => {
+      const name = tagName(tag);
+      if (name === "") {
+        out.push(`<${tag}>`);
+        return;
+      }
+      if (tag.startsWith("/")) {
+        // A parent's end tag ends what is still open inside it. An end tag
+        // with nothing of its name open is left as it is.
+        const at = open.lastIndexOf(name);
+        if (at !== -1) {
+          closeFrom(at + 1);
+          open.length = at;
+        }
+        out.push(`<${tag}>`);
+        return;
+      }
+      // The outermost element this tag ends, reached through elements that
+      // end with their parent: `<optgroup>` after `<option>` ends the open
+      // option and the optgroup around it.
+      let ends = -1;
+      for (let i = open.length - 1; i >= 0; i--) {
+        const current = open[i] as string;
+        if (ENDED_BY.get(current)?.has(name)) ends = i;
+        else if (!ENDED_BY_PARENT.has(current)) break;
+      }
+      if (ends !== -1) closeFrom(ends);
+      if (!isSelfClosing(tag, name) && open.length < MAX_OPEN_ELEMENTS) open.push(name);
+      out.push(`<${tag}>`);
+    },
+  );
+  closeFrom(0);
+  return out.join("");
+}
+
 // --- Page chrome ---------------------------------------------------------
 //
 // Navigation, the site header and footer, sidebars and "related links"
@@ -446,12 +603,13 @@ export function extractHtml(
   for (const name of ["script", "style", "noscript", "title"]) {
     page = replaceElements(page, name, () => "\n");
   }
-  // Chrome goes first, so a `main` or `article` inside it (a related-post
+  // End tags the page left out are written in before anything matches an
+  // element to its end. Chrome goes first, so a `main` or `article` inside it (a related-post
   // preview in an `aside`, a `main` in a `template`) is never taken for the
   // page's content. Then the page's own content when it marks it, else the
   // whole page. A `main` that holds no text (a page that fills it by
   // script) falls back to the whole page.
-  page = stripChrome(page);
+  page = stripChrome(closeImpliedEndTags(page));
   const region = contentRegion(page);
   let markdown = region === null ? "" : toMarkdown(region);
   if (markdown === "") markdown = toMarkdown(page);
