@@ -43,6 +43,32 @@ describe("chat/citationMarkers", () => {
     expect(stripCitationMarkers("Pages [1, 9].", MAX)).toBe("Pages [1, 9].");
   });
 
+  it("judges each bracket next to another on its own", () => {
+    const cases: Array<[string, string]> = [
+      ["Choose option [42] [1].", "Choose option [42]."],
+      ["Choose option [1] [42].", "Choose option [42]."],
+      ["Choose option [42][1].", "Choose option [42]."],
+      ["Choose option [1][42][2].", "Choose option[42]."],
+      ["Pages [1, 9] [2] and [0] [3].", "Pages [1, 9] and [0]."],
+      ["Room [2024] [1] [42] [2].", "Room [2024] [42]."],
+      ["Read [42] [1](https://site.example/a) [2].", "Read [42] [1](https://site.example/a)."],
+      ["Read [1] [42](https://site.example/a).", "Read [42](https://site.example/a)."],
+    ];
+    for (const [answer, expected] of cases) {
+      expect(stripCitationMarkers(answer, MAX)).toBe(expected);
+      // The same in every two- and three-chunk split of the stream.
+      for (let a = 0; a <= answer.length; a++) {
+        expect(streamed([answer.slice(0, a), answer.slice(a)]).text).toBe(expected);
+        for (let b = a; b <= answer.length; b++) {
+          const { text } = streamed([answer.slice(0, a), answer.slice(a, b), answer.slice(b)]);
+          expect(text).toBe(expected);
+        }
+      }
+    }
+    // A paused reply's continuation goes through the same helper.
+    expect(streamed(["[42] [", "1] next."], "Choose option").text).toBe("[42] next.");
+  });
+
   it("takes out a marker split between two stream chunks", () => {
     const { sent, text } = streamed(["Click Forgot Password [", "1] to reset."]);
     expect(text).toBe("Click Forgot Password to reset.");

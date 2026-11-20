@@ -12,17 +12,19 @@
  *   also straight after a word ("Forgot Password[1].");
  * - never a Markdown link (`[1](https://…)`).
  * The spaces before a marker go with it: "open at 9 [1]." becomes "open at 9.".
+ * Each bracket is judged on its own, so in "option [42] [1]." the "[42]"
+ * stays and the "[1]" still goes.
  */
 
 const NUMBER = String.raw`\d{1,2}`;
 const ONE_MARKER = String.raw`\[[ \t]*${NUMBER}(?:[ \t]*[,–-][ \t]*${NUMBER})*[ \t]*\]`;
-const MARKERS = new RegExp(String.raw`[ \t]*${ONE_MARKER}(?:[ \t]*${ONE_MARKER})*(?!\()`, "gu");
+const MARKER = new RegExp(String.raw`[ \t]*${ONE_MARKER}(?!\()`, "gu");
 /**
  * The end of a stream that could still turn into a marker (or be the spaces
  * before one, or a marker that a following "(" would make a link), so it is
- * held back until the next chunk says which. Unbounded, like `MARKERS`: any
- * text it lets through can never become part of a marker later, so what was
- * sent is never taken back. A stray "[" is held only until a letter (or any
+ * held back until the next chunk says which. It holds a whole run of
+ * brackets, however long: any text it lets through can never become part of
+ * a marker later, so what was sent is never taken back. A stray "[" is held only until a letter (or any
  * other character a marker cannot hold) arrives.
  */
 const UNSETTLED_TAIL = /[ \t]*(?:\[[ \t\d,–-]*\]?[ \t]*)*$/u;
@@ -36,7 +38,7 @@ function withinRange(marker: string, maxSource: number): boolean {
 }
 
 function stripAll(text: string, maxSource: number): string {
-  return text.replace(MARKERS, (match) => (withinRange(match, maxSource) ? "" : match));
+  return text.replace(MARKER, (match) => (withinRange(match, maxSource) ? "" : match));
 }
 
 /**
@@ -249,8 +251,8 @@ export function markerStripper(maxSource: number, before = ""): MarkerStripper {
   let raw = "";
   let sent = "";
   const emit = (clean: string): string => {
-    // The held tail covers every unfinished marker (UNSETTLED_TAIL is as
-    // unbounded as MARKERS) and code is decided left to right, so the clean
+    // The held tail covers every unfinished marker (UNSETTLED_TAIL holds a
+    // whole run of brackets) and code is decided left to right, so the clean
     // text only grows; the guard keeps a surprise from repeating text.
     if (!clean.startsWith(sent)) return "";
     const delta = clean.slice(sent.length);
