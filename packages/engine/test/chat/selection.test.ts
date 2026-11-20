@@ -9,6 +9,7 @@ import {
 import { traceCandidates } from "../../src/chat/trace.js";
 import {
   boundedHeadingPath,
+  chunksToIndex,
   embeddingInput,
   MAX_HEADING_SHARE,
 } from "../../src/ingest/consumer.js";
@@ -77,18 +78,23 @@ describe("selectCandidates", () => {
     score: number,
     text: string = `text of ${chunkId} with enough distinct words to compare`,
     sourceKind: SelectableChunk["sourceKind"] = "sitemap",
-  ): SelectableChunk => ({ chunkId, documentId, score, text, sourceKind });
+    subject: { title?: string; headingPath?: string } = {
+      title: "A page",
+      headingPath: "A page > A section",
+    },
+  ): SelectableChunk => ({ chunkId, documentId, score, text, sourceKind, ...subject });
 
   const ids = (chunks: readonly SelectableChunk[]) => chunks.map((c) => c.chunkId);
 
-  it("collapses identical and near-identical text, keeping the best-scored", () => {
-    const footer = "What is MCP? Remote vs Local MCP Glossary Testing Guide OAuth Troubleshooting";
+  it("collapses the same text under the same subject, keeping the best-scored", () => {
+    const text = "We are open Tuesday to Saturday from seven until half past three.";
     const { chunks, dropped } = selectCandidates(
       [
-        chunk("a", "doc_1", 0.79, footer),
-        chunk("b", "doc_2", 0.796, footer),
-        // One word changed: still the same block.
-        chunk("c", "doc_3", 0.78, `${footer} Pricing`),
+        // The same page reached under two addresses.
+        chunk("a", "doc_1", 0.79, text),
+        chunk("b", "doc_2", 0.796, text),
+        // Only the line breaks differ.
+        chunk("c", "doc_3", 0.78, text.replace(" from ", "\n  from ")),
         chunk("d", "doc_4", 0.5),
       ],
       FLOOR,
@@ -97,6 +103,67 @@ describe("selectCandidates", () => {
     expect(ids(chunks)).toEqual(["b", "d"]);
     expect(dropped.get("a")).toBe("duplicate");
     expect(dropped.get("c")).toBe("duplicate");
+  });
+
+  it("keeps the same answer to two different questions", () => {
+    const refund = {
+      title: "What is the refund window?",
+      headingPath: "What is the refund window?",
+    };
+    const warranty = {
+      title: "How long does the warranty last?",
+      headingPath: "How long does the warranty last?",
+    };
+    const { chunks, dropped } = selectCandidates(
+      [
+        chunk("refund", "doc_refund", 0.6, "30 days.", "entry", refund),
+        chunk("warranty", "doc_warranty", 0.55, "30 days.", "entry", warranty),
+        chunk("other", "doc_other", 0.4),
+      ],
+      FLOOR,
+      { topK: 6 },
+    );
+    expect(ids(chunks)).toEqual(["refund", "warranty", "other"]);
+    expect(dropped.size).toBe(0);
+  });
+
+  it("keeps the same text on two pages with different titles", () => {
+    const text =
+      "Prices include tax and delivery within the country, with returns free for a month.";
+    const { chunks } = selectCandidates(
+      [
+        chunk("a", "doc_a", 0.7, text, "sitemap", {
+          title: "Desk lamp",
+          headingPath: "Desk lamp > Price",
+        }),
+        chunk("b", "doc_b", 0.69, text, "sitemap", {
+          title: "Floor lamp",
+          headingPath: "Floor lamp > Price",
+        }),
+      ],
+      FLOOR,
+      { topK: 6 },
+    );
+    expect(ids(chunks)).toEqual(["a", "b"]);
+  });
+
+  it("keeps nearly identical text that says the opposite", () => {
+    const yes =
+      "You can reset the server after saving your configuration and stopping all active connections from the management console.";
+    const no = yes.replace("You can ", "You can not ");
+    const reordered =
+      "After saving your configuration and stopping all active connections from the management console, you can reset the server.";
+    const { chunks, dropped } = selectCandidates(
+      [
+        chunk("yes", "doc_1", 0.7, yes),
+        chunk("no", "doc_1", 0.69, no),
+        chunk("re", "doc_2", 0.68, reordered),
+      ],
+      FLOOR,
+      { topK: 6 },
+    );
+    expect(ids(chunks)).toEqual(["yes", "no", "re"]);
+    expect(dropped.size).toBe(0);
   });
 
   it("does not call short texts that merely share words duplicates", () => {
@@ -188,9 +255,26 @@ describe("selectCandidates", () => {
   });
 
   it("keeps one of a written answer's two vectors (question and answer)", () => {
-    const text = "Paste the address into the tester, choose the transport and press Connect.";
+    const title = "How do I test a remote server?";
+    const indexed = chunksToIndex(
+      `# ${title}\n\nPaste the address into the tester, choose the transport and press Connect.`,
+      { title },
+      "entry",
+    );
+    expect(indexed).toHaveLength(2);
+    const [answer, question] = indexed;
+    // As `resolveChunks` gives them: the stored text and heading path, the document's title.
+    const resolved = (id: string, score: number, c: typeof answer): SelectableChunk => ({
+      chunkId: id,
+      documentId: "doc_entry",
+      score,
+      text: c?.text,
+      headingPath: c?.headingPath,
+      title,
+      sourceKind: "entry",
+    });
     const { chunks, dropped } = selectCandidates(
-      [chunk("q", "doc_entry", 0.95, text, "entry"), chunk("a", "doc_entry", 0.6, text, "entry")],
+      [resolved("q", 0.95, question), resolved("a", 0.6, answer)],
       FLOOR,
       { topK: 6 },
     );

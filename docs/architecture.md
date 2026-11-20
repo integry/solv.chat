@@ -551,10 +551,12 @@ The Monitor screens read:
    nothing clears the floor nothing is kept, so off-topic questions still find
    nothing. An instance may set `SOLV_SCORE_FLOOR` (0 to 0.9); the trace records
    the floor used. Of the chunks that pass the floor, in order:
-   - Duplicates: of chunks with identical or near-identical text (the same
-     words, or word sets overlapping at least 90% for texts of 8 words or
-     more) only the best-scored is kept, except that a written answer is kept
-     over a page chunk it duplicates.
+   - Duplicates: of chunks with the same text under the same title and
+     heading path (only runs of whitespace told apart) only the best-scored
+     is kept, except that a written answer is kept over a page chunk it
+     duplicates. Text that differs in any word is kept, and so is the same
+     text about another subject (the same "30 days." answering a refund
+     question and a warranty question).
    - The written answer: the best-scoring written answer at or above the
      floor itself is always given, in place of the lowest-scored chunk when
      the set is full.
@@ -842,7 +844,7 @@ the trace reads.
   it was passed to the model or dropped: `below_floor` (under the score floor
   this answer used, which is recorded too; a chunk kept in the same-document
   margin is marked passed), `not_found` (the vector matched but its chunk is
-  no longer in D1), `duplicate` (the same text as a better chunk),
+  no longer in D1), `duplicate` (the same text, title and heading path as a better chunk),
   `document_cap` (its document had given its share and others filled the
   set) or `rank` (`TOP_K` better chunks filled the set). The admin shows each
   candidate's heading path beside its title, read from the chunk when the

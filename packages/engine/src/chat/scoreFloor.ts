@@ -77,18 +77,9 @@ export function scoreFloorFrom(env: ScoreFloorEnv): number {
  */
 export const MAX_CHUNKS_PER_DOCUMENT = 2;
 
-/**
- * Two chunks whose sets of words overlap at least this much (Jaccard) are
- * near-identical: the same footer with one link changed, the same paragraph
- * on two pages with a different heading. Ours.
- */
-export const NEAR_DUPLICATE_SIMILARITY = 0.9;
-/** Below this many distinct words only identical text counts as a duplicate. */
-const NEAR_DUPLICATE_MIN_WORDS = 8;
-
 /** Why a chunk that cleared the floor was still not given to the model. */
 export type SelectionDropReason =
-  /** Its text is identical or nearly identical to a better-scored chunk's. */
+  /** Its text, title and heading path are the same as a better-scored chunk's. */
   | "duplicate"
   /** Its document already gave `MAX_CHUNKS_PER_DOCUMENT`, and others filled the set. */
   | "document_cap"
@@ -101,6 +92,13 @@ export interface SelectableChunk {
   documentId: string;
   /** Compared for duplicates; left out, a chunk is never a duplicate. */
   text?: string | undefined;
+  /**
+   * The chunk's subject: its document's title and heading path. Two chunks
+   * are duplicates only when these match as well as the text, so the same
+   * answer ("30 days.") to two different questions is kept twice.
+   */
+  title?: string | undefined;
+  headingPath?: string | undefined;
   /** `entry` marks an owner-written answer, which has a reserved place. */
   sourceKind?: "push" | "sitemap" | "entry" | undefined;
 }
@@ -119,18 +117,18 @@ export interface Selection<T> {
   dropped: Map<string, SelectionDropReason>;
 }
 
-function wordsOf(text: string): string[] {
-  return text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-}
-
-function isNearDuplicate(a: string[], b: string[]): boolean {
-  if (a.join(" ") === b.join(" ")) return true;
-  const setA = new Set(a);
-  const setB = new Set(b);
-  if (setA.size < NEAR_DUPLICATE_MIN_WORDS || setB.size < NEAR_DUPLICATE_MIN_WORDS) return false;
-  let shared = 0;
-  for (const word of setA) if (setB.has(word)) shared++;
-  return shared / (setA.size + setB.size - shared) >= NEAR_DUPLICATE_SIMILARITY;
+/**
+ * What makes two chunks interchangeable: the same subject (title and heading
+ * path) and the same text, with only runs of whitespace told apart. Nothing
+ * looser: a word set ignores order and punctuation, so it calls a sentence
+ * and its negation the same, and the same body under another title answers
+ * another question. A written answer's question vector, which holds its
+ * first chunk's text under the same headings, matches that chunk exactly.
+ */
+function duplicateKey(chunk: SelectableChunk): string | null {
+  if (chunk.text === undefined) return null;
+  const squash = (value: string | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
+  return JSON.stringify([squash(chunk.title), squash(chunk.headingPath), squash(chunk.text)]);
 }
 
 /**
@@ -141,9 +139,10 @@ function isNearDuplicate(a: string[], b: string[]): boolean {
  *    `SAME_DOCUMENT_MARGIN` under it only when a chunk of the same document
  *    is at or above it. Nothing is eligible when no chunk clears the floor,
  *    so off-topic questions still find nothing.
- * 2. Duplicates: of chunks with identical or near-identical text
- *    (`NEAR_DUPLICATE_SIMILARITY`) only the best-scored is kept, except that
- *    a written answer is kept over a page chunk it duplicates.
+ * 2. Duplicates: of chunks with the same text, title and heading path
+ *    (`duplicateKey`) only the best-scored is kept, except that a written
+ *    answer is kept over a page chunk it duplicates. Text that differs in
+ *    any word, or the same text about another subject, is kept.
  * 3. The written-answer reservation: the best-scoring written answer
  *    (`sourceKind: "entry"`) at or above the floor itself is always given,
  *    in place of the lowest-scored chunk if the set is full. An owner's
@@ -170,15 +169,15 @@ export function selectCandidates<T extends SelectableChunk>(
   );
 
   // 2. Duplicates, best first; a written answer takes its duplicate's place.
-  const unique: Array<{ chunk: T; words: string[] | null }> = [];
+  const unique: Array<{ chunk: T }> = [];
+  const byKey = new Map<string, { chunk: T }>();
   for (const chunk of eligible) {
-    const words = chunk.text === undefined ? null : wordsOf(chunk.text);
-    const twin =
-      words === null
-        ? undefined
-        : unique.find((kept) => kept.words !== null && isNearDuplicate(kept.words, words));
+    const key = duplicateKey(chunk);
+    const twin = key === null ? undefined : byKey.get(key);
     if (twin === undefined) {
-      unique.push({ chunk, words });
+      const kept = { chunk };
+      unique.push(kept);
+      if (key !== null) byKey.set(key, kept);
     } else if (chunk.sourceKind === "entry" && twin.chunk.sourceKind !== "entry") {
       dropped.set(twin.chunk.chunkId, "duplicate");
       twin.chunk = chunk;

@@ -46,7 +46,7 @@ export type TraceDropReason =
   | "below_floor"
   /** The vector matched, but its chunk is no longer in D1 (content changed or was removed). */
   | "not_found"
-  /** Its text is identical or nearly identical to a better-scored chunk that was used. */
+  /** Its text, title and heading path are the same as a better-scored chunk's. */
   | "duplicate"
   /** Its document had already given its share, and other documents filled the set. */
   | "document_cap"
