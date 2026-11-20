@@ -22,6 +22,12 @@ export const CHECK_FAILED_MESSAGE =
 export const CHECK_LOAD_TIMEOUT_MS = 15_000;
 /** The frame loaded but Turnstile neither answered nor asked the visitor to act. */
 export const CHECK_TOKEN_TIMEOUT_MS = 30_000;
+/**
+ * The whole `POST /v1/session` exchange, response body included. The engine
+ * gives Siteverify 5 s, so 15 s leaves room for the network both ways and
+ * still releases a waiting message when the request or its body stalls.
+ */
+export const CHECK_EXCHANGE_TIMEOUT_MS = 15_000;
 /** A session this close to expiring is renewed before use rather than sent. */
 export const SESSION_RENEW_MARGIN_MS = 60_000;
 
@@ -59,6 +65,9 @@ export class CheckController {
   #timer: ReturnType<typeof setTimeout> | null = null;
   #waiting = 0;
   #listening = false;
+  /** Bumped whenever an attempt settles, so a late exchange cannot settle the next one. */
+  #attempt = 0;
+  #exchangeAbort: AbortController | null = null;
 
   constructor(opts: CheckControllerOptions) {
     this.#opts = opts;
@@ -208,6 +217,13 @@ export class CheckController {
   async #exchange(token: string): Promise<void> {
     // The frame's work is done; the token is spent by the exchange either way.
     this.#removeFrame();
+    const attempt = this.#attempt;
+    const live = () => attempt === this.#attempt;
+    const abort = new AbortController();
+    this.#exchangeAbort = abort;
+    // A deadline for the request and its body: on expiry `#fail` settles the
+    // check and `#finish` aborts the request.
+    this.#arm(CHECK_EXCHANGE_TIMEOUT_MS);
     try {
       const visitorId = this.#opts.visitorId();
       const response = await fetch(`${this.#opts.endpoint()}/v1/session`, {
@@ -219,12 +235,15 @@ export class CheckController {
           visitorId,
           token,
         }),
+        signal: abort.signal,
       });
+      if (!live()) return;
       const body = (await response.json().catch(() => null)) as {
         session?: unknown;
         expiresAt?: unknown;
         error?: unknown;
       } | null;
+      if (!live()) return;
       if (
         response.ok &&
         body !== null &&
@@ -246,7 +265,7 @@ export class CheckController {
         typeof body?.error === "string" && body.error.trim() ? body.error : CHECK_FAILED_MESSAGE,
       );
     } catch {
-      this.#fail(CHECK_FAILED_MESSAGE);
+      if (live()) this.#fail(CHECK_FAILED_MESSAGE);
     }
   }
 
@@ -282,7 +301,11 @@ export class CheckController {
   }
 
   #finish(result: CheckResult): void {
+    this.#attempt += 1;
     this.#arm(null);
+    const abort = this.#exchangeAbort;
+    this.#exchangeAbort = null;
+    abort?.abort();
     this.#removeFrame();
     const settle = this.#settle;
     this.#settle = null;

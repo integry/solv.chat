@@ -9,8 +9,13 @@
 // - Test secret keys, the dummy token, and that a test secret's success
 //   response always carries hostname "example.com" and no action:
 //   https://developers.cloudflare.com/turnstile/troubleshooting/testing/
-// - `action` is at most 32 characters of letters, digits, `_` and `-`:
+// - `action` is at most 32 characters of letters, digits, `_` and `-`;
+//   `cData` ("customer data", the `data-cdata` attribute) is at most 255 of
+//   the same characters and is returned upon validation:
 //   https://developers.cloudflare.com/turnstile/get-started/client-side-rendering/widget-configurations/
+// - Siteverify returns that value as `cdata` ("Custom data payload from
+//   client-side"), on the server-side validation page above. A test
+//   secret's response carries no `cdata` (testing page above).
 
 export const SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
@@ -27,12 +32,37 @@ export const SITEVERIFY_TIMEOUT_MS = 5_000;
 /** The action the check frame renders with, and Siteverify must echo back. */
 export const TURNSTILE_ACTION = "solv-chat";
 
+const encoder = new TextEncoder();
+
+/**
+ * The `cData` the check frame renders with for one assistant on one host
+ * page, and that Siteverify must echo back: a SHA-256 of the assistant's id
+ * and the parent origin, as 64 hex characters (within `cData`'s documented
+ * 255 letters, digits, `_` and `-`). It binds a token to the assistant and
+ * page the challenge ran for, so a token collected through one assistant's
+ * frame cannot be exchanged for another assistant's session, even when the
+ * engine's keys and hostname are shared. The frame is only served, and so
+ * only rendered with this value, for an origin in that assistant's allowed
+ * websites.
+ */
+export async function checkBinding(assistantId: string, parentOrigin: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(`solv.chat check v1\n${assistantId}\n${parentOrigin}`),
+  );
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** The documented test secret keys (always pass, always fail, token already spent). */
 export const TURNSTILE_TEST_SECRETS: readonly string[] = [
   "1x0000000000000000000000000000000AA",
   "2x0000000000000000000000000000000AA",
   "3x0000000000000000000000000000000AA",
 ];
+
+export function isTestSecret(secret: string): boolean {
+  return TURNSTILE_TEST_SECRETS.includes(secret);
+}
 
 /** The documented test site keys. */
 export const TURNSTILE_TEST_SITE_KEYS: readonly string[] = [
@@ -52,7 +82,7 @@ export type SiteverifyResult =
       ok: false;
       /**
        * `rejected`: Turnstile said no (bad, expired or reused token).
-       * `mismatch`: it said yes for another hostname or action.
+       * `mismatch`: it said yes for another hostname, action or binding.
        * `unavailable`: no usable answer (timeout, network, not JSON).
        */
       reason: "rejected" | "mismatch" | "unavailable";
@@ -67,13 +97,15 @@ export interface SiteverifyInput {
   remoteIp: string;
   /** The engine's own hostname: the check frame is served from it. */
   expectedHostname: string;
+  /** `checkBinding` for the assistant and origin the exchange names. */
+  expectedCdata: string;
   fetchImpl?: typeof fetch | undefined;
   timeoutMs?: number | undefined;
 }
 
 /**
  * Asks Siteverify about one token. Only `success: true` with this engine's
- * hostname and the check's action counts; everything else, including a
+ * hostname, the check's action and the expected binding (`cdata`) counts; everything else, including a
  * timeout or a reply that is not JSON, is a refusal.
  */
 export async function siteverify(input: SiteverifyInput): Promise<SiteverifyResult> {
@@ -109,15 +141,20 @@ export async function siteverify(input: SiteverifyInput): Promise<SiteverifyResu
   if (result.success !== true) return { ok: false, reason: "rejected", codes };
 
   // A test secret answers for the dummy token with a fixed hostname and no
-  // action (documented), so the two checks below cannot pass with one. The
-  // admin warns that test keys protect nothing.
-  const testKeys = TURNSTILE_TEST_SECRETS.includes(input.secret);
+  // action or cdata (documented), so the checks below cannot pass with one.
+  // The admin warns that test keys protect nothing.
+  const testKeys = isTestSecret(input.secret);
   const hostnameOk = testKeys
     ? result.hostname === TEST_HOSTNAME
     : result.hostname === input.expectedHostname;
   const actionOk = testKeys ? true : result.action === TURNSTILE_ACTION;
-  if (!hostnameOk || !actionOk) {
-    return { ok: false, reason: "mismatch", codes: [!hostnameOk ? "hostname" : "action"] };
+  const cdataOk = testKeys ? true : result.cdata === input.expectedCdata;
+  if (!hostnameOk || !actionOk || !cdataOk) {
+    return {
+      ok: false,
+      reason: "mismatch",
+      codes: [!hostnameOk ? "hostname" : !actionOk ? "action" : "cdata"],
+    };
   }
   return { ok: true };
 }

@@ -241,10 +241,64 @@ export interface MessageCapInput {
 }
 
 /**
+ * Takes one slot of the conversation cap for a new visitor message, in one
+ * statement, so two simultaneous requests for a conversation's last slot
+ * cannot both get it. Counts the higher of the reservations and the stored
+ * visitor messages, so messages written before the column existed count.
+ * Returns `reserved`, `full`, or `absent` when no conversation with this id
+ * belongs to this assistant and visitor (the answer then starts a new one,
+ * which has no messages to cap).
+ */
+async function reserveConversationSlot(
+  db: D1Database,
+  input: MessageCapInput & { conversationId: string },
+  cap: number,
+): Promise<"reserved" | "full" | "absent"> {
+  const used = `MAX(visitor_messages_reserved, (
+    SELECT COUNT(*) FROM messages
+     WHERE org_id = ?1 AND conversation_id = ?2 AND role = 'user'
+  ))`;
+  const res = await db
+    .prepare(
+      `UPDATE conversations SET visitor_messages_reserved = ${used} + 1
+        WHERE org_id = ?1 AND id = ?2 AND assistant_id = ?3 AND visitor_id = ?4
+          AND ${used} < ?5`,
+    )
+    .bind(input.orgId, input.conversationId, input.assistantId, input.visitorId, cap)
+    .run();
+  if ((res.meta.changes ?? 0) > 0) return "reserved";
+  const exists = await db
+    .prepare(
+      `SELECT 1 AS found FROM conversations
+        WHERE org_id = ?1 AND id = ?2 AND assistant_id = ?3 AND visitor_id = ?4`,
+    )
+    .bind(input.orgId, input.conversationId, input.assistantId, input.visitorId)
+    .first<{ found: number }>();
+  return exists === null ? "absent" : "full";
+}
+
+/** Gives back a slot taken by `reserveConversationSlot` when a later cap refuses the message. */
+async function releaseConversationSlot(
+  db: D1Database,
+  input: MessageCapInput & { conversationId: string },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE conversations SET visitor_messages_reserved = visitor_messages_reserved - 1
+        WHERE org_id = ?1 AND id = ?2 AND visitor_messages_reserved > 0`,
+    )
+    .bind(input.orgId, input.conversationId)
+    .run();
+}
+
+/**
  * The per-visitor caps on a new visitor message, checked after the session,
- * the rate limit and the spend cap, and before any paid work. Costs one D1
- * read (the conversation's length, only when the request names one) and one
- * D1 batch of two upserts.
+ * the rate limit and the spend cap, and before any paid work. Costs, when
+ * the request names a conversation, one D1 update that reserves the
+ * conversation's slot (and one read when it does not), then one D1 batch of
+ * two upserts. A slot stays taken once the message is admitted, even if the
+ * answer then fails: the visitor's message is stored before any answer, so
+ * the cap counts what was accepted.
  */
 export async function checkMessageCaps(
   db: D1Database,
@@ -253,19 +307,32 @@ export async function checkMessageCaps(
   now: number,
 ): Promise<VisitorRefusal | null> {
   const { caps } = check;
-  if (input.conversationId !== undefined && caps.conversationMessages > 0) {
-    // Read first, so a refusal here does not use up the day's counts.
-    const row = await db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM messages
-         WHERE org_id = ?1 AND conversation_id = ?2 AND role = 'user'`,
-      )
-      .bind(input.orgId, input.conversationId)
-      .first<{ n: number }>();
-    if ((row?.n ?? 0) >= caps.conversationMessages) {
-      return { code: "conversation_cap", message: CONVERSATION_CAP_MESSAGE };
-    }
+  const conversation =
+    input.conversationId !== undefined && caps.conversationMessages > 0
+      ? { ...input, conversationId: input.conversationId }
+      : null;
+  let reserved = false;
+  if (conversation !== null) {
+    // Reserved first, so a refusal here does not use up the day's counts.
+    const slot = await reserveConversationSlot(db, conversation, caps.conversationMessages);
+    if (slot === "full") return { code: "conversation_cap", message: CONVERSATION_CAP_MESSAGE };
+    reserved = slot === "reserved";
   }
+  const refusal = await checkDailyCaps(db, check, input, now);
+  // A message the daily caps refuse is not admitted, so its slot goes back.
+  if (refusal !== null && reserved && conversation !== null) {
+    await releaseConversationSlot(db, conversation);
+  }
+  return refusal;
+}
+
+async function checkDailyCaps(
+  db: D1Database,
+  check: Extract<VisitorCheck, { state: "on" }>,
+  input: MessageCapInput,
+  now: number,
+): Promise<VisitorRefusal | null> {
+  const { caps } = check;
   const day = Math.floor(now / DAY_MS) * DAY_MS;
   const hits: CounterHit[] = [];
   if (caps.visitorMessagesPerDay > 0) {

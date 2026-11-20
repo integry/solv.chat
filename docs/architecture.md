@@ -111,7 +111,8 @@ from the auth seam and pass it down.
 - `conversations` — id, assistant_id, visitor_id (random, cookie-less; stored in
   the widget's localStorage), started_at, page_url, last_message_at (when the
   newest message was written, `started_at` while there is none; kept by
-  triggers, and the order of the Conversations list).
+  triggers, and the order of the Conversations list), visitor_messages_reserved
+  (visitor messages admitted under the conversation cap; see "Visitor check").
 - `messages` — id, conversation_id, role, content, citations JSON, tool_calls JSON,
   tokens_in, tokens_out, answered (boolean: did retrieval find support),
   search_text (content in Unicode lowercase, NFC, final sigma "ς" as "σ",
@@ -170,7 +171,8 @@ from the auth seam and pass it down.
 - `visitor_check_tokens` — token_hash (SHA-256 of a Turnstile token, the key),
   org_id, expires_at: tokens already exchanged for a visitor session, kept for
   the token's 300-second life. Keyed on the hash alone, because a token is the
-  operator's and may be spent once across every org. See "Visitor check".
+  operator's and may be spent once across every org. Not written for a test
+  secret. See "Visitor check".
 - `visitor_counters` — org_id, assistant_id, counter (`visitor_day` | `ip_day` |
   `ip_sessions_hour`), subject (an HMAC of the visitor id or IP, never the value),
   window_start, hits: the per-visitor caps. See "Visitor check".
@@ -263,8 +265,11 @@ origin in `script-src`, `connect-src` and `frame-src` and nothing else.
 moves focus into the input by itself). The widget creates the frame on the
 visitor's first focus or keystroke in the message input, or when they pick a
 suggested question. The frame renders Turnstile explicitly, in managed mode
-with `appearance: "interaction-only"`, `retry: "never"` and action
-`solv-chat`, and posts back the token, an error, or that the challenge needs
+with `appearance: "interaction-only"`, `retry: "never"`, action
+`solv-chat` and `cData` set to the frame's binding (64 hex characters: the
+SHA-256 of `solv.chat check v1`, the assistant's id and the parent origin,
+each on its own line; `cData` allows 255 letters, digits, `_` and `-`), and
+posts back the token, an error, or that the challenge needs
 the visitor (`before-interactive-callback`). The frame sits in a collapsed
 area of the panel, so creating it moves nothing; it opens above the input
 only for an interactive challenge, at Turnstile's flexible size (100% wide,
@@ -282,13 +287,23 @@ expired; the best-effort "visitor moved on" notice never starts one.
 **Session.** As soon as Turnstile issues a token the widget posts it to
 `POST /v1/session` (`protocol`, `assistant`, `visitorId`, `token`). In order:
 Origin; a configuration refusal; the Limits seam's `config` action (per-IP
-rate limit and spend cap: an exchange costs no model call); the token's hash
-is inserted into `visitor_check_tokens`, and a token already there is refused
-(Turnstile's own reuse detection is eventually consistent, so two exchanges
-seconds apart could both pass it); `siteverify` with the secret, the token and
-`cf-connecting-ip`, within 5 s; `success` must be `true`, `hostname` the
-engine's own and `action` `solv-chat` (a test secret always answers
-`example.com` and no action, which is accepted only for a test secret);
+rate limit and spend cap: an exchange costs no model call); expired rows of
+`visitor_check_tokens` are deleted, then the token's hash is inserted, and a
+token already there is refused (Turnstile's own reuse detection is eventually
+consistent, so two exchanges seconds apart could both pass it); `siteverify`
+with the secret, the token and `cf-connecting-ip`, within 5 s; `success` must
+be `true`, `hostname` the engine's own, `action` `solv-chat` and `cdata` the
+binding for the assistant the body names and the request's Origin. The
+binding is what ties a token to the assistant and page its challenge ran
+for: every assistant shares the engine's keys and hostname, so without it a
+token collected through one assistant's frame on its page could be
+exchanged, with a forged Origin, for another assistant's session. A test
+secret always answers `example.com` and no action or `cdata`, which is
+accepted only for a test secret, and accepts only the one fixed dummy token,
+so a test secret's exchange skips the spent-token record (otherwise the
+always-pass keys would issue one session and then refuse every visitor) and
+still goes to `siteverify`, so the always-fail and spent-token test secrets
+refuse every time;
 anything else, including a timeout, a non-200 or a body that is not JSON, is a
 refusal (`check_failed`, logged with Turnstile's error codes only); then the
 sessions-per-IP cap (`session_cap`). The answer is `{ session, expiresAt }`.
@@ -306,7 +321,11 @@ several questions) on one check; an hour does, matches the window the
 sessions-per-IP cap counts in, and bounds a session copied from a browser.
 The widget keeps it in `sessionStorage` per assistant and renews it with a
 fresh check when it has under a minute left, or after the engine refuses it
-(`check_required`).
+(`check_required`). The exchange, response body included, has 15 s
+(`CHECK_EXCHANGE_TIMEOUT_MS`: the engine's 5 s for `siteverify` and room for
+the network both ways); past that the request is aborted and the check has
+failed as above. An exchange that answers after its check has ended is
+ignored, so it cannot end a later check.
 
 **Owner surfaces are not challenged.** "Try it", test runs and everything
 under `/api/admin/*` use the admin session and are not counted against the
@@ -335,11 +354,17 @@ last 6 turns, and 50 questions in one conversation is far past a support
 exchange; one session an hour per tab makes 30 an hour thirty people behind
 one address.
 
-Counters live in D1, like the rate limit: per new message, one read of the
-conversation's length (only when the request names a conversation) and one
-batch of two upserts that increment and return the count in one statement;
+Counters live in D1, like the rate limit: per new message, when the request
+names a conversation, one update that takes a slot of its cap
+(`conversations.visitor_messages_reserved`, compared with the higher of it
+and the conversation's stored visitor messages, so two simultaneous requests
+cannot both take the last slot; one more read when no conversation of this
+assistant and visitor has the id, which then starts a new one), and one
+batch of two upserts that increment and return the count in one statement
+(when a daily cap then refuses the message, its slot is given back);
 per session issued, one upsert, plus the spent-token insert and an expired-row
-delete. The first hit of a new window deletes the org's older windows of that
+delete. A slot stays taken once a message is admitted, even if its answer
+then fails: the question is stored before any answer. The first hit of a new window deletes the org's older windows of that
 counter. A session check is CPU only (one HKDF and one HMAC).
 
 **Privacy.** No token, session or IP is stored with conversations; the two

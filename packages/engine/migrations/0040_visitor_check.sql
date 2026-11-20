@@ -29,3 +29,9 @@ CREATE TABLE visitor_counters (
   PRIMARY KEY (org_id, assistant_id, counter, subject, window_start)
 );
 CREATE INDEX visitor_counters_window ON visitor_counters(org_id, counter, window_start);
+
+-- Visitor messages admitted into a conversation under the conversation cap,
+-- reserved atomically before any paid work (like tool_calls_used in 0010), so
+-- concurrent requests cannot both take the last slot. Compared with the
+-- higher of this and the conversation's stored visitor messages.
+ALTER TABLE conversations ADD COLUMN visitor_messages_reserved INTEGER NOT NULL DEFAULT 0;

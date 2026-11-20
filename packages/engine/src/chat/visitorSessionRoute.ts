@@ -8,6 +8,8 @@ import { issueVisitorSession, tokenHash } from "../security/visitorSession.js";
 import { checkLimits, corsHeaders, matchedOrigin } from "./checks.js";
 import { bodyKeyedPreflight, publicAssistant } from "./route.js";
 import {
+  checkBinding,
+  isTestSecret,
   SITEVERIFY_TIMEOUT_MS,
   siteverify,
   TURNSTILE_ACTION,
@@ -52,7 +54,8 @@ function refuse(
  * Handles `POST /v1/session` and its preflight: exchanges a Turnstile token
  * for a signed visitor session. Order: Origin, the per-IP rate limit and
  * spend cap (the config budget: an exchange costs no model call), the
- * spent-token record, Siteverify, then the sessions-per-IP cap.
+ * spent-token record (not for a test secret), Siteverify (hostname, action
+ * and the assistant-and-page binding), then the sessions-per-IP cap.
  */
 export async function visitorSessionRoute(
   request: Request,
@@ -91,19 +94,29 @@ export async function visitorSessionRoute(
   }
 
   const now = (deps.now ?? Date.now)();
-  // Recorded before asking Turnstile: its own reuse check is eventually
-  // consistent, so two exchanges of one token seconds apart could both pass
-  // it. The first insert wins; every later one is refused.
-  const spent = await env.DB.prepare(
-    `INSERT INTO visitor_check_tokens (token_hash, org_id, expires_at) VALUES (?1, ?2, ?3)
-     ON CONFLICT(token_hash) DO NOTHING RETURNING token_hash`,
-  )
-    .bind(await tokenHash(parsed.value.token), assistant.orgId, now + TURNSTILE_TOKEN_TTL_MS)
-    .first<{ token_hash: string }>();
-  if (spent === null) return refuse(403, "check_failed", CHECK_FAILED_MESSAGE, origin);
+  // Expired rows go first, so a token's row never outlives its 300 s.
   await env.DB.prepare("DELETE FROM visitor_check_tokens WHERE org_id = ?1 AND expires_at < ?2")
     .bind(assistant.orgId, now)
     .run();
+  // Recorded before asking Turnstile: its own reuse check is eventually
+  // consistent, so two exchanges of one token seconds apart could both pass
+  // it. The first insert wins; every later one is refused.
+  // A test secret accepts only the one fixed dummy token (documented:
+  // https://developers.cloudflare.com/turnstile/troubleshooting/testing/ —
+  // checked 2026-11-20), so recording it would let the always-pass keys
+  // issue one session and then refuse every visitor. It skips the record and
+  // still goes to Siteverify, so the always-fail and spent-token test
+  // secrets refuse as they are documented to. Test keys protect nothing, and
+  // the admin says so.
+  if (!isTestSecret(check.secret)) {
+    const spent = await env.DB.prepare(
+      `INSERT INTO visitor_check_tokens (token_hash, org_id, expires_at) VALUES (?1, ?2, ?3)
+       ON CONFLICT(token_hash) DO NOTHING RETURNING token_hash`,
+    )
+      .bind(await tokenHash(parsed.value.token), assistant.orgId, now + TURNSTILE_TOKEN_TTL_MS)
+      .first<{ token_hash: string }>();
+    if (spent === null) return refuse(403, "check_failed", CHECK_FAILED_MESSAGE, origin);
+  }
 
   const ip = request.headers.get("cf-connecting-ip") ?? "";
   const verdict = await siteverify({
@@ -111,6 +124,8 @@ export async function visitorSessionRoute(
     token: parsed.value.token,
     remoteIp: ip,
     expectedHostname: new URL(request.url).hostname,
+    // The token must come from this assistant's frame, opened for this page.
+    expectedCdata: await checkBinding(assistant.id, origin),
     fetchImpl: deps.fetchImpl,
     timeoutMs: deps.siteverifyTimeoutMs ?? SITEVERIFY_TIMEOUT_MS,
   });
@@ -210,7 +225,7 @@ export async function checkFrameRoute(
   const limited = await checkLimits(deps.seams.limits as Limits, assistant, request, "config");
   if (limited !== null) return new Response(limited.message, { status: 429 });
   const html = `<!doctype html>
-<html lang="en" data-site-key="${escapeAttr(check.siteKey)}" data-parent="${escapeAttr(parent)}" data-theme="${theme}" data-action="${TURNSTILE_ACTION}">
+<html lang="en" data-site-key="${escapeAttr(check.siteKey)}" data-parent="${escapeAttr(parent)}" data-theme="${theme}" data-action="${TURNSTILE_ACTION}" data-cdata="${await checkBinding(assistant.id, parent)}">
 <head><meta charset="utf-8"><meta name="color-scheme" content="${theme}"><title>Security check</title><script src="/v1/check/frame.js" defer></script></head>
 <body><div id="check"></div></body>
 </html>
@@ -234,7 +249,8 @@ export async function checkFrameRoute(
  *
  * Options used, all documented on
  * https://developers.cloudflare.com/turnstile/get-started/client-side-rendering/widget-configurations/
- * (checked 2026-11-20): `appearance: "interaction-only"` (shown only when the
+ * (checked 2026-11-20): `action` and `cData` (the assistant-and-page
+ * binding Siteverify must echo), `appearance: "interaction-only"` (shown only when the
  * visitor must act), `size: "flexible"` (100% wide, at least 300px),
  * `retry: "never"` (the widget decides when to retry), `refresh-expired:
  * "never"` (the session, not the token, is what lasts), `response-field:
@@ -258,6 +274,7 @@ export const CHECK_FRAME_SCRIPT = `(() => {
       widgetId = window.turnstile.render("#check", {
         sitekey: data.siteKey || "",
         action: data.action || "",
+        cData: data.cdata || "",
         theme: data.theme === "dark" ? "dark" : "light",
         size: "flexible",
         appearance: "interaction-only",

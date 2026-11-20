@@ -2,7 +2,7 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import { defaultVersionConfig, parseChatEventLine } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type AppOptions, createApp, type Env } from "../../src/app.js";
-import { SITEVERIFY_URL } from "../../src/chat/turnstile.js";
+import { checkBinding, SITEVERIFY_URL } from "../../src/chat/turnstile.js";
 import { forPrincipal } from "../../src/db/tenant.js";
 import { ANTHROPIC_MODELS } from "../../src/models.js";
 import type { LlmProvider } from "../../src/providers/types.js";
@@ -186,10 +186,15 @@ async function chat(
 }
 
 let tokenSeq = 0;
-/** A fresh real-shaped token that `fakeTurnstile` accepts for the engine's hostname. */
-function realToken(
+/**
+ * A fresh real-shaped token that `fakeTurnstile` accepts for the engine's
+ * hostname, as Turnstile answers for one rendered by `assistantId`'s frame
+ * opened for `origin` (its `cdata`).
+ */
+async function realToken(
   tokens: Record<string, Record<string, unknown>>,
   answer?: Record<string, unknown>,
+  boundTo: { assistantId?: string; origin?: string } = {},
 ) {
   tokenSeq += 1;
   const token = `real-token-${tokenSeq}-${crypto.randomUUID()}`;
@@ -197,10 +202,17 @@ function realToken(
     success: true,
     hostname: "engine.example",
     action: "solv-chat",
+    cdata: await checkBinding(boundTo.assistantId ?? "ast_vc_1", boundTo.origin ?? ORIGIN),
     "error-codes": [],
   };
   return token;
 }
+
+const REAL_ENV: Partial<Env> = {
+  SOLV_TURNSTILE_SITE_KEY: REAL_SITE_KEY,
+  SOLV_TURNSTILE_SECRET: REAL_SECRET,
+  SOLV_SECRET_KEY: SIGNING_SECRET,
+};
 
 describe("visitor check", () => {
   const tenantA = forPrincipal(env.DB, { orgId: TEST_ORG_ID, userId: "usr_a", role: "owner" });
@@ -420,9 +432,11 @@ describe("visitor check", () => {
 
   describe("token exchange", () => {
     it("cannot exchange one token twice, even when Siteverify would accept it again", async () => {
-      const h = harness(PASS_ENV);
-      expect((await exchange(h, DUMMY_TOKEN)).status).toBe(200);
-      const second = await exchange(h, DUMMY_TOKEN, { visitorId: "vis_2" });
+      const tokens: Record<string, Record<string, unknown>> = {};
+      const h = harness(REAL_ENV, { tokens });
+      const token = await realToken(tokens);
+      expect((await exchange(h, token)).status).toBe(200);
+      const second = await exchange(h, token, { visitorId: "vis_2" });
       expect(second.status).toBe(403);
       expect(second.body.code).toBe("check_failed");
       // Refused before Siteverify was asked a second time.
@@ -430,9 +444,93 @@ describe("visitor check", () => {
     });
 
     it("cannot spend one token across organisations", async () => {
+      const tokens: Record<string, Record<string, unknown>> = {};
+      const h = harness(REAL_ENV, { tokens });
+      const token = await realToken(tokens);
+      expect((await exchange(h, token)).status).toBe(200);
+      expect((await exchange(h, token, { assistant: "pk_vc_b" })).status).toBe(403);
+      expect(h.turnstile.verifyCalls).toHaveLength(1);
+    });
+
+    it("keeps the always-pass test keys usable for every visitor, assistant and renewal", async () => {
       const h = harness(PASS_ENV);
-      expect((await exchange(h, DUMMY_TOKEN)).status).toBe(200);
-      expect((await exchange(h, DUMMY_TOKEN, { assistant: "pk_vc_b" })).status).toBe(403);
+      const runs = [
+        {},
+        { visitorId: "vis_2" },
+        { assistant: "pk_vc_2" },
+        { assistant: "pk_vc_b" },
+        // A renewal: the same visitor checks again.
+        {},
+      ];
+      for (const opts of runs) {
+        const issued = await exchange(h, DUMMY_TOKEN, opts);
+        expect(issued.status).toBe(200);
+        expect(typeof issued.body.session).toBe("string");
+      }
+      // Each exchange still asked Siteverify.
+      expect(h.turnstile.verifyCalls).toHaveLength(runs.length);
+      const stored = await env.DB.prepare("SELECT COUNT(*) AS n FROM visitor_check_tokens").first<{
+        n: number;
+      }>();
+      expect(stored?.n).toBe(0);
+    });
+
+    it("still refuses every exchange with the always-fail and spent-token test secrets", async () => {
+      for (const secret of [FAIL_SECRET, SPENT_SECRET]) {
+        const h = harness({ ...PASS_ENV, SOLV_TURNSTILE_SECRET: secret });
+        for (const visitorId of ["vis_1", "vis_2", "vis_1"]) {
+          const result = await exchange(h, DUMMY_TOKEN, { visitorId });
+          expect(result.status).toBe(403);
+          expect(result.body.code).toBe("check_failed");
+        }
+        expect(h.turnstile.verifyCalls).toHaveLength(3);
+      }
+    });
+
+    it("drops spent tokens once they have expired, before recording a new one", async () => {
+      const tokens: Record<string, Record<string, unknown>> = {};
+      const h = harness(REAL_ENV, { tokens });
+      await env.DB.prepare(
+        "INSERT INTO visitor_check_tokens (token_hash, org_id, expires_at) VALUES ('old', ?1, ?2)",
+      )
+        .bind(TEST_ORG_ID, Date.now() - 1000)
+        .run();
+      expect((await exchange(h, await realToken(tokens))).status).toBe(200);
+      const rows = await env.DB.prepare("SELECT token_hash FROM visitor_check_tokens").all<{
+        token_hash: string;
+      }>();
+      expect(rows.results.map((r) => r.token_hash)).not.toContain("old");
+      expect(rows.results).toHaveLength(1);
+    });
+
+    it("binds a token to the assistant and page its challenge ran for", async () => {
+      const tokens: Record<string, Record<string, unknown>> = {};
+      const h = harness(REAL_ENV, { tokens });
+      // A token from assistant 1's frame (same org, same website, shared
+      // keys and hostname) is refused for assistant 2 and for org B's.
+      for (const assistant of ["pk_vc_2", "pk_vc_b"]) {
+        const fromFirst = await realToken(tokens);
+        const refused = await exchange(h, fromFirst, { assistant });
+        expect(refused.status).toBe(403);
+        expect(refused.body).toEqual({
+          error: "The security check could not be completed. Please try again.",
+          code: "check_failed",
+        });
+        expect(refused.body.session).toBeUndefined();
+      }
+      // One rendered for another page of the same assistant is refused too.
+      const otherPage = await realToken(tokens, undefined, { origin: "https://other.example" });
+      expect((await exchange(h, otherPage)).status).toBe(403);
+      // So is one with no binding at all.
+      const unbound = await realToken(tokens, {
+        success: true,
+        hostname: "engine.example",
+        action: "solv-chat",
+      });
+      expect((await exchange(h, unbound)).status).toBe(403);
+      // The right binding is accepted.
+      const own = await realToken(tokens, undefined, { assistantId: "ast_vc_2" });
+      expect((await exchange(h, own, { assistant: "pk_vc_2" })).status).toBe(200);
     });
 
     it("never treats a Siteverify error, bad reply or timeout as success", async () => {
@@ -477,21 +575,21 @@ describe("visitor check", () => {
         SOLV_SECRET_KEY: SIGNING_SECRET,
       };
       const h = harness(env2, { tokens });
-      expect((await exchange(h, realToken(tokens))).status).toBe(200);
-      const wrongHost = realToken(tokens, {
+      expect((await exchange(h, await realToken(tokens))).status).toBe(200);
+      const wrongHost = await realToken(tokens, {
         success: true,
         hostname: "attacker.example",
         action: "solv-chat",
       });
       expect((await exchange(h, wrongHost)).status).toBe(403);
-      const wrongAction = realToken(tokens, {
+      const wrongAction = await realToken(tokens, {
         success: true,
         hostname: "engine.example",
         action: "login",
       });
       expect((await exchange(h, wrongAction)).status).toBe(403);
       // A test secret's fixed answer (example.com, no action) is not enough for a real secret.
-      const testShaped = realToken(tokens, { success: true, hostname: "example.com" });
+      const testShaped = await realToken(tokens, { success: true, hostname: "example.com" });
       expect((await exchange(h, testShaped)).status).toBe(403);
     });
 
@@ -607,6 +705,65 @@ describe("visitor check", () => {
       expect(fresh.events.at(-1)?.type).toBe("done");
     });
 
+    it("admits only one of two simultaneous requests for a conversation's last slot", async () => {
+      const h = harness(capEnv({ SOLV_CONVERSATION_MESSAGES: "2" }));
+      const session = await sessionFor(h);
+      const first = await chat(h, { message: "Q1", session });
+      const done = first.events.at(-1);
+      if (done?.type !== "done") throw new Error("expected done");
+      const conversationId = done.conversationId;
+      const calls = h.embedSpy.mock.calls.length;
+
+      const results = await Promise.all([
+        chat(h, { message: "Q2a", session, conversationId }),
+        chat(h, { message: "Q2b", session, conversationId }),
+      ]);
+      const last = results.map((r) => r.events.at(-1));
+      expect(last.filter((e) => e?.type === "done")).toHaveLength(1);
+      expect(last.filter((e) => e?.type === "error" && e.code === "conversation_cap")).toHaveLength(
+        1,
+      );
+      // Only the admitted request did paid work, and the conversation holds the cap.
+      expect(h.embedSpy.mock.calls.length).toBe(calls + 1);
+      const stored = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?1 AND role = 'user'",
+      )
+        .bind(conversationId)
+        .first<{ n: number }>();
+      expect(stored?.n).toBe(2);
+    });
+
+    it("counts visitor messages stored before any reservation, and gives a slot back when a daily cap refuses", async () => {
+      const h = harness(
+        capEnv({ SOLV_CONVERSATION_MESSAGES: "3", SOLV_VISITOR_DAILY_MESSAGES: "2" }),
+      );
+      const session = await sessionFor(h);
+      const first = await chat(h, { message: "Q1", session });
+      const done = first.events.at(-1);
+      if (done?.type !== "done") throw new Error("expected done");
+      const conversationId = done.conversationId;
+      expect((await chat(h, { message: "Q2", session, conversationId })).events.at(-1)?.type).toBe(
+        "done",
+      );
+      // The day's cap refuses the third: no slot is kept for a message not admitted.
+      const refused = await chat(h, { message: "Q3", session, conversationId });
+      expect(refused.events[0]).toMatchObject({ code: "visitor_cap" });
+      const row = await env.DB.prepare(
+        "SELECT visitor_messages_reserved AS n FROM conversations WHERE id = ?1",
+      )
+        .bind(conversationId)
+        .first<{ n: number }>();
+      expect(row?.n).toBe(2);
+
+      // A conversation whose messages predate the column is still capped by them.
+      await env.DB.prepare("UPDATE conversations SET visitor_messages_reserved = 0 WHERE id = ?1")
+        .bind(conversationId)
+        .run();
+      const fresh = harness(capEnv({ SOLV_CONVERSATION_MESSAGES: "2" }));
+      const capped = await chat(fresh, { message: "Q3", session, conversationId });
+      expect(capped.events[0]).toMatchObject({ code: "conversation_cap" });
+    });
+
     it("refuses a session after the IP's hourly session cap, per assistant", async () => {
       const tokens: Record<string, Record<string, unknown>> = {};
       const h = harness(
@@ -618,16 +775,18 @@ describe("visitor check", () => {
         },
         { tokens },
       );
-      expect((await exchange(h, realToken(tokens))).status).toBe(200);
-      expect((await exchange(h, realToken(tokens))).status).toBe(200);
-      const third = await exchange(h, realToken(tokens));
+      expect((await exchange(h, await realToken(tokens))).status).toBe(200);
+      expect((await exchange(h, await realToken(tokens))).status).toBe(200);
+      const third = await exchange(h, await realToken(tokens));
       expect(third.status).toBe(429);
       expect(third.body).toEqual({
         error: "Too many security checks have come from your network. Please try again in an hour.",
         code: "session_cap",
       });
-      expect((await exchange(h, realToken(tokens), { assistant: "pk_vc_2" })).status).toBe(200);
-      expect((await exchange(h, realToken(tokens), { assistant: "pk_vc_b" })).status).toBe(200);
+      const forSecond = await realToken(tokens, undefined, { assistantId: "ast_vc_2" });
+      expect((await exchange(h, forSecond, { assistant: "pk_vc_2" })).status).toBe(200);
+      const forOrgB = await realToken(tokens, undefined, { assistantId: "ast_vc_b" });
+      expect((await exchange(h, forOrgB, { assistant: "pk_vc_b" })).status).toBe(200);
     });
 
     it("stores no IP or visitor id in the counters", async () => {
@@ -778,6 +937,14 @@ describe("visitor check", () => {
       expect(csp).toContain("frame-src https://challenges.cloudflare.com");
       expect(ok.text).toContain(`data-site-key="${PASS_SITE_KEY}"`);
       expect(ok.text).toContain('data-theme="dark"');
+      // The challenge carries the assistant-and-page binding Siteverify must echo.
+      expect(ok.text).toContain(`data-cdata="${await checkBinding("ast_vc_1", ORIGIN)}"`);
+      const second = await call(
+        h,
+        `/v1/check/frame?assistant=pk_vc_2&parent=${encodeURIComponent(ORIGIN)}`,
+      );
+      expect(second.text).toContain(`data-cdata="${await checkBinding("ast_vc_2", ORIGIN)}"`);
+      expect(await checkBinding("ast_vc_1", ORIGIN)).toMatch(/^[0-9a-f]{64}$/);
       expect(ok.text).not.toContain(PASS_SECRET);
 
       const evil = await call(
@@ -788,6 +955,7 @@ describe("visitor check", () => {
       const script = await call(h, "/v1/check/frame.js");
       expect(script.response.headers.get("content-type")).toContain("javascript");
       expect(script.text).toContain("event.origin !== parentOrigin");
+      expect(script.text).toContain("cData: data.cdata");
     });
   });
 
@@ -806,11 +974,13 @@ describe("visitor check", () => {
       SOLV_SECRET_KEY: SIGNING_SECRET,
     };
     const h = harness(real, { tokens });
-    const good = await exchange(h, realToken(tokens));
+    const good = await exchange(h, await realToken(tokens));
     bodies.push(JSON.stringify(good.body));
     bodies.push(JSON.stringify((await exchange(h, "bad-token")).body));
     bodies.push(
-      JSON.stringify((await exchange(h, realToken(tokens, { success: true, hostname: "x" }))).body),
+      JSON.stringify(
+        (await exchange(h, await realToken(tokens, { success: true, hostname: "x" }))).body,
+      ),
     );
     bodies.push((await chat(h, { message: "Q", session: good.body.session })).text);
     bodies.push((await chat(h, { message: "Q" })).text);

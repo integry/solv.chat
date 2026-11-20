@@ -5,7 +5,7 @@
  * @vitest-environment-options {"settings": {"navigation": {"disableChildFrameNavigation": true}}}
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CHECK_LOAD_TIMEOUT_MS } from "../src/check.js";
+import { CHECK_EXCHANGE_TIMEOUT_MS, CHECK_LOAD_TIMEOUT_MS } from "../src/check.js";
 import "../src/widget.js";
 
 const ENGINE = location.origin;
@@ -36,7 +36,14 @@ interface Recorded {
 }
 
 /** An engine with the visitor check on: config says so, `/v1/session` exchanges a token. */
-function fakeEngine(options: { config?: Record<string, unknown>; sessionStatus?: number } = {}) {
+function fakeEngine(
+  options: {
+    config?: Record<string, unknown>;
+    sessionStatus?: number;
+    /** Answers `/v1/session` instead of the default, for stalled or late exchanges. */
+    session?: (init: RequestInit | undefined) => Promise<Response>;
+  } = {},
+) {
   const requests: Recorded[] = [];
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -51,6 +58,7 @@ function fakeEngine(options: { config?: Record<string, unknown>; sessionStatus?:
       });
     }
     if (url.endsWith("/v1/session")) {
+      if (options.session) return options.session(init);
       if (options.sessionStatus && options.sessionStatus !== 200) {
         return Response.json(
           {
@@ -293,6 +301,104 @@ describe("visitor check in the widget", () => {
       "The security check could not be completed.",
     );
     expect(requests.some((r) => r.url.endsWith("/v1/chat"))).toBe(false);
+  });
+
+  describe("a stalled session exchange", () => {
+    /** Opens the panel, waits a message on the check and hands the frame a token. */
+    async function sendWithToken(root: ShadowRoot) {
+      mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+      const input = mustQuery<HTMLTextAreaElement>(root, "#solv-input");
+      input.dispatchEvent(new FocusEvent("focus"));
+      const frame = mustQuery<HTMLIFrameElement>(root, ".solv-check iframe");
+      fromFrame(frame, { type: "ready" });
+      input.value = "Hello?";
+      mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+      fromFrame(frame, { type: "token", token: "XXXX.DUMMY.TOKEN.XXXX" });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    it("fails the waiting message and aborts the request when the exchange never answers", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      let signal: AbortSignal | undefined;
+      const requests = fakeEngine({
+        session: (init) => {
+          signal = init?.signal ?? undefined;
+          return new Promise<Response>(() => {});
+        },
+      });
+      const { root } = mount();
+      await vi.advanceTimersByTimeAsync(0);
+      await sendWithToken(root);
+      expect(signal?.aborted).toBe(false);
+      expect(root.querySelector(".solv-bubble-error")).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(CHECK_EXCHANGE_TIMEOUT_MS + 10);
+      expect(mustQuery(root, ".solv-bubble-error").textContent).toBe(
+        "The security check could not be completed. Check your connection, then try again.",
+      );
+      expect(signal?.aborted).toBe(true);
+      expect(requests.some((r) => r.url.endsWith("/v1/chat"))).toBe(false);
+    });
+
+    it("fails the waiting message when the response body never arrives", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const requests = fakeEngine({
+        // Headers arrive; the body stream never sends a byte or closes.
+        session: async () =>
+          new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      });
+      const { root } = mount();
+      await vi.advanceTimersByTimeAsync(0);
+      await sendWithToken(root);
+      expect(root.querySelector(".solv-bubble-error")).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(CHECK_EXCHANGE_TIMEOUT_MS + 10);
+      expect(mustQuery(root, ".solv-bubble-error").textContent).toContain(
+        "The security check could not be completed.",
+      );
+      expect(requests.some((r) => r.url.endsWith("/v1/chat"))).toBe(false);
+    });
+
+    it("does not let a late answer to a timed-out exchange settle the retry", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const late: Array<(response: Response) => void> = [];
+      const requests = fakeEngine({
+        // Ignores the abort, as a response already in flight might.
+        session: () => new Promise<Response>((resolve) => late.push(resolve)),
+      });
+      const { root } = mount();
+      await vi.advanceTimersByTimeAsync(0);
+      mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+      const input = mustQuery<HTMLTextAreaElement>(root, "#solv-input");
+      input.dispatchEvent(new FocusEvent("focus"));
+      let frame = mustQuery<HTMLIFrameElement>(root, ".solv-check iframe");
+      fromFrame(frame, { type: "ready" });
+      fromFrame(frame, { type: "token", token: "token-1" });
+      await vi.advanceTimersByTimeAsync(CHECK_EXCHANGE_TIMEOUT_MS + 10);
+      // No message waited, so the notice offers a retry; it opens a new frame.
+      mustQuery<HTMLButtonElement>(root, ".solv-check-failed button").click();
+      frame = mustQuery<HTMLIFrameElement>(root, ".solv-check iframe");
+
+      // The first exchange answers now: it must not end the retry or store a session.
+      late[0]?.(Response.json({ session: "vs1.late", expiresAt: Date.now() + 3_600_000 }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(root.querySelector(".solv-check iframe")).toBe(frame);
+      expect(sessionStorage.getItem("solv-chat-session:pk_test_check")).toBeNull();
+
+      // The retry's own token still completes it, and the message goes out with that session.
+      input.value = "Hello?";
+      mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+      fromFrame(frame, { type: "ready" });
+      fromFrame(frame, { type: "token", token: "token-2" });
+      await vi.advanceTimersByTimeAsync(0);
+      late[1]?.(Response.json({ session: "vs1.retry", expiresAt: Date.now() + 3_600_000 }));
+      await vi.waitFor(() =>
+        expect(requests.find((r) => r.url.endsWith("/v1/chat"))?.body?.session).toBe("vs1.retry"),
+      );
+    });
   });
 
   it("shows the engine's refusal of the token and sends nothing", async () => {
