@@ -2,6 +2,8 @@
 // by heading and says nothing about size. ~1200 characters is about 300 tokens,
 // which keeps a handful of chunks inside a modest prompt budget, and the
 // overlap keeps a sentence that straddles a split retrievable from either side.
+import { fitsSourceBudget } from "../chat/prompt.js";
+
 export const MAX_CHARS = 1200;
 export const OVERLAP_CHARS = 150;
 // A heading longer than this is cut. Six levels of it keep the path (which is
@@ -26,7 +28,9 @@ export const MAX_CHUNKS = 1500;
  * about 50 tokens, two or three sentences: over three times the heading paths
  * above and the longest chrome chunk, and a sixth of `MAX_CHARS`, so a merge
  * never makes a chunk much larger than a full one. A document whose whole
- * text is shorter (a one-line written answer) is still one chunk.
+ * text is shorter (a one-line written answer) is still one chunk, and so is
+ * a short section no neighbour can take without the prompt cutting the
+ * result (long, divergent heading paths; see `mergeSmallChunks`).
  */
 export const MIN_CHUNK_CHARS = 200;
 
@@ -374,19 +378,35 @@ const samePath = (a: Chunk, b: Chunk): boolean =>
   a.headingPath.every((heading, i) => heading === b.headingPath[i]);
 
 /**
+ * A heading path as it is stored and shown to the model (see `chunksToIndex`
+ * in `ingest/consumer.ts`).
+ */
+export function joinHeadingPath(headingPath: readonly string[]): string {
+  return headingPath.join(" > ");
+}
+
+/**
  * Merges every chunk shorter than `minChars` into a neighbour, so no chunk
  * is stored on a few words. For each short chunk, the neighbour is, in
  * order: one under the same heading path (the previous, then the next)
  * that the two fit together within `MAX_CHARS`; the previous one, then the
  * next, within `MAX_CHARS`; and when neither fits, the same-heading one,
- * else the previous, else the next, whatever the size (at most about
- * `MAX_CHARS + minChars` and the headings). A merge keeps the shared
+ * else the previous, else the next, larger than `MAX_CHARS` (at most about
+ * `MAX_CHARS + minChars` and the headings). Every merge must also reach the
+ * model whole: its `section:` line and text within the prompt's per-source
+ * allowance (`fitsSourceBudget`), since the prompt cuts what is over it and
+ * the cut part would exist in no other chunk. A short chunk no neighbour
+ * can take on those terms is kept as it is. A merge keeps the shared
  * headings as the path and writes the rest into the text, so no word or
  * heading is lost. A document with one chunk keeps it, however short.
  */
 export function mergeSmallChunks(chunks: readonly Chunk[], minChars: number): Chunk[] {
   const out = [...chunks];
   const small = (chunk: Chunk) => chunk.text.length < minChars;
+  const whole = (merged: Chunk | undefined): merged is Chunk =>
+    merged !== undefined && fitsSourceBudget(joinHeadingPath(merged.headingPath), merged.text);
+  const full = (merged: Chunk | undefined): merged is Chunk =>
+    whole(merged) && merged.text.length <= MAX_CHARS;
   let i = 0;
   while (out.length > 1 && i < out.length) {
     const chunk = out[i] as Chunk;
@@ -398,27 +418,25 @@ export function mergeSmallChunks(chunks: readonly Chunk[], minChars: number): Ch
     const next = i + 1 < out.length ? (out[i + 1] as Chunk) : undefined;
     const withPrev = prev === undefined ? undefined : mergePair(prev, chunk);
     const withNext = next === undefined ? undefined : mergePair(chunk, next);
-    const fits = (merged: Chunk | undefined): merged is Chunk =>
-      merged !== undefined && merged.text.length <= MAX_CHARS;
-    const order: Array<["prev" | "next", Chunk | undefined]> = [
-      ...(prev !== undefined && samePath(prev, chunk) && fits(withPrev)
-        ? [["prev", withPrev] as ["prev", Chunk]]
-        : []),
-      ...(next !== undefined && samePath(next, chunk) && fits(withNext)
-        ? [["next", withNext] as ["next", Chunk]]
-        : []),
-      ...(fits(withPrev) ? [["prev", withPrev] as ["prev", Chunk]] : []),
-      ...(fits(withNext) ? [["next", withNext] as ["next", Chunk]] : []),
-      ...(prev !== undefined && samePath(prev, chunk)
-        ? [["prev", withPrev] as ["prev", Chunk]]
-        : []),
-      ...(next !== undefined && samePath(next, chunk)
-        ? [["next", withNext] as ["next", Chunk]]
-        : []),
-      ["prev", withPrev],
-      ["next", withNext],
+    const prevSame = prev !== undefined && samePath(prev, chunk);
+    const nextSame = next !== undefined && samePath(next, chunk);
+    const candidates: Array<[side: "prev" | "next", merged: Chunk | undefined, ok: boolean]> = [
+      ["prev", withPrev, prevSame && full(withPrev)],
+      ["next", withNext, nextSame && full(withNext)],
+      ["prev", withPrev, full(withPrev)],
+      ["next", withNext, full(withNext)],
+      ["prev", withPrev, prevSame && whole(withPrev)],
+      ["next", withNext, nextSame && whole(withNext)],
+      ["prev", withPrev, whole(withPrev)],
+      ["next", withNext, whole(withNext)],
     ];
-    const [side, merged] = order.find(([, m]) => m !== undefined) as ["prev" | "next", Chunk];
+    const found = candidates.find(([, , ok]) => ok);
+    if (found === undefined) {
+      // Any merge would be cut in the prompt: keep the short chunk whole.
+      i++;
+      continue;
+    }
+    const [side, merged] = found as ["prev" | "next", Chunk, boolean];
     if (side === "prev") {
       out.splice(i - 1, 2, merged);
       // The merged chunk is not short; carry on with what follows it.

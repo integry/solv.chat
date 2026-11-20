@@ -3,7 +3,7 @@ import type { DocumentRow, IndexErrorCode } from "../db/documents.js";
 import { forQueuedIngest, type Tenant } from "../db/tenant.js";
 import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
 import type { UsageSink } from "../seams/types.js";
-import { chunkMarkdown, exceedsChunkBudget } from "./chunk.js";
+import { chunkMarkdown, exceedsChunkBudget, joinHeadingPath } from "./chunk.js";
 import type { IngestQueueMessage } from "./documents.js";
 import { INGEST_VERSION } from "./version.js";
 
@@ -96,7 +96,7 @@ export function chunksToIndex(
   // ("# How long is the refund window?" over "30 days."), so it keeps them.
   const headingIsContent = entry || parts.length === 1;
   const chunks: IndexedChunk[] = parts.map((chunk) => {
-    const headingPath = chunk.headingPath.join(" > ");
+    const headingPath = joinHeadingPath(chunk.headingPath);
     return {
       id: newId("chk"),
       ordinal: chunk.ordinal,

@@ -281,13 +281,18 @@ Documents are cut by heading into chunks of at most 1,200 characters
   into a neighbour: one under the same heading path that the two fit
   together within 1,200 characters (the previous, then the next), else the
   previous, else the next; when neither fits, the same-heading one, the
-  previous or the next anyway (at most about 1,400 characters). The merged
-  chunk keeps the headings the two share as its path and writes the others
-  into its text, so no word or heading is lost. 200 is ours, from the data
-  in issue #123: the chrome chunks that won were 45 to 74 characters under
-  heading paths of 40 to 60, so the path was most of what was embedded;
-  200 characters is two or three sentences, over three times those, and a
-  sixth of a full chunk.
+  previous or the next anyway (at most about 1,400 characters). Every merge
+  must also reach the model whole: its `section:` line and text within the
+  prompt's 2,000 characters per source (`fitsSourceBudget` in
+  `chat/prompt.ts`), because the prompt cuts what is over and the cut part
+  would be in no other chunk. A short chunk that no neighbour can take on
+  those terms (long heading paths that share nothing) is kept as it is. The
+  merged chunk keeps the headings the two share as its path and writes the
+  others into its text, so no word or heading is lost. 200 is ours, from
+  the data in issue #123: the chrome chunks that won were 45 to 74
+  characters under heading paths of 40 to 60, so the path was most of what
+  was embedded; 200 characters is two or three sentences, over three times
+  those, and a sixth of a full chunk.
 - **Embedding input** (`embeddingInput` in `ingest/consumer.ts`). A chunk is
   embedded as its heading path, then its text, with the path bounded to half
   the text's length (a third of the input), dropping the broadest headings

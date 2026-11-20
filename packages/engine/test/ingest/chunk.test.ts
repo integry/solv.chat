@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { buildPrompt, fitsSourceBudget } from "../../src/chat/prompt.js";
 import {
   chunkMarkdown,
   exceedsChunkBudget,
+  joinHeadingPath,
   MAX_CHARS,
   MAX_CHUNKS,
   MAX_HEADING_CHARS,
@@ -328,6 +330,79 @@ describe("chunkMarkdown: minimum chunk size", () => {
     // No heading is shared, so the path is empty and B is written at the top level.
     expect(chunks[0]?.headingPath).toEqual([]);
     expect(chunks[0]?.text.endsWith("# B\n\nShort.")).toBe(true);
+  });
+
+  // F3: the prompt gives each source 2,000 characters for its `section:` line
+  // and text, and cuts the rest. Two sections under six ~100-character
+  // headings that share none fit it apart (about 1,625 and 725), but merged
+  // the two paths move into the text (about 2,380): the cut would drop the
+  // short section's answer, which then exists in no other chunk.
+  const heading = (label: string) => `${label} ${"h".repeat(96)}`;
+  const deepSection = (label: string, body: string) =>
+    [1, 2, 3, 4, 5, 6]
+      .map((depth) => `${"#".repeat(depth)} ${heading(`${label}${depth}`)}`)
+      .concat(body)
+      .join("\n\n");
+  /** What the model reads of each chunk, through the real prompt builder. */
+  const promptOf = (chunks: readonly { text: string; headingPath: string[] }[]) => {
+    const last = buildPrompt({
+      behaviour: { persona: "" },
+      chunks: chunks.map((c) => ({
+        title: "Doc",
+        url: "https://example.com/doc",
+        text: c.text,
+        headingPath: joinHeadingPath(c.headingPath),
+      })),
+      history: [],
+      question: "q",
+    }).messages.at(-1);
+    return last !== undefined && "content" in last ? last.content : "";
+  };
+
+  it("keeps a short section whole when merging it would be cut in the prompt (F3)", () => {
+    const answer = `The answer is ANSWER-${"z".repeat(88)}`;
+    const md = `${deepSection("A", words(200, "body"))}\n\n${deepSection("B", answer)}`;
+    const unmerged = chunkMarkdown(md, { minChars: 0 });
+    expect(unmerged).toHaveLength(2);
+    // Each section reaches the model whole on its own.
+    for (const chunk of unmerged) {
+      expect(fitsSourceBudget(joinHeadingPath(chunk.headingPath), chunk.text)).toBe(true);
+    }
+
+    const chunks = chunkMarkdown(md);
+    expect(chunks).toEqual(unmerged);
+    for (const chunk of chunks) {
+      expect(fitsSourceBudget(joinHeadingPath(chunk.headingPath), chunk.text)).toBe(true);
+      expect(promptOf([chunk])).toContain(chunk.text);
+    }
+    expect(promptOf(chunks)).toContain(answer);
+  });
+
+  it("still merges a short section across divergent deep headings when the result fits", () => {
+    const md = `${deepSection("A", words(40, "body"))}\n\n${deepSection("B", "Short answer.")}`;
+    const chunks = chunkMarkdown(md);
+    expect(chunks).toHaveLength(1);
+    const [chunk] = chunks;
+    expect(chunk?.headingPath).toEqual([]);
+    expect(chunk?.text).toContain(`###### ${heading("B6")}\n\nShort answer.`);
+    expect(promptOf(chunks)).toContain("Short answer.");
+  });
+
+  it("merges a short section into the neighbour the prompt can carry whole", () => {
+    // The previous section has room in neither budget; the next one does.
+    const md = [
+      deepSection("A", words(200, "body")),
+      deepSection("B", "Short answer."),
+      `# ${heading("C1")}\n\n${words(40, "tail")}`,
+    ].join("\n\n");
+    const chunks = chunkMarkdown(md);
+    expect(chunks).toHaveLength(2);
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeGreaterThanOrEqual(MIN_CHUNK_CHARS);
+      expect(fitsSourceBudget(joinHeadingPath(chunk.headingPath), chunk.text)).toBe(true);
+    }
+    expect(chunks[1]?.text).toContain("Short answer.");
+    expect(chunks[1]?.text).toContain("tail");
   });
 
   it("can be turned off", () => {
