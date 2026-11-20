@@ -1,8 +1,9 @@
-import { isPlainObject, newId, parseSourceInput } from "@solvchat/core";
+import { isPlainObject, newId, parseSourceInput, type RepeatedBlocks } from "@solvchat/core";
 import type { DocumentSummaryRow } from "../db/documents.js";
 import type { SourceRow, SourceWithStatsRow } from "../db/sources.js";
 import type { Tenant } from "../db/tenant.js";
 import { type DeleteDeps, deleteDocuments } from "../ingest/documents.js";
+import { repeatedBlocksFor } from "../ingest/repeatedSource.js";
 import { BadRequest, NotFound } from "./errors.js";
 import { type SourceSyncStatus, syncStatusFor } from "./sourceSync.js";
 
@@ -159,4 +160,19 @@ export async function getSourceDocument(
     },
     markdown,
   };
+}
+
+/**
+ * The blocks left out of a source's pages because they repeat across most
+ * of them, with the first 80 characters of each, read back from the stored
+ * text of a few of its pages (see "Repeated blocks").
+ */
+export async function getRepeatedBlocks(
+  tenant: Tenant,
+  docs: Pick<R2Bucket, "get">,
+  sourceId: string,
+): Promise<RepeatedBlocks> {
+  const source = await tenant.sources.get(sourceId);
+  if (source === null) throw new NotFound("source");
+  return repeatedBlocksFor(tenant, docs, source);
 }

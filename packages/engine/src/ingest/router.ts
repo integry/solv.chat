@@ -110,7 +110,12 @@ export async function ingestRoutes(
     }
 
     const result = await deleteDocuments(
-      { tenant, docs: deps.docs, retriever: deps.retriever },
+      {
+        tenant,
+        docs: deps.docs,
+        retriever: deps.retriever,
+        repeated: { queue: deps.queue, orgId: scope.orgId },
+      },
       scope,
       body,
       pushOnly,

@@ -27,6 +27,8 @@ const EXPECTED_TABLES = [
   "source_sync_pages",
   "source_sync_attempts",
   "sync_org_refusals",
+  "document_blocks",
+  "source_blocks",
 ];
 
 describe("migrations", () => {

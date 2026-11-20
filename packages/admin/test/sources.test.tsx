@@ -1,3 +1,4 @@
+import type { RepeatedBlocks } from "@solvchat/core";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.js";
@@ -57,6 +58,7 @@ function installSourcesFakeServer(options?: {
   onSourcesGet?: (count: number) => Promise<Response | null> | Response | null;
   previewUrls?: string[];
   noPush?: boolean;
+  repeatedBlocks?: Map<string, RepeatedBlocks>;
 }) {
   const assistant = makeAssistant();
   const sources: SourceSummary[] = [
@@ -286,6 +288,11 @@ function installSourcesFakeServer(options?: {
       }
       const { markdown, ...document } = found;
       return Response.json({ document, markdown });
+    }
+
+    const repeatedMatch = /^\/api\/admin\/sources\/([^/]+)\/repeated-blocks$/.exec(path);
+    if (repeatedMatch?.[1] && method === "GET") {
+      return Response.json(options?.repeatedBlocks?.get(repeatedMatch[1]) ?? { blocks: [] });
     }
 
     const deleteSourceMatch = /^\/api\/admin\/sources\/([^/]+)$/.exec(path);
@@ -991,6 +998,51 @@ describe("admin Sources screen", () => {
     ).toBeTruthy();
     expect(within(sourceRow("help.example.com")).getByText("Empty")).toBeTruthy();
 
+    await expectNoSeriousA11yViolations(container);
+  });
+
+  it("says how many repeated parts were left out, and lists the start of each", async () => {
+    const cookie =
+      "We use cookies to remember your settings and to see which pages are read. You can";
+    installSourcesFakeServer({
+      extraSources: [
+        source({
+          id: "src_map_1",
+          kind: "sitemap",
+          label: "help.example.com",
+          settings: { url: "https://help.example.com/sitemap.xml" },
+          documentCount: 40,
+          repeatedBlockCount: 2,
+        }),
+      ],
+      repeatedBlocks: new Map([
+        [
+          "src_map_1",
+          {
+            blocks: [
+              { text: cookie.slice(0, 80), truncated: true, pages: 40 },
+              { text: "Acme Ltd, 12 Harbour Street", truncated: false, pages: 38 },
+            ],
+          },
+        ],
+      ]),
+    });
+    window.history.replaceState(null, "", "/admin/sources");
+    const { container } = render(<App />);
+    await screen.findByText("help.example.com");
+    // Only the source with left-out text says so.
+    expect(within(sourceRow("Your site")).queryByText(/repeated parts? left out/)).toBeNull();
+    fireEvent.click(
+      within(sourceRow("help.example.com")).getByRole("button", {
+        name: "2 repeated parts left out",
+      }),
+    );
+    const panel = await screen.findByRole("region", { name: "Left out: text on most pages" });
+    const items = await within(panel).findAllByRole("listitem");
+    expect(items.map((item) => item.textContent)).toEqual([
+      `${cookie.slice(0, 80)}…40 pages`,
+      "Acme Ltd, 12 Harbour Street38 pages",
+    ]);
     await expectNoSeriousA11yViolations(container);
   });
 

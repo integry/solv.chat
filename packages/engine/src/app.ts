@@ -14,6 +14,7 @@ import type { ScoreFloorEnv } from "./chat/scoreFloor.js";
 import { forPrincipal, forScheduledSync, type Tenant } from "./db/tenant.js";
 import { runIngestBatch } from "./ingest/consumer.js";
 import { plainPageFetcher } from "./ingest/pageFetcher.js";
+import type { RepeatedQueue } from "./ingest/repeatedSource.js";
 import { type IngestResource, ingestRoutes } from "./ingest/router.js";
 import {
   type DueSyncsResult,
@@ -341,6 +342,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
             retriever,
             usage: seams.usage,
             resolveOrg,
+            queue: env.INGEST_QUEUE as unknown as RepeatedQueue,
           },
         );
       }

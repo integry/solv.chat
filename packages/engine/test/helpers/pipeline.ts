@@ -101,3 +101,44 @@ export async function runConsumer(
   );
   return { acked, retried };
 }
+
+/**
+ * Delivers queued messages to the consumer with the queue wired back in, as
+ * production does, until nothing more is queued: pages the consumer queues
+ * again when their source's repeated blocks change (see "Repeated blocks")
+ * are delivered too. `batchSize` messages go to the consumer at a time.
+ */
+export async function drainConsumer(
+  messages: IngestQueueMessage[],
+  deps: { embedder: Embedder; retriever: Retriever; usage?: UsageSink | undefined },
+  batchSize = 4,
+): Promise<{ acked: number; retried: number; rounds: number }> {
+  let acked = 0;
+  let retried = 0;
+  let rounds = 0;
+  const queue = {
+    async sendBatch(batch: Array<{ body: IngestQueueMessage }>) {
+      messages.push(...batch.map((m) => m.body));
+    },
+  };
+  while (messages.length > 0) {
+    if (++rounds > 200) throw new Error("the consumer never settled");
+    const batch = messages.splice(0, batchSize).map((body) => ({
+      id: newId("msg"),
+      timestamp: new Date(),
+      attempts: 1,
+      body,
+      ack() {
+        acked++;
+      },
+      retry() {
+        retried++;
+      },
+    }));
+    await runIngestBatch(
+      { messages: batch },
+      { db: env.DB, resolveOrg: acceptQueuedOrg, docs: env.DOCS, queue, ...deps },
+    );
+  }
+  return { acked, retried, rounds };
+}

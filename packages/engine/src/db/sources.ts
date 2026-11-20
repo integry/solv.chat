@@ -36,6 +36,12 @@ export interface SourceWithStatsRow extends SourceRow {
   retryingCount: number;
   /** One of the failed documents' error codes, or null when none failed. */
   indexError: IndexErrorCode | null;
+  /**
+   * How many blocks of text are left out of the source's pages because they
+   * repeat across most of them (paragraphs, lists and code blocks; see
+   * "Repeated blocks").
+   */
+  repeatedBlockCount: number;
 }
 
 /** A source with documents that need attention on the Overview. */
@@ -55,6 +61,7 @@ interface StatsRow extends Row {
   failed_count: number | null;
   retrying_count: number | null;
   index_error: string | null;
+  repeated_count: number | null;
 }
 
 const INDEX_ERROR_CODES: ReadonlySet<string> = new Set<IndexErrorCode>([
@@ -171,7 +178,9 @@ export function sourcesFor(db: D1Database, orgId: string) {
                          THEN 1 ELSE 0 END) AS retrying_count,
                 MAX(CASE WHEN d.index_error_hash = d.content_hash
                           AND (d.indexed_hash IS NULL OR d.indexed_hash != d.content_hash)
-                         THEN d.index_error END) AS index_error
+                         THEN d.index_error END) AS index_error,
+                (SELECT COUNT(*) FROM json_each(s.repeated_blocks)
+                  WHERE substr(value, 1, 1) = 'b') AS repeated_count
          FROM sources s
          LEFT JOIN documents d ON d.org_id = s.org_id AND d.source_id = s.id
          WHERE s.org_id = ?1 AND s.assistant_id = ?2
@@ -191,6 +200,7 @@ export function sourcesFor(db: D1Database, orgId: string) {
           row.index_error !== null && INDEX_ERROR_CODES.has(row.index_error)
             ? (row.index_error as IndexErrorCode)
             : null,
+        repeatedBlockCount: Number(row.repeated_count ?? 0),
       }));
     },
 

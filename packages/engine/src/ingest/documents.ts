@@ -13,6 +13,7 @@ import type { IngestScope, Tenant } from "../db/tenant.js";
 import type { Retriever } from "../providers/retrieval.js";
 import { sha256Hex } from "../util/crypto.js";
 import { chunkMarkdown, exceedsChunkBudget, MAX_CHUNKS } from "./chunk.js";
+import { type RepeatedQueue, reconcileRepeated } from "./repeatedSource.js";
 import { INGEST_VERSION } from "./version.js";
 
 export const MAX_BATCH_DOCUMENTS = 100;
@@ -62,6 +63,12 @@ export interface DeleteDeps {
   tenant: Tenant;
   docs: { delete(keys: string | string[]): Promise<unknown> };
   retriever: Pick<Retriever, "remove">;
+  /**
+   * After a removal, the source's repeated blocks are worked out again and
+   * the pages whose blocks changed status are queued here (see "Repeated
+   * blocks"). Left out when the whole source goes.
+   */
+  repeated?: { queue: RepeatedQueue; orgId: string } | undefined;
 }
 
 const encoder = new TextEncoder();
@@ -386,6 +393,18 @@ export async function removeSourceDocuments(
     .map((doc) => doc.bodyKey as string);
   for (let i = 0; i < bodyKeys.length; i += R2_DELETE_KEYS_LIMIT) {
     await tryDeleteObject(deps.docs, bodyKeys.slice(i, i + R2_DELETE_KEYS_LIMIT), sourceId);
+  }
+  // Fewer pages: a block may now be over the threshold, or under it.
+  const repeated = deps.repeated;
+  if (removed.size > 0 && repeated !== undefined) {
+    try {
+      await reconcileRepeated(deps.tenant, sourceId, repeated.queue, repeated.orgId);
+    } catch (err) {
+      console.warn("ingest delete: could not update repeated blocks", {
+        sourceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
   return removed.size;
 }

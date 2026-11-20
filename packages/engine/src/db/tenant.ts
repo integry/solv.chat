@@ -1,5 +1,6 @@
 import type { Principal } from "../seams/types.js";
 import { assistantsFor } from "./assistants.js";
+import { blocksFor } from "./blocks.js";
 import { conversationsFor } from "./conversations.js";
 import { documentsFor } from "./documents.js";
 import { feedbackFor } from "./feedback.js";
@@ -30,6 +31,7 @@ export interface Tenant {
   readonly versions: ReturnType<typeof versionsFor>;
   readonly sources: ReturnType<typeof sourcesFor>;
   readonly documents: ReturnType<typeof documentsFor>;
+  readonly blocks: ReturnType<typeof blocksFor>;
   readonly conversations: ReturnType<typeof conversationsFor>;
   readonly messages: ReturnType<typeof messagesFor>;
   readonly traces: ReturnType<typeof tracesFor>;
@@ -101,6 +103,7 @@ function build(db: D1Database, orgId: string): Tenant {
     versions: versionsFor(db, orgId),
     sources: sourcesFor(db, orgId),
     documents: documentsFor(db, orgId),
+    blocks: blocksFor(db, orgId),
     conversations: conversationsFor(db, orgId),
     messages: messagesFor(db, orgId),
     traces: tracesFor(db, orgId),

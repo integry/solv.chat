@@ -107,7 +107,7 @@ export function isSyncPageMessage(body: unknown): body is SyncPageMessage {
 
 export interface SyncQueue {
   send(message: IngestQueueMessage): Promise<unknown>;
-  sendBatch(messages: Array<{ body: SyncPageMessage }>): Promise<unknown>;
+  sendBatch(messages: Array<{ body: SyncPageMessage | IngestQueueMessage }>): Promise<unknown>;
 }
 
 export interface SyncCaps {
@@ -426,7 +426,12 @@ export async function startSourceSyncFor(
   const removed =
     plan.removed.length > 0
       ? await removeSourceDocuments(
-          { tenant, docs: deps.docs, retriever: deps.retriever },
+          {
+            tenant,
+            docs: deps.docs,
+            retriever: deps.retriever,
+            repeated: { queue: deps.queue, orgId },
+          },
           source.id,
           plan.removed,
         )

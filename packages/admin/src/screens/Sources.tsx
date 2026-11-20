@@ -20,6 +20,7 @@ import { useToast } from "../ui/Toast.js";
 import { cliPushCommand } from "./cliCommand.js";
 import { EntryEditor } from "./EntryEditor.js";
 import { RebuildNotice } from "./RebuildNotice.js";
+import { RepeatedBlocksList, repeatedBlocksText } from "./RepeatedBlocks.js";
 import {
   isSyncing,
   SyncCell,
@@ -925,10 +926,20 @@ export function Sources({ assistantId }: SourcesProps) {
         }
         if (source.sync && isSyncing(source)) return <SyncingStatus sync={source.sync} />;
         const status = indexStatus(source);
+        const repeated = source.repeatedBlockCount ?? 0;
         return (
           <div className="source-status">
             <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
             {status.hint && <span className="source-status-hint">{status.hint}</span>}
+            {repeated > 0 && (
+              <button
+                type="button"
+                className="text-button source-status-hint"
+                onClick={() => showDocuments(source.id)}
+              >
+                {repeatedBlocksText(repeated)}
+              </button>
+            )}
           </div>
         );
       },
@@ -1088,6 +1099,11 @@ export function Sources({ assistantId }: SourcesProps) {
               Read-only. Update pushed pages from your site with <code>solv push</code>.
             </p>
           )}
+          <RepeatedBlocksList
+            key={expandedSource.id}
+            sourceId={expandedSource.id}
+            count={expandedSource.repeatedBlockCount ?? 0}
+          />
           {(() => {
             const activeDocs = docsState.sourceId === expandedSource.id ? docsState : null;
             const start = activeDocs ? activeDocs.offset + 1 : 0;

@@ -1,11 +1,19 @@
 import { newId } from "@solvchat/core";
-import type { DocumentRow, IndexErrorCode } from "../db/documents.js";
+import type { BlocksInput, ChunkRow, DocumentRow, IndexErrorCode } from "../db/documents.js";
 import { forQueuedIngest, type Tenant } from "../db/tenant.js";
 import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
 import type { UsageSink } from "../seams/types.js";
 import { chunkMarkdown, exceedsChunkBudget, joinHeadingPath } from "./chunk.js";
 import type { IngestQueueMessage } from "./documents.js";
-import { INGEST_VERSION } from "./version.js";
+import { pageBlocks, repeatedKey, withoutRepeated } from "./repeated.js";
+import {
+  builtWithCurrentRepeated,
+  type CommittedPage,
+  checksRepeated,
+  type RepeatedQueue,
+  reconcileRepeated,
+} from "./repeatedSource.js";
+import { EMBEDDINGS_REUSABLE_FROM, INGEST_VERSION } from "./version.js";
 
 export interface IngestConsumerDeps {
   db: D1Database;
@@ -19,6 +27,13 @@ export interface IngestConsumerDeps {
    * (`AuthProvider.resolveOrg` with `queued_ingest`); null drops the message.
    */
   resolveOrg: (claimedOrgId: string) => Promise<string | null>;
+  /**
+   * Where pages go to be cleaned when a block crosses its source's
+   * repeated threshold (the ingest queue itself; see "Repeated blocks").
+   * Without it, pages are still built with the source's repeated blocks,
+   * but earlier pages are not queued again when those change.
+   */
+  queue?: RepeatedQueue | undefined;
 }
 
 /**
@@ -170,16 +185,22 @@ async function processIngestMessage(
     return;
   }
 
-  // Indexed, and by the current pipeline. A document indexed by an older
-  // version is rebuilt from its stored text (a re-index; see
-  // `ingest/version.ts`), once: the commit records the version.
-  if (document.indexedHash === contentHash && document.ingestVersion >= INGEST_VERSION) {
+  const source = await tenant.sources.get(document.sourceId);
+  if (source === null) {
     message.ack();
     return;
   }
 
-  const source = await tenant.sources.get(document.sourceId);
-  if (source === null) {
+  // Indexed, by the current pipeline, and with the source's current
+  // repeated blocks. A document indexed by an older version, or before a
+  // block on it crossed (or fell back under) its source's threshold, is
+  // rebuilt from its stored text (a re-index; see `ingest/version.ts` and
+  // "Repeated blocks"), once: the commit records the version and key.
+  if (
+    document.indexedHash === contentHash &&
+    document.ingestVersion >= INGEST_VERSION &&
+    (!checksRepeated(source.kind) || (await builtWithCurrentRepeated(tenant, document)))
+  ) {
     message.ack();
     return;
   }
@@ -216,7 +237,22 @@ async function indexDocument(
     throw new MissingBodyError(`missing document body for ${document.id}`);
   }
 
-  const markdown = await object.text();
+  const stored = await object.text();
+  // A page of a pushed or sitemap source loses the blocks that repeat across
+  // most of its source's pages; the stored text keeps them, so a page is
+  // rebuilt without re-fetching when that changes. Written answers are the
+  // owner's own words and are never touched.
+  let markdown = stored;
+  let blocks: BlocksInput | undefined;
+  let committedPage: CommittedPage | undefined;
+  if (checksRepeated(source.kind)) {
+    const page = await pageBlocks(stored);
+    const repeated = new Set((await tenant.blocks.stored(document.sourceId))?.hashes ?? []);
+    markdown = withoutRepeated(stored, page, repeated).markdown;
+    const key = await repeatedKey(page, repeated);
+    blocks = { sourceId: document.sourceId, hashes: page.hashes, key };
+    committedPage = { documentId: document.id, contentHash, page, key };
+  }
   const parts = chunkMarkdown(markdown);
   if (exceedsChunkBudget(parts)) {
     // `pushDocuments` refuses such a document, so only a body stored before
@@ -235,6 +271,35 @@ async function indexDocument(
     return;
   }
   const chunks = chunksToIndex(markdown, document, source.kind);
+  const reconcile = async () => {
+    if (deps.queue === undefined || committedPage === undefined) return;
+    const queue = deps.queue;
+    const page = committedPage;
+    // Best effort: the page is committed either way, and the source's next
+    // commit (or removal) works the counts out again.
+    await bestEffort("ingest consumer: could not update repeated blocks", document.id, () =>
+      reconcileRepeated(tenant, document.sourceId, queue, orgId, page),
+    );
+  };
+
+  // Content already indexed, rebuilt for its version or repeated blocks,
+  // that comes out as the very chunks it has: their vectors are what this
+  // build would make, so nothing is embedded and only the document's state
+  // and blocks are written. This is what spares the upgrade to version 3
+  // an embedding for every page with no repeated block, and a page that
+  // keeps its repeated block (most of the page) one on every crossing.
+  if (await reusesStoredChunks(tenant, document, chunks)) {
+    const committed = await tenant.documents.replaceChunks(
+      document.id,
+      [],
+      contentHash,
+      INGEST_VERSION,
+      { blocks, keepChunks: true },
+    );
+    if (committed) await reconcile();
+    message.ack();
+    return;
+  }
 
   let vectors: number[][] = [];
   if (chunks.length > 0) {
@@ -281,6 +346,7 @@ async function indexDocument(
     chunks.map(({ id, ordinal, text, headingPath }) => ({ id, ordinal, text, headingPath })),
     contentHash,
     INGEST_VERSION,
+    { blocks },
   );
   const newChunkIds = chunks.map((c) => c.id);
 
@@ -299,7 +365,35 @@ async function indexDocument(
       deps.retriever.remove(previousChunkIds),
     );
   }
+  await reconcile();
   message.ack();
+}
+
+/**
+ * True when the document's indexed chunks are exactly `chunks` (text,
+ * heading path and order) and were built by an ingest version that embeds
+ * a chunk as this one does, so their vectors can stay.
+ */
+async function reusesStoredChunks(
+  tenant: Tenant,
+  document: DocumentRow,
+  chunks: ReadonlyArray<{ ordinal: number; text: string; headingPath: string }>,
+): Promise<boolean> {
+  if (document.indexedHash !== document.contentHash) return false;
+  if (document.ingestVersion < EMBEDDINGS_REUSABLE_FROM) return false;
+  const stored: ChunkRow[] = await tenant.documents.listChunks(document.id);
+  return (
+    stored.length === chunks.length &&
+    stored.every((row, i) => {
+      const chunk = chunks[i];
+      return (
+        chunk !== undefined &&
+        row.ordinal === chunk.ordinal &&
+        row.text === chunk.text &&
+        row.headingPath === chunk.headingPath
+      );
+    })
+  );
 }
 
 /**
