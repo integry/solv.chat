@@ -20,7 +20,10 @@ describe("chat/citationMarkers", () => {
     expect(stripCitationMarkers("Refunds take 30 days [1][2] and are free [2] [3].", MAX)).toBe(
       "Refunds take 30 days and are free.",
     );
-    expect(stripCitationMarkers("[1] Start here.", MAX)).toBe(" Start here.");
+    expect(stripCitationMarkers("[1] Start here.", MAX)).toBe("Start here.");
+    expect(stripCitationMarkers("[1][2]  Start here.", MAX)).toBe("Start here.");
+    expect(streamed(["[", "1] ", " Start", " here."]).text).toBe("Start here.");
+    expect(stripCitationMarkers(" [1] Start here.", MAX)).toBe(" Start here.");
     expect(stripCitationMarkers("See the steps [1-3].\n\nNext [4]\n", MAX)).toBe(
       "See the steps.\n\nNext\n",
     );

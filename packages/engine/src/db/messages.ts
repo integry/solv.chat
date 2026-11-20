@@ -55,7 +55,7 @@ export interface MessageRow {
   /**
    * Whether the visitor was shown `citations` (the version's "Show sources in
    * answers"). Off, `citations` is still kept: it is the owner's record of
-   * the pages the answer used. True for rows written before migration 0033.
+   * the pages the answer used. True for rows written before migration 0034.
    */
   citationsShown: boolean;
 }

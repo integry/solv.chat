@@ -29,9 +29,8 @@
  * stays and the "[1]" still goes.
  *
  * A line ends at "\n", "\r\n" or a bare "\r" alike, as the widget reads the
- * answer (it turns the latter two into "\n" before parsing), so a closing
- * fence or a blank line is found whatever line endings the model used; the
- * text itself keeps its own endings.
+ * answer, so a closing fence or a blank line is found whatever line endings
+ * the model used; the text itself keeps its own endings.
  */
 
 const NUMBER = String.raw`\d{1,2}`;
@@ -76,14 +75,16 @@ function linkTextBefore(text: string, at: number): boolean {
   return false;
 }
 
-/** The `[start, end)` spans of `text` from `from` up to `end` that are markers (with their spaces). */
-function markersIn(
+/** `source` with the markers `text` shows from `from` up to `end` taken out. */
+function stripAll(
   text: string,
   from: number,
   end: number,
   maxSource: number,
-): Array<[number, number]> {
-  const spans: Array<[number, number]> = [];
+  source = text,
+): string {
+  let out = "";
+  let at = from;
   MARKER.lastIndex = from;
   for (let match = MARKER.exec(text); match !== null; match = MARKER.exec(text)) {
     const markerEnd = match.index + match[0].length;
@@ -95,37 +96,11 @@ function markersIn(
       !escapedAt(text, markerStart) &&
       !linkTextBefore(text, markerStart)
     ) {
-      spans.push([match.index, markerEnd]);
+      out += source.slice(at, match.index);
+      at = markerEnd;
     }
   }
-  return spans;
-}
-
-/**
- * `text` with every "\r\n" and bare "\r" read as a "\n", the way the widget
- * reads an answer before parsing it, and `offset`, which gives the index in
- * `text` of each index in the normalized text (its length included). The
- * normalized text of any prefix of `text` is a prefix of this one, so reading
- * a stream through it never changes what was read before.
- */
-function normalizeBreaks(text: string): {
-  normalized: string;
-  offset: (at: number) => number;
-} {
-  if (!text.includes("\r")) return { normalized: text, offset: (at) => at };
-  const offsets: number[] = [];
-  let normalized = "";
-  for (let p = 0; p < text.length; p++) {
-    offsets.push(p);
-    if (text[p] === "\r") {
-      normalized += "\n";
-      if (text[p + 1] === "\n") p++;
-    } else {
-      normalized += text[p];
-    }
-  }
-  offsets.push(text.length);
-  return { normalized, offset: (at) => offsets[at] ?? text.length };
+  return out + source.slice(at, end);
 }
 
 /**
@@ -556,28 +531,21 @@ function proseRanges(text: string): Array<[number, number]> {
  */
 export function stripCitationMarkers(text: string, maxSource: number, before = ""): string {
   const whole = before + text;
-  // Markdown is read with line breaks normalized, as the widget reads it; the
-  // markers found are then cut out of `whole` itself, so its line endings
-  // stay as the model wrote them. A marker holds no line break, so its span
-  // maps back as it is.
-  const { normalized, offset } = normalizeBreaks(whole);
+  // Read with every line ending as "\n" ("\r\n" as " \n", a trailing space
+  // changing nothing), keeping each index, so the cuts apply to `whole` as is.
+  // A "\r" a chunk ends on reads as "\n" until its "\n" arrives, to the same effect.
+  const lines = whole.replace(/\r\n?/gu, (eol) => (eol.length === 2 ? " \n" : "\n"));
   let out = "";
   let at = before.length;
-  let from = 0;
-  while (offset(from) < at) from++;
-  for (const [start, end] of proseRanges(normalized)) {
-    if (end <= from) continue;
-    for (const [markerStart, markerEnd] of markersIn(
-      normalized,
-      Math.max(start, from),
-      end,
-      maxSource,
-    )) {
-      out += whole.slice(at, offset(markerStart));
-      at = offset(markerEnd);
-    }
+  for (const [start, end] of proseRanges(lines)) {
+    if (end <= at) continue;
+    const from = Math.max(start, at);
+    out += whole.slice(at, from) + stripAll(lines, from, end, maxSource, whole);
+    at = end;
   }
-  return out + whole.slice(at);
+  const clean = out + whole.slice(at);
+  // An answer that opens with a marker does not open with the space after it.
+  return before === "" && !/^[ \t]/u.test(whole) ? clean.replace(/^[ \t]+/u, "") : clean;
 }
 
 export interface MarkerStripper {

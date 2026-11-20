@@ -107,7 +107,7 @@ from the auth seam and pass it down.
   reads it yet). See "Answer review".
   For assistant replies, also citations_shown (1 when the visitor was shown
   the citations, 0 when the version had "Show sources in answers" off; 1 for
-  rows written before migration 0033). The citations are stored either way.
+  rows written before migration 0034). The citations are stored either way.
   For visitor questions, topic_id (the question's topic, or NULL: not
   reviewed, or its topic was deleted; indexed on its own, so deleting a topic
   finds its questions without reading every message). See "Topics".
