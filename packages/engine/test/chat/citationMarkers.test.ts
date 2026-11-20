@@ -102,6 +102,9 @@ describe("chat/citationMarkers", () => {
       "Codes [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 99] stay [5].",
       "```text\n```not-a-close\nitems[1]\n```  [2]\n``` \nDone[1].",
       "Example:\n\n    items[1]\n\n\tx[2]\nDone[1].\n- Step [2]\n\n    Save [3].\n\n      y[4]\n",
+      "1. Example [1]:\n\n    ~~~js\n    items[1]\n\n    b[2]\n    ~~~\n\n> ~~~\n> row[3]\n>\n> col[4]\n\nDone [1].",
+      "> 1. Run [2]:\n>    ```\n>    x[1]\n>    ```\n> Then [3].\n- ~~~\n  y[2]\n- Next [1]\n   > ~~~\n   > z[3]\n",
+      "1. Step:\n   ```sh\nls dir[1]\n```\nDone [1].\n```\n\nAfter [2].",
     ];
     let seed = 7;
     const random = () => {
@@ -233,6 +236,104 @@ describe("chat/citationMarkers", () => {
     // A continuation whose first part ended at a blank line.
     expect(streamed(["    items[1]\nDone[2]."], "Example:\n\n").text).toBe("    items[1]\nDone.");
     expect(streamed(["items[1]\n"], "Example:\n\n    ").text).toBe("items[1]\n");
+  });
+
+  it("leaves markers inside code in list items and quotes alone, however it is streamed", () => {
+    const cases: Array<[string, string]> = [
+      // A fence indented to sit in an ordered list item.
+      [
+        "1. Example:\n\n    ~~~js\n    items[1]\n    ~~~\n\nDone [1].",
+        "1. Example:\n\n    ~~~js\n    items[1]\n    ~~~\n\nDone.",
+      ],
+      // A backtick fence in a list item, with a blank line inside it.
+      [
+        "1. Example:\n\n    ```js\n    a = items[1]\n\n    b = items[2]\n    ```\n\nDone [1].",
+        "1. Example:\n\n    ```js\n    a = items[1]\n\n    b = items[2]\n    ```\n\nDone.",
+      ],
+      // A fence on the item's own line, then the next item.
+      ["- ~~~\n  items[1]\n  ~~~\n- Next [2].", "- ~~~\n  items[1]\n  ~~~\n- Next."],
+      // In a nested item; the outer item's text goes on after it.
+      [
+        "- Steps:\n  - Run:\n\n    ~~~\n    x[1]\n    ~~~\n\n  Then save [2].",
+        "- Steps:\n  - Run:\n\n    ~~~\n    x[1]\n    ~~~\n\n  Then save.",
+      ],
+      // A quoted fence, a nested one, and a fence in a list inside a quote.
+      ["> ~~~\n> items[1]\n> ~~~\n\nDone [1].", "> ~~~\n> items[1]\n> ~~~\n\nDone."],
+      ["> > ~~~\n> > items[1]\n> > ~~~\n> Done [2].", "> > ~~~\n> > items[1]\n> > ~~~\n> Done."],
+      [
+        "> 1. Example:\n>\n>     ~~~\n>     items[1]\n>     ~~~\n\nDone [1].",
+        "> 1. Example:\n>\n>     ~~~\n>     items[1]\n>     ~~~\n\nDone.",
+      ],
+      // A quote inside a list item; the item's text goes on after it.
+      [
+        "1. Example:\n\n   > ~~~\n   > items[1]\n   > ~~~\n\n    Then click Save [1].",
+        "1. Example:\n\n   > ~~~\n   > items[1]\n   > ~~~\n\n    Then click Save.",
+      ],
+      // Indented code inside a quote.
+      [">     items[1]\n\nDone [1].", ">     items[1]\n\nDone."],
+    ];
+    for (const [answer, expected] of cases) {
+      expect(stripCitationMarkers(answer, MAX)).toBe(expected);
+      for (let a = 0; a <= answer.length; a++) {
+        expect(streamed([answer.slice(0, a), answer.slice(a)]).text).toBe(expected);
+        for (let b = a; b <= answer.length; b++) {
+          const { text } = streamed([answer.slice(0, a), answer.slice(a, b), answer.slice(b)]);
+          expect(text).toBe(expected);
+        }
+      }
+    }
+    // A paused reply's continuation inside a list item's or a quote's fence.
+    expect(
+      streamed(["items[1]\n    ~~~\n\nDone [1]."], "1. Example:\n\n    ~~~js\n    ").text,
+    ).toBe("items[1]\n    ~~~\n\nDone.");
+    expect(streamed(["[1]\n> ~~~\n\nDone [2]."], "> ~~~\n> items").text).toBe(
+      "[1]\n> ~~~\n\nDone.",
+    );
+    expect(streamed(["> items[1]\n> ~~~\nDone [1]."], "> ~~~\n").text).toBe(
+      "> items[1]\n> ~~~\nDone.",
+    );
+  });
+
+  it("ends a quoted fence where its quote ends", () => {
+    // A line without ">" leaves the quote, and the fence with it.
+    expect(stripCitationMarkers("> ~~~\n> items[1]\n\nDone [1].", MAX)).toBe(
+      "> ~~~\n> items[1]\n\nDone.",
+    );
+    expect(stripCitationMarkers("> ~~~\n> items[1]\nDone [1].", MAX)).toBe(
+      "> ~~~\n> items[1]\nDone.",
+    );
+    expect(streamed(["> ~~~\n> items[", "1]\nDone [", "1]."]).text).toBe(
+      "> ~~~\n> items[1]\nDone.",
+    );
+  });
+
+  it("keeps code indented less than the list item holding a fence on a line of its own", () => {
+    // Indented to the item, the fence closes there and prose follows.
+    expect(stripCitationMarkers("1. Step:\n   ```sh\n   ls dir[1]\n   ```\nDone [1].", MAX)).toBe(
+      "1. Step:\n   ```sh\n   ls dir[1]\n   ```\nDone.",
+    );
+    // Flush left, the code line is still code as the widget shows it, and
+    // Markdown reads the second fence as opening another code block.
+    for (const answer of [
+      "1. Step:\n   ```sh\nls dir[1]\n```\nDone [1].",
+      "1. Step:\n   ~~~\nls dir[1]\n   ~~~\nDone [1].",
+    ]) {
+      expect(stripCitationMarkers(answer, MAX)).toBe(answer);
+      for (let cut = 1; cut < answer.length; cut++) {
+        expect(streamed([answer.slice(0, cut), answer.slice(cut)]).text).toBe(answer);
+      }
+    }
+  });
+
+  it("ends a fence on a list item's own line where the item ends", () => {
+    // The next item is prose again, as in Markdown.
+    expect(stripCitationMarkers("- ~~~\n  y[2]\n- Next [1].", MAX)).toBe("- ~~~\n  y[2]\n- Next.");
+    expect(stripCitationMarkers("1. ```sh\n   npm i x[1]\n2. Run [1].", MAX)).toBe(
+      "1. ```sh\n   npm i x[1]\n2. Run.",
+    );
+    expect(streamed(["1. ```sh\n   npm i x[", "1]\n2. Run [", "1]."]).text).toBe(
+      "1. ```sh\n   npm i x[1]\n2. Run.",
+    );
   });
 
   it("holds a long unfinished marker group instead of sending it early", () => {

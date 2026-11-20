@@ -478,10 +478,11 @@ visitors once published and by "Try it" and test runs from the draft.
   next chunk (or the end) settles it, however long the unfinished marker is,
   so nothing sent is ever taken back. Only numbers 1 to `TOP_K` are taken,
   anywhere in prose (also straight after a word, "Password[1]") but never
-  inside Markdown code, an inline span or a fenced block (so `items[1]`
-  stays), never a Markdown link, with the spaces before them. No `citation`
-  event is sent, so the widget shows no sources block. Page actions do not
-  depend on citations and work as before.
+  inside Markdown code, an inline span or a fenced or indented block, also
+  one within a list item or a quote (so `items[1]` stays), never a Markdown
+  link, with the spaces before them. No `citation` event is sent, so the
+  widget shows no sources block. Page actions do not depend on citations and
+  work as before.
 - **Kept either way.** Everything the owner sees: the trace, the stored
   citations, `message_documents` (Reports' "Content used most / never used"
   count the same), and the conversation view, which shows a reply's pages

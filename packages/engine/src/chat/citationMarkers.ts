@@ -8,8 +8,9 @@
  * - only numbers from 1 to `maxSource` (the most sources a prompt can carry),
  *   so "[2024]" or "[42]" stay;
  * - never inside Markdown code (an inline code span, a fenced block or an
- *   indented block), so `items[1]` in a code sample stays. In prose a marker goes wherever it is,
- *   also straight after a word ("Forgot Password[1].");
+ *   indented block, also within a list item or a quote), so `items[1]` in a
+ *   code sample stays. In prose a marker goes wherever it is, also straight
+ *   after a word ("Forgot Password[1].");
  * - never a Markdown link (`[1](https://…)`).
  * The spaces before a marker go with it: "open at 9 [1]." becomes "open at 9.".
  * Each bracket is judged on its own, so in "option [42] [1]." the "[42]"
@@ -42,22 +43,6 @@ function stripAll(text: string, maxSource: number): string {
 }
 
 /**
- * The `[start, end)` ranges of `text` that are prose, not Markdown code.
- * A fence is a line starting (after up to three spaces) with three or more
- * backticks or tildes, and runs to a line starting with at least as many of
- * the same and nothing else but spaces; unclosed, to the end. An indented
- * block is a line indented four columns past the current list item's text
- * (a tab reaching the next multiple of four), where a paragraph cannot hold
- * it: first in the text, or after a blank line, a heading, a closing fence or
- * another indented line. Elsewhere a run of backticks opens an inline span
- * that ends at the same number of backticks or at a blank line.
- *
- * Read strictly left to right: whether a character is code depends only on
- * the text before it, so appending text never turns already-sent prose into
- * code or back. (Markdown proper would wait for a closing backtick; a stray
- * one here only protects the rest of its paragraph, which keeps markers in.)
- */
-/**
  * Where the paragraph ends if the line break at `at` is followed by a blank
  * line: the blank line's own break, so the spaces between stay with the code
  * and nothing already read as code turns into prose once the break arrives.
@@ -83,44 +68,172 @@ const LIST_MARKER = /^(?:[-*+]|\d{1,9}[.)])(?=[ \t]|$)/u;
 const ATX_HEADING = /^#{1,6}(?:[ \t\n]|$)/u;
 
 /**
- * The column a list item's text starts at, if the line whose text starts at
- * `at` (indented `width`) is a list item; otherwise null.
+ * The list item marker at `at` and the columns of space after it that belong
+ * to the marker (the item's text starts after them), or null.
  */
-function listItemColumn(text: string, at: number, width: number): number | null {
+function listItemAt(text: string, at: number): { marker: number; gap: number } | null {
   const lineEnd = text.indexOf("\n", at);
   const line = text.slice(at, lineEnd === -1 ? text.length : lineEnd);
   const marker = LIST_MARKER.exec(line);
   if (marker === null) return null;
   const after = indentAt(line, marker[0].length);
-  const gap = after.width;
   // Text more than four columns past the marker is itself indented code; the
   // item's text then starts one column after the marker, as with no text.
-  const textGap = gap >= 1 && gap <= 4 && after.end < line.length ? gap : 1;
-  return width + marker[0].length + textGap;
+  const gap = after.width >= 1 && after.width <= 4 && after.end < line.length ? after.width : 1;
+  return { marker: marker[0].length, gap };
 }
 
+/** How many times `char` repeats from `at`. */
+function runAt(text: string, at: number, char: string): number {
+  let end = at;
+  while (text[end] === char) end++;
+  return end - at;
+}
+
+/** A run of three or more backticks or tildes at `at`, as a fence opens or closes with. */
+function fenceAt(text: string, at: number): { char: string; length: number; end: number } | null {
+  const char = text[at];
+  if (char !== "`" && char !== "~") return null;
+  const length = runAt(text, at, char);
+  return length >= 3 ? { char, length, end: at + length } : null;
+}
+
+/** Past a quote's ">" and the one space that may follow it. */
+function afterQuoteMarker(text: string, at: number): number {
+  return text[at + 1] === " " || text[at + 1] === "\t" ? at + 2 : at + 1;
+}
+
+/**
+ * A block a line can sit in: a block quote (each of its lines starts with
+ * ">"), or a list item whose text starts `column` columns into the space
+ * its parent leaves.
+ */
+type Container = { quote: true } | { quote: false; column: number };
+
+/**
+ * Where a line's own text starts once some of its containers are read: the
+ * whitespace from `at`, of which the first `skip` columns are list items'.
+ */
+interface LinePosition {
+  at: number;
+  skip: number;
+}
+
+/** How many of `containers` the line starting at `start` continues, and where its text starts. */
+function continuedContainers(
+  text: string,
+  start: number,
+  containers: readonly Container[],
+): LinePosition & { matched: number } {
+  let at = start;
+  let skip = 0;
+  let matched = 0;
+  for (const container of containers) {
+    const indent = indentAt(text, at);
+    const blank = indent.end === text.length || text[indent.end] === "\n";
+    if (container.quote) {
+      if (blank || indent.width - skip > 3 || text[indent.end] !== ">") break;
+      at = afterQuoteMarker(text, indent.end);
+      skip = 0;
+    } else if (!blank) {
+      // A blank line stays in a list item; text must reach the item's column.
+      if (indent.width - skip < container.column) break;
+      skip += container.column;
+    }
+    matched++;
+  }
+  return { at, skip, matched };
+}
+
+/**
+ * Opens the quotes and list items that start a line at `from` (each at most
+ * three columns in), adding them to `containers`. Returns where the line's
+ * text then starts, or null if none starts there.
+ */
+function openContainers(
+  text: string,
+  from: LinePosition,
+  containers: Container[],
+): LinePosition | null {
+  let { at, skip } = from;
+  let opened = false;
+  for (;;) {
+    const indent = indentAt(text, at);
+    const width = indent.width - skip;
+    if (width > 3) break;
+    if (text[indent.end] === ">") {
+      containers.push({ quote: true });
+      at = afterQuoteMarker(text, indent.end);
+      skip = 0;
+    } else {
+      const item = listItemAt(text, indent.end);
+      if (item === null) break;
+      containers.push({ quote: false, column: width + item.marker + item.gap });
+      at = indent.end + item.marker;
+      skip = item.gap;
+    }
+    opened = true;
+  }
+  return opened ? { at, skip } : null;
+}
+
+/** Whether a line whose text starts at `at`, indented `width`, starts a block that ends a paragraph. */
+function startsBlock(text: string, at: number, width: number): boolean {
+  if (width > 3) return false;
+  return (
+    text[at] === ">" ||
+    fenceAt(text, at) !== null ||
+    listItemAt(text, at) !== null ||
+    ATX_HEADING.test(text.slice(at, at + 8))
+  );
+}
+
+/**
+ * The `[start, end)` ranges of `text` that are prose, not Markdown code.
+ *
+ * Lines are read inside their containers, as Markdown does: block quotes
+ * (">") and list items (text indented to the item's column), nested either
+ * way. A line's indent is counted from where its innermost container's text
+ * starts, so code in a quote or a list item is found like code anywhere else.
+ * A paragraph line may leave out its containers' markers and stay in them.
+ *
+ * A fence is a line starting (up to three columns in) with three or more
+ * backticks or tildes, and runs to a line in the same containers starting
+ * with at least as many of the same and nothing else but spaces; unclosed, to
+ * the end, or to the first line that leaves a container holding it. In a
+ * fence on a line of its own (nothing before it but up to three spaces, the
+ * way the widget finds fences), a line indented less than the list item
+ * holding the fence still stays code, as the widget shows it, and so does
+ * everything after it until a fence starts (code again, in Markdown too).
+ * An indented block is a line indented four columns, where a paragraph cannot
+ * hold it: first in its container, or after a blank line, a heading, a
+ * closing fence or another indented line. Elsewhere a run of backticks opens
+ * an inline span that ends at the same number of backticks or at a blank line.
+ *
+ * Read strictly left to right: whether a character is code depends only on
+ * the text before it, so appending text never turns already-sent prose into
+ * code or back. (Markdown proper would wait for a closing backtick; a stray
+ * one here only protects the rest of its paragraph, which keeps markers in.)
+ */
 function proseRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
+  // Inside an open fence (or held code) this is the end of the text, so it is
+  // code to the end until a line ends it.
   let proseStart = 0;
   let i = 0;
-  // Whether the next line may start an indented code block (it cannot
-  // continue a paragraph), and the column a list item's text starts at, so
-  // that text indented to stay in the item is not taken for code.
+  // The containers the current line is in, the open fence, whether lines are
+  // held as code after a fence's list item ended, and whether the next line
+  // may start an indented code block (no paragraph is open).
+  const containers: Container[] = [];
+  // `plain` marks a fence opened on a line with nothing before it but up to
+  // three spaces, whatever containers that line is in: read that way alone,
+  // as the widget reads its fences, it holds its code wherever it is.
+  let fence: { char: string; length: number; plain: boolean } | null = null;
+  let held = false;
   let codeMayStart = true;
-  let previousBlank = true;
-  let listColumn = 0;
-  const runAt = (at: number, char: string): number => {
-    let end = at;
-    while (text[end] === char) end++;
-    return end - at;
-  };
-  const lineStartFence = (at: number): { char: string; length: number; end: number } | null => {
-    let p = at;
-    while (p - at < 3 && text[p] === " ") p++;
-    const char = text[p];
-    if (char !== "`" && char !== "~") return null;
-    const length = runAt(p, char);
-    return length >= 3 ? { char, length, end: p + length } : null;
+  const lineEnd = (at: number): number => {
+    const end = text.indexOf("\n", at);
+    return end === -1 ? text.length : end;
   };
   // A closing fence carries nothing after it but spaces: a line such as
   // "```not-a-close" is still code. At the very end of the text the rest of
@@ -132,62 +245,101 @@ function proseRanges(text: string): Array<[number, number]> {
     while (text[p] === " " || text[p] === "\t") p++;
     return p === text.length || text[p] === "\n";
   };
-  while (i < text.length) {
-    const atLineStart = i === 0 || text[i - 1] === "\n";
-    if (atLineStart) {
-      const indent = indentAt(text, i);
-      const blank = indent.end === text.length || text[indent.end] === "\n";
-      if (blank) {
-        codeMayStart = true;
-        previousBlank = true;
-      } else if (codeMayStart && indent.width >= listColumn + 4) {
-        // An indented code line, up to its line break.
-        ranges.push([proseStart, i]);
-        const lineEnd = text.indexOf("\n", i);
-        i = lineEnd === -1 ? text.length : lineEnd;
-        proseStart = i;
-        previousBlank = false;
-        continue;
-      } else {
-        const item = listItemColumn(text, indent.end, indent.width);
-        if (item !== null) listColumn = item;
-        else if (previousBlank && indent.width < listColumn) listColumn = 0;
-        codeMayStart = ATX_HEADING.test(text.slice(indent.end, indent.end + 8));
-        previousBlank = false;
-      }
-    }
-    const fence = atLineStart ? lineStartFence(i) : null;
+  /**
+   * Reads the line starting at `start`, as code or not, and returns where to
+   * go on from: past the code, or `start` itself to read its text for spans.
+   */
+  const readLine = (start: number): number => {
+    const line = continuedContainers(text, start, containers);
     if (fence !== null) {
-      ranges.push([proseStart, i]);
-      // Skip to the closing fence line, or to the end.
-      let p = text.indexOf("\n", fence.end);
-      let close = text.length;
-      while (p !== -1) {
-        const closer = lineStartFence(p + 1);
+      if (line.matched === containers.length) {
+        const indent = indentAt(text, line.at);
+        const closer = indent.width - line.skip <= 3 ? fenceAt(text, indent.end) : null;
         if (
           closer !== null &&
           closer.char === fence.char &&
           closer.length >= fence.length &&
           onlySpacesToLineEnd(closer.end)
         ) {
-          close = closer.end;
-          break;
+          fence = null;
+          proseStart = closer.end;
+          codeMayStart = true;
+          return closer.end;
         }
-        p = text.indexOf("\n", p + 1);
+        return lineEnd(start);
       }
-      i = close;
-      proseStart = close;
+      // The line leaves a container holding the fence, which ends it, and is
+      // read afresh. Indented less than a list item in a plain fence, it is
+      // held as code with all that follows until a fence starts.
+      const left = containers.slice(line.matched);
+      if (fence.plain && !left.some((container) => container.quote)) held = true;
+      else proseStart = start;
+      fence = null;
       codeMayStart = true;
-      continue;
+    }
+    // Where the line's text goes on from once its kind is known: held code
+    // skips to the line's end, anything else is read for spans.
+    const next = (): number => (held ? lineEnd(start) : start);
+    let position: LinePosition = line;
+    let indent = indentAt(text, position.at);
+    let blank = indent.end === text.length || text[indent.end] === "\n";
+    if (line.matched < containers.length && !blank) {
+      // A paragraph's next line may leave its containers' markers out.
+      if (!codeMayStart && !startsBlock(text, indent.end, indent.width - line.skip)) return next();
+      codeMayStart = true;
+    }
+    if (line.matched < containers.length) containers.length = line.matched;
+    if (!(codeMayStart && indent.width - position.skip >= 4)) {
+      const opened = openContainers(text, position, containers);
+      if (opened !== null) {
+        position = opened;
+        indent = indentAt(text, position.at);
+        blank = indent.end === text.length || text[indent.end] === "\n";
+        codeMayStart = true;
+      }
+    }
+    const width = indent.width - position.skip;
+    if (blank) {
+      codeMayStart = true;
+      return next();
+    }
+    if (codeMayStart && width >= 4) {
+      // An indented code line, up to its line break.
+      if (held) return lineEnd(start);
+      ranges.push([proseStart, start]);
+      proseStart = lineEnd(start);
+      return proseStart;
+    }
+    const opener = width <= 3 ? fenceAt(text, indent.end) : null;
+    if (opener !== null) {
+      if (!held) ranges.push([proseStart, start]);
+      held = false;
+      proseStart = text.length;
+      const plain = /^ {0,3}$/u.test(text.slice(start, indent.end));
+      fence = { char: opener.char, length: opener.length, plain };
+      return lineEnd(opener.end);
+    }
+    codeMayStart = ATX_HEADING.test(text.slice(indent.end, indent.end + 8));
+    return next();
+  };
+  let lineRead = -1;
+  while (i < text.length) {
+    if ((i === 0 || text[i - 1] === "\n") && lineRead !== i) {
+      lineRead = i;
+      const next = readLine(i);
+      if (next !== i) {
+        i = next;
+        continue;
+      }
     }
     if (text[i] === "`") {
-      const length = runAt(i, "`");
+      const length = runAt(text, i, "`");
       ranges.push([proseStart, i]);
       let p = i + length;
       let close = text.length;
       while (p < text.length) {
         if (text[p] === "`") {
-          const run = runAt(p, "`");
+          const run = runAt(text, p, "`");
           if (run === length) {
             close = p + run;
             break;
@@ -199,7 +351,6 @@ function proseRanges(text: string): Array<[number, number]> {
         if (blank !== null) {
           close = blank;
           codeMayStart = true;
-          previousBlank = true;
           break;
         }
         p++;
