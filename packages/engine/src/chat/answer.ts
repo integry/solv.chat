@@ -22,7 +22,7 @@ import type { UsageSink } from "../seams/types.js";
 import { cutShortSuffix } from "./cutShort.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
 import type { ReviewJob } from "./review.js";
-import { DEFAULT_SCORE_FLOOR, selectChunks } from "./scoreFloor.js";
+import { DEFAULT_SCORE_FLOOR, selectCandidates } from "./scoreFloor.js";
 import {
   MAX_TOOL_CALLS_PER_CONVERSATION,
   resumeToolLoop,
@@ -35,6 +35,7 @@ import {
   type AnswerRecorder,
   answerRecorder,
   type KeySource,
+  MAX_TRACE_CANDIDATES,
   type PreviewTraceSource,
   type TraceCandidate,
   type TracePart,
@@ -48,6 +49,19 @@ import {
 // `scoreFloor.ts`. An instance may override it with `SOLV_SCORE_FLOOR`.
 export const SCORE_FLOOR = DEFAULT_SCORE_FLOOR;
 export const TOP_K = 6;
+/**
+ * How many hits the retriever is asked for, of which at most `TOP_K` reach
+ * the model. More than `TOP_K`, so that setting aside duplicates and a
+ * document's extra chunks (see `selectCandidates`) still leaves enough, and
+ * so a written answer below six page chunks is among the hits at all.
+ * Vectorize returns up to 100 matches when no values or metadata are asked
+ * for, as here ("Maximum returned results (topK) without values and
+ * metadata: 100").
+ * Source: https://developers.cloudflare.com/vectorize/platform/limits/ — checked 2026-11-20
+ * Every hit is resolved in one D1 query and kept in the trace, whose ceiling
+ * is the same number.
+ */
+export const CANDIDATE_POOL = MAX_TRACE_CANDIDATES;
 /** Lease duration for an active resume claim before a stalled worker's lock expires. */
 export const RESUME_CLAIM_TTL_MS = 60_000;
 const RESUME_CLAIM_RENEW_INTERVAL_MS = Math.floor(RESUME_CLAIM_TTL_MS / 4);
@@ -393,10 +407,16 @@ function keptChunks(
   resolved: ResolvedChunk[],
 ): { chunks: ResolvedChunk[]; candidates: TraceCandidate[] } {
   const floor = floorFor(deps);
-  const chunks = selectChunks(resolved, floor);
+  const { chunks, dropped } = selectCandidates(resolved, floor, { topK: TOP_K });
   return {
     chunks,
-    candidates: traceCandidates(hits, floor, resolved, new Set(chunks.map((c) => c.chunkId))),
+    candidates: traceCandidates(
+      hits,
+      floor,
+      resolved,
+      new Set(chunks.map((c) => c.chunkId)),
+      dropped,
+    ),
   };
 }
 
@@ -444,7 +464,7 @@ async function retrieve(
       vector,
       orgId: input.orgId,
       assistantId: input.assistantId,
-      topK: TOP_K,
+      topK: CANDIDATE_POOL,
       ...(deps.signal ? { signal: deps.signal } : {}),
     });
     const resolved = await resolveChunks(deps.tenant, input.assistantId, hits);
@@ -953,7 +973,7 @@ export async function* answerWithActionResults(
         vector,
         orgId: input.orgId,
         assistantId: input.assistantId,
-        topK: TOP_K,
+        topK: CANDIDATE_POOL,
       });
       const resolved = await resolveChunks(deps.tenant, input.assistantId, hits);
       return keptChunks(deps, hits, resolved);

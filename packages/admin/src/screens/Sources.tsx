@@ -19,6 +19,7 @@ import { StatusBadge, type StatusTone } from "../ui/StatusBadge.js";
 import { useToast } from "../ui/Toast.js";
 import { cliPushCommand } from "./cliCommand.js";
 import { EntryEditor } from "./EntryEditor.js";
+import { RebuildNotice } from "./RebuildNotice.js";
 import {
   isSyncing,
   SyncCell,
@@ -1033,6 +1034,8 @@ export function Sources({ assistantId }: SourcesProps) {
           {actionError}
         </p>
       )}
+
+      <RebuildNotice assistantId={assistantId} onRebuilt={sourcesRes.reload} />
 
       {sources.length === 0 ? (
         !addOpen && (

@@ -57,6 +57,27 @@ export const SAFETY_FRAME = [
   "Keep the answer focused so it finishes in the space you have: lead with the answer, prefer one code example, and name the page that has the rest.",
 ].join(" ");
 
+/**
+ * The part of a source that `MAX_CHUNK_CHARS` bounds: its `section:` line
+ * (when it has headings) and its text. Exported so the chunker can refuse a
+ * merge whose result this prompt would cut (see `mergeSmallChunks`).
+ */
+export function sourceBody(
+  headingPath: string,
+  text: string,
+): { sectionLine: string | null; text: string } {
+  const heading = headingPath.trim();
+  const sectionLine = heading === "" ? null : `section: ${heading}`.slice(0, MAX_CHUNK_CHARS);
+  const textBudget = MAX_CHUNK_CHARS - (sectionLine === null ? 0 : sectionLine.length + 1);
+  return { sectionLine, text: text.slice(0, Math.max(0, textBudget)) };
+}
+
+/** True when a chunk reaches the model whole: nothing of it is cut. */
+export function fitsSourceBudget(headingPath: string, text: string): boolean {
+  const heading = headingPath.trim();
+  return (heading === "" ? 0 : `section: ${heading}`.length + 1) + text.length <= MAX_CHUNK_CHARS;
+}
+
 export interface BuildPromptInput {
   behaviour: Pick<BehaviourConfig, "persona">;
   chunks: readonly (Pick<ResolvedChunk, "title" | "url" | "text"> &
@@ -88,17 +109,15 @@ export function buildPrompt(args: BuildPromptInput): LlmRequest {
   // model with no subject. It shares the per-chunk budget with the text.
   const sources = args.chunks
     .map((chunk, i) => {
-      const heading = chunk.headingPath?.trim() ?? "";
-      const sectionLine = heading === "" ? null : `section: ${heading}`.slice(0, MAX_CHUNK_CHARS);
-      const textBudget = MAX_CHUNK_CHARS - (sectionLine === null ? 0 : sectionLine.length + 1);
+      const body = sourceBody(chunk.headingPath ?? "", chunk.text);
       return [
         `<<<source ${i + 1}`,
         `title: ${chunk.title}`,
         // An entry's URL is an admin link; it means nothing to a visitor and
         // the model should not repeat it.
         ...(chunk.sourceKind === "entry" ? [] : [`url: ${chunk.url}`]),
-        ...(sectionLine === null ? [] : [sectionLine]),
-        chunk.text.slice(0, Math.max(0, textBudget)),
+        ...(body.sectionLine === null ? [] : [body.sectionLine]),
+        body.text,
         ">>>",
       ].join("\n");
     })

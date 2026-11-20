@@ -153,7 +153,7 @@ export interface ConversationTurn {
 }
 
 /** Why retrieved content was not given to the model. */
-export type TraceDropReason = "below_floor" | "not_found";
+export type TraceDropReason = "below_floor" | "not_found" | "duplicate" | "document_cap" | "rank";
 
 export interface AnswerTraceCandidate {
   chunkId: string;
