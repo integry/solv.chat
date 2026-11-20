@@ -65,9 +65,11 @@ from the auth seam and pass it down.
   across most of its pages, as last worked out, with repeated_pending (the
   hashes whose change of status some pages may not have been queued for yet),
   repeated_rev (how many times repeated_blocks was stored), repeated_owed
-  (removals of its pages whose reconciliation has not yet run through) and
-  repeated_pages_rev (how many times one of its pages was committed with its
-  blocks or deleted, kept by triggers on `documents`); see "Repeated blocks".
+  (how many times its pages were removed; never lowered), repeated_reconciled
+  (the repeated_owed a reconciliation read and then ran through; it owes one
+  while repeated_owed is higher) and repeated_pages_rev (how many times one
+  of its pages was committed with its blocks or deleted, kept by triggers on
+  `documents`); see "Repeated blocks".
 - `documents` — id, source_id, external_id, url, title, content_hash, updated_at,
   indexed_hash (the content last made searchable), index_error and
   index_error_hash (a short code saying why the content with that hash could
@@ -381,11 +383,14 @@ never touched. Nothing calls a model.
   an older set, and otherwise reconciles again (as does any message for an
   indexed page while hashes are pending). A removal raises the source's
   `repeated_owed` in the batch that deletes the pages, and a reconciliation
-  that read it and ran through clears it (unless a removal raised it again
-  meanwhile). When the reconciliation after a removal fails, at any step,
-  the removal sends a `repeated_source` message on the ingest queue, which
-  is retried until a reconciliation runs through; any message for one of
-  the source's indexed pages reconciles too while it is owed. Only when
+  that read it before counting and ran through records that value as
+  `repeated_reconciled` (which only rises), so a removal after that read,
+  which raised `repeated_owed` past it, stays owed even when the earlier
+  reconciliation finishes after the later one. When the reconciliation after
+  a removal fails, at any step, the removal sends a `repeated_source`
+  message on the ingest queue, which is retried until a reconciliation runs
+  through; any message for one of the source's indexed pages reconciles too
+  while it is owed. Only when
   that send fails as well does the removal fail; the pages are gone and
   the obligation stays recorded, and the same request again (or the next
   sync run of the source), with nothing left to remove, reconciles.

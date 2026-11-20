@@ -15,8 +15,17 @@ export interface StoredRepeated {
   raw: string;
   pending: string[];
   rev: number;
-  /** Removals whose reconciliation has not yet run through (`repeated_owed`); 0 when none. */
+  /**
+   * Removals whose reconciliation has not yet run through (`repeated_owed`
+   * above `repeated_reconciled`); 0 when none.
+   */
   owed: number;
+  /**
+   * The source's count of removals (`repeated_owed`, which only rises), as
+   * read with the set: the removals a reconciliation that runs through after
+   * this read accounts for, passed to `discharge`.
+   */
+  removals: number;
   /**
    * The count of changes to the source's counted pages (`repeated_pages_rev`:
    * a page committed with its blocks, or deleted), as read with the set; a
@@ -44,7 +53,8 @@ export function blocksFor(db: D1Database, orgId: string) {
     async stored(sourceId: string): Promise<StoredRepeated | null> {
       const row = await prepare(
         db,
-        `SELECT repeated_blocks, repeated_pending, repeated_rev, repeated_owed, repeated_pages_rev
+        `SELECT repeated_blocks, repeated_pending, repeated_rev, repeated_owed,
+                repeated_reconciled, repeated_pages_rev
            FROM sources WHERE org_id = ?1 AND id = ?2`,
       )
         .bind(orgId, sourceId)
@@ -53,6 +63,7 @@ export function blocksFor(db: D1Database, orgId: string) {
           repeated_pending: string;
           repeated_rev: number;
           repeated_owed: number;
+          repeated_reconciled: number;
           repeated_pages_rev: number;
         }>();
       if (row === null) return null;
@@ -61,7 +72,8 @@ export function blocksFor(db: D1Database, orgId: string) {
         raw: row.repeated_blocks,
         pending: stringArray(row.repeated_pending),
         rev: Number(row.repeated_rev),
-        owed: Number(row.repeated_owed),
+        owed: Math.max(0, Number(row.repeated_owed) - Number(row.repeated_reconciled)),
+        removals: Number(row.repeated_owed),
         pagesRev: Number(row.repeated_pages_rev),
       };
     },
@@ -151,17 +163,23 @@ export function blocksFor(db: D1Database, orgId: string) {
     },
 
     /**
-     * Clears the source's owed reconciliation (`repeated_owed`) once one that
-     * read it as `owed` has run through, unless a removal raised it since.
+     * Records that a reconciliation which read the source's removals as
+     * `expected.removals` (before it counted) has run through: those
+     * removals are accounted for. A removal since raised `repeated_owed`
+     * past that value, and stays owed. `repeated_reconciled` only rises, so a
+     * reconciliation that finishes after a later one never lowers it.
      */
-    async discharge(sourceId: string, owed: number): Promise<boolean> {
-      if (owed === 0) return true;
+    async discharge(
+      sourceId: string,
+      expected: Pick<StoredRepeated, "owed" | "removals">,
+    ): Promise<boolean> {
+      if (expected.owed === 0) return true;
       const res = await prepare(
         db,
-        `UPDATE sources SET repeated_owed = 0
-          WHERE org_id = ?1 AND id = ?2 AND repeated_owed = ?3`,
+        `UPDATE sources SET repeated_reconciled = ?3
+          WHERE org_id = ?1 AND id = ?2 AND repeated_reconciled < ?3`,
       )
-        .bind(orgId, sourceId, owed)
+        .bind(orgId, sourceId, expected.removals)
         .run();
       return (res.meta.changes ?? 0) > 0;
     },

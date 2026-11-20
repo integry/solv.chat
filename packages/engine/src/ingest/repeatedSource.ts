@@ -82,10 +82,12 @@ export interface CommittedPage {
  * whose status changed or is pending.
  *
  * `ranThrough` is true when the set was confirmed or stored and every page
- * it owes was queued; the source's owed reconciliation (`repeated_owed`,
- * raised by a removal) is then cleared, unless a removal raised it since
- * it was read. It is false when every compare-and-set lost (to another
- * run's store, or to a page committed or removed while this one counted).
+ * it owes was queued; the removals the source counted when the set was read
+ * (`repeated_owed`, raised by each removal and never lowered) are then
+ * recorded as reconciled (`repeated_reconciled`); a removal since then has
+ * a higher count and stays owed. It is false when every compare-and-set
+ * lost (to another run's store, or to a page committed or removed while
+ * this one counted).
  */
 export async function reconcileRepeated(
   tenant: Tenant,
@@ -96,7 +98,7 @@ export async function reconcileRepeated(
 ): Promise<{ queued: number; ranThrough: boolean }> {
   let current: Set<string> | null = null;
   // The removals owed a reconciliation, as read with the set this run used.
-  let owedRemovals = 0;
+  let owedRemovals: Pick<StoredRepeated, "owed" | "removals"> = { owed: 0, removals: 0 };
   // The hashes whose pages this run queues, and the store they were read at.
   let owed: string[] = [];
   let rev = 0;
@@ -105,7 +107,7 @@ export async function reconcileRepeated(
     if (stored === null) return { queued: 0, ranThrough: true };
     owed = stored.pending;
     rev = stored.rev;
-    owedRemovals = stored.owed;
+    owedRemovals = stored;
     const next = await tenant.blocks.compute(sourceId);
     const before = new Set(stored.hashes);
     const after = new Set(next);

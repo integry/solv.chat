@@ -21,6 +21,7 @@ import {
 import {
   type RepeatedQueue,
   type RepeatedSourceMessage,
+  reconcileRepeated,
   runRepeatedSourceBatch,
 } from "../../src/ingest/repeatedSource.js";
 import { INGEST_VERSION } from "../../src/ingest/version.js";
@@ -617,6 +618,57 @@ describe("repeated blocks across a source's pages", { timeout: 60_000 }, () => {
     expect({ acked, retried }).toEqual({ acked: 1, retried: 1 });
     expect(scheduled.messages).toHaveLength(4);
     await drainConsumer(scheduled.messages, { embedder, retriever });
+    await expectBlocksGivenBack();
+  });
+
+  it("keeps a later removal owed when an earlier reconciliation finishes after it", async () => {
+    await importPages(sitePages(6));
+    // A: the reconciliation of the first removal. Once it has counted the
+    // five pages left (the chrome stays repeated: nothing changes), and
+    // before it goes on, B reconciles the same five pages and clears what
+    // the first removal owes; then a second removal, whose counting fails,
+    // schedules the source's message.
+    const scheduled: Array<IngestQueueMessage | RepeatedSourceMessage> = [];
+    let interleaved = false;
+    const counting: Tenant = {
+      ...tenant,
+      blocks: {
+        ...tenant.blocks,
+        async compute(sourceId: string) {
+          const next = await tenant.blocks.compute(sourceId);
+          if (!interleaved) {
+            interleaved = true;
+            expect(next).not.toEqual([]);
+            const b = await reconcileRepeated(tenant, sourceId, capturingQueue(), TEST_ORG_ID);
+            expect(b).toEqual({ queued: 0, ranThrough: true });
+            expect(await owedRemovals(sourceId)).toBe(0);
+            await removePages(
+              ["page-4"],
+              {
+                async sendBatch(batch) {
+                  scheduled.push(...batch.map((m) => m.body));
+                },
+              },
+              failingCompute(1),
+            );
+            expect(await owedRemovals(sourceId)).toBe(1);
+          }
+          return next;
+        },
+      },
+    };
+    const first = capturingQueue();
+    await removePages(["page-5"], first, counting);
+    expect(interleaved).toBe(true);
+    expect(first.messages).toEqual([]);
+    // A accounted for the first removal only: the second is still owed.
+    expect(await owedRemovals(site.sitemapSourceId)).toBe(1);
+    expect(scheduled).toEqual([
+      { kind: "repeated_source", orgId: TEST_ORG_ID, sourceId: site.sitemapSourceId },
+    ]);
+
+    // The second removal's message reconciles the four pages left.
+    await drainConsumer(scheduled, { embedder, retriever });
     await expectBlocksGivenBack();
   });
 
