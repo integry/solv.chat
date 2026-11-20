@@ -1,7 +1,7 @@
 import { EmptyReplyError, isRetryableStatus, ProviderError, toProviderError } from "./error.js";
 import { type ReasoningSwitchState, sendWithReasoningSwitch } from "./reasoning.js";
 import { readEventStream } from "./sse.js";
-import type { LlmProvider } from "./types.js";
+import type { LlmProvider, StopReason } from "./types.js";
 
 export interface OpenRouterOptions {
   apiKey: string;
@@ -123,6 +123,7 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
       // A reply is text; reasoning alone is not one.
       let sawText = false;
       let sawReasoning = false;
+      let stopReason: StopReason | undefined;
 
       try {
         for await (const event of readEventStream(response.body, streamOptions?.signal)) {
@@ -172,6 +173,7 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
           }
           if (choice?.finish_reason !== undefined && choice.finish_reason !== null) {
             sawTerminal = true;
+            stopReason = openrouterFinishReason(choice.finish_reason);
           }
         }
       } catch (err) {
@@ -195,9 +197,33 @@ export function openrouterProvider(options: OpenRouterOptions): LlmProvider {
           tokensIn: tokensIn ?? 0,
           tokensOut: tokensOut ?? 0,
           ...(costMicros !== undefined ? { costMicros } : {}),
+          ...(stopReason !== undefined ? { stopReason } : {}),
         };
       }
       if (failure !== undefined) throw failure;
     },
   };
+}
+
+/**
+ * OpenRouter's normalized `finish_reason` in the provider-neutral words:
+ * `length` (the limit "applies to reasoning and visible output combined")
+ * cuts the reply short, `content_filter` stops it, `tool_calls` asks for
+ * tools; `stop` and anything else (a provider's own extra value) is a
+ * finished reply. `error` ends the stream with an error object, handled
+ * before this is read.
+ * Source: https://openrouter.ai/docs/api-reference/overview (finish reasons) and
+ * https://openrouter.ai/docs/use-cases/reasoning-tokens — checked 2026-11-20
+ */
+export function openrouterFinishReason(value: string): StopReason {
+  switch (value) {
+    case "length":
+      return "length";
+    case "content_filter":
+      return "refused";
+    case "tool_calls":
+      return "tools";
+    default:
+      return "end";
+  }
 }

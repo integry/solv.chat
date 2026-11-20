@@ -11,8 +11,15 @@ import { type ResolvedChunk, resolveChunks } from "../ingest/resolve.js";
 import type { ModelInfo } from "../models.js";
 import { ProviderError } from "../providers/error.js";
 import { type Embedder, embeddingCostMicros, type Retriever } from "../providers/retrieval.js";
-import type { LlmMessage, LlmProvider, LlmToolResult, ToolCall } from "../providers/types.js";
+import type {
+  LlmMessage,
+  LlmProvider,
+  LlmToolResult,
+  StopReason,
+  ToolCall,
+} from "../providers/types.js";
 import type { UsageSink } from "../seams/types.js";
+import { cutShortSuffix } from "./cutShort.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
 import type { ReviewJob } from "./review.js";
 import { DEFAULT_SCORE_FLOOR, selectChunks } from "./scoreFloor.js";
@@ -393,8 +400,18 @@ function keptChunks(
   };
 }
 
-function stopFor(stopReason: string | undefined): TraceStop {
-  return stopReason === "length" ? "length" : "complete";
+/** The provider-neutral stop reason of an answer's last model call, as its trace keeps it. */
+export function stopFor(stopReason: StopReason | undefined): TraceStop {
+  switch (stopReason) {
+    case "length":
+      return "length";
+    case "tools":
+      return "tool";
+    case "refused":
+      return "refused";
+    default:
+      return "complete";
+  }
 }
 
 /**
@@ -531,6 +548,7 @@ export async function* answerMessage(
     chunks,
     history,
     question: input.message,
+    model: deps.model,
   });
 
   // Atomically reserve conversation tool budget before dispatch so failed
@@ -549,7 +567,7 @@ export async function* answerMessage(
   let toolCalls: StoredToolCall[] = [];
   let pending: ToolCall[] = [];
   let continuation: ToolLoopContinuation | undefined;
-  let stopReason: string | undefined;
+  let stopReason: StopReason | undefined;
   let tokensIn = 0;
   let tokensOut = 0;
   let modelCalls = 0;
@@ -625,6 +643,15 @@ export async function* answerMessage(
       return;
     }
     throw err;
+  }
+
+  // Cut at the output limit: close what was left open and say so, in what
+  // is streamed and in what is stored, before the citations follow.
+  if (pending.length === 0 && stopReason === "length") {
+    const suffix = cutShortSuffix(text);
+    text += suffix;
+    recorder.firstToken();
+    yield { type: "token", text: suffix };
   }
 
   const cited = citableByUrl(chunks);
@@ -937,6 +964,7 @@ export async function* answerWithActionResults(
       chunks,
       history,
       question: questionMsg.content,
+      model: deps.model,
     });
 
     const llmResults: LlmToolResult[] = [];
@@ -973,7 +1001,7 @@ export async function* answerWithActionResults(
     let tokensIn = 0;
     let tokensOut = 0;
     let resumeCost: number | null = 0;
-    let stopReason: string | undefined;
+    let stopReason: StopReason | undefined;
 
     let abortedByLease = false;
 
@@ -1055,6 +1083,13 @@ export async function* answerWithActionResults(
     if (abortedByLease) {
       yield { type: "error", message: RESUME_NOT_FOUND_MESSAGE };
       return;
+    }
+
+    if (nextPending.length === 0 && stopReason === "length") {
+      const suffix = cutShortSuffix(text);
+      text += suffix;
+      recorder.firstToken();
+      yield { type: "token", text: suffix };
     }
 
     const resumedCitations = citableByUrl(chunks).map((c) => ({ url: c.url, title: c.title }));

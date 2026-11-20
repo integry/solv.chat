@@ -85,12 +85,23 @@ export async function modelKeySource(
 export type PreviewTraceSource = "try_it" | "test_run";
 
 /**
- * Why the answer stopped. `paused` means it is waiting for page actions and a
- * later request continues it. `spend_cap` is kept for hosts whose limits stop
- * an answer part-way; the open engine refuses an over-cap request before it
- * answers, so no stored answer of its own carries it.
+ * Why the answer stopped, the same for every provider. `complete`: the model
+ * finished. `length`: it reached the output limit and the answer was cut
+ * short (it was closed off for the visitor). `tool`: it still asked for a
+ * tool when no more were allowed. `refused`: the model or the provider's
+ * filter declined to go on. `paused` means it is waiting for page actions and
+ * a later request continues it. `spend_cap` is kept for hosts whose limits
+ * stop an answer part-way; the open engine refuses an over-cap request before
+ * it answers, so no stored answer of its own carries it.
  */
-export type TraceStop = "complete" | "length" | "spend_cap" | "error" | "paused";
+export type TraceStop =
+  | "complete"
+  | "length"
+  | "tool"
+  | "refused"
+  | "spend_cap"
+  | "error"
+  | "paused";
 
 export interface TracePart {
   /** `answer` for the request that wrote the message, `resume` for a page-action continuation. */
