@@ -195,7 +195,15 @@ export interface AnswerTracePart {
     id: string;
     keySource: "stored" | "environment" | "managed";
   } | null;
-  retrieval: { floor: number; ms: number; candidates: AnswerTraceCandidate[] };
+  retrieval: {
+    floor: number;
+    ms: number;
+    candidates: AnswerTraceCandidate[];
+    /** Matches whose content was gone; null (or absent) on older answers. */
+    stale?: number | null;
+    /** Whether it searched again because of them. */
+    searchedAgain?: boolean | null;
+  };
   timing: { firstTokenMs: number | null; totalMs: number };
   tools: { rounds: number; ms: number };
 }

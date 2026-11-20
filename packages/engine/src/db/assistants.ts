@@ -181,6 +181,43 @@ export function assistantsFor(db: D1Database, orgId: string) {
         .run();
     },
 
+    /** Records that the assistant's searchable content changed at `at` (see "Index lag"). */
+    async markContentChanged(id: string, at: number): Promise<void> {
+      await prepare(
+        db,
+        "UPDATE assistants SET content_changed_at = ?3 WHERE org_id = ?1 AND id = ?2",
+      )
+        .bind(orgId, id, at)
+        .run();
+    },
+
+    /**
+     * When the assistant's searchable content last changed (null: never),
+     * and how many of its documents are still waiting to be indexed (the
+     * Sources list's "Indexing…": content not yet committed, and no error
+     * recorded for it). Null when the assistant is not in this org.
+     */
+    async contentStatus(
+      id: string,
+    ): Promise<{ changedAt: number | null; indexing: number } | null> {
+      const row = await prepare(
+        db,
+        `SELECT a.content_changed_at AS changed_at,
+                (SELECT COUNT(*) FROM sources s
+                   JOIN documents d ON d.org_id = s.org_id AND d.source_id = s.id
+                  WHERE s.org_id = a.org_id AND s.assistant_id = a.id
+                    AND (d.indexed_hash IS NULL OR d.indexed_hash != d.content_hash)
+                    AND (d.index_error_hash IS NULL OR d.index_error_hash != d.content_hash)
+                ) AS indexing
+           FROM assistants a
+          WHERE a.org_id = ?1 AND a.id = ?2`,
+      )
+        .bind(orgId, id)
+        .first<{ changed_at: number | null; indexing: number }>();
+      if (!row) return null;
+      return { changedAt: row.changed_at ?? null, indexing: Number(row.indexing ?? 0) };
+    },
+
     async remove(id: string): Promise<boolean> {
       const res = await prepare(db, "DELETE FROM assistants WHERE org_id = ?1 AND id = ?2")
         .bind(orgId, id)

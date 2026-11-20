@@ -9,6 +9,7 @@ import type { Assistant } from "../api/types.js";
 import { isSafeHttpUrl } from "../safeUrl.js";
 import { AnswerTrace } from "../screens/AnswerTrace.js";
 import { TRY_IT_ANSWERED_EVENT } from "../screens/OverviewParts.js";
+import { RecentChangesNotice } from "../screens/RecentChangesNotice.js";
 import { Icon } from "../ui/Icon.js";
 
 interface Citation {
@@ -291,6 +292,13 @@ export function TryItPane({
           )}
         </div>
       </div>
+
+      <RecentChangesNotice
+        assistantId={assistant.id}
+        active={!hidden}
+        refresh={turns.filter((turn) => turn.messageId !== undefined).length}
+        className="try-it-notice"
+      />
 
       <div className="try-it-log" role="log" aria-live="polite">
         {turns.length === 0 ? (

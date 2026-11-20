@@ -11,12 +11,13 @@ import type { KeyProvider, LlmProviderName } from "../seams/types.js";
 
 export const TRACE_VERSION = 1;
 /**
- * Candidates kept per request: every hit the retriever returned. The answer
- * path asks it for this many (`CANDIDATE_POOL`), more than the `TOP_K` it
- * gives the model, so duplicates and a document's extra chunks can be set
- * aside without leaving the set short.
+ * Candidates kept per request: the answer's pool of live candidates
+ * (`CANDIDATE_POOL`, 20) and as many of the hits that had no chunk, when
+ * the index still returned vectors of replaced or deleted content (see
+ * "Index lag"). Over this, the lowest-scored unused rows are left out
+ * first; `stale` still counts every one.
  */
-export const MAX_TRACE_CANDIDATES = 20;
+export const MAX_TRACE_CANDIDATES = 40;
 /**
  * Requests kept per message: the first answer and up to seven page-action
  * resumes of it. The per-conversation tool-call cap ends a longer chain first.
@@ -24,9 +25,10 @@ export const MAX_TRACE_CANDIDATES = 20;
 export const MAX_TRACE_PARTS = 8;
 /**
  * The stored JSON for one message never exceeds this many UTF-8 bytes. The
- * fullest trace the engine can write (8 parts of 20 candidates) is about
- * 20 KiB, and a typical one (one part, `CANDIDATE_POOL` candidates) about 2 KiB;
- * anything larger is cut down by `boundTrace` before it is written, and
+ * typical trace (one part, `CANDIDATE_POOL` candidates) is about 2 KiB, and
+ * one part of `MAX_TRACE_CANDIDATES` about 4 KiB; the fullest the engine can
+ * write (8 parts of 40) is over the limit and is cut down by `boundTrace`
+ * before it is written, and
  * migration 0026 refuses a longer row as a backstop.
  */
 export const MAX_TRACE_BYTES = 32 * 1024;
@@ -120,7 +122,15 @@ export interface TracePart {
   version: { id: string; state: "published" | "draft" };
   /** Null when no model was asked (nothing relevant was found). */
   model: { provider: LlmProviderName; id: string; keySource: KeySource } | null;
-  retrieval: { floor: number; ms: number; candidates: TraceCandidate[] };
+  retrieval: {
+    floor: number;
+    ms: number;
+    candidates: TraceCandidate[];
+    /** Distinct hits with no chunk (`not_found`); absent on traces written before issue #131. */
+    stale?: number;
+    /** Whether the retriever was asked again because of them; absent before issue #131. */
+    searchedAgain?: boolean;
+  };
   /** Milliseconds from the start of the request. */
   timing: { firstTokenMs: number | null; totalMs: number };
   tools: { rounds: number; ms: number };
@@ -140,6 +150,12 @@ export interface TraceReviewNote {
   failed?: ReviewFailure;
   catchUp?: true;
   claimedAt?: number;
+}
+
+/** What the search met beyond its candidates (see `searchPool` in `answer.ts`). */
+export interface TraceSearch {
+  stale: number;
+  searchedAgain: boolean;
 }
 
 export interface StoredTrace {
@@ -361,30 +377,36 @@ export function traceCandidates(
   reasons: ReadonlyMap<string, Exclude<TraceDropReason, "below_floor" | "not_found">> = new Map(),
 ): TraceCandidate[] {
   const byId = new Map(resolved.map((c) => [c.chunkId, c.documentId]));
-  return [...hits]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, MAX_TRACE_CANDIDATES)
-    .map((hit): TraceCandidate => {
-      const score = Number.isFinite(hit.score)
-        ? Math.round(hit.score * SCORE_PLACES) / SCORE_PLACES
-        : 0;
-      const isKept = kept?.has(hit.chunkId) === true;
-      if (hit.score < floor && !isKept) {
-        return {
-          chunkId: hit.chunkId,
-          documentId: byId.get(hit.chunkId) ?? null,
-          score,
-          used: false,
-          dropped: "below_floor",
-        };
-      }
-      const documentId = byId.get(hit.chunkId);
-      if (documentId === undefined) {
-        return { chunkId: hit.chunkId, documentId: null, score, used: false, dropped: "not_found" };
-      }
-      if (kept === undefined || isKept)
-        return { chunkId: hit.chunkId, documentId, score, used: true };
-      const reason = reasons.get(hit.chunkId);
-      return { chunkId: hit.chunkId, documentId, score, used: false, dropped: reason ?? "rank" };
-    });
+  const sorted = [...hits].sort((a, b) => b.score - a.score);
+  // Over the cap, every chunk given to the model stays and the best of the
+  // rest fill what is left, still best first.
+  let rows = sorted.slice(0, MAX_TRACE_CANDIDATES);
+  if (sorted.length > MAX_TRACE_CANDIDATES && kept !== undefined) {
+    const room = MAX_TRACE_CANDIDATES - sorted.filter((hit) => kept.has(hit.chunkId)).length;
+    let others = 0;
+    rows = sorted.filter((hit) => kept.has(hit.chunkId) || others++ < room);
+  }
+  return rows.map((hit): TraceCandidate => {
+    const score = Number.isFinite(hit.score)
+      ? Math.round(hit.score * SCORE_PLACES) / SCORE_PLACES
+      : 0;
+    const isKept = kept?.has(hit.chunkId) === true;
+    if (hit.score < floor && !isKept) {
+      return {
+        chunkId: hit.chunkId,
+        documentId: byId.get(hit.chunkId) ?? null,
+        score,
+        used: false,
+        dropped: "below_floor",
+      };
+    }
+    const documentId = byId.get(hit.chunkId);
+    if (documentId === undefined) {
+      return { chunkId: hit.chunkId, documentId: null, score, used: false, dropped: "not_found" };
+    }
+    if (kept === undefined || isKept)
+      return { chunkId: hit.chunkId, documentId, score, used: true };
+    const reason = reasons.get(hit.chunkId);
+    return { chunkId: hit.chunkId, documentId, score, used: false, dropped: reason ?? "rank" };
+  });
 }

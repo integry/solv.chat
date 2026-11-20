@@ -31,6 +31,7 @@ const EXPECTED_TABLES = [
   "source_blocks",
   "visitor_check_tokens",
   "visitor_counters",
+  "retired_chunks",
 ];
 
 describe("migrations", () => {

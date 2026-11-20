@@ -1,3 +1,4 @@
+import { RETIRED_CHUNK_KEEP_MS } from "../ingest/indexLag.js";
 import { INGEST_VERSION } from "../ingest/version.js";
 import { prepare, prepareInsert } from "./sql.js";
 import { type SyncRunFence, syncRunHolds } from "./sync.js";
@@ -94,6 +95,12 @@ export interface ResolvedChunkRow {
   sourceKind: "push" | "sitemap" | "entry";
 }
 
+/** A replaced chunk, with which replacement of its document retired it. */
+export interface RetiredChunkRow extends ResolvedChunkRow {
+  /** Counts up per document; every chunk one commit retires shares it. */
+  revision: number;
+}
+
 export interface UpsertDocumentInput {
   id: string;
   sourceId: string;
@@ -169,7 +176,19 @@ export interface CommitOptions {
    * them after the comparison is never recorded over by this one.
    */
   keepChunks?: readonly string[] | undefined;
+  /**
+   * When the commit happens (milliseconds). A commit that replaces chunks
+   * keeps the old ones in `retired_chunks` from this time, and records it
+   * as the assistant's `content_changed_at` (see "Index lag"). Defaults to
+   * now.
+   */
+  now?: number | undefined;
 }
+
+/** The assistant that owns document `?2` in org `?1`, as a subquery. */
+const ASSISTANT_OF_DOCUMENT = `(SELECT s.assistant_id FROM documents d
+  JOIN sources s ON s.org_id = d.org_id AND s.id = d.source_id
+  WHERE d.org_id = ?1 AND d.id = ?2)`;
 
 export interface ChunkInput {
   id: string;
@@ -574,7 +593,7 @@ export function documentsFor(db: D1Database, orgId: string) {
      */
     async removeMany(
       ids: string[],
-      options: { oweRepeated?: string | undefined } = {},
+      options: { oweRepeated?: string | undefined; now?: number | undefined } = {},
     ): Promise<Map<string, string[]>> {
       const removed = new Map<string, string[]>();
       if (ids.length === 0) return removed;
@@ -587,7 +606,18 @@ export function documentsFor(db: D1Database, orgId: string) {
                 "UPDATE sources SET repeated_owed = repeated_owed + 1 WHERE org_id = ?1 AND id = ?2",
               ).bind(orgId, options.oweRepeated),
             ];
+      const now = options.now ?? Date.now();
       const statements = inGroups(ids).flatMap((group) => [
+        // Before the delete, while the documents still name their assistant:
+        // their vectors are deleted next, and the index applies that later.
+        prepare(
+          db,
+          `UPDATE assistants SET content_changed_at = ?2
+            WHERE org_id = ?1 AND id IN (
+              SELECT s.assistant_id FROM documents d
+                JOIN sources s ON s.org_id = d.org_id AND s.id = d.source_id
+               WHERE d.org_id = ?1 AND d.id IN (${placeholdersFrom(group.length, 3)}))`,
+        ).bind(orgId, now, ...group),
         prepare(
           db,
           `SELECT id, document_id FROM chunks
@@ -600,9 +630,12 @@ export function documentsFor(db: D1Database, orgId: string) {
         ).bind(orgId, ...group),
       ]);
       const results = (await db.batch([...owe, ...statements])).slice(owe.length);
-      for (let i = 0; i < results.length; i += 2) {
-        const chunks = (results[i]?.results ?? []) as Array<{ id: string; document_id: string }>;
-        for (const row of (results[i + 1]?.results ?? []) as Array<{ id: string }>) {
+      for (let i = 0; i < results.length; i += 3) {
+        const chunks = (results[i + 1]?.results ?? []) as Array<{
+          id: string;
+          document_id: string;
+        }>;
+        for (const row of (results[i + 2]?.results ?? []) as Array<{ id: string }>) {
           removed.set(row.id, []);
         }
         for (const chunk of chunks) {
@@ -684,6 +717,59 @@ export function documentsFor(db: D1Database, orgId: string) {
         title: row.title,
         sourceKind: row.kind,
       }));
+    },
+
+    /**
+     * Chunks a re-index or update replaced at or after `since`, by id, for
+     * an answer whose search still returned their vectors (see "Index
+     * lag"). Only while their document exists and belongs to the
+     * assistant: a deleted document's retired chunks go with it.
+     */
+    async retiredChunksByIds(
+      assistantId: string,
+      chunkIds: string[],
+      since: number,
+    ): Promise<RetiredChunkRow[]> {
+      const out: RetiredChunkRow[] = [];
+      // Three parameters are taken by org, assistant and `since`.
+      for (let i = 0; i < chunkIds.length; i += IN_LIST_LIMIT - 1) {
+        const group = chunkIds.slice(i, i + IN_LIST_LIMIT - 1);
+        const res = await prepare(
+          db,
+          `SELECT r.id, r.document_id, r.text, r.heading_path, r.revision, d.url, d.title, s.kind
+           FROM retired_chunks r
+           JOIN documents d ON d.org_id = r.org_id AND d.id = r.document_id
+           JOIN sources s ON s.org_id = d.org_id AND s.id = d.source_id
+           WHERE r.org_id = ?1
+             AND s.assistant_id = ?2
+             AND r.retired_at >= ?3
+             AND r.id IN (${placeholdersFrom(group.length, 4)})`,
+        )
+          .bind(orgId, assistantId, since, ...group)
+          .all<{
+            id: string;
+            document_id: string;
+            text: string;
+            heading_path: string;
+            revision: number;
+            url: string;
+            title: string;
+            kind: "push" | "sitemap" | "entry";
+          }>();
+        for (const row of res.results) {
+          out.push({
+            id: row.id,
+            documentId: row.document_id,
+            text: row.text,
+            headingPath: row.heading_path,
+            url: row.url,
+            title: row.title,
+            sourceKind: row.kind,
+            revision: row.revision,
+          });
+        }
+      }
+      return out;
     },
 
     /**
@@ -801,10 +887,42 @@ export function documentsFor(db: D1Database, orgId: string) {
                                AND id NOT IN (SELECT value FROM json_each(?${slot})))`);
       const key = options.blocks?.key ?? null;
       const stmts: D1PreparedStatement[] = [];
+      const now = options.now ?? Date.now();
       if (keep === undefined) {
         // Nothing kept, so the guard has no kept-chunks check here.
         const owed = guard(0);
         stmts.push(
+          // The chunks being replaced stay readable for a while: their
+          // vectors are still what the index returns until it applies the
+          // delete that follows this commit (see "Index lag"). Retired rows
+          // past the window are cleared here, for the whole org.
+          prepare(db, "DELETE FROM retired_chunks WHERE org_id = ?1 AND retired_at < ?2").bind(
+            orgId,
+            now - RETIRED_CHUNK_KEEP_MS,
+          ),
+          // Each replacement retires its chunks under the document's next
+          // revision, so a search that returns two older versions' vectors
+          // reads only one of them (`resolveChunks`). The batch is one
+          // transaction (above), so no other commit takes the same revision;
+          // `indexLag.test.ts` checks every chunk of a commit gets one value.
+          prepare(
+            db,
+            `INSERT OR REPLACE INTO retired_chunks (id, org_id, document_id, text, heading_path, retired_at, revision)
+             SELECT id, org_id, document_id, text, heading_path, ?6,
+                    (SELECT COALESCE(MAX(revision), 0) + 1 FROM retired_chunks
+                     WHERE org_id = ?1 AND document_id = ?2)
+             FROM chunks
+             WHERE org_id = ?1 AND document_id = ?2
+               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${owed})`,
+          ).bind(orgId, documentId, expectedContentHash, ingestVersion, key, now),
+          // New vectors were written for this commit: the index shows them
+          // a little later.
+          prepare(
+            db,
+            `UPDATE assistants SET content_changed_at = ?6
+             WHERE org_id = ?1 AND id = ${ASSISTANT_OF_DOCUMENT}
+               AND EXISTS (SELECT 1 FROM documents WHERE org_id = ?1 AND id = ?2 AND ${owed})`,
+          ).bind(orgId, documentId, expectedContentHash, ingestVersion, key, now),
           prepare(
             db,
             `DELETE FROM chunks
