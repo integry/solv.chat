@@ -146,6 +146,7 @@ describe("chat/publicConfig", () => {
       title: "Published Title",
       accentColor: "#112233",
       position: "left",
+      allowExpand: false,
     };
     base.behaviour = {
       greeting: "Published greeting",
@@ -194,6 +195,7 @@ describe("chat/publicConfig", () => {
     expect(Object.keys(body).sort()).toEqual([
       "accentColor",
       "actions",
+      "allowExpand",
       "greeting",
       "position",
       "suggestedQuestions",
@@ -203,6 +205,7 @@ describe("chat/publicConfig", () => {
       title: "Published Title",
       accentColor: "#112233",
       position: "left",
+      allowExpand: false,
       greeting: "Published greeting",
       suggestedQuestions: ["How do I start?"],
       actions: {
@@ -225,6 +228,8 @@ describe("chat/publicConfig", () => {
 
     const body2 = (await res2.json()) as Record<string, unknown>;
     expect(body2.title).toBe("Draft Only Title");
+    // The default: the expand control is offered.
+    expect(body2.allowExpand).toBe(true);
     expect(body2.actions).toEqual({
       builtins: false,
       allowedOrigins: ["https://draft-only.example"],

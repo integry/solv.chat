@@ -1749,6 +1749,83 @@ with the visitor check on, Turnstile runs inside a frame served by the
 engine's origin, created only once the visitor starts typing (see "Visitor
 check").
 
+**Panel size.** On a viewport 640px wide or more the panel is
+`min(460px, 100vw − 32px)` by `min(720px, 100vh − 96px)`; narrower, it keeps
+`min(380px, 100vw − 32px)` by `min(560px, 100vh − 96px)`. 460px fits about 44
+characters of a code line (34 at 380px), so a code block scrolls sideways less
+than before for the same content, and 720px shows a five-step list with a
+short code block without scrolling.
+
+**Side panel.** With the owner's "Allow expanding to a side panel" on (the
+default; `widget.allowExpand` in the version config and the public config),
+the panel header has an expand control and, once expanded, a collapse control
+in its place. Off, neither is in the panel at all, and a remembered expanded
+state is not applied. Expanded on a viewport 900px wide or more, the chat is a
+460px column on the widget's side, the full viewport height (`100dvh` where
+supported), and the host page is narrowed to make room (below 900px the page
+would keep less than a phone's width, so expand fills the screen instead and
+leaves the page alone). The launcher is hidden while expanded.
+
+Making room is three inline properties on the host's root element
+(`document.documentElement`): `margin-right` (or `margin-left`) of 460px, added
+to an inline margin the host already set (`calc(<host value> + 460px)`); a
+`max-width` of the viewport less the margins, kept within a maximum the host
+set, so a root sized `width: 100%` narrows too; and the custom property
+`--solv-chat-panel-width: 460px`. The margin and `max-width` are `!important`
+so a host stylesheet cannot undo them. Before setting them the widget records
+the root's `style` attribute and each property's own value and priority; on
+collapse, close, a viewport becoming too narrow, or the element being removed
+it puts each property back as it was (value and `!important`), and, when the
+host changed nothing else meanwhile, the attribute byte for byte (no `style`
+attribute if there was none). Content in normal flow reflows into the
+narrower page; elements the host fixed to that edge (`position: fixed` or
+`sticky` bars) are not moved and may sit under the column unless the host
+offsets them with the custom property (see the embedding notes in
+`docs/self-hosting.md`).
+
+Expanded or not is saved with the open conversation in sessionStorage
+(`expanded: true`, left out when false), so it survives navigation in the tab;
+nothing is written before the visitor first opens the panel. Page actions
+(`navigate`, `highlight`, `fill`) work the same while expanded. Both controls
+are buttons with a name ("Expand to a side panel", "Collapse to a small
+window"), `aria-controls` on the panel and `aria-expanded` (false, true);
+toggling moves focus to the other control, which takes the same place, so
+focus stays in the panel. Escape closes the panel as before (and gives the
+page its width back). The appearing animation is off under
+`prefers-reduced-motion: reduce`.
+
+**Progress while an answer is written.** From the moment a message is sent,
+through the visitor check, and again while a tool or page action runs, the
+answer's bubble shows a typing indicator: three CSS-animated dots (still under
+reduced motion), `aria-hidden`, and the first time for that answer a visually
+hidden "Writing an answer" inside the messages' `role="log"` live region, so
+it is announced once. The indicator is never re-inserted with that label (a
+node moved within a live region is announced again): moved below a page
+action's note, the dots move alone. It goes when the first text is painted.
+
+Each `token` event is added to the answer at once, and painted on the next
+animation frame, so a fast stream lays out once a frame. While the answer is
+still arriving the end of the text that could still become a Markdown
+construct (an unclosed link or image, `*` / `**` emphasis, a code span, a
+fence line, a list marker with nothing after it, a table row, a table header
+without its delimiter row) is held back (`streaming.ts`), at most 600ms per
+construct; an open code block is shown as a growing code block. At the end of
+the stream the whole text is rendered as at rest, so the final view is exactly
+the one-shot rendering. The same renderer and its rules apply (DOM nodes and
+`textContent` only, no raw HTML). The view stays at the newest text only while
+the visitor has not scrolled up more than 32px; sending a message brings it
+back down.
+
+Nothing on the engine side holds text back: the route writes each event as
+the answer pipeline yields it, the tool loop passes text deltas straight on,
+the marker filter (sources off) holds only a tail that could still be a
+citation marker, and the cut-short line is appended after the last delta. The
+stream is sent with `cache-control: no-cache, no-transform` so nothing on the
+way compresses or regroups it. A measurement through the real route and
+provider parser in workerd is `packages/engine/test/chat/streamTiming.test.ts`;
+the delay before the first visible text is the model's own reasoning, which
+the typing indicator covers.
+
 The element's `preview(config)` method (same shape as the public config
 response) shows a config with the panel open and from then on makes no
 requests. The admin's Widget screen uses it for a live preview: the real

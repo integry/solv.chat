@@ -140,13 +140,14 @@ describe("Widget screen", () => {
     );
     await waitFor(() => expect(post).toHaveBeenCalled());
     const first = post.mock.calls.at(-1)?.[0] as {
-      widget: { title: string; accentColor: string; position: string };
+      widget: { title: string; accentColor: string; position: string; allowExpand: boolean };
       behaviour: { greeting: string; suggestedQuestions: string[] };
     };
     expect(first.widget).toEqual({
       title: "Ask a question",
       accentColor: "#2563eb",
       position: "right",
+      allowExpand: true,
     });
     expect(first.behaviour.suggestedQuestions).toEqual(["First?", "Second?", "Third?"]);
 
@@ -154,8 +155,13 @@ describe("Widget screen", () => {
     fireEvent.change(screen.getByLabelText("Accent colour"), { target: { value: "#0f766e" } });
     fireEvent.change(screen.getByLabelText("Position"), { target: { value: "left" } });
     await waitFor(() => {
-      const last = post.mock.calls.at(-1)?.[0] as { widget: Record<string, string> };
-      expect(last.widget).toEqual({ title: "Help desk", accentColor: "#0f766e", position: "left" });
+      const last = post.mock.calls.at(-1)?.[0] as { widget: Record<string, unknown> };
+      expect(last.widget).toEqual({
+        title: "Help desk",
+        accentColor: "#0f766e",
+        position: "left",
+        allowExpand: true,
+      });
     });
 
     // An unfinished colour keeps the last valid one in the preview.
@@ -164,6 +170,43 @@ describe("Widget screen", () => {
       const last = post.mock.calls.at(-1)?.[0] as { widget: Record<string, string> };
       expect(last.widget.accentColor).toBe("#2563eb");
     });
+  });
+
+  it("offers expanding to a side panel by default, previews and saves the choice", async () => {
+    const fake = installBuildScreensFake();
+    render(<App />);
+    const toggle = (await screen.findByLabelText(
+      "Allow expanding to a side panel",
+    )) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    // The help text says what it does to the owner's page.
+    const hint = document.getElementById(toggle.getAttribute("aria-describedby") ?? "");
+    expect(hint?.textContent).toMatch(/Your page moves over to make room/);
+    expect(hint?.textContent).toMatch(/Bars fixed to that edge of your page stay put/);
+
+    const frameWindow = previewFrame().contentWindow;
+    if (!frameWindow) throw new Error("no frame window");
+    const post = vi.spyOn(frameWindow, "postMessage").mockImplementation(() => {});
+    window.dispatchEvent(
+      new MessageEvent("message", { data: "solv-preview-ready", source: frameWindow }),
+    );
+    fireEvent.click(toggle);
+    expect(toggle.checked).toBe(false);
+    await waitFor(() => {
+      const last = post.mock.calls.at(-1)?.[0] as { widget: { allowExpand: boolean } };
+      expect(last.widget.allowExpand).toBe(false);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      const put = fake.calls.find((c) => c.method === "PUT" && c.path.endsWith("/draft"));
+      expect((put?.body as { widget?: { allowExpand?: boolean } })?.widget?.allowExpand).toBe(
+        false,
+      );
+    });
+    await waitFor(() =>
+      expect([...fake.drafts.values()][0]?.config.widget.allowExpand).toBe(false),
+    );
   });
 
   it("explains page help in plain words and keeps it off by default", async () => {

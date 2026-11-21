@@ -140,6 +140,7 @@ describe("parseVersionConfig", () => {
         title: "Docs Bot",
         accentColor: "#112233",
         position: "left" as const,
+        allowExpand: false,
       },
       limits: { dailyCostCapMicros: 500 },
       allowedTools: ["search_docs"],
@@ -159,6 +160,19 @@ describe("parseVersionConfig", () => {
       expect(res.value.allowedTools).toEqual(["search_docs"]);
     }
     expect(base.behaviour.greeting).toBe("Custom greeting");
+  });
+
+  it("allows expanding by default, so a config stored before the setting gets the control", () => {
+    expect(defaultVersionConfig().widget.allowExpand).toBe(true);
+    const stored = parseVersionConfig({ widget: { title: "Docs", position: "left" } });
+    expect(stored.ok && stored.value.widget.allowExpand).toBe(true);
+    const off = parseVersionConfig({ widget: { allowExpand: false } });
+    expect(off.ok && off.value.widget.allowExpand).toBe(false);
+    const bad = parseVersionConfig({ widget: { allowExpand: "yes" } });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) {
+      expect(bad.errors).toContain("widget.allowExpand: must be true or false");
+    }
   });
 
   it("shows sources by default, so a config stored before the setting keeps citing", () => {

@@ -78,7 +78,12 @@ function LineProblems({ id, problems }: { id: string; problems: LineProblem[] })
 }
 
 function widgetEqual(a: WidgetConfig, b: WidgetConfig): boolean {
-  return a.title === b.title && a.accentColor === b.accentColor && a.position === b.position;
+  return (
+    a.title === b.title &&
+    a.accentColor === b.accentColor &&
+    a.position === b.position &&
+    a.allowExpand === b.allowExpand
+  );
 }
 
 function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
@@ -112,6 +117,7 @@ export function Widget({ assistantId }: WidgetProps) {
   const [title, setTitle] = useState("");
   const [accentColor, setAccentColor] = useState("#2563eb");
   const [position, setPosition] = useState<WidgetPosition>("right");
+  const [allowExpand, setAllowExpand] = useState(true);
   const [originsText, setOriginsText] = useState("");
   const [builtins, setBuiltins] = useState(false);
   const [actionOriginsText, setActionOriginsText] = useState("");
@@ -136,6 +142,7 @@ export function Widget({ assistantId }: WidgetProps) {
     title,
     accentColor,
     position,
+    allowExpand,
     originsText,
     builtins,
     actionOriginsText,
@@ -144,6 +151,7 @@ export function Widget({ assistantId }: WidgetProps) {
     title,
     accentColor,
     position,
+    allowExpand,
     originsText,
     builtins,
     actionOriginsText,
@@ -158,6 +166,7 @@ export function Widget({ assistantId }: WidgetProps) {
     title: string;
     accentColor: string;
     position: WidgetPosition;
+    allowExpand: boolean;
     builtins: boolean;
     actionOriginsText: string;
   } | null>(null);
@@ -174,6 +183,7 @@ export function Widget({ assistantId }: WidgetProps) {
       title: string;
       accentColor: string;
       position: WidgetPosition;
+      allowExpand: boolean;
       builtins: boolean;
       actionOriginsText: string;
     };
@@ -204,6 +214,7 @@ export function Widget({ assistantId }: WidgetProps) {
             title: widget.title,
             accentColor: widget.accentColor,
             position: widget.position,
+            allowExpand: widget.allowExpand,
             builtins: actions.builtins,
             actionOriginsText: actionOriginsSame
               ? latest.actionOriginsText
@@ -223,6 +234,7 @@ export function Widget({ assistantId }: WidgetProps) {
         title: latestRef.current.title,
         accentColor: latestRef.current.accentColor,
         position: latestRef.current.position,
+        allowExpand: latestRef.current.allowExpand,
         builtins: latestRef.current.builtins,
         actionOriginsText: latestRef.current.actionOriginsText,
       };
@@ -259,6 +271,9 @@ export function Widget({ assistantId }: WidgetProps) {
         setAccentColor(savedWidget.accentColor);
       }
       if (!keep || latest.position === keep.position) setPosition(savedWidget.position);
+      if (!keep || latest.allowExpand === keep.allowExpand) {
+        setAllowExpand(savedWidget.allowExpand);
+      }
       if (!keep || latest.builtins === keep.builtins) setBuiltins(savedActions.builtins);
       if (!keep || latest.actionOriginsText === keep.actionOriginsText) {
         setActionOriginsText(savedActionOrigins);
@@ -287,6 +302,9 @@ export function Widget({ assistantId }: WidgetProps) {
       }
       if (!snapshot || latestRef.current.position === snapshot.position) {
         setPosition(savedWidget.position);
+      }
+      if (!snapshot || latestRef.current.allowExpand === snapshot.allowExpand) {
+        setAllowExpand(savedWidget.allowExpand);
       }
       if (!snapshot || latestRef.current.builtins === snapshot.builtins) {
         setBuiltins(savedActions.builtins);
@@ -321,7 +339,7 @@ export function Widget({ assistantId }: WidgetProps) {
     }
   }, [assistantId, initOriginsKey, savedAssistant]);
 
-  const currentWidget: WidgetConfig = { title, accentColor, position };
+  const currentWidget: WidgetConfig = { title, accentColor, position, allowExpand };
   const currentOrigins = parseOrigins(originsText);
   const currentActions: ActionsConfig = {
     builtins,
@@ -348,13 +366,14 @@ export function Widget({ assistantId }: WidgetProps) {
         title: title.trim() || "Ask a question",
         accentColor: HEX_COLOUR.test(accentColor.trim()) ? accentColor.trim() : "#2563eb",
         position,
+        allowExpand,
       },
       behaviour: {
         greeting: savedBehaviour?.greeting ?? "",
         suggestedQuestions: savedBehaviour?.suggestedQuestions ?? [],
       },
     }),
-    [title, accentColor, position, savedBehaviour],
+    [title, accentColor, position, allowExpand, savedBehaviour],
   );
   const originProblems = checkOriginLines(originsText);
   const actionOriginProblems = checkOriginLines(actionOriginsText);
@@ -405,7 +424,7 @@ export function Widget({ assistantId }: WidgetProps) {
     setFailedRun(null);
 
     const submittedOriginsText = originsText;
-    const submittedWidget = { title, accentColor, position };
+    const submittedWidget = { title, accentColor, position, allowExpand };
     const submittedActions = { builtins, actionOriginsText };
     const nextFieldErrors: Record<string, string> = {};
     let generalError: string | null = null;
@@ -450,6 +469,9 @@ export function Widget({ assistantId }: WidgetProps) {
           if (latestRef.current.position === submittedWidget.position) {
             setPosition(res.draft.config.widget.position);
           }
+          if (latestRef.current.allowExpand === submittedWidget.allowExpand) {
+            setAllowExpand(res.draft.config.widget.allowExpand);
+          }
           if (latestRef.current.builtins === submittedActions.builtins) {
             setBuiltins(res.draft.config.actions.builtins);
           }
@@ -490,12 +512,20 @@ export function Widget({ assistantId }: WidgetProps) {
       title: t,
       accentColor: a,
       position: p,
+      allowExpand: x,
       builtins: b,
       actionOriginsText: ao,
     } = latestRef.current;
     const snapshot = {
       assistantId,
-      fields: { title: t, accentColor: a, position: p, builtins: b, actionOriginsText: ao },
+      fields: {
+        title: t,
+        accentColor: a,
+        position: p,
+        allowExpand: x,
+        builtins: b,
+        actionOriginsText: ao,
+      },
     };
     try {
       await mutation.run("publishing", async () => {
@@ -654,6 +684,31 @@ export function Widget({ assistantId }: WidgetProps) {
                 {fieldErrors["widget.position"] && (
                   <p className="field-error" role="alert">
                     {fieldErrors["widget.position"]}
+                  </p>
+                )}
+              </div>
+
+              <div className="field">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={allowExpand}
+                    disabled={saving}
+                    aria-describedby="widget-expand-hint"
+                    onChange={(e) => setAllowExpand(e.target.checked)}
+                  />
+                  <span>Allow expanding to a side panel</span>
+                </label>
+                <span id="widget-expand-hint" className="field-hint">
+                  Adds a button to the chat window that opens the chat as a tall column on the same
+                  side as the chat button. Your page moves over to make room, so visitors can read
+                  it and the chat side by side. On small screens the chat fills the screen instead.
+                  Bars fixed to that edge of your page stay put; the setup guide shows how to move
+                  them.
+                </span>
+                {fieldErrors["widget.allowExpand"] && (
+                  <p className="field-error" role="alert">
+                    {fieldErrors["widget.allowExpand"]}
                   </p>
                 )}
               </div>
