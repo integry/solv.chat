@@ -134,7 +134,8 @@ describe("parseVersionConfig", () => {
         persona: "Helpful guide",
         fallbackText: "Custom fallback",
         suggestedQuestions: ["How do I start?"],
-        showSources: false,
+        sources: "none" as const,
+        listSources: false,
       },
       widget: {
         title: "Docs Bot",
@@ -152,7 +153,8 @@ describe("parseVersionConfig", () => {
         persona: "Helpful guide",
         fallbackText: "Custom fallback",
         suggestedQuestions: ["How do I start?"],
-        showSources: false,
+        sources: "none",
+        listSources: false,
       });
       expect(res.value.widget).toEqual(base.widget);
       expect(res.value.limits).toEqual({ dailyCostCapMicros: 500 });
@@ -161,31 +163,59 @@ describe("parseVersionConfig", () => {
     expect(base.behaviour.greeting).toBe("Custom greeting");
   });
 
-  it("shows sources by default, so a config stored before the setting keeps citing", () => {
-    expect(defaultVersionConfig().behaviour.showSources).toBe(true);
+  it("links sources in the text by default, with no list under the answer", () => {
+    expect(defaultVersionConfig().behaviour.sources).toBe("links");
+    expect(defaultVersionConfig().behaviour.listSources).toBe(false);
+    // A version stored before the setting existed had sources on.
     const stored = parseVersionConfig({ behaviour: { greeting: "Hi", persona: "" } });
-    expect(stored.ok && stored.value.behaviour.showSources).toBe(true);
+    expect(stored.ok && stored.value.behaviour.sources).toBe("links");
+    expect(stored.ok && stored.value.behaviour.listSources).toBe(false);
   });
 
-  it("reads Show sources in answers as a boolean and refuses anything else", () => {
+  it("moves a stored showSources on to links in the text and off to none", () => {
+    const on = parseVersionConfig({ behaviour: { showSources: true } });
+    expect(on.ok && on.value.behaviour).toMatchObject({ sources: "links", listSources: false });
     const off = parseVersionConfig({ behaviour: { showSources: false } });
-    expect(off.ok && off.value.behaviour.showSources).toBe(false);
-    const on = parseVersionConfig(
-      { behaviour: { showSources: true } },
-      off.ok ? off.value : undefined,
-    );
-    expect(on.ok && on.value.behaviour.showSources).toBe(true);
-    // A partial save of another field keeps the stored choice.
-    const kept = parseVersionConfig(
-      { behaviour: { greeting: "Hey" } },
-      off.ok ? off.value : undefined,
-    );
-    expect(kept.ok && kept.value.behaviour.showSources).toBe(false);
+    expect(off.ok && off.value.behaviour).toMatchObject({ sources: "none", listSources: false });
+    // The old key is not kept: the parsed config has only the new ones.
+    expect(off.ok && "showSources" in off.value.behaviour).toBe(false);
+    // When both are given, the new setting wins.
+    const both = parseVersionConfig({ behaviour: { showSources: false, sources: "numbered" } });
+    expect(both.ok && both.value.behaviour.sources).toBe("numbered");
     for (const bad of ["false", 0, null]) {
       const res = parseVersionConfig({ behaviour: { showSources: bad } });
       expect(res.ok).toBe(false);
       if (!res.ok) expect(res.errors).toContain("behaviour.showSources: must be true or false");
     }
+  });
+
+  it("reads Show sources in answers as one of three choices and refuses anything else", () => {
+    for (const mode of ["links", "numbered", "none"] as const) {
+      const res = parseVersionConfig({ behaviour: { sources: mode } });
+      expect(res.ok && res.value.behaviour.sources).toBe(mode);
+    }
+    const numbered = parseVersionConfig({ behaviour: { sources: "numbered" } });
+    // A partial save of another field keeps the stored choice.
+    const kept = parseVersionConfig(
+      { behaviour: { greeting: "Hey" } },
+      numbered.ok ? numbered.value : undefined,
+    );
+    expect(kept.ok && kept.value.behaviour.sources).toBe("numbered");
+    for (const bad of ["Links", true, 1, null, ""]) {
+      const res = parseVersionConfig({ behaviour: { sources: bad } });
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.errors).toContain('behaviour.sources: must be "links", "numbered" or "none"');
+      }
+    }
+  });
+
+  it("reads List sources under answers as a boolean", () => {
+    const on = parseVersionConfig({ behaviour: { listSources: true } });
+    expect(on.ok && on.value.behaviour.listSources).toBe(true);
+    const bad = parseVersionConfig({ behaviour: { listSources: "yes" } });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.errors).toContain("behaviour.listSources: must be true or false");
   });
 
   it("rejects bad hex colour, bad position, negative cap, and over-cap suggestedQuestions", () => {

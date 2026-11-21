@@ -149,7 +149,7 @@ function listItemAt(text: string, at: number): { marker: number; gap: number } |
  * an odd run of backslashes (`\\\`` is an escaped backslash and a real
  * backtick). Only in prose; inside code a backslash is a backslash.
  */
-function escapedAt(text: string, at: number): boolean {
+export function escapedAt(text: string, at: number): boolean {
   let backslashes = 0;
   for (let p = at - 1; p >= 0 && text[p] === "\\"; p--) backslashes++;
   return backslashes % 2 === 1;
@@ -341,8 +341,12 @@ function destinationEnd(text: string, at: number): number {
  * already-sent prose into code or back. (Markdown proper would wait for a
  * closing backtick or ")"; a stray one here only protects the rest of its
  * paragraph or the word after it, which keeps markers in.)
+ *
+ * With `keepLinks`, links are left in the prose whole (their destinations, autolinks
+ * and reference definitions too): only code is left out. `sourceLinks.ts`
+ * reads links itself.
  */
-function proseRanges(text: string): Array<[number, number]> {
+export function proseRanges(text: string, keepLinks = false): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   // Inside an open fence (or held code) this is the end of the text, so it is
   // code to the end until a line ends it.
@@ -453,7 +457,8 @@ function proseRanges(text: string): Array<[number, number]> {
       fence = { char: opener.char, length: opener.length, plain };
       return lineEnd(opener.end);
     }
-    const label = !held && width <= 3 ? matchEnd(DEFINITION_LABEL, text, indent.end) : null;
+    const label =
+      !held && !keepLinks && width <= 3 ? matchEnd(DEFINITION_LABEL, text, indent.end) : null;
     if (label !== null) {
       // A reference definition: its label is no marker, and its destination
       // is the word after the label.
@@ -480,11 +485,11 @@ function proseRanges(text: string): Array<[number, number]> {
       i++;
       continue;
     }
-    if (text[i] === "]" && text[i + 1] === "(") {
+    if (!keepLinks && text[i] === "]" && text[i + 1] === "(") {
       i = skip(i + 2, destinationEnd(text, i + 2));
       continue;
     }
-    if (text[i] === "<") {
+    if (!keepLinks && text[i] === "<") {
       const scheme = matchEnd(AUTOLINK_SCHEME, text, i);
       if (scheme !== null) {
         i = skip(scheme, matchEnd(AUTOLINK_REST, text, scheme) ?? scheme);

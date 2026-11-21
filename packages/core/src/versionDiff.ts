@@ -47,6 +47,12 @@ const POSITION_LABELS: Record<string, string> = {
   left: "Bottom left",
 };
 
+const SOURCES_LABELS: Record<string, string> = {
+  links: "Link in the text",
+  numbered: "Numbered, with a list",
+  none: "None",
+};
+
 /** Formats the daily spend cap like the Overview screen (US dollars; 0 is no cap). */
 function formatSpendCap(value: unknown): string {
   if (typeof value !== "number" || value <= 0) return "No cap";
@@ -75,8 +81,15 @@ export const VERSION_DIFF_FIELDS: readonly DiffField[] = [
     kind: "list",
   },
   {
-    path: "behaviour.showSources",
+    path: "behaviour.sources",
     label: "Show sources in answers",
+    screen: "Behaviour",
+    kind: "text",
+    format: (value) => SOURCES_LABELS[String(value)] ?? String(value),
+  },
+  {
+    path: "behaviour.listSources",
+    label: "List sources under answers",
     screen: "Behaviour",
     kind: "boolean",
   },

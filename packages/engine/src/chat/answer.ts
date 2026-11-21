@@ -4,6 +4,7 @@ import {
   type ChatEvent,
   newId,
   type PageAction,
+  type SourcesMode,
 } from "@solvchat/core";
 import type { Citation } from "../db/messages.js";
 import type { Tenant } from "../db/tenant.js";
@@ -25,11 +26,12 @@ import type {
   ToolCall,
 } from "../providers/types.js";
 import type { UsageSink } from "../seams/types.js";
-import { type MarkerStripper, markerStripper } from "./citationMarkers.js";
+import { markerStripper } from "./citationMarkers.js";
 import { cutShortSuffix } from "./cutShort.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
 import type { ReviewJob } from "./review.js";
 import { DEFAULT_SCORE_FLOOR, selectCandidates } from "./scoreFloor.js";
+import { linkTargets, pageKey, sourceLinker } from "./sourceLinks.js";
 import {
   MAX_TOOL_CALLS_PER_CONVERSATION,
   resumeToolLoop,
@@ -112,10 +114,11 @@ export interface AnswerDeps {
   review?: AnswerReviewHook | undefined;
   /**
    * Given, once a reply is complete, the pages it could cite, whether or not
-   * the visitor is shown them ("Show sources in answers" off). Internal: a
-   * test run's "cites" check reads it, and nothing here reaches a visitor.
+   * the visitor is shown them, and the pages its text links to ("Link in the
+   * text"; empty otherwise). Internal: a test run's "cites" check reads it,
+   * and nothing here reaches a visitor.
    */
-  onCitable?: ((citations: readonly Citation[]) => void) | undefined;
+  onCitable?: ((citations: readonly Citation[], linked: readonly string[]) => void) | undefined;
 }
 
 export interface AnswerReviewHook {
@@ -199,13 +202,76 @@ function usedDocumentIds(chunks: readonly ResolvedChunk[]): string[] {
   return [...new Set(chunks.map((chunk) => chunk.documentId))];
 }
 
+/** "Show sources in answers" for a reply; a behaviour without it reads as the default. */
+function sourcesModeOf(behaviour: BehaviourConfig): SourcesMode {
+  return behaviour.sources ?? "links";
+}
+
 /**
- * The marker filter for a reply, or null when the version shows its sources
- * (then the stream is passed on untouched, exactly as before the setting).
- * `TOP_K` bounds the numbers: no prompt carries more sources than that.
+ * Whether the visitor gets the list of pages under the answer (`citation`
+ * events): always when numbered, with "List sources under answers" when
+ * linked in the text, never with none.
  */
-function strippingFor(behaviour: BehaviourConfig, before = ""): MarkerStripper | null {
-  return behaviour.showSources === false ? markerStripper(TOP_K, before) : null;
+export function listsSources(behaviour: BehaviourConfig): boolean {
+  const mode = sourcesModeOf(behaviour);
+  return mode === "numbered" || (mode === "links" && behaviour.listSources === true);
+}
+
+/** What a reply's streamed text goes through before the visitor gets it. */
+interface AnswerFilter {
+  /** Takes the next raw chunk and returns what can be sent now (maybe ""). */
+  push(chunk: string): string;
+  /** Returns whatever was held back, at the end of the stream or a pause. */
+  flush(): string;
+  /** Everything sent so far, which is exactly the text to store. */
+  readonly text: string;
+  /** The pages the text links to so far, by `pageKey`. */
+  readonly linked: readonly string[];
+}
+
+/**
+ * The filter for a reply, or null when numbered (then the stream is passed on
+ * untouched, exactly as before the setting had three values). None: markers
+ * are taken out. Links in the text: links are rewritten to the answer's pages
+ * or reduced to text (`sourceLinks.ts`), then markers are taken out. `TOP_K`
+ * bounds the marker numbers: no prompt carries more sources than that.
+ * `before` is a paused reply's stored part, `pages` the pages it had.
+ */
+function filterFor(
+  behaviour: BehaviourConfig,
+  chunks: readonly ResolvedChunk[],
+  before = "",
+  pages: readonly string[] = [],
+): AnswerFilter | null {
+  const mode = sourcesModeOf(behaviour);
+  if (mode === "numbered") return null;
+  const stripper = markerStripper(TOP_K, before);
+  if (mode === "none") {
+    return {
+      push: (chunk) => stripper.push(chunk),
+      flush: () => stripper.flush(),
+      get text() {
+        return stripper.text;
+      },
+      linked: [],
+    };
+  }
+  const linker = sourceLinker(linkTargets(chunks, pages), before);
+  return {
+    push: (chunk) => stripper.push(linker.push(chunk)),
+    flush: () => stripper.push(linker.flush()) + stripper.flush(),
+    get text() {
+      return stripper.text;
+    },
+    get linked() {
+      return linker.linked;
+    },
+  };
+}
+
+/** The linked pages as the citations name them (the stored address), for `onCitable`. */
+function linkedPages(linked: readonly string[], citations: readonly Citation[]): string[] {
+  return linked.map((key) => citations.find((c) => pageKey(c.url) === key)?.url ?? key);
 }
 
 /**
@@ -684,11 +750,13 @@ export async function* answerMessage(
           MAX_TOOL_CALLS_PER_CONVERSATION,
         );
 
-  // "Show sources in answers" off: markers are taken out of the stream before
-  // the visitor gets it, and out of the stored text, and no citation event is
-  // sent. What the answer used is still recorded for the owner.
-  const showSources = input.behaviour.showSources !== false;
-  const stripper = strippingFor(input.behaviour);
+  // "Show sources in answers": numbered passes the stream on untouched; links
+  // in the text rewrites links and takes markers out, none takes markers out,
+  // before the visitor gets it and in the stored text. The list of pages
+  // (`citation` events) is sent only when the visitor is to see it. What the
+  // answer used is recorded for the owner whatever the setting.
+  const showSources = listsSources(input.behaviour);
+  const filter = filterFor(input.behaviour, chunks);
 
   let text = "";
   let toolCalls: StoredToolCall[] = [];
@@ -750,8 +818,8 @@ export async function* answerMessage(
       }
       const event = step.value;
       if (event.kind === "text") {
-        const out = stripper === null ? event.text : stripper.push(event.text);
-        if (stripper === null || out !== "") {
+        const out = filter === null ? event.text : filter.push(event.text);
+        if (filter === null || out !== "") {
           recorder.firstToken();
           yield { type: "token", text: out };
         }
@@ -775,14 +843,14 @@ export async function* answerMessage(
     throw err;
   }
 
-  if (stripper !== null) {
-    // What was held back in case it was the start of a marker.
-    const rest = stripper.flush();
+  if (filter !== null) {
+    // What was held back in case it was the start of a marker or a link.
+    const rest = filter.flush();
     if (rest !== "") {
       recorder.firstToken();
       yield { type: "token", text: rest };
     }
-    text = stripper.text;
+    text = filter.text;
   }
 
   // Cut at the output limit: close what was left open and say so, in what
@@ -867,7 +935,7 @@ export async function* answerMessage(
       yield { type: "citation", url: chunk.url, title: chunk.title };
     }
   }
-  deps.onCitable?.(citations);
+  deps.onCitable?.(citations, linkedPages(filter?.linked ?? [], citations));
 
   if (!input.preview) {
     await deps.tenant.messages.create({
@@ -1132,9 +1200,15 @@ export async function* answerWithActionResults(
         MAX_TOOL_CALLS_PER_CONVERSATION,
       );
 
-    const showSources = input.behaviour.showSources !== false;
+    const showSources = listsSources(input.behaviour);
     // The paused part was stored already clean; only the new text is filtered.
-    const stripper = strippingFor(input.behaviour, pendingReply.content);
+    // Its pages stay pages a link may go to.
+    const filter = filterFor(
+      input.behaviour,
+      chunks,
+      pendingReply.content,
+      pendingReply.citations.map((c) => c.url),
+    );
 
     let text = pendingReply.content;
     let newCalls: StoredToolCall[] = [];
@@ -1187,8 +1261,8 @@ export async function* answerWithActionResults(
         }
         const event = step.value;
         if (event.kind === "text") {
-          const out = stripper === null ? event.text : stripper.push(event.text);
-          if (stripper === null || out !== "") {
+          const out = filter === null ? event.text : filter.push(event.text);
+          if (filter === null || out !== "") {
             recorder.firstToken();
             yield { type: "token", text: out };
           }
@@ -1231,13 +1305,13 @@ export async function* answerWithActionResults(
       return;
     }
 
-    if (stripper !== null) {
-      const rest = stripper.flush();
+    if (filter !== null) {
+      const rest = filter.flush();
       if (rest !== "") {
         recorder.firstToken();
         yield { type: "token", text: rest };
       }
-      text = pendingReply.content + stripper.text;
+      text = pendingReply.content + filter.text;
     }
 
     if (nextPending.length === 0 && stopReason === "length") {
@@ -1309,7 +1383,7 @@ export async function* answerWithActionResults(
         yield { type: "citation", url: citation.url, title: citation.title };
       }
     }
-    deps.onCitable?.(citations);
+    deps.onCitable?.(citations, linkedPages(filter?.linked ?? [], citations));
 
     yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
     await saveTrace(

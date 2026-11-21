@@ -22,7 +22,7 @@ import {
 } from "./builtins.js";
 import { CheckController } from "./check.js";
 import { askToConfirm, type ConfirmHandle } from "./confirm.js";
-import { parseSafeHttpUrl, renderMarkdown } from "./markdown.js";
+import { parseSafeHttpUrl, renderMarkdown, withoutUnfinishedLink } from "./markdown.js";
 import { readEventLines } from "./sse.js";
 import {
   claimConversation,
@@ -993,7 +993,8 @@ export class SolvChat extends HTMLElement {
           // comes from a model that can be talked into emitting markup, and a
           // chat bubble is the last place that should execute anything.
           assistantTurn.text += event.text;
-          renderMarkdown(textEl, assistantTurn.text);
+          // A link still being written is held back until it is complete.
+          renderMarkdown(textEl, withoutUnfinishedLink(assistantTurn.text));
           this.#scrollToBottom();
           this.#persist();
         } else if (event.type === "citation") {
@@ -1059,6 +1060,9 @@ export class SolvChat extends HTMLElement {
         this.#markTurnInterrupted(bubble, assistantTurn);
       }
     }
+
+    // The stream is over: whatever arrived is shown, as a reload would show it.
+    if (assistantTurn.text !== "") renderMarkdown(textEl, assistantTurn.text);
 
     if (resumeEvent && !signal.aborted) {
       await this.#resumeWithActionResults(

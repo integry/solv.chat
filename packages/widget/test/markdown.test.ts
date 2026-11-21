@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { renderMarkdown } from "../src/markdown.js";
+import { renderMarkdown, withoutUnfinishedLink } from "../src/markdown.js";
 import "../src/widget.js";
 
 function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
@@ -274,17 +274,33 @@ describe("Markdown rendering", () => {
     expect(links).toHaveLength(2);
     expect(links[0]?.href).toBe("https://docs.example.com/path_(v1)");
     expect(links[0]?.target).toBe("_blank");
-    expect(links[0]?.rel).toBe("noopener noreferrer nofollow");
+    expect(links[0]?.rel).toBe("noopener noreferrer");
     expect(links[0]?.textContent).toBe("Docs");
 
     expect(links[1]?.href).toBe("http://localhost:3000/");
     expect(links[1]?.target).toBe("_blank");
-    expect(links[1]?.rel).toBe("noopener noreferrer nofollow");
+    expect(links[1]?.rel).toBe("noopener noreferrer");
 
     expect(container.textContent).toContain("[JS](javascript:alert(1))");
     expect(container.textContent).toContain("[Data](data:text/html,<script>alert(1)</script>)");
     expect(container.textContent).toContain("[Mail](mailto:a@b.com)");
     expect(container.querySelector("script")).toBeNull();
+  });
+
+  it("holds back only a link at the end that is not complete yet", () => {
+    expect(withoutUnfinishedLink("Read [the guide")).toBe("Read ");
+    expect(withoutUnfinishedLink("Read [the guide]")).toBe("Read ");
+    expect(withoutUnfinishedLink("Read [the guide](https://docs.example.com/te")).toBe("Read ");
+    expect(withoutUnfinishedLink("Read ![chart](https://docs.example.com/c")).toBe("Read ");
+    // Complete, or not a link at all: shown as it is.
+    expect(withoutUnfinishedLink("Read [the guide](https://docs.example.com/t).")).toBe(
+      "Read [the guide](https://docs.example.com/t).",
+    );
+    expect(withoutUnfinishedLink("Read [the guide] now")).toBe("Read [the guide] now");
+    expect(withoutUnfinishedLink("A [note\nnext")).toBe("A [note\nnext");
+    // An escaped bracket is text.
+    expect(withoutUnfinishedLink("Use \\[x")).toBe("Use \\[x");
+    expect(withoutUnfinishedLink("Plain text.")).toBe("Plain text.");
   });
 
   it("keeps unsupported constructs (headings, tables, images, block quotes, raw HTML) as literal text", () => {

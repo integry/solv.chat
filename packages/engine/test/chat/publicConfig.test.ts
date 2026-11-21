@@ -152,7 +152,8 @@ describe("chat/publicConfig", () => {
       persona: "Secret owner persona",
       fallbackText: "Secret fallback",
       suggestedQuestions: ["How do I start?"],
-      showSources: true,
+      sources: "numbered",
+      listSources: false,
     };
     base.actions = {
       builtins: true,

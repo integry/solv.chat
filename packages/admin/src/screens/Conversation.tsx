@@ -79,8 +79,8 @@ function Timestamp({ value }: { value: number }) {
 
 function TurnBody({ turn }: { turn: ConversationTurn }) {
   const safeCitations = turn.citations.filter((c) => isSafeHttpUrl(c.url));
-  // With "Show sources in answers" off the visitor saw no sources; the owner
-  // still sees what the answer used.
+  // With no list under the answer (sources linked in the text, or none) the
+  // visitor saw no list of sources; the owner still sees what the answer used.
   const sourcesLabel = turn.citationsShown === false ? "Used content" : "Sources";
   return (
     <>

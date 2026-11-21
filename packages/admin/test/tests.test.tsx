@@ -267,7 +267,7 @@ describe("Tests screen", () => {
     fireEvent.change(screen.getByLabelText("What the answer must do"), {
       target: { value: "cites" },
     });
-    expect(screen.getByText("The answer has to show this page as a source.")).toBeTruthy();
+    expect(screen.getByText("The answer has to link to this page or use it.")).toBeTruthy();
     expect(screen.getByLabelText("Page address")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Q3?" } });
     fireEvent.change(screen.getByLabelText("Page address"), {

@@ -144,8 +144,9 @@ export interface ConversationTurn {
   content: string;
   citations: Citation[];
   /**
-   * False when the visitor saw no citations ("Show sources in answers" was
-   * off): `citations` then lists the content the answer used. Absent means shown.
+   * False when the visitor saw no list of sources under the answer (sources
+   * linked in the text without the list, or none): `citations` then lists the
+   * content the answer used. Absent means shown.
    */
   citationsShown?: boolean;
   toolCalls?: ConversationToolCall[] | null;

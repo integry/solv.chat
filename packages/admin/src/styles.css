@@ -2983,6 +2983,12 @@ a {
   outline-offset: 2px;
 }
 
+/* Behaviour's "Show sources in answers": a visible legend above the cards. */
+.sources-choices > legend {
+  padding: 0;
+  margin-bottom: var(--space-2);
+}
+
 .choice-card-text {
   display: flex;
   flex-direction: column;

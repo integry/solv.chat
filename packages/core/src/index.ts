@@ -103,6 +103,8 @@ export {
   defaultVersionConfig,
   type LimitsConfig,
   parseVersionConfig,
+  SOURCES_MODES,
+  type SourcesMode,
   type VersionConfig,
   type WidgetConfig,
   type WidgetPosition,

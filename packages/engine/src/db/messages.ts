@@ -53,9 +53,11 @@ export interface MessageRow {
   /** The reviewer's confidence, 0 to 1, when its backend gives one. Nothing reads it yet. */
   outcomeConfidence: number | null;
   /**
-   * Whether the visitor was shown `citations` (the version's "Show sources in
-   * answers"). Off, `citations` is still kept: it is the owner's record of
-   * the pages the answer used. True for rows written before migration 0034.
+   * Whether the visitor was shown `citations` as a list under the answer
+   * (the version's "Show sources in answers" and "List sources under
+   * answers"). Without the list, `citations` is still kept: it is the owner's
+   * record of the pages the answer used. True for rows written before
+   * migration 0034.
    */
   citationsShown: boolean;
 }
