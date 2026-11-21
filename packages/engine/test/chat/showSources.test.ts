@@ -23,10 +23,10 @@ import { ANTHROPIC_MODELS } from "../../src/models.js";
 import type { LlmChunk, LlmProvider, LlmRequest, ToolCall } from "../../src/providers/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
-import { fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
 // The numbered answer's public response as it was before "Show sources in
 // answers" had three values, kept as bytes so a change to it shows.
 import numberedAnswer from "../fixtures/numbered-answer.json";
+import { fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
 
 const QUESTION = "How do I reset my password?";
 const PAGE = { url: "https://site.example/docs/reset", title: "Reset Password" };
@@ -773,9 +773,10 @@ describe("chat: Show sources in answers", () => {
     function numberOf(request: LlmRequest, title: string): number {
       const last = request.messages.at(-1);
       const content = last && "content" in last ? String(last.content) : "";
-      const match = new RegExp(`<<<source (\\d+)\\ntitle: ${title.replace(/[?]/gu, "\\?")}\\n`, "u").exec(
-        content,
-      );
+      const match = new RegExp(
+        `<<<source (\\d+)\\ntitle: ${title.replace(/[?]/gu, "\\?")}\\n`,
+        "u",
+      ).exec(content);
       if (match === null) throw new Error(`no source titled ${title}`);
       return Number(match[1]);
     }

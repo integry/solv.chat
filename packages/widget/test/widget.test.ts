@@ -236,7 +236,8 @@ describe("<solv-chat>", () => {
     mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
     await flushAsync();
 
-    const text = () => mustQuery<HTMLElement>(root, ".solv-bubble--assistant:last-of-type .solv-bubble-text");
+    const text = () =>
+      mustQuery<HTMLElement>(root, ".solv-bubble--assistant:last-of-type .solv-bubble-text");
     const sameSite = `${location.origin}/docs/testing`;
     push('event: token\ndata: {"text":"Read [the testing"}\n\n');
     await flushAsync();
@@ -267,7 +268,9 @@ describe("<solv-chat>", () => {
       event.preventDefault();
     };
     window.addEventListener("click", atWindow);
-    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }));
+    link.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }),
+    );
     window.removeEventListener("click", atWindow);
     expect(preventedBefore).toBe(false);
     expect(root.querySelector(".solv-citations")).toBeNull();

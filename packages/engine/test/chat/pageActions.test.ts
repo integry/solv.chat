@@ -2,7 +2,6 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import {
   CHAT_PROTOCOL_VERSION,
   type ChatEvent,
-  defaultVersionConfig,
   type PageAction,
   parseChatEventLine,
 } from "@solvchat/core";
@@ -22,6 +21,7 @@ import type { LlmProvider, LlmRequest, ToolCall } from "../../src/providers/type
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { directoryResolveOrg, fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
+import { numberedConfig } from "../helpers/config.js";
 
 const NAVIGATE_ACTION: PageAction = {
   name: "navigate",
@@ -183,7 +183,7 @@ describe("chat/pageActions", () => {
   });
 
   async function publishConfig(builtins: boolean) {
-    const cfg = defaultVersionConfig();
+    const cfg = numberedConfig();
     cfg.actions = { builtins, allowedOrigins: [] };
     const draft = await tenant.versions.createDraft({
       id: "ver_1",

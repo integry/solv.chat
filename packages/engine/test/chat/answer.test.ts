@@ -1,5 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { defaultVersionConfig, parseChatEventLine } from "@solvchat/core";
+import { parseChatEventLine } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/app.js";
 import { answerMessage } from "../../src/chat/answer.js";
@@ -16,6 +16,7 @@ import type { UsageEvent } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
+import { numberedConfig } from "../helpers/config.js";
 
 function parseSseBody(text: string) {
   return text
@@ -90,7 +91,7 @@ describe("chat/answer", () => {
       createdAt: 1000,
     });
 
-    const pubConfig = defaultVersionConfig();
+    const pubConfig = numberedConfig();
     pubConfig.behaviour.persona = "Published persona";
     pubConfig.behaviour.fallbackText = "Published fallback";
     const draft = await tenant.versions.createDraft({
@@ -330,7 +331,7 @@ describe("chat/answer", () => {
   });
 
   it("answers from the published version on /v1/chat even when target='draft' comes with an owner session", async () => {
-    const draftConfig = defaultVersionConfig();
+    const draftConfig = numberedConfig();
     draftConfig.behaviour.persona = "Draft-only persona";
     await tenant.versions.updateDraft("ast_1", draftConfig);
 
@@ -1120,7 +1121,7 @@ describe("chat/answer", () => {
       return out;
     }
 
-    const behaviour = defaultVersionConfig().behaviour;
+    const behaviour = numberedConfig().behaviour;
 
     it("records the billed model tokens once when the reply write rejects after a complete stream", async () => {
       const usage = vi.fn(async (_event: UsageEvent) => {});
@@ -1324,7 +1325,7 @@ describe("chat/answer", () => {
       name: "Docs Bot",
       allowedOrigins: ["https://site.example", "https://engine.example"],
     });
-    const draftConfig = defaultVersionConfig();
+    const draftConfig = numberedConfig();
     draftConfig.behaviour.persona = "Admin preview draft persona";
     await tenant.versions.updateDraft("ast_1", draftConfig);
 

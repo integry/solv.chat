@@ -145,7 +145,9 @@ describe("Behaviour screen", () => {
     const group = await screen.findByRole("group", { name: "Show sources in answers" });
     const region = screen.getByRole("region", { name: "Sources" });
     expect(within(region).getByRole("heading", { name: "Sources" })).toBeTruthy();
-    const links = within(group).getByRole("radio", { name: /Link in the text/ }) as HTMLInputElement;
+    const links = within(group).getByRole("radio", {
+      name: /Link in the text/,
+    }) as HTMLInputElement;
     const numbered = within(group).getByRole("radio", {
       name: /Numbered, with a list/,
     }) as HTMLInputElement;

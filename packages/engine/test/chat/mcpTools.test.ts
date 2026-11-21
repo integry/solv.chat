@@ -1,5 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { defaultVersionConfig, parseChatEventLine } from "@solvchat/core";
+import { parseChatEventLine } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/app.js";
 import {
@@ -18,6 +18,7 @@ import { sealSecret } from "../../src/security/secretBox.js";
 import { fakeMcpServer } from "../fakes/fakeMcpServer.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
+import { numberedConfig } from "../helpers/config.js";
 
 const SECRET_KEY = "test-solv-secret-key-for-mcp-tools";
 const ROTATED_KEY = "rotated-solv-secret-key-different";
@@ -150,7 +151,7 @@ describe("chat/mcpTools", () => {
       allowedOrigins: ["https://shop.example"],
       createdAt: 1000,
     });
-    const draftConfig = defaultVersionConfig();
+    const draftConfig = numberedConfig();
     draftConfig.allowedTools = ["lookup_order"];
     const draftA = await tenantA.versions.createDraft({
       id: "ver_a1",
@@ -719,7 +720,7 @@ describe("chat/mcpTools", () => {
       allowedOrigins: ["https://b.example"],
       createdAt: 1000,
     });
-    const draftBConfig = defaultVersionConfig();
+    const draftBConfig = numberedConfig();
     draftBConfig.allowedTools = ["org_b_secret_tool", "lookup_order"];
     const draftB = await tenantB.versions.createDraft({
       id: "ver_b1",

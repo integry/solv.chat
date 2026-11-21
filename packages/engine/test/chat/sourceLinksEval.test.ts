@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { stripCitationMarkers } from "../../src/chat/citationMarkers.js";
 import { buildPrompt, SAFETY_FRAME_LINKS } from "../../src/chat/prompt.js";
 import { linkTargets, rewriteSourceLinks } from "../../src/chat/sourceLinks.js";
+import type { ResolvedChunk } from "../../src/ingest/resolve.js";
 import evalSet from "../fixtures/source-links-eval.json";
 
 /**
@@ -17,7 +18,7 @@ interface Page {
   url: string;
   headingPath: string;
   text: string;
-  sourceKind?: string;
+  sourceKind?: ResolvedChunk["sourceKind"];
 }
 
 interface Case {
@@ -34,9 +35,9 @@ type Counts = Record<Outcome | "linkedExpected" | "links" | "targetChars", numbe
 /** The link targets the model wrote (`](…)` or `][n]`): what each scheme spends on them. */
 const TARGET = /\]\([^)]*\)|\]\[\d+\]/gu;
 
-const pages = evalSet.pages as Record<string, Page>;
+const pages = evalSet.pages as unknown as Record<string, Page>;
 const cases = evalSet.cases as Case[];
-const schemes = evalSet.schemes as Record<string, { replace?: [string, string][] }>;
+const schemes = evalSet.schemes as unknown as Record<string, { replace?: [string, string][] }>;
 const summary = (evalSet as unknown as { summary: Record<string, Counts> }).summary;
 
 function chunksFor(item: Case) {

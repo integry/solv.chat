@@ -1,10 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import {
-  defaultVersionConfig,
-  MAX_TESTS_PER_RUN,
-  newId,
-  type TestExpectation,
-} from "@solvchat/core";
+import { MAX_TESTS_PER_RUN, newId, type TestExpectation } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runAnswerTests, TEST_RUN_WALL_TIME_MS } from "../../src/admin/answerTests.js";
 import { createApp } from "../../src/app.js";
@@ -15,6 +10,7 @@ import type { UsageEvent } from "../../src/seams/types.js";
 import type { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { type createTestApp, fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
+import { numberedConfig } from "../helpers/config.js";
 
 const ORG_A = TEST_ORG_ID;
 const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -95,7 +91,7 @@ async function seedAssistant(orgId: string, fallbackText = "I don't know.") {
   const assistantId = newId("ast");
   const versionId = newId("ver");
   const now = Date.now();
-  const config = defaultVersionConfig();
+  const config = numberedConfig();
   config.behaviour.fallbackText = fallbackText;
   await env.DB.batch([
     env.DB.prepare(
@@ -793,7 +789,7 @@ describe("admin answer tests", () => {
     const serverId = newId("mcp");
     const toolId = newId("mcp");
     const now = Date.now();
-    const draftConfig = defaultVersionConfig();
+    const draftConfig = numberedConfig();
     draftConfig.allowedTools = ["lookup_order"];
     await env.DB.batch([
       env.DB.prepare(

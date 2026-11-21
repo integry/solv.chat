@@ -688,7 +688,10 @@ export function Behaviour({ assistantId }: BehaviourProps) {
           title="Sources"
           help="How answers point to the pages they came from. You always see which content each answer used."
         >
-          <fieldset className="choice-group sources-choices" aria-describedby="behaviour-sources-hint">
+          <fieldset
+            className="choice-group sources-choices"
+            aria-describedby="behaviour-sources-hint"
+          >
             <legend className="field-label">Show sources in answers</legend>
             {SOURCES_CHOICES.map((choice) => (
               <label

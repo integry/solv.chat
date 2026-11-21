@@ -69,7 +69,11 @@ function score(item, answer) {
   const result = links.rewriteSourceLinks(answer, links.linkTargets(chunksFor(item)));
   const text = markers.stripCitationMarkers(result.text, TOP_K);
   const outcome =
-    result.removed > 0 ? "linkRemoved" : result.linked.length > 0 ? "linkedCorrectly" : "linkedNothing";
+    result.removed > 0
+      ? "linkRemoved"
+      : result.linked.length > 0
+        ? "linkedCorrectly"
+        : "linkedNothing";
   return { outcome, linked: result.linked, removed: result.removed, text };
 }
 
@@ -139,7 +143,10 @@ for (const item of set.cases) {
     if (typeof answer !== "string") continue;
     const result = score(item, answer);
     totals[scheme][result.outcome] += 1;
-    const expected = item.expect.length === 0 ? result.linked.length === 0 : item.expect.every((url) => result.linked.includes(url));
+    const expected =
+      item.expect.length === 0
+        ? result.linked.length === 0
+        : item.expect.every((url) => result.linked.includes(url));
     if (expected) totals[scheme].linkedExpected += 1;
     for (const match of answer.matchAll(TARGET)) {
       totals[scheme].links += 1;

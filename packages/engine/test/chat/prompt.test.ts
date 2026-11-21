@@ -37,7 +37,9 @@ describe("chat/prompt", () => {
     expect(SAFETY_FRAME_NO_CITATIONS).toContain("add no citation markers such as [1]");
     expect(SAFETY_FRAME_LINKS).toContain("[those words][n]");
     expect(SAFETY_FRAME_LINKS).toContain("Never write a web address yourself");
-    expect(SAFETY_FRAME_LINKS).toContain("Add no citation markers such as [1] and no list of sources");
+    expect(SAFETY_FRAME_LINKS).toContain(
+      "Add no citation markers such as [1] and no list of sources",
+    );
     expect(SAFETY_FRAME_LINKS).not.toContain("Cite the sources you used");
 
     const chunks = [{ title: "Docs", url: "https://site.example/docs", text: "Read the docs." }];
@@ -103,7 +105,7 @@ describe("chat/prompt", () => {
       question: "What does it cost?",
     });
 
-    expect(hostile.system).toBe(SAFETY_FRAME);
+    expect(hostile.system).toBe(SAFETY_FRAME_LINKS);
     expect(hostile.system).toBe(clean.system);
     expect(hostile.messages.at(-1)?.role).toBe("user");
     expect(messageText(hostile.messages.at(-1))).toContain(
@@ -125,7 +127,7 @@ describe("chat/prompt", () => {
       question: "How?",
     });
 
-    expect(req.system.startsWith(SAFETY_FRAME)).toBe(true);
+    expect(req.system.startsWith(SAFETY_FRAME_LINKS)).toBe(true);
     expect(req.system).toContain("Always respond concisely in plain English.");
   });
 

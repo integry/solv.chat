@@ -76,9 +76,7 @@ describe("chat/sourceLinks", () => {
       ].join(" "),
       TARGETS,
     );
-    expect(result.text).toBe(
-      "Read the API guide, our partner, pricing, email us and run it.",
-    );
+    expect(result.text).toBe("Read the API guide, our partner, pricing, email us and run it.");
     expect(result.removed).toBe(5);
   });
 
@@ -86,8 +84,11 @@ describe("chat/sourceLinks", () => {
     expect(rewrite("![chart](https://evil.example/pixel.png) and <https://evil.example/x>.")).toBe(
       "chart and https://evil.example/x.",
     );
+    expect(rewrite(`![chart](${PRICING}) here.`)).toBe(`![chart](${PRICING}) here.`);
+    expect(rewrite(`See <${PRICING}>.`)).toBe(`See <${PRICING}>.`);
+    // Both go to one page, so the second in the paragraph is reduced to its text.
     expect(rewrite(`![chart](${PRICING}) and <${PRICING}>.`)).toBe(
-      `![chart](${PRICING}) and <${PRICING}>.`,
+      `![chart](${PRICING}) and ${PRICING}.`,
     );
   });
 
@@ -166,14 +167,19 @@ describe("chat/sourceLinks", () => {
   });
 
   it("holds an autolink, an image's '!' and a long unfinished label until they settle", () => {
-    expect(stream(`See <${PRICING.slice(0, 12)}`, [])).toEqual(["See ", `<${PRICING.slice(0, 12)}`]);
+    expect(stream(`See <${PRICING.slice(0, 12)}`, [])).toEqual([
+      "See ",
+      `<${PRICING.slice(0, 12)}`,
+    ]);
     const deltas = stream("Look ![chart](https://evil.example/p.png) now", [6, 10]);
     expect(deltas.slice(0, 2)).toEqual(["Look ", ""]);
     expect(deltas.join("")).toBe("Look chart now");
     const long = `Read [${"the very long name of the testing guide ".repeat(5)}`;
     const held = stream(`${long}][1].`, [long.length]);
     expect(held[0]).toBe("Read ");
-    expect(held[1]).toMatch(/^\[the very long .*\]\(https:\/\/docs\.example\.com\/guide\/testing\)\.$/u);
+    expect(held[1]).toMatch(
+      /^\[the very long .*\]\(https:\/\/docs\.example\.com\/guide\/testing\)\.$/u,
+    );
   });
 
   it("reduces a link left unfinished at the end to its text, so none is left open", () => {
