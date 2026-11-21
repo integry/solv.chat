@@ -15,7 +15,7 @@ const ANSWERS = [
     "",
     "```js",
     "const client = createClient({ key: process.env.KEY });",
-    "await client.reset(\"user-\" + id);",
+    'await client.reset("user-" + id);',
     "```",
     "",
     "See the [guide](https://docs.example.com/guide) for more.",

@@ -927,6 +927,7 @@ describe("visitor check", () => {
       expect(Object.keys(JSON.parse(config.text)).sort()).toEqual([
         "accentColor",
         "actions",
+        "allowExpand",
         "greeting",
         "position",
         "suggestedQuestions",
