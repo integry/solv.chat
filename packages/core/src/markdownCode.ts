@@ -211,6 +211,78 @@ function destinationEnd(text: string, at: number): number {
   return text.length;
 }
 
+/** A bracket of only numbers (`[1]`, `[1, 2]`): a citation marker, as the engine's link check reads one. */
+const MARKER_LABEL = /^[ \t]*\d[ \t\d,–-]*$/u;
+
+/**
+ * Where an inline link's tail that starts after its "](" at `at` ends, read
+ * the way the engine's link check reads it (`readDestination` in
+ * `chat/sourceLinks.ts`): its destination, an optional title in `"…"`, `'…'`
+ * or `(…)`, and the closing ")". Returns the position past the ")"; unfinished,
+ * the end of the text; and where it stops being a link's tail (a line break,
+ * a "<" in `<…>`, anything but ")" after the title), that position.
+ */
+function linkTailEnd(text: string, at: number): number {
+  let p = at;
+  const skipSpaces = () => {
+    while (text[p] === " " || text[p] === "\t") p++;
+  };
+  skipSpaces();
+  const angle = text[p] === "<";
+  if (angle) p++;
+  let depth = 0;
+  let destEnd = -1;
+  for (; p < text.length; p++) {
+    const char = text[p];
+    if (char === "\n") return p;
+    if (char === "\\") {
+      // A backslash never escapes a line break: no destination holds one.
+      if (text[p + 1] !== "\n") p++;
+    } else if (angle) {
+      if (char === ">") {
+        destEnd = ++p;
+        break;
+      }
+      if (char === "<") return p;
+    } else if (char === " " || char === "\t" || (char === ")" && depth === 0)) {
+      destEnd = p;
+      break;
+    } else if (char === "(") {
+      depth++;
+    } else if (char === ")") {
+      depth--;
+    }
+  }
+  if (destEnd === -1) return text.length;
+  skipSpaces();
+  const quote = text[p];
+  if (quote === '"' || quote === "'" || quote === "(") {
+    const closer = quote === "(" ? ")" : quote;
+    for (p++; p < text.length && text[p] !== closer; p++) {
+      if (text[p] === "\n") return p;
+      if (text[p] === "\\" && text[p + 1] !== "\n") p++;
+    }
+    if (p >= text.length) return text.length;
+    p++;
+    skipSpaces();
+  }
+  if (p >= text.length) return text.length;
+  return text[p] === ")" ? p + 1 : p;
+}
+
+/**
+ * Where a reference link's second bracket, whose "[" is at `at`, ends: past
+ * its "]", or where a line break or another "[" ends it first (unfinished, the
+ * end of the text), as the engine's link check reads it.
+ */
+function referenceEnd(text: string, at: number): number {
+  for (let p = at + 1; p < text.length; p++) {
+    if (text[p] === "\n" || text[p] === "[") return p;
+    if (text[p] === "]") return p + 1;
+  }
+  return text.length;
+}
+
 /**
  * The `[start, end)` ranges of `text` that are prose, not Markdown code nor
  * a link's destination.
@@ -251,7 +323,15 @@ function destinationEnd(text: string, at: number): number {
  * With `keepLinks`, links are left in the prose whole (their destinations, autolinks
  * and reference definitions too): only code is left out. The engine's link
  * check (`chat/sourceLinks.ts`) and the admin "Try it" pane read links
- * themselves.
+ * themselves. A link's tail (after its label's "]": the destination and
+ * title up to ")", or a reference's "[…]") and an autolink's address open no
+ * code span there: the check reads a backtick in them as part of the link
+ * and may write the link without it (a title is dropped, a link it does not
+ * allow loses all but its label), so a span opened there would hide the
+ * links after it from the check while they reach the visitor as links.
+ * Where a tail turns out not to be one (a line break, anything but ")" after
+ * the title), reading goes on from there as usual; what came before stays
+ * prose, so appending text still changes nothing already read.
  *
  * Lines end at "\n" only: a caller reading text with "\r\n" or "\r" endings
  * maps them first (`"\r\n"` to `" \n"`, `"\r"` to `"\n"`), keeping indexes.
@@ -379,9 +459,13 @@ export function proseRanges(text: string, keepLinks = false): Array<[number, num
     return next();
   };
   let lineRead = -1;
+  // With `keepLinks`, where the last "[" in prose on this line is while no
+  // "]" has closed it yet (or -1): a link's label, whose "]" may start its tail.
+  let label = -1;
   while (i < text.length) {
     if ((i === 0 || text[i - 1] === "\n") && lineRead !== i) {
       lineRead = i;
+      label = -1;
       const next = readLine(i);
       if (next !== i) {
         i = next;
@@ -404,6 +488,31 @@ export function proseRanges(text: string, keepLinks = false): Array<[number, num
       if (scheme !== null) {
         i = skip(scheme, matchEnd(AUTOLINK_REST, text, scheme) ?? scheme);
         continue;
+      }
+    }
+    if (keepLinks) {
+      // A link's tail stays prose but opens no code span: the link check
+      // reads it as the link's (and may write the link without it), so a
+      // backtick there must not hide what follows it from that check.
+      if (text[i] === "[") {
+        label = i;
+      } else if (text[i] === "]" && label !== -1) {
+        const words = text.slice(label + 1, i);
+        label = -1;
+        if (text[i + 1] === "(") {
+          i = linkTailEnd(text, i + 2);
+          continue;
+        }
+        if (text[i + 1] === "[" && !MARKER_LABEL.test(words)) {
+          i = referenceEnd(text, i + 1);
+          continue;
+        }
+      } else if (text[i] === "<") {
+        const scheme = matchEnd(AUTOLINK_SCHEME, text, i);
+        if (scheme !== null) {
+          i = matchEnd(AUTOLINK_REST, text, scheme) ?? scheme;
+          continue;
+        }
       }
     }
     if (text[i] === "`") {
@@ -429,6 +538,9 @@ export function proseRanges(text: string, keepLinks = false): Array<[number, num
         }
         p++;
       }
+      // A label holds no line break, so a span running onto another line
+      // leaves no "[" open behind it.
+      if (text.slice(i, close).includes("\n")) label = -1;
       i = close;
       proseStart = close;
       continue;

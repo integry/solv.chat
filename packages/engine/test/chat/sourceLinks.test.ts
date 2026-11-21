@@ -227,6 +227,61 @@ describe("chat/sourceLinks", () => {
     );
   });
 
+  describe("a backtick in a link's tail hides no link after it", () => {
+    const PHISH = "https://unlisted.example/phish";
+    // Each line: the answer, and what it must become. The first link's tail
+    // holds a backtick the rewrite drops with the title, the unlisted
+    // address or the reference; the link after it must still be checked.
+    const cases: Array<[string, string, string]> = [
+      [
+        "a title",
+        `[guide](${PRICING} "\`tag") then [other](${PHISH})`,
+        `[guide](${PRICING}) then other`,
+      ],
+      [
+        "an unlisted address",
+        `[x](https://unlisted.example/a\`b) then [other](${PHISH})`,
+        "x then other",
+      ],
+      ["a reference", `[x][1\`] then [other](${PHISH})`, "x then other"],
+      [
+        "an autolink",
+        `<https://unlisted.example/a\`b> then [other](${PHISH}) and \`x\``,
+        "https://unlisted.example/a`b then other and `x`",
+      ],
+    ];
+
+    it.each(cases)("in %s, whole", (_name, text, expected) => {
+      expect(rewrite(text)).toBe(expected);
+      expect(rewriteSourceLinks(text, TARGETS).removed).toBe(
+        expected.startsWith("[guide]") ? 1 : 2,
+      );
+    });
+
+    it.each(cases)("in %s, split anywhere on the stream", (_name, text, expected) => {
+      for (let a = 1; a < text.length; a++) {
+        expect(stream(text, [a]).join("")).toBe(expected);
+        const b = Math.min(a + 5, text.length - 1);
+        if (b > a) expect(stream(text, [a, b]).join("")).toBe(expected);
+      }
+    });
+
+    it("still keeps real code in a label and after the link as written", () => {
+      const text = `[the \`npm test\` command](${PRICING} "Plans") and \`[raw](${PHISH})\``;
+      expect(rewrite(text)).toBe(`[the \`npm test\` command](${PRICING}) and \`[raw](${PHISH})\``);
+      // A "](" with no "[" before it is no link, so its backtick opens code.
+      const plain = `See a](b "\`[raw](${PHISH})\`") now`;
+      expect(rewrite(plain)).toBe(plain);
+    });
+
+    it("reads no link across a backslash at a line's end", () => {
+      // The link is not one, so nothing on the next line is dropped with it.
+      const text = `[x](https://unlisted.example/a\\\n\`) [other](${PHISH})`;
+      const out = rewrite(text);
+      expect(out.startsWith("[x](https://unlisted.example/a\\\n`)")).toBe(true);
+    });
+  });
+
   it("keeps line endings as written", () => {
     expect(rewrite("A [x][1]\r\n\r\nB [y][1]\r\n")).toBe(
       `A [x](${TESTING})\r\n\r\nB [y](${TESTING})\r\n`,

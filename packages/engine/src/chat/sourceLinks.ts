@@ -216,7 +216,9 @@ function readDestination(text: string, open: number, labelEnd: number, final: bo
     const char = text[p];
     if (char === "\n") return { kind: "none" };
     if (char === "\\") {
-      p++;
+      // A backslash never escapes a line break: no destination holds one
+      // (and `proseRanges` reads the next line as a line of its own).
+      if (text[p + 1] !== "\n") p++;
     } else if (angle) {
       if (char === ">") {
         destEnd = p;
@@ -247,7 +249,7 @@ function readDestination(text: string, open: number, labelEnd: number, final: bo
     p++;
     for (; p < text.length && text[p] !== closer; p++) {
       if (text[p] === "\n") return { kind: "none" };
-      if (text[p] === "\\") p++;
+      if (text[p] === "\\" && text[p + 1] !== "\n") p++;
     }
     if (p >= text.length) return unfinished;
     p++;
