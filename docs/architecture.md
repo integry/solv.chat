@@ -1017,23 +1017,53 @@ by default) is a second one, offered with "Link in the text" only.
   page, the words that name it ("the testing guide", "the pricing page", a
   feature's name) are a Markdown link to that page, at most one per source
   per paragraph, never a whole sentence nor "here". The frame
-  (`SAFETY_FRAME_LINKS`) has the model refer to a source by its number as a
-  reference link, `[the testing guide][2]`, and never write an address; the
-  engine (`chat/sourceLinks.ts`) turns each into a link to that source's
-  page. Numbers rather than addresses: a number cannot be mistyped into
-  another page, and it costs a few output characters where an address costs
-  dozens. The recorded evaluation (`test/fixtures/source-links-eval.json`,
-  13 questions against a documentation corpus, replayed by a test and
-  re-recorded with `scripts/source-links-eval.mjs --record`) answered each
-  question both ways: both linked 12 correctly, 1 (a written answer's)
-  linked nothing, none had a link removed; numbers spent 64 characters on
-  16 link targets, addresses 459 on 13. A written answer has no
+  (`SAFETY_FRAME_LINKS`) has the model refer to a source by its number in
+  one form, an inline link, `[the testing guide](2)`, and says it writes no
+  reference definition (`[1]: https://…`), no `[words][n]` and no address,
+  as a link or as text; the engine (`chat/sourceLinks.ts`) turns each into
+  a link to that source's page. Numbers rather than addresses: a number
+  cannot be mistyped into another page, and it costs a few output
+  characters where an address costs dozens. Inline rather than the
+  reference form (`[the testing guide][2]`) this frame used first: that is
+  Markdown's reference link, and a deployed check saw the model finish it
+  the Markdown way, with definitions numbered its own way after the text,
+  so source numbers sent the words to pages they did not name. The engine
+  does not rely on the prompt for that. A reference link (`[words][label]`,
+  or `[words][]`) goes where the answer's own definition of its label says
+  (labels matched as Markdown matches them), never by the sources' numbers
+  when the answer defines its labels; with no definition anywhere in the
+  answer, a numbered reference can only mean the sources' numbers. Either
+  way the address must pass the rule below, or the link is reduced to its
+  text. Since a definition usually comes after the text, a reference link
+  is held from its "[" until its definition arrives or the stream ends,
+  and the rest of the stream with it. Every definition (on a line of its
+  own, or run into the text as `page.[1]: https://…[2]: https://…`, or a
+  bare `[1]:`) is taken out of what is sent and stored, held while one may
+  still be arriving. An address written out in the text is a link
+  (`[https://…](https://…)`, as is an autolink, which the widget shows as
+  no link) when it is one of the answer's pages, and is otherwise left as
+  text; a link whose words are its own address is always kept, however
+  often the paragraph links that page. The recorded evaluation
+  (`test/fixtures/source-links-eval.json`, 14 questions against two
+  documentation corpora, this repository's docs and sqlite.org, replayed by
+  a test and re-recorded with `scripts/source-links-eval.mjs --record`)
+  answered each question with this frame, with the reference form, and with
+  addresses copied: each way linked 13 correctly and 1 (a written answer's)
+  linked nothing, none had a link removed, and in 13 of 14 answers a link
+  went to the page the question is about (or, for the written answer, no
+  link); numbers spent 60 characters on 15 link targets, references 72 on
+  18, addresses 559 on 16. Over every recorded answer (three or four to each
+  question), the
+  reference form wrote `[words][n]` in 51 of 55 answers, the inline form in
+  none of 42; neither wrote a definition there (the deployed check saw them
+  in 2 of 4 answers to one question). A written answer has no
   public page: text that relies only on it carries no link. A link survives
   only when it goes to a page the answer was given (the pages its citations
   would list, the same rule: not a written answer) or to an address the
   text of one of those sources contains, a section of either (`#…`) included; every other link
   (another site, a made-up page, a relative or `mailto:` address, a
-  reference to no source or to a definition, an image, an autolink) and a
+  reference to no source or whose definition goes elsewhere, an image, an
+  autolink) and a
   second link to the same page in a paragraph is reduced to its text, in the
   stream and the stored text alike. A link whose words hold another link or
   a pair of brackets (`[see [the guide]](…)`, `[outer [inner](…)](…)`) is

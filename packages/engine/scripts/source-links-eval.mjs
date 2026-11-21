@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 // The evaluation behind "Link in the text" (test/fixtures/source-links-eval.json):
-// real questions against a documentation corpus, each answered twice, once
-// with the sources' numbers to link by (`[words][2]`, what the engine asks
-// for) and once asked to copy the sources' addresses (`[words](https://…)`).
-// Every answer goes through the engine's own link rules (`sourceLinks.ts`,
-// then the marker filter), and each is counted as linked correctly, linked
-// nothing, or had a link removed. `test/chat/sourceLinksEval.test.ts`
-// replays the recorded answers and checks the counts; this script records
-// new ones against the real model. Opt-in and never run in CI: it spends a
-// little on the provider.
+// real questions against documentation corpora, each answered in three
+// schemes from the same sources: with the engine's frame (link words by the
+// source's number, `[words](2)`), with the frame it replaced (the same by a
+// reference, `[words][2]`, which models sometimes finished with definitions
+// of their own, `[1]: https://…`), and asked to copy the sources' addresses
+// (`[words](https://…)`). Every answer goes through the engine's own link
+// rules (`sourceLinks.ts`, then the marker filter), and each is counted as
+// linked correctly, linked nothing, or had a link removed, and whether its
+// links go to the page the question is about. Each answer written in
+// reference style (a `[words][n]` link or a definition) is counted too:
+// that is what the frame change is measured by. `samples` holds further
+// answers to the same requests, counted for reference style only.
+// `test/chat/sourceLinksEval.test.ts` replays the recorded answers and checks
+// the counts; this script records new ones against the real model. Opt-in
+// and never run in CI: it spends a little on the provider.
 //
 //   npm run build -w @solvchat/engine
 //   node packages/engine/scripts/source-links-eval.mjs            # score the recorded answers
@@ -18,7 +24,8 @@
 //   SOLV_OPENAI_KEY=...    node packages/engine/scripts/source-links-eval.mjs --record --provider openai
 //
 // --record answers every case with the balanced tier and writes the answers
-// and the model into the fixture. Prints no key.
+// and the model into the fixture (and drops the samples, which were answers
+// to the same requests by other means). Prints no key.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -116,6 +123,7 @@ if (process.argv.includes("--record")) {
       }
       item.answers[scheme] = text;
     }
+    delete item.samples;
   }
   set.recorded = {
     model: model.id,
@@ -124,16 +132,23 @@ if (process.argv.includes("--record")) {
   };
 }
 
+/** A definition (`[1]: https://…`, on its own line or run into the text). */
+const DEFINITION = /\[[^\]\n]+\]:[ \t]*<?https?:\/\//u;
+/** A reference link, `[words][n]`. */
+const REFERENCE = /\[[^\]\n]+\]\[[^\]\n]*\]/u;
+
 const totals = {};
+const style = {};
 for (const scheme of Object.keys(set.schemes)) {
   totals[scheme] = {
     linkedCorrectly: 0,
     linkedNothing: 0,
     linkRemoved: 0,
-    linkedExpected: 0,
+    linkedExpectedPage: 0,
     links: 0,
     targetChars: 0,
   };
+  style[scheme] = { answers: 0, referenceLinks: 0, definitions: 0 };
 }
 /** The link targets the model wrote (`](…)` or `][n]`): what each scheme spends on them. */
 const TARGET = /\]\([^)]*\)|\]\[\d+\]/gu;
@@ -143,14 +158,21 @@ for (const item of set.cases) {
     if (typeof answer !== "string") continue;
     const result = score(item, answer);
     totals[scheme][result.outcome] += 1;
+    // Its link goes where it should: at least one link to a page the
+    // question is about (a written answer's case: no link at all).
     const expected =
       item.expect.length === 0
         ? result.linked.length === 0
-        : item.expect.every((url) => result.linked.includes(url));
-    if (expected) totals[scheme].linkedExpected += 1;
+        : result.linked.some((url) => item.expect.includes(url));
+    if (expected) totals[scheme].linkedExpectedPage += 1;
     for (const match of answer.matchAll(TARGET)) {
       totals[scheme].links += 1;
       totals[scheme].targetChars += match[0].length;
+    }
+    for (const written of [answer, ...(item.samples?.[scheme] ?? [])]) {
+      style[scheme].answers += 1;
+      if (REFERENCE.test(written)) style[scheme].referenceLinks += 1;
+      if (DEFINITION.test(written)) style[scheme].definitions += 1;
     }
     console.log(
       `${scheme.padEnd(20)} ${item.id.padEnd(22)} ${result.outcome.padEnd(16)} linked ${result.linked.join(", ") || "nothing"}${result.removed ? `, ${result.removed} removed` : ""}`,
@@ -160,11 +182,16 @@ for (const item of set.cases) {
 console.log("");
 for (const [scheme, counts] of Object.entries(totals)) {
   console.log(
-    `${scheme}: ${counts.linkedCorrectly} linked correctly, ${counts.linkedNothing} linked nothing, ${counts.linkRemoved} had a link removed; ${counts.linkedExpected} of ${set.cases.length} linked what they should (or nothing, for a written answer); ${counts.links} links written with ${counts.targetChars} characters of targets.`,
+    `${scheme}: ${counts.linkedCorrectly} linked correctly, ${counts.linkedNothing} linked nothing, ${counts.linkRemoved} had a link removed; in ${counts.linkedExpectedPage} of ${set.cases.length} a link goes to the page the question is about (for a written answer: no link); ${counts.links} links written with ${counts.targetChars} characters of targets.`,
+  );
+  const s = style[scheme];
+  console.log(
+    `  reference style: ${s.referenceLinks} of ${s.answers} answers wrote [words][n], ${s.definitions} wrote definitions.`,
   );
 }
 if (process.argv.includes("--record") || process.argv.includes("--summarize")) {
   set.summary = totals;
+  set.referenceStyle = style;
   writeFileSync(fixturePath, `${JSON.stringify(set, null, 2)}\n`);
   console.log(`\nRecorded in ${fixturePath}.`);
 }

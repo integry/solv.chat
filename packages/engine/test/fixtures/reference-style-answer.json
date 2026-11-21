@@ -1,0 +1,18 @@
+{
+  "about": "A deployed check of \"Link in the text\" (real model, documentation corpus of sqlite.org pages, list off), question \"Is SQLite free to use commercially?\": in 2 of 4 answers the model wrote reference-style Markdown, [words][n] with its own trailing [n]: url definitions numbered differently from the sources it was given. Before the fix the engine linked \"copyright page\" to about.html and \"FAQ\" and \"support options page\" to copyright.html, and showed the definitions as text. `answer` is the model's text as the visitor saw it: the quoted parts are verbatim, the parts the report left out (\"...\") are filled in, the link syntax is put back where the visitor saw links, and the definitions are run together as the visitor saw them. `answerOnLines` is the same answer with its definitions on lines of their own, as Markdown writes them. `sources` is the retrieval order the engine numbered (source 1 about.html, 2 and 3 two sections of copyright.html), `expected` the page each link's words name, which is the model's own definition of its label.",
+  "question": "Is SQLite free to use commercially?",
+  "sources": [
+    { "title": "About SQLite", "url": "https://sqlite.org/about.html", "text": "The code for SQLite is in the public domain and is thus free for use for any purpose, commercial or private." },
+    { "title": "SQLite Copyright", "url": "https://sqlite.org/copyright.html", "text": "All of the code and documentation in SQLite has been dedicated to the public domain by the authors. Anyone is free to copy, modify, publish, use, compile, sell, or distribute the original SQLite code, either in source code form or as a compiled binary, for any purpose, commercial or non-commercial, and by any means." },
+    { "title": "SQLite Copyright", "url": "https://sqlite.org/copyright.html", "text": "Warranty of Title. SQLite is in the public domain and does not require a license. Even so, some organizations want legal proof of their right to use SQLite. Hwaci will sell a Warranty of Title for SQLite." },
+    { "title": "SQLite Frequently Asked Questions", "url": "https://sqlite.org/faq.html", "text": "(13) Can I use SQLite in my commercial product without paying royalties? Yes. SQLite is in the public domain. No claim of ownership is made to any part of the code. You can do anything you want with it." },
+    { "title": "SQLite Support Options", "url": "https://sqlite.org/support.html", "text": "If you would like professional support for SQLite or if you want custom modifications performed by the original author of SQLite, these services are available for a modest fee." }
+  ],
+  "answer": "Yes. SQLite is in the public domain, so you can use it in a commercial product without paying royalties or asking permission. The [copyright page][1] covers the dedication, and the [FAQ][2] states the royalty answer directly. If your lawyers want a warranty of title or you want paid help, that is described on the [support options page][3].[1]: https://sqlite.org/copyright.html[2]: https://sqlite.org/faq.html[3]: https://sqlite.org/support.html",
+  "answerOnLines": "Yes. SQLite is in the public domain, so you can use it in a commercial product without paying royalties or asking permission. The [copyright page][1] covers the dedication, and the [FAQ][2] states the royalty answer directly. If your lawyers want a warranty of title or you want paid help, that is described on the [support options page][3].\n\n[1]: https://sqlite.org/copyright.html\n[2]: https://sqlite.org/faq.html\n[3]: https://sqlite.org/support.html\n",
+  "expected": {
+    "copyright page": "https://sqlite.org/copyright.html",
+    "FAQ": "https://sqlite.org/faq.html",
+    "support options page": "https://sqlite.org/support.html"
+  }
+}

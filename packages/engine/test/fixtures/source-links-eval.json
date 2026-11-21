@@ -1,15 +1,31 @@
 {
-  "about": "The evaluation behind \"Link in the text\": how the model should refer to sources. Each question is answered twice from the same sources: with the engine's frame (SAFETY_FRAME_LINKS: link words by the source's number, [words][n]) and with that frame changed to ask for the sources' addresses copied into the link ([words](url)). Each answer is put through the engine's link rules and counted as linked correctly, linked nothing, or had a link removed. The pages are sections of this repository's docs/architecture.md under stand-in addresses; the last case's only fitting source is a written answer, which must get no link. Replayed by test/chat/sourceLinksEval.test.ts; recorded with scripts/source-links-eval.mjs.",
+  "about": "The evaluation behind \"Link in the text\": how the model should refer to sources. Each question is answered from the same sources in three schemes: source-numbers, the engine's frame (SAFETY_FRAME_LINKS: link words by the source's number, [words](n)); reference-numbers, the frame it replaced (the same by a Markdown reference, [words][n], which a deployed check saw the model finish with definitions numbered its own way, [1]: https://…); and copied-addresses, the frame changed to ask for the sources' addresses copied into the link ([words](url)). Each answer is put through the engine's link rules and counted as linked correctly, linked nothing, or had a link removed, and as linking the expected page when at least one of its links goes to a page in the case's `expect` (for the written-answer case, whose `expect` is empty: when it links nothing). `referenceStyle` counts, over `answers` and `samples` (further answers to the same requests), the answers that wrote a [words][n] link or a definition. The solv.chat pages are sections of this repository's docs/architecture.md under stand-in addresses; the sqlite-commercial case is the deployed check's question over excerpts of sqlite.org pages, retrieved in the order that check numbered them. The open-source case's only fitting source is a written answer, which must get no link. Replayed by test/chat/sourceLinksEval.test.ts; recorded with scripts/source-links-eval.mjs.",
   "schemes": {
-    "numbered-references": {},
+    "source-numbers": {},
+    "reference-numbers": {
+      "replace": [
+        [
+          "into a link written as [those words](n), where n is the number of that source; it becomes a link to the page.",
+          "into a link written as [those words][n], where n is the number of that source; it becomes a link to the page."
+        ],
+        [
+          "Write every link in exactly that form: never a reference definition such as [1]: https://…, never [those words][n], and never a web address, neither as a link nor as plain text. ",
+          ""
+        ],
+        [
+          "A source with no url gets no link.",
+          "Never write a web address yourself. A source with no url gets no link."
+        ]
+      ]
+    },
     "copied-addresses": {
       "replace": [
         [
-          "into a link written as [those words][n], where n is the number of that source; it becomes a link to the page.",
+          "into a link written as [those words](n), where n is the number of that source; it becomes a link to the page.",
           "into a Markdown link to that source's url, written as [those words](url) with the url copied exactly as given."
         ],
         [
-          "Never write a web address yourself. ",
+          "Write every link in exactly that form: never a reference definition such as [1]: https://…, never [those words][n], and never a web address, neither as a link nor as plain text. ",
           ""
         ]
       ]
@@ -100,6 +116,36 @@
       "headingPath": "",
       "text": "Yes. The chat engine, the widget, the ingest CLI and the admin are open source under the Apache 2.0 licence. Sign-up, teams, billing and managed model keys are part of the hosted service.",
       "sourceKind": "entry"
+    },
+    "sqlite-about": {
+      "title": "About SQLite",
+      "url": "https://sqlite.org/about.html",
+      "headingPath": "About SQLite",
+      "text": "SQLite is an in-process library that implements a self-contained, serverless, zero-configuration, transactional SQL database engine. The code for SQLite is in the public domain and is thus free for use for any purpose, commercial or private. SQLite is the most widely deployed database in the world with more applications than we can count, including several high-profile projects."
+    },
+    "sqlite-copyright": {
+      "title": "SQLite Copyright",
+      "url": "https://sqlite.org/copyright.html",
+      "headingPath": "SQLite Is Public Domain",
+      "text": "All of the code and documentation in SQLite has been dedicated to the public domain by the authors. All code authors, and representatives of the companies they work for, have signed affidavits dedicating their contributions to the public domain and originals of those signed affidavits are stored in a firesafe at the main offices of Hwaci. Anyone is free to copy, modify, publish, use, compile, sell, or distribute the original SQLite code, either in source code form or as a compiled binary, for any purpose, commercial or non-commercial, and by any means."
+    },
+    "sqlite-copyright-warranty": {
+      "title": "SQLite Copyright",
+      "url": "https://sqlite.org/copyright.html",
+      "headingPath": "SQLite Is Public Domain > Warranty of Title",
+      "text": "SQLite is in the public domain and does not require a license. Even so, some organizations want legal proof of their right to use SQLite. Circumstances where this occurs include the following: your company desires indemnity against claims of copyright infringement; you are using SQLite in a jurisdiction that does not recognize the public domain. If any of the above circumstances apply to you, Hwaci, the company that employs all the developers of SQLite, will sell you a Warranty of Title for SQLite."
+    },
+    "sqlite-faq": {
+      "title": "SQLite Frequently Asked Questions",
+      "url": "https://sqlite.org/faq.html",
+      "headingPath": "Can I use SQLite in my commercial product without paying royalties?",
+      "text": "Yes. SQLite is in the public domain. No claim of ownership is made to any part of the code. You can do anything you want with it."
+    },
+    "sqlite-support": {
+      "title": "SQLite Support Options",
+      "url": "https://sqlite.org/support.html",
+      "headingPath": "Paid Professional Support",
+      "text": "If you would like professional support for SQLite or if you want custom modifications performed by the original author of SQLite, these services are available for a modest fee. The core SQLite library found on this website is in the public domain. But there also exist proprietary, licensed extensions to SQLite."
     }
   },
   "cases": [
@@ -116,8 +162,20 @@
         "https://docs.solv.chat/widget"
       ],
       "answers": {
-        "numbered-references": "Add one script tag to your page, then place the chat element where you want it, using your assistant's public key:\n\n```html\n<solv-chat assistant=\"pk_...\"></solv-chat>\n```\n\nIt is a single small file with no framework or dependencies, and it sets no cookies. The rest of the setup is on [the widget install page][1].\n\nIf you turn on the visitor check, see [the visitor check][2] for the keys it needs.",
+        "source-numbers": "Load the widget with one script tag, then put the custom element on your page with your assistant's public key:\n\n```html\n<solv-chat assistant=\"pk_...\"></solv-chat>\n```\n\nIt needs no framework and no dependencies, sets no cookies, and is a single file under 30 kB gzipped. It also keeps the conversation going across page changes and reloads. The rest of the setup is on [the chat widget page](1).",
+        "reference-numbers": "Add one script tag to your page, then place the chat element where you want it, using your assistant's public key:\n\n```html\n<solv-chat assistant=\"pk_...\"></solv-chat>\n```\n\nIt is a single small file with no framework or dependencies, and it sets no cookies. The rest of the setup is on [the widget install page][1].\n\nIf you turn on the visitor check, see [the visitor check][2] for the keys it needs.",
         "copied-addresses": "Add the widget to your page with one script tag, then place the custom element where you want the chat:\n\n```html\n<solv-chat assistant=\"pk_...\"></solv-chat>\n```\n\nIt needs no framework and no dependencies, and it is a single file under 30 kB gzipped. It sets no cookies. See [Install the chat widget](https://docs.solv.chat/widget) for the rest."
+      },
+      "samples": {
+        "source-numbers": [
+          "Add the widget with one script tag and one custom element on your page:\n\n```html\n<solv-chat assistant=\"pk_...\"></solv-chat>\n```\n\nReplace `pk_...` with your assistant's key. [The chat widget](1) has no framework and no dependencies, and it sets no cookies. It restores the open conversation after a page change or reload.\n\nIf you turn on the visitor check, see [the visitor check](2) for the extra settings it needs.",
+          "Add the widget with one script tag, then place the custom element on your page with your assistant's key:\n\n```html\n<solv-chat assistant=\"pk_...\"></solv-chat>\n```\n\nIt needs no framework and no dependencies, and it is a single file under 30 kB gzipped. It sets no cookies. See [Install the chat widget](1) for the rest, including how it restores a conversation after a page change. If you turn on the [visitor check](2), the widget handles it for you."
+        ],
+        "reference-numbers": [
+          "Add the `<solv-chat>` element to your page and load the widget with one script tag. The element takes your assistant's public key:\n\n```html\n<solv-chat assistant=\"pk_...\"></solv-chat>\n```\n\nThe widget is a single file with no dependencies, sets no cookies and loads nothing from third parties into your page. If you turn on the visitor check, it runs inside a frame from the engine's own origin once the visitor starts typing. See [the install guide][1] for the rest, and [the visitor check][2] if you want to protect the chat from scripts.",
+          "Add one script tag for the widget to your page, then place the custom element where you want the chat, using your assistant's key:\n\n```html\n<solv-chat assistant=\"pk_...\"></solv-chat>\n```\n\nThere is no framework or dependency to set up, and it sets no cookies. [The widget install page][1] has the rest.",
+          "Load the widget with one script tag, then place the custom element on your page with your assistant's key:\n\n```html\n<solv-chat assistant=\"pk_...\"></solv-chat>\n```\n\nIt needs no framework and no dependencies, is a single file under 30 kB gzipped, and sets no cookies. The rest of the setup is on [the install page][1]."
+        ]
       }
     },
     {
@@ -132,8 +190,20 @@
         "https://docs.solv.chat/page-actions"
       ],
       "answers": {
-        "numbered-references": "Yes. With [page actions][1] on, the assistant can fill in form fields for a visitor, but only fields you have marked as fillable. It never submits the form, so the visitor always presses Submit themselves.\n\nIt runs in the visitor's own browser with their own session, so no owner credential is involved. It can also take the visitor to the right section of a page and point at a control.",
+        "source-numbers": "Yes. With [page actions](1), the assistant can fill in form fields for a visitor, for example to book a demo. It only fills fields you have marked as fillable, and it never submits the form: the visitor presses Submit themselves.\n\nIt can also take the visitor to the right section of a page and point at a control. These actions run in the visitor's own browser session, so no owner credential is involved.",
+        "reference-numbers": "Yes. With [page actions][1] on, the assistant can fill in form fields for a visitor, but only fields you have marked as fillable. It never submits the form, so the visitor always presses Submit themselves.\n\nIt runs in the visitor's own browser with their own session, so no owner credential is involved. It can also take the visitor to the right section of a page and point at a control.",
         "copied-addresses": "Yes. Through [page actions](https://docs.solv.chat/page-actions), the assistant can fill in form fields for a visitor, for example when they ask it to \"book a demo for Tuesday\". It only fills fields you have marked as fillable, and it never submits the form. The visitor presses Submit themselves.\n\nIt runs in the visitor's own browser with their own session, so no credential of yours is involved."
+      },
+      "samples": {
+        "source-numbers": [
+          "Yes. The assistant can fill in form fields for a visitor, but only fields you have marked as fillable. It never submits the form, so the visitor presses Submit themselves. For example, asked to \"book a demo for Tuesday\", it fills the demo form and stops there.\n\nThis runs in the visitor's own browser with their own session, so no owner credential is involved. See [page actions](1) for the other built-in actions, `navigate` and `highlight`.",
+          "Yes. With [page actions](1), the assistant can fill in form fields for a visitor, for example when they ask to \"book a demo for Tuesday\". It only fills fields you have marked as fillable, and it never submits the form: the visitor presses Submit themselves.\n\nActions run in the visitor's own browser with their own session, so no owner credential is involved."
+        ],
+        "reference-numbers": [
+          "Yes. The assistant can fill in a form for your visitors, but only the fields you have marked as fillable. It never submits the form, so the visitor always presses Submit themselves. For example, asked to \"book a demo for Tuesday\", it fills the demo form and leaves the rest to the visitor.\n\nThis runs in the visitor's own browser with their own session, so no owner credential is involved. The assistant can also take the visitor to another page or section and point at a control. [Page actions][1] has the full list.",
+          "Yes. The assistant can use the `fill` action to put values into form fields that you have marked as fillable. It never submits the form, so the visitor reads what was filled in and presses Submit themselves.\n\nActions run in the visitor's own browser with their own session, so no owner credential is involved. See [page actions][1] for the other built-in actions, `navigate` and `highlight`.",
+          "Yes. The `fill` action puts values into form fields you have marked as fillable, and it never submits. The visitor reads what was filled in and presses Submit themselves. Actions run in the visitor's own browser with their own session, so no owner credential is involved. More on this is in [page actions][1]."
+        ]
       }
     },
     {
@@ -148,8 +218,20 @@
         "https://docs.solv.chat/answering"
       ],
       "answers": {
-        "numbered-references": "The assistant says it does not know rather than guessing. Content that does not hold the answer is not used to make one up.\n\nYou can see these cases in [Reports][3], which lists the most frequent unanswered questions and the share of questions that could not be answered, so you know what content to add.",
+        "source-numbers": "The assistant says it does not know rather than guessing. It only gets content that scores above a relevance floor, and when nothing clears it, nothing is passed on, so an off-topic or unanswered question finds nothing. You can read more about this in [how answers are made](1).\n\nThose questions are not lost. [Reports](3) shows the share of questions that could not be answered and lists the most often unanswered ones, so you can see which content to add.",
+        "reference-numbers": "The assistant says it does not know rather than guessing. Content that does not hold the answer is not used to make one up.\n\nYou can see these cases in [Reports][3], which lists the most frequent unanswered questions and the share of questions that could not be answered, so you know what content to add.",
         "copied-addresses": "The assistant says it does not know rather than guessing. When nothing in your content is close enough to the question, nothing is handed to the model to answer from.\n\nYou can find these questions afterwards on the [Reports screen](https://docs.solv.chat/reports), which lists the most often unanswered questions and the share that could not be answered. That shows you which content to add."
+      },
+      "samples": {
+        "source-numbers": [
+          "The assistant says it does not know instead of guessing. Content that does not hold the answer is declined, and when nothing is related enough to the question, nothing is passed to the model at all, so off-topic questions find nothing.\n\nYou can then see what was missed: [Reports](3) lists the share of questions that could not be answered and the most frequent unanswered questions, so you know which content to add.",
+          "The assistant says it does not know instead of guessing. It only gets content that is related to the question, and it declines when that content does not hold the answer.\n\nThose questions are then counted as unanswered. [Reports](3) shows the share that could not be answered and lists the most often unanswered questions, so you can see which content to add. The same list is in the CSV download."
+        ],
+        "reference-numbers": [
+          "The assistant says it does not know. It only answers from the content you have given it, and the model declines when the content it is handed does not hold the answer. Content that is clearly unrelated to the question is filtered out before the model sees it, so off-topic questions find nothing to answer from.\n\nYou can see these questions afterwards. [Reports][3] lists the most frequent unanswered questions, and the share of questions that could not be answered is shown for each topic. [How answers are made][1] explains how content is picked for each question.",
+          "The assistant says it does not know. It only answers from your content, and when the content it finds does not hold the answer, it declines instead of guessing.\n\nThese questions then show up in [Reports][3], which has the share of questions that could not be answered and the questions most often left unanswered, so you can see what to add to your content.",
+          "The assistant says it does not know instead of guessing. [How answers are made][1] explains that content which does not hold the answer is declined, and a question with no matching content finds nothing.\n\nSuch questions are counted as unanswered. [Reports][3] shows the most often unanswered questions, with their topic, so you can see what to add to your content."
+        ]
       }
     },
     {
@@ -164,8 +246,20 @@
         "https://docs.solv.chat/answer-tests"
       ],
       "answers": {
-        "numbered-references": "Add an answer test for it. A test is a question plus one expectation, and one of the expectations is that the answer cites a given URL. Write a pricing question and expect your pricing page's URL.\n\n```json\n{ \"question\": \"How much does it cost?\", \"expect\": \"cites\", \"url\": \"https://example.com/pricing\" }\n```\n\nThe check passes when the answer links to that URL or the page is among those it used. [Answer tests][1] run automatically when you publish. If any fail, you see which and why, and can fix the draft or publish anyway. You can also run them from CI with `solv test`.",
+        "source-numbers": "Add an [answer test](1): a question such as \"How much does it cost?\" with the expectation that the answer cites your pricing page URL. A \"cites\" test passes when the answer links to that URL, or when the page is among the sources it used.\n\nPublish runs your tests first. If one fails, you see which and why, and you can fix the draft or publish anyway. You can also run the same tests from CI with `solv test`, which exits non-zero on a failure, and the tests can live in `solv.config.json`.",
+        "reference-numbers": "Add an answer test for it. A test is a question plus one expectation, and one of the expectations is that the answer cites a given URL. Write a pricing question and expect your pricing page's URL.\n\n```json\n{ \"question\": \"How much does it cost?\", \"expect\": \"cites\", \"url\": \"https://example.com/pricing\" }\n```\n\nThe check passes when the answer links to that URL or the page is among those it used. [Answer tests][1] run automatically when you publish. If any fail, you see which and why, and can fix the draft or publish anyway. You can also run them from CI with `solv test`.",
         "copied-addresses": "Add an [answer test](https://docs.solv.chat/answer-tests) for it: write the question a visitor would ask about pricing and set the expectation that the answer cites your pricing page URL. The test passes when the answer links to that URL or uses that page.\n\nPublishing runs your tests first. If one fails, you see which and why, and you can fix the draft or publish anyway. You can also run them from CI with `solv test`, which exits with an error when a test fails."
+      },
+      "samples": {
+        "source-numbers": [
+          "Write an answer test for it. A test is a question plus one expectation, and one of the expectations is that the answer cites a given URL. Ask something like \"How much does it cost?\" and expect your pricing page's URL.\n\n[Answer tests](1) run against your draft, and Publish runs them first. If one fails, you see which and why, and you can fix the draft or publish anyway. You can also run them from CI with `solv test`, which exits non-zero on a failure.\n\nThe page that explains how retrieval picks content is [How answers are made](3).",
+          "Write an [answer test](1) for it: a question such as \"How much does it cost?\" with the expectation that the answer cites your pricing page's URL. The test passes when the answer links to that URL in its text, or the URL is among its sources or the pages it used.\n\nPublish runs your tests first. If one fails, you see which one and why, and you can fix the draft or publish anyway. You can also run the same tests from CI with `solv test`, which exits non-zero on a failure."
+        ],
+        "reference-numbers": [
+          "Add a test for it. An [answer test][1] is a question plus one expectation, and one of the expectations is that the answer cites a given URL. Write the question visitors ask about pricing and expect your pricing page's URL.\n\nTests run against your draft, and Publish runs them first. If one fails, you see which test failed and why, and you can fix the draft or publish anyway. You can also run them from CI with `solv test`, which exits with an error when a test fails. On Conversations and Gaps, \"Add to tests\" turns a real exchange into a test.",
+          "Add an answer test. A test is a question plus one expectation, and one of the expectations is that the answer cites a given URL. Write a test such as \"How much does it cost?\" that expects your pricing page's URL.\n\n[Answer tests][1] run against your draft, and Publish runs them first. If any fail, you see which and why, and you can fix the draft or publish anyway. You can also run them from CI with `solv test`, which exits non-zero on a failure.",
+          "Write an answer test for it. A test is a question plus one expectation, and one expectation is that the answer cites a given URL. Add the question \"Where can I see pricing?\" (or similar) and expect your pricing page URL. The test passes when the answer links to that URL, or the URL is among its sources or the pages it used.\n\nPublish runs your tests first. If any fail, you see which and why, and can fix the draft or publish anyway. You can also run them from CI with `solv test`, which exits non-zero on a failure. See [answer tests][1] for the details."
+        ]
       }
     },
     {
@@ -180,8 +274,20 @@
         "https://docs.solv.chat/providers"
       ],
       "answers": {
-        "numbered-references": "The assistant can answer using Anthropic, OpenAI or OpenRouter. For search, embeddings come from OpenAI by default, or from OpenRouter if you set `SOLV_EMBEDDINGS_PROVIDER=openrouter`.\n\nWhen you run it yourself, the engine works completely with your own provider keys. Details of each provider are on [the model providers page][1]. Managed model keys are only part of the hosted service, as described in [open core and cloud][2].",
+        "source-numbers": "You can use Anthropic, OpenAI or OpenRouter to write answers. For embeddings you can use OpenAI (the default) or OpenRouter. Retrieval uses Vectorize.\n\nYou pick one provider and a model tier for the whole instance in its configuration, not per assistant. See [model providers](1) for the details.",
+        "reference-numbers": "The assistant can answer using Anthropic, OpenAI or OpenRouter. For search, embeddings come from OpenAI by default, or from OpenRouter if you set `SOLV_EMBEDDINGS_PROVIDER=openrouter`.\n\nWhen you run it yourself, the engine works completely with your own provider keys. Details of each provider are on [the model providers page][1]. Managed model keys are only part of the hosted service, as described in [open core and cloud][2].",
         "copied-addresses": "You can use Anthropic, OpenAI or OpenRouter for answers. For embeddings you can use OpenAI (the default) or OpenRouter. Retrieval uses Vectorize.\n\nThe provider and model tier are set once for the whole instance in its configuration, not per assistant. More detail is on the [model providers page](https://docs.solv.chat/providers)."
+      },
+      "samples": {
+        "source-numbers": [
+          "You can use Anthropic, OpenAI or OpenRouter for answers. For embeddings you can use OpenAI (the default) or OpenRouter. The instance picks a provider and a model tier in its configuration; there is no per-assistant model picker in the admin.\n\nThe open engine runs complete with your own keys, as described on [open core and cloud](2). The list of providers is on [model providers](1).",
+          "You can use Anthropic, OpenAI or OpenRouter for answers. For embeddings you can use OpenAI (the default) or OpenRouter, which is set with `SOLV_EMBEDDINGS_PROVIDER=openrouter`.\n\nYou choose the provider and a model tier for the whole instance in its configuration, not per assistant. A self-hosted engine runs complete with your own provider keys, as described on [Open core and cloud](2). More detail is on [Model providers](1)."
+        ],
+        "reference-numbers": [
+          "You can use Anthropic, OpenAI or OpenRouter to answer questions. For embeddings, you can use OpenAI (the default) or OpenRouter. If you self-host, the engine runs complete with your own provider keys.\n\nYou choose the provider and a model tier for the whole instance in its configuration, not per assistant. The admin has no per-assistant model or temperature picker. See [the providers page][1] for the settings, and [open core and cloud][2] for what the hosted service adds, such as managed model keys.",
+          "The assistant can run on Anthropic, OpenAI or OpenRouter. For embeddings you can use OpenAI (the default) or OpenRouter.\n\nYour instance picks the provider and a model tier in its configuration through Worker environment variables. [The model providers page][1] has the details.",
+          "You can use Anthropic, OpenAI or OpenRouter for answers. For embeddings you can use OpenAI (the default) or OpenRouter by setting `SOLV_EMBEDDINGS_PROVIDER=openrouter`. You pick the provider and a model tier for the instance in its configuration; there is no per-assistant model picker in the admin. See [model providers][1] for the full list."
+        ]
       }
     },
     {
@@ -196,8 +302,20 @@
         "https://docs.solv.chat/privacy"
       ],
       "answers": {
-        "numbered-references": "Conversations are kept until they are deleted. The open engine has no automatic expiry. Deleting a conversation, or its assistant, also deletes its messages, feedback and answer traces.\n\nThere is no export of conversations today. More on what is stored is on [the privacy page][1].",
+        "source-numbers": "Conversations and their messages are kept until they are deleted. The open engine has no automatic expiry. Deleting a conversation, or its assistant, also deletes its messages along with their feedback, linked gap answers and answer traces. See [privacy and retention](1) for what else is stored.\n\nThere is no export of conversations today.",
+        "reference-numbers": "Conversations are kept until they are deleted. The open engine has no automatic expiry. Deleting a conversation, or its assistant, also deletes its messages, feedback and answer traces.\n\nThere is no export of conversations today. More on what is stored is on [the privacy page][1].",
         "copied-addresses": "Conversations and their messages are kept until they are deleted. There is no automatic expiry. Deleting a conversation, or its assistant, also deletes its messages, their feedback and their answer traces. More is on the [privacy and retention page](https://docs.solv.chat/privacy)."
+      },
+      "samples": {
+        "source-numbers": [
+          "Conversations and their messages are kept until they are deleted. The open engine has no automatic expiry. Deleting a conversation, or its assistant, also deletes its messages, feedback, linked gap answers and answer traces.\n\nThere is no export of conversations today. More detail is on [privacy and retention](1).",
+          "Conversations are kept until you delete them. The open engine has no automatic expiry. Deleting a conversation, or its assistant, also deletes its messages, feedback, linked gap answers and answer traces.\n\nThe visitor check is shorter-lived: it keeps token hashes for five minutes and hashed visitor and IP counters for about a day. See [Privacy and retention](1) for the full list."
+        ],
+        "reference-numbers": [
+          "Until you delete them. In the open engine there is no automatic expiry, so conversations and their messages stay until you delete a conversation or its assistant. Deleting either also removes the messages' feedback, linked gap answers and answer traces.\n\nThere is no export of conversations today. See [privacy and retention][1] for what else is stored and for how long.",
+          "Conversations and their messages are kept until they are deleted. There is no automatic expiry.\n\nDeleting a conversation, or its assistant, also deletes its messages, feedback, linked gap answers and answer traces. [The privacy page][1] has more on what is stored.",
+          "Conversations and their messages are kept until they are deleted. The open engine has no automatic expiry. Deleting a conversation, or its assistant, also deletes its messages, feedback, linked gap answers and answer traces. There is no export of conversations today. More is on [privacy and retention][1]."
+        ]
       }
     },
     {
@@ -212,8 +330,20 @@
         "https://docs.solv.chat/mcp-tools"
       ],
       "answers": {
-        "numbered-references": "Yes. You can add your own MCP server by its URL (it must be https), and the assistant can call its tools. Every tool starts switched off. You turn on the ones you want and publish a version that allows them.\n\nEvery visitor is anonymous and each call runs with your credential, so use a read-only token. Details are on [the MCP tools page][1].\n\nIf you only need the assistant to act inside your page, such as moving to a section or filling a form, [page actions][2] run in the visitor's own browser and involve no owner credential.",
+        "source-numbers": "Yes, by adding an MCP server that exposes your API. You add it by URL (it must be https) in the admin, and its tools are listed but all switched off. A tool can only be called once you turn it on and publish a version that allows it. See [tools over MCP](1) for the rules.\n\nKeep in mind that every visitor is anonymous and every tool call runs with your credential, so use a read-only token. The secret is stored encrypted and is never returned by any API. Tool results are treated as data, are capped in size, and each conversation has limits on the number of calls and on time.",
+        "reference-numbers": "Yes. You can add your own MCP server by its URL (it must be https), and the assistant can call its tools. Every tool starts switched off. You turn on the ones you want and publish a version that allows them.\n\nEvery visitor is anonymous and each call runs with your credential, so use a read-only token. Details are on [the MCP tools page][1].\n\nIf you only need the assistant to act inside your page, such as moving to a section or filling a form, [page actions][2] run in the visitor's own browser and involve no owner credential.",
         "copied-addresses": "Yes. You can add an MCP server by its URL, and the assistant can then call its tools through [tools over MCP](https://docs.solv.chat/mcp-tools). Every tool is off until you switch it on and publish a version that allows it.\n\nKeep in mind that visitors are anonymous and every tool call runs with your credential, so use a read-only token. The server URL must be https."
+      },
+      "samples": {
+        "source-numbers": [
+          "Yes. You add an MCP server by its URL (Streamable HTTP), and the assistant can call the tools it offers. A few rules apply:\n\n- Every tool is off by default. You switch on each tool you want and publish a version that allows it.\n- Every call runs with your credential, so a read-only token is recommended. The secret is encrypted and never returned by any API.\n- The server URL must be https and must not point to a private or loopback address.\n- Each conversation has limits on the number of tool calls and on total time.\n\nSee [tools over MCP](1) for the full list of settings.",
+          "Yes, if your API is available as an MCP server. You add the server by its URL, and the assistant can then call its tools. Every tool starts switched off. Nothing is callable until you switch a tool on and publish a version that allows it. See [Tools over MCP](1).\n\nKeep in mind that every visitor is anonymous and every call runs with your credential, so use a read-only token. Server URLs must be https. The credential is encrypted and never shown again in the admin.\n\nIf you only want the assistant to act inside the visitor's page, such as going to a section or filling a form, [page actions](2) do that with the visitor's own session and no credential of yours."
+        ],
+        "reference-numbers": [
+          "Yes, through an MCP server. You add the server by URL (Streamable HTTP), and the assistant can call its tools. Some things to know:\n\n- Every tool is off until you switch it on and publish a version that allows it.\n- Visitors are anonymous, and every call runs with your credential, so use a read-only token. The admin shows a standing warning about this.\n- The server URL must be https and must not point to a private or loopback address.\n- The secret is encrypted and never returned by any API. The admin only shows \"set\" or \"not set\".\n\n[Tools over MCP][1] has the details. If you only want the assistant to act inside the visitor's page, [page actions][2] run with the visitor's own session and no owner credential.",
+          "Yes, through MCP. You add an MCP server by its URL (it must be https), and the assistant lists its tools. Every tool is off by default: you switch on each one you want and publish a version that includes it.\n\nKeep in mind that every visitor is anonymous and tool calls run with your credential, so use a read-only token. The secret is encrypted and never shown again in the admin. See [Tools over MCP][1] for the limits that apply.",
+          "Yes, through an MCP server. You add the server by URL in the admin, and the assistant can call the tools it lists. Every tool starts switched off. A tool becomes callable only after you switch it on and publish a version that allows it.\n\nKeep in mind that visitors are anonymous and every call runs with your credential, so use a read-only token. The server URL must be https and must not point to a private or loopback address. Details are in [tools over MCP][1]."
+        ]
       }
     },
     {
@@ -228,8 +358,20 @@
         "https://docs.solv.chat/visitor-check"
       ],
       "answers": {
-        "numbered-references": "Turn on the visitor check. Every visitor's browser then passes Cloudflare Turnstile, and the engine gives it a signed session that chat requests must carry. Scripts that skip this cannot use up your daily spend cap or lock real visitors out.\n\nSet `SOLV_TURNSTILE_SITE_KEY` as a variable and `SOLV_TURNSTILE_SECRET` as a secret, and also set `SOLV_SECRET_KEY` so sessions can be signed. With neither Turnstile value set, the check is off and the admin warns that chat is unprotected. See [the visitor check][1] for the full setup.\n\nThe check does not store a token, session or IP with conversations. The widget starts it only once the visitor begins typing.",
+        "source-numbers": "Turn on the [visitor check](1). Every visitor's browser then passes Cloudflare Turnstile, and the engine issues a signed session that public chat requests must carry. Without it, a script can fake the origin and rotate addresses to use up your daily spend cap.\n\nTo set it up, set `SOLV_TURNSTILE_SITE_KEY` (a variable) and `SOLV_TURNSTILE_SECRET` (a secret), together with `SOLV_SECRET_KEY` to sign sessions. If neither Turnstile value is set, the check is off and the admin warns that visitor chat is unprotected. If only one is set, or the signing key is missing, the chat refuses every request. It applies to the whole instance, not per assistant.",
+        "reference-numbers": "Turn on the visitor check. Every visitor's browser then passes Cloudflare Turnstile, and the engine gives it a signed session that chat requests must carry. Scripts that skip this cannot use up your daily spend cap or lock real visitors out.\n\nSet `SOLV_TURNSTILE_SITE_KEY` as a variable and `SOLV_TURNSTILE_SECRET` as a secret, and also set `SOLV_SECRET_KEY` so sessions can be signed. With neither Turnstile value set, the check is off and the admin warns that chat is unprotected. See [the visitor check][1] for the full setup.\n\nThe check does not store a token, session or IP with conversations. The widget starts it only once the visitor begins typing.",
         "copied-addresses": "Turn on the visitor check. When your instance is set up for it, each visitor's browser passes Cloudflare Turnstile and the engine issues a signed session that every public chat request must carry. That stops scripts from using up your daily spend cap.\n\nTo enable it, set `SOLV_TURNSTILE_SITE_KEY` (a variable), `SOLV_TURNSTILE_SECRET` (a secret) and `SOLV_SECRET_KEY` for signing sessions. If neither Turnstile value is set, the check is off and the admin shows a warning that visitor chat is unprotected. See [the visitor check](https://docs.solv.chat/visitor-check) for details."
+      },
+      "samples": {
+        "source-numbers": [
+          "Turn on the visitor check. Every visitor's browser then passes Cloudflare Turnstile and the engine issues a signed session that public chat requests must carry, so a script cannot use up your daily spend cap by itself.\n\nTo set it up, add `SOLV_TURNSTILE_SITE_KEY` (a variable) and `SOLV_TURNSTILE_SECRET` (a secret), and also `SOLV_SECRET_KEY` to sign sessions. If neither Turnstile value is set, the check is off and the admin warns that visitor chat is unprotected. If only some are set, the chat refuses every request until the setup is complete. There is no per-assistant switch. Details are on [the visitor check](1).\n\nWith the check on, the widget loads Turnstile inside a frame from the engine's own origin, only once the visitor starts typing.",
+          "Turn on the [visitor check](1). Every visitor's browser then passes Cloudflare Turnstile, and the engine issues a signed session that public chat requests must carry. Without it, a script can fake the page's origin and use up your daily spend cap.\n\nTo set it up, add `SOLV_TURNSTILE_SITE_KEY` and `SOLV_TURNSTILE_SECRET`, plus `SOLV_SECRET_KEY` to sign sessions. If neither Turnstile value is set, the check is off and the admin shows a warning that your chat is unprotected. There is no per-assistant switch.\n\nThe [widget](3) runs Turnstile in a frame that starts only once the visitor starts typing."
+        ],
+        "reference-numbers": [
+          "Turn on the visitor check. Without it, a script can fake the page's `Origin` and rotate addresses to get around the per-IP rate limit, which could use up your daily spend cap and lock real visitors out. With it, every visitor's browser passes Cloudflare Turnstile and the engine issues a signed session that chat requests must carry.\n\nTo set it up, give the instance `SOLV_TURNSTILE_SITE_KEY` (a variable), `SOLV_TURNSTILE_SECRET` (a secret) and `SOLV_SECRET_KEY` to sign sessions. If only some are set, the chat refuses every request until the setup is complete. With none set, the check is off and the admin warns that visitor chat is unprotected. There is no per-assistant switch.\n\n[The visitor check][1] has the details.",
+          "Turn on the visitor check. Every visitor's browser then passes Cloudflare Turnstile, and the chat only accepts requests that carry a signed session, so a script cannot just call it.\n\nSet `SOLV_TURNSTILE_SITE_KEY` and `SOLV_TURNSTILE_SECRET`, and also `SOLV_SECRET_KEY` so sessions can be signed. If the check is not set up, the admin shows a warning that visitor chat is unprotected. See [the visitor check][1] for how it works.",
+          "Turn on the visitor check. Every visitor's browser then passes Cloudflare Turnstile, and the engine issues a signed session that public chat requests must carry. That stops scripts from using up your daily spend cap.\n\nSet `SOLV_TURNSTILE_SITE_KEY` (a variable), `SOLV_TURNSTILE_SECRET` (a secret) and `SOLV_SECRET_KEY` to sign sessions. If only some are set, the chat refuses every request until the setup is complete. The steps are on [the visitor check page][1]."
+        ]
       }
     },
     {
@@ -244,8 +386,20 @@
         "https://docs.solv.chat/config-as-code"
       ],
       "answers": {
-        "numbered-references": "Yes. Put a `solv.config.json` in your repository. It describes the assistant's behaviour, widget and tests. Run `solv apply` with your ingest key (`SOLV_INGEST_KEY`) to write it to the draft. Publishing is always done in the admin.\n\nKeep the ingest key secret, because it can change the draft's behaviour as well as its content. A `tests` array in the file replaces the stored tests rather than merging with them. See [config as code][1] for the rest.",
+        "source-numbers": "Yes. Put a `solv.config.json` in your repository to describe the assistant's behaviour, widget and tests. [Config as code](1) works like this:\n\n```sh\nsolv apply   # writes the draft, using SOLV_INGEST_KEY\nsolv push    # sends content\nsolv test    # runs the tests\n```\n\nPublishing always happens in the admin, and the file and the admin edit the same draft. A `tests` array in the file replaces the stored tests rather than merging with them. The file cannot add an MCP server, because its credential does not belong in a repository. Keep your ingest key secret, since it can change the assistant's draft.",
+        "reference-numbers": "Yes. Put a `solv.config.json` in your repository. It describes the assistant's behaviour, widget and tests. Run `solv apply` with your ingest key (`SOLV_INGEST_KEY`) to write it to the draft. Publishing is always done in the admin.\n\nKeep the ingest key secret, because it can change the draft's behaviour as well as its content. A `tests` array in the file replaces the stored tests rather than merging with them. See [config as code][1] for the rest.",
         "copied-addresses": "Yes. Put a `solv.config.json` in your repository to describe the assistant's behaviour, widget and tests. Run `solv apply` to write it to the draft. Publishing still happens in the admin, and the admin and the file edit the same draft.\n\nKeep your ingest key secret, because it can change the draft's behaviour. See [config as code](https://docs.solv.chat/config-as-code) for more."
+      },
+      "samples": {
+        "source-numbers": [
+          "Yes. Put a `solv.config.json` in your repository. It describes the assistant's behaviour, its widget and its tests. Run `solv apply` to write it to the draft, using your ingest key (`SOLV_INGEST_KEY`). Publishing always happens in the admin.\n\nA few things to know about [config as code](1):\n\n- The admin and the file edit the same draft.\n- A `tests` array replaces the stored tests rather than merging with them.\n- The file cannot add MCP servers, because their credentials do not belong in a repository.\n- Keep the ingest key secret, since it can change the assistant's behaviour.\n\n`solv test` runs your [answer tests](2) from CI.",
+          "Yes. Put a `solv.config.json` in your repository. It describes the assistant's behaviour, widget and tests. Run `solv apply` with your ingest key (`SOLV_INGEST_KEY`) to write the draft. Publishing always happens in the admin, and the admin and the file edit the same draft.\n\nA `tests` array in the file replaces the stored [answer tests](2) rather than merging with them. Keep the ingest key secret, because it can change the assistant's draft. See [Config as code](1) for details."
+        ],
+        "reference-numbers": [
+          "Yes. Put a `solv.config.json` file in your repository. It describes the assistant's behaviour, widget and tests. Run `solv apply` with your ingest key (`SOLV_INGEST_KEY`) to write it to the draft. You still publish in the admin, and the admin and the file edit the same draft.\n\nTwo things to watch. A `tests` array in the file replaces your stored tests rather than merging with them. And the file cannot add an MCP server, because its credential has no place in a repository. Keep the ingest key secret, since it can change the draft's behaviour as well as its content. See [config as code][1].",
+          "Yes. Put a `solv.config.json` in your repository. It describes the assistant's behaviour, widget and tests. Run `solv apply` to write it to the draft (it needs your ingest key in `SOLV_INGEST_KEY`), then publish in the admin.\n\n```\nsolv apply\n```\n\nA `tests` array in the file replaces the stored tests rather than merging with them. Keep the ingest key secret. [Config as code][1] has the details.",
+          "Yes. Put a `solv.config.json` in your repository. It describes the assistant's behaviour, widget and tests. Run `solv apply` with your ingest key (`SOLV_INGEST_KEY`) to write the draft. Publishing is always done in the admin. The admin and the file edit the same draft.\n\nA `tests` array in the file replaces the stored tests rather than merging with them. Keep the ingest key secret, because it can change the assistant's behaviour. See [config as code][1] for more."
+        ]
       }
     },
     {
@@ -260,8 +414,20 @@
         "https://docs.solv.chat/sitemap-sync"
       ],
       "answers": {
-        "numbered-references": "Yes, if you turn it on. A sitemap source has a `sync` setting that is `off` by default. Set it to `daily` or `weekly` and the source is re-read on that schedule. Note that a sitemap index is not followed: the run fails, and you need to use one of the sitemaps it lists.\n\nSee [scheduled sitemap sync][1] for how a run works.",
+        "source-numbers": "Only if you turn it on. A sitemap source has a `sync` setting that is `off` by default, so you need to set it to `daily` or `weekly`. Each run then reads the sitemap again and picks up what changed. See [scheduled sitemap sync](1).\n\nOne limit: a sitemap index is not followed. The run fails with a message to use one of the sitemaps it lists.",
+        "reference-numbers": "Yes, if you turn it on. A sitemap source has a `sync` setting that is `off` by default. Set it to `daily` or `weekly` and the source is re-read on that schedule. Note that a sitemap index is not followed: the run fails, and you need to use one of the sitemaps it lists.\n\nSee [scheduled sitemap sync][1] for how a run works.",
         "copied-addresses": "They can be, if you turn it on. A sitemap source has a `sync` setting that is `off` by default, or `daily` or `weekly`. With daily or weekly, each run reads your sitemap again. More is on the [scheduled sitemap sync](https://docs.solv.chat/sitemap-sync) page.\n\nA sitemap index is not followed. Point the source at one of the sitemaps it lists instead."
+      },
+      "samples": {
+        "source-numbers": [
+          "Only if you turn it on. A sitemap source has a `sync` setting that is `off` by default, with `daily` and `weekly` as the other options. When it is on, each run reads your sitemap (up to 50,000 URLs, with their `<lastmod>` dates).\n\nTwo limits apply: a sitemap index is not followed, so you must point at one of the sitemaps it lists, and a run can be refused by your plan's limits. See [scheduled sitemap sync](1) for the details.",
+          "Only if you turn it on. A sitemap source has a `sync` setting that is `off` by default, so it must be set to `daily` or `weekly` before it follows the sitemap. See [Scheduled sitemap sync](1).\n\nA sync reads up to 50,000 entries from the sitemap. It does not follow a sitemap index: if you give it one, the run fails and you need to use one of the sitemaps it lists."
+        ],
+        "reference-numbers": [
+          "Yes, if you turn on sync for the sitemap source. Its `sync` setting can be `off`, `daily` or `weekly`, and `off` is the default. With daily or weekly, a run reads the sitemap again and keeps the source in step with it.\n\nTwo limits: a sitemap index is not followed, so the run fails and you need to use one of the sitemaps it lists. And a sitemap can have up to 50,000 entries. See [scheduled sitemap sync][1].",
+          "Not by default. A sitemap source has a `sync` setting that is `off` unless you change it. Set it to `daily` or `weekly` and the source is read again on that schedule.\n\nThe sitemap must list pages directly, because a sitemap index is not followed. Use one of the sitemaps it lists instead. See [scheduled sitemap sync][1].",
+          "Only if you turn it on. A sitemap source has a `sync` setting that is `off` by default. Set it to `daily` or `weekly` and it stays in step with the sitemap. Each run reads the sitemap, which can list up to 50,000 URLs. A sitemap index is not followed, so point it at one of the sitemaps the index lists. See [scheduled sitemap sync][1]."
+        ]
       }
     },
     {
@@ -276,8 +442,20 @@
         "https://docs.solv.chat/reports"
       ],
       "answers": {
-        "numbered-references": "Open the Reports screen. It has a \"Content used most\" list, and a \"Content never used\" list, for a 7, 30 or 90 day range you choose. You can download the table as CSV. A page counts when an answer was given it to answer from. Only real visitor answers count, not \"Try it\" or test runs.\n\nMore is on [the Reports page][1].",
+        "source-numbers": "Open the [Reports screen](1) in the admin and pick 7, 30 or 90 days. It has a \"Content used most\" list and a \"Content never used\" list, based on which pages and written answers were given to the assistant to answer visitors. Only visitor answers count, not \"Try it\" or test runs. You can download the table as CSV.",
+        "reference-numbers": "Open the Reports screen. It has a \"Content used most\" list, and a \"Content never used\" list, for a 7, 30 or 90 day range you choose. You can download the table as CSV. A page counts when an answer was given it to answer from. Only real visitor answers count, not \"Try it\" or test runs.\n\nMore is on [the Reports page][1].",
         "copied-addresses": "Open the [Reports screen](https://docs.solv.chat/reports) and pick 7, 30 or 90 days. It has a \"Content used most\" list, and a \"Content never used\" list for pages no answer drew on. You can download the table as CSV. Only visitor answers count, not \"Try it\" or test runs."
+      },
+      "samples": {
+        "source-numbers": [
+          "Open the Reports screen and pick a date range of 7, 30 or 90 days. It has a \"Content used most\" list and a \"Content never used\" list. A page counts as used when a reply was given it to answer from. Only visitor answers count, not \"Try it\" or test runs. You can download the table as CSV.\n\nMore is on the [Reports](1) page.",
+          "Open the [Reports](1) screen. Its \"Content used most\" list shows the documents your answers relied on most, over 7, 30 or 90 days, and \"Content never used\" shows the ones that were never used. Only visitor answers count; \"Try it\" and test runs are not included.\n\nYou can download the table as CSV."
+        ],
+        "reference-numbers": [
+          "On the Reports screen. Pick a date range of 7, 30 or 90 days and look at \"Content used most\" and \"Content never used\". A page counts as used when an answer was given it to answer from, and each answer counts a page once. Only visitor answers count, so your \"Try it\" and test runs do not show up. The table can be downloaded as CSV. See [Reports][1].",
+          "Open the Reports screen. Pick 7, 30 or 90 days and look at \"Content used most\", which lists the pages answers drew on. \"Content never used\" lists the ones that were never used.\n\nOnly visitor answers count, not \"Try it\" or test runs, and you can download the table as CSV. See [Reports][1].",
+          "Open the Reports screen. It has a \"Content used most\" list and a \"Content never used\" list for the date range you pick (7, 30 or 90 days). A page counts when an answer was given it to answer from. Only visitor answers count, and you can download the table as CSV. More on this is in [Reports][1]."
+        ]
       }
     },
     {
@@ -292,8 +470,20 @@
         "https://docs.solv.chat/topics"
       ],
       "answers": {
-        "numbered-references": "The answer review names a topic for each visitor question. It either picks one of the assistant's existing topic names or proposes a new short label of 2 to 4 words, in the language of the question. Each question is tagged once, and there is no manual tagging.\n\nAn assistant can have at most 40 topics, plus \"Other\". Off-topic questions get no topic. Read more on [the topics page][1], and see [Reports][2] for the topic list with counts and the share unanswered.",
+        "source-numbers": "The answer review names them. When it reviews an answer, it is given the assistant's current topic names and either picks one or proposes a new short label of 2 to 4 words (at most 40 characters, in the language of the question). The topic is stored on the visitor's question, and each question is tagged once.\n\nAn assistant can have at most 40 topics, plus \"Other\". Off-topic questions get no topic, and you cannot tag messages by hand. The grouped list, with the share left unanswered per topic, is on the [Reports](2) screen.",
+        "reference-numbers": "The answer review names a topic for each visitor question. It either picks one of the assistant's existing topic names or proposes a new short label of 2 to 4 words, in the language of the question. Each question is tagged once, and there is no manual tagging.\n\nAn assistant can have at most 40 topics, plus \"Other\". Off-topic questions get no topic. Read more on [the topics page][1], and see [Reports][2] for the topic list with counts and the share unanswered.",
         "copied-addresses": "Each visitor question gets a short topic label (2 to 4 words) from the answer review, which picks one of the assistant's existing topics or proposes a new one. The label is stored on the visitor's question, and a question is tagged once. An assistant can have at most 40 topics, plus \"Other\". Questions that are off topic get no topic. See [Topics](https://docs.solv.chat/topics) for more. The [Reports screen](https://docs.solv.chat/reports) lists the topics, most asked first."
+      },
+      "samples": {
+        "source-numbers": [
+          "The answer review gives each visitor question a topic, in the same call that reviews the answer. It is shown the assistant's current topic names and either picks one or proposes a new short label of 2 to 4 words (at most 40 characters), in the language of the question.\n\nThe topic is stored on the question, and a question is tagged once. Off-topic questions get no topic. There can be at most 40 topics per assistant, not counting \"Other\". You can't tag a message by hand. This differs from top questions, which are grouped only by their exact lowercased text. See [Topics](1) for more, and the [Reports](2) screen for the topics list with the share of unanswered questions.",
+          "[Topics](1) group questions by what they are about, unlike the top questions list, which groups only identical text. The answer review names the topic in the same call: it gets your assistant's current topic names and either picks one or proposes a new short label of 2 to 4 words, in the language of the question.\n\nThe topic is stored on the visitor's question, and a question is tagged once. Off-topic questions get no topic. There is no manual tagging, and an assistant can have at most 40 topics, plus \"Other\". The [Reports](2) screen shows each topic with its question count and the share that went unanswered."
+        ],
+        "reference-numbers": [
+          "Each visitor question gets a topic when its answer is reviewed. The review is given your assistant's current topic names and must pick one or propose a new short label of 2 to 4 words, at most 40 characters, in the language of the question. A question is tagged once and never re-tagged, and you cannot tag a message by hand.\n\nQuestions that are not about your site get no topic. An assistant can have at most 40 topics, not counting \"Other\". This is different from the top questions list, which groups only questions with exactly the same lowercased text. [Topics][1] has the details, and [Reports][2] shows the topics for a period.",
+          "The answer review names them. It gets the assistant's current topic names and either picks one or proposes a short new label of 2 to 4 words, at most 40 characters, in the language of the question.\n\nThe topic is stored on the visitor's question, and a question is tagged once. Off-topic questions get no topic, and an assistant has at most 40 topics, plus \"Other\". [The topics page][1] has more.",
+          "The answer review names them. In the same call that reviews an answer, it gets the assistant's current topic names and either picks one or proposes a new short label (2 to 4 words, at most 40 characters, in the language of the question). The topic is stored on the visitor's question, once, and nothing re-tags it.\n\nOff-topic questions get no topic. An assistant can have at most 40 topics, not counting \"Other\". There is no manual tagging. See [Topics][1]."
+        ]
       }
     },
     {
@@ -306,32 +496,101 @@
       ],
       "expect": [],
       "answers": {
-        "numbered-references": "Yes. The chat engine, the widget, the ingest CLI and the admin are open source under the Apache 2.0 licence. Sign-up, teams, billing and managed model keys are part of the hosted service.",
+        "source-numbers": "Yes. The chat engine, the widget, the ingest CLI and the admin are open source under the Apache 2.0 licence. Sign-up, teams, billing and managed model keys are part of the hosted service.",
+        "reference-numbers": "Yes. The chat engine, the widget, the ingest CLI and the admin are open source under the Apache 2.0 licence. Sign-up, teams, billing and managed model keys are part of the hosted service.",
         "copied-addresses": "Yes. The chat engine, the widget, the ingest CLI and the admin are open source under the Apache 2.0 licence. Sign-up, teams, billing and managed model keys are part of the hosted service."
+      },
+      "samples": {
+        "source-numbers": [
+          "Yes. The chat engine, the widget, the ingest CLI and the admin are open source under the Apache 2.0 licence. Sign-up, teams, billing and managed model keys are part of the hosted service.\n\nIf you self-host, the engine runs complete with your own keys from [Anthropic, OpenAI or OpenRouter](2).",
+          "Yes. The chat engine, the widget, the ingest CLI and the admin are open source under the Apache 2.0 licence. Sign-up, teams, billing and managed model keys are part of the hosted service.\n\nA self-hoster can run the engine complete with their own provider keys, such as Anthropic, OpenAI or OpenRouter, as described in [Model providers](2)."
+        ],
+        "reference-numbers": [
+          "Yes. The chat engine, the widget, the ingest CLI and the admin are open source under the Apache 2.0 licence. Sign-up, teams, billing and managed model keys are part of the hosted service. If you self-host, the engine runs complete with your own provider keys.",
+          "Yes. The chat engine, the widget, the ingest CLI and the admin are open source under the Apache 2.0 licence. Sign-up, teams, billing and managed model keys are part of the hosted service.",
+          "Yes. The chat engine, the widget, the ingest CLI and the admin are open source under the Apache 2.0 licence. Sign-up, teams, billing and managed model keys are part of the hosted service."
+        ]
+      }
+    },
+    {
+      "id": "sqlite-commercial",
+      "question": "Is SQLite free to use commercially?",
+      "sources": [
+        "sqlite-about",
+        "sqlite-copyright",
+        "sqlite-copyright-warranty",
+        "sqlite-faq",
+        "sqlite-support"
+      ],
+      "expect": [
+        "https://sqlite.org/about.html",
+        "https://sqlite.org/copyright.html",
+        "https://sqlite.org/faq.html",
+        "https://sqlite.org/support.html"
+      ],
+      "answers": {
+        "source-numbers": "Yes. SQLite is in the [public domain](2), so you can copy, modify, sell or distribute it for any purpose, commercial or not, without paying royalties. The [FAQ](4) says the same.\n\nIf your company wants legal proof of its right to use it, or indemnity, Hwaci sells an optional Warranty of Title. Paid support is also available.",
+        "reference-numbers": "Yes. SQLite is in the public domain, so you can use it in a commercial product without paying royalties. [The SQLite FAQ][4] says you can do anything you want with it, and [the copyright page][2] says anyone may copy, modify, sell or distribute it for any purpose.\n\nIf your company wants legal proof of its right to use it, for example indemnity against copyright claims, Hwaci sells a Warranty of Title. Paid support is also available, and some extensions to SQLite are proprietary and licensed.",
+        "copied-addresses": "Yes. SQLite is in the public domain, so you can use, modify, sell or distribute it in a commercial product without paying royalties, as the [SQLite FAQ](https://sqlite.org/faq.html) confirms.\n\nIf your organization wants legal proof of its right to use it, for example indemnity against copyright claims or use in a jurisdiction that does not recognize the public domain, the developers' company, Hwaci, sells a [Warranty of Title](https://sqlite.org/copyright.html). Paid [professional support](https://sqlite.org/support.html) is also available."
+      },
+      "samples": {
+        "source-numbers": [
+          "Yes. SQLite is [in the public domain](2), so you can copy, modify, sell or distribute it for any purpose, commercial or not, with no royalties. [The FAQ](4) says the same.\n\nIf your organization wants legal proof of its right to use it, for example for indemnity or a jurisdiction that does not recognise the public domain, Hwaci sells [a Warranty of Title](3). Paid [professional support](5) is also available.",
+          "Yes. SQLite is in the public domain, so you can use it in a commercial product without paying royalties, as the [SQLite FAQ](4) confirms. You can copy, modify, sell or distribute it for any purpose, as [the copyright page](2) explains.\n\nIf your company wants legal proof of its right to use it, for example indemnity against copyright claims, Hwaci sells a [Warranty of Title](3). Paid [support options](5) exist too, but they are optional."
+        ],
+        "reference-numbers": [
+          "Yes. SQLite is in the public domain, so you can use, modify, sell or distribute it for any purpose, commercial or not, and you do not pay royalties. [The SQLite FAQ][4] says you can do anything you want with it.\n\nIf your company wants legal proof of its right to use SQLite, for example for indemnity against copyright claims, the company behind SQLite sells a [Warranty of Title][3]. That is optional.",
+          "Yes. SQLite is in the public domain, so you can use it in a commercial product without paying royalties. [The SQLite FAQ][4] says you can do anything you want with it, and [the copyright page][2] says anyone may copy, modify, sell or distribute it for any purpose.\n\nIf your company wants legal proof of its right to use SQLite, Hwaci sells a [Warranty of Title][3]."
+        ]
       }
     }
   ],
   "recorded": {
     "model": "claude-sonnet-5-5",
-    "how": "Each scheme's 13 requests, exactly as scripts/source-links-eval.mjs --prompts prints them (system and user message), were answered by Claude Sonnet 5.5 (the Anthropic balanced tier) run as a separate agent per scheme, not through the provider API: no provider key was available when this was recorded. Re-record with --record and a key to measure the API itself.",
+    "how": "Each scheme's requests, exactly as scripts/source-links-eval.mjs --prompts prints them (system and user message), were answered by Claude Sonnet 5.5 (the Anthropic balanced tier) run as a separate agent per scheme and sample, not through the provider API: no provider key was available. The reference-numbers and copied-addresses answers to the first 13 cases are the ones recorded on 2026-11-21 before the frame changed; everything else (all source-numbers answers, the sqlite-commercial case, and every sample) was recorded on 2026-11-21 after it. Re-record with --record and a key to measure the API itself.",
     "on": "2026-11-21"
   },
   "summary": {
-    "numbered-references": {
-      "linkedCorrectly": 12,
+    "source-numbers": {
+      "linkedCorrectly": 13,
       "linkedNothing": 1,
       "linkRemoved": 0,
-      "linkedExpected": 12,
-      "links": 16,
-      "targetChars": 64
+      "linkedExpectedPage": 13,
+      "links": 15,
+      "targetChars": 60
+    },
+    "reference-numbers": {
+      "linkedCorrectly": 13,
+      "linkedNothing": 1,
+      "linkRemoved": 0,
+      "linkedExpectedPage": 13,
+      "links": 18,
+      "targetChars": 72
     },
     "copied-addresses": {
-      "linkedCorrectly": 12,
+      "linkedCorrectly": 13,
       "linkedNothing": 1,
       "linkRemoved": 0,
-      "linkedExpected": 12,
-      "links": 13,
-      "targetChars": 459
+      "linkedExpectedPage": 13,
+      "links": 16,
+      "targetChars": 559
+    }
+  },
+  "referenceStyle": {
+    "source-numbers": {
+      "answers": 42,
+      "referenceLinks": 0,
+      "definitions": 0
+    },
+    "reference-numbers": {
+      "answers": 55,
+      "referenceLinks": 51,
+      "definitions": 0
+    },
+    "copied-addresses": {
+      "answers": 14,
+      "referenceLinks": 0,
+      "definitions": 0
     }
   }
 }

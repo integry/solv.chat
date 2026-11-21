@@ -56,7 +56,7 @@ describe("chat/sourceLinks", () => {
       TARGETS,
     );
     expect(result.text).toBe(
-      `See [the steps](${TESTING}#steps), then [pricing](${PRICING}) and <${STATUS}#now>.`,
+      `See [the steps](${TESTING}#steps), then [pricing](${PRICING}) and [${STATUS}#now](${STATUS}#now).`,
     );
     expect(result.linked).toEqual([TESTING, PRICING, STATUS]);
     expect(result.destinations).toEqual([`${TESTING}#steps`, PRICING, `${STATUS}#now`]);
@@ -109,10 +109,12 @@ describe("chat/sourceLinks", () => {
       "chart and https://evil.example/x.",
     );
     expect(rewrite(`![chart](${PRICING}) here.`)).toBe(`![chart](${PRICING}) here.`);
-    expect(rewrite(`See <${PRICING}>.`)).toBe(`See <${PRICING}>.`);
-    // Both go to one page, so the second in the paragraph is reduced to its text.
+    // An autolink to a page is written as a link whose text is its address
+    // (the widget shows no autolink as one), and like any address it is
+    // always a link, however often the paragraph links that page.
+    expect(rewrite(`See <${PRICING}>.`)).toBe(`See [${PRICING}](${PRICING}).`);
     expect(rewrite(`![chart](${PRICING}) and <${PRICING}>.`)).toBe(
-      `![chart](${PRICING}) and ${PRICING}.`,
+      `![chart](${PRICING}) and [${PRICING}](${PRICING}).`,
     );
   });
 
@@ -260,9 +262,16 @@ describe("chat/sourceLinks", () => {
     expect(deltas.slice(0, 2)).toEqual(["Look ", ""]);
     expect(deltas.join("")).toBe("Look chart now");
     const long = `Read [${"the very long name of the testing guide ".repeat(5)}`;
-    const held = stream(`${long}][1].`, [long.length]);
+    const held = stream(`${long}](1).`, [long.length]);
     expect(held[0]).toBe("Read ");
     expect(held[1]).toMatch(
+      /^\[the very long .*\]\(https:\/\/docs\.example\.com\/guide\/testing\)\.$/u,
+    );
+    // A reference link waits for the end: a definition of its label may
+    // still follow, and only that says where it goes.
+    const reference = stream(`${long}][1].`, [long.length, long.length + 5]);
+    expect(reference.slice(0, 3)).toEqual(["Read ", "", ""]);
+    expect(reference[3]).toMatch(
       /^\[the very long .*\]\(https:\/\/docs\.example\.com\/guide\/testing\)\.$/u,
     );
   });

@@ -2,25 +2,38 @@
  * Links in an answer for "Show sources in answers" set to "Link in the text".
  *
  * The model is not asked to copy addresses. Each source in the prompt has a
- * number, and the model links words to a source by that number, as a
- * Markdown reference link: `[the testing guide][2]`. This module turns each
- * such reference into a link to source 2's page, on the stream and in the
- * stored text alike. Numbers rather than copied addresses: a number cannot
- * be mistyped into another page, so a correct reference always links where
- * it should, and it costs a few output characters where an address costs
- * dozens. In the recorded evaluation (`test/fixtures/source-links-eval.json`)
- * both ways linked every answer correctly; numbers spent 64 characters on 16
- * link targets, addresses 459 on 13.
+ * number, and the model links words to a source by that number, as an
+ * inline Markdown link: `[the testing guide](2)`. This module turns each
+ * such link into a link to source 2's page, on the stream and in the stored
+ * text alike. Numbers rather than copied addresses: a number cannot be
+ * mistyped into another page, so a correct reference always links where it
+ * should, and it costs a few output characters where an address costs
+ * dozens. The recorded evaluation (`test/fixtures/source-links-eval.json`)
+ * compares the ways of asking.
+ *
+ * A reference link (`[the FAQ][2]`, `[the FAQ][]`) is the model's own
+ * Markdown: it goes where the answer's own definition of its label
+ * (`[2]: https://…/faq.html`) says, never to source 2 because the numbers
+ * look alike, since an answer that defines its labels numbers them its own
+ * way. Only with no definition anywhere in the answer does a numbered
+ * reference mean the sources' numbers. A reference is held until its
+ * definition arrives or the stream ends. Every definition, on a line of its
+ * own or run into the text (`page.[1]: https://…[2]: https://…`), is taken
+ * out of what is sent and stored.
  *
  * Whatever the model writes, a link survives only when it goes to a page the
  * answer was given (`LinkTargets`): a reference to a source with no page (a
- * written answer) or to no source at all, an inline link or autolink to any
- * other address (another site, a made-up page, `mailto:`), a reference to a
- * definition, and an image of any of these are reduced to their text. A link
- * to a page already linked in the same paragraph is reduced too: at most one
- * link per source per paragraph. A link whose text holds another link or a
- * pair of brackets (`[see [the guide]](…)`) is reduced to its text whatever
- * its target, and the links in that text are checked like any other. The
+ * written answer) or to no source at all, an inline link, autolink or
+ * definition to any other address (another site, a made-up page, `mailto:`),
+ * and an image of any of these are reduced to their text. An address
+ * written out in the text is made a link when it is one of those pages and
+ * left as text otherwise; an autolink to one is written as an inline link
+ * (the widget shows no autolink as a link). A link to a page already linked
+ * in the same paragraph is reduced too: at most one link per source per
+ * paragraph, unless its words are its own address, which is always a link.
+ * A link whose text holds another link or a pair of brackets
+ * (`[see [the guide]](…)`) is reduced to its text whatever its target, and
+ * the links in that text are checked like any other. The
  * rewritten text is then read again until that changes nothing, so no link
  * reaches the visitor unchecked, not even one formed from the text around a
  * link whose syntax was dropped.
@@ -30,8 +43,9 @@
  * escaped bracket (`\[`). A bare marker such as `[1]` is left for
  * `markerStripper`, which runs after this.
  *
- * Streaming: a link is never sent half-written. From a "[" (or "![", or an
- * autolink's "<") that could still become a link, the stream is held until
+ * Streaming: a link is never sent half-written. From a "[" (or "![", an
+ * autolink's "<", or an address's "h") that could still become a link or a
+ * definition, the stream is held until
  * the link is complete or cannot be one, and then sent whole, rewritten or
  * as text. At the end of the stream (or a pause, or a cut at the output
  * limit) a link left unfinished is reduced to its text, so no open link is
@@ -147,6 +161,13 @@ type Construct =
   | { kind: "none" }
   | { kind: "marker"; end: number }
   /**
+   * A reference definition, `[label]: https://…` (with an optional title),
+   * on a line of its own or run into the text: `[open, end)` is taken out,
+   * with the line break after it when it fills its line. `url` is its
+   * address, or null when it gives none (`[1]:` and nothing more).
+   */
+  | { kind: "definition"; label: string; url: string | null; end: number }
+  /**
    * A link: its text is `[labelStart, labelEnd)`; `target` is its destination
    * or reference. `nested`: its text holds brackets (another link, or what is
    * read as one) or an autolink, so it is never kept as a link.
@@ -251,6 +272,10 @@ function readConstruct(text: string, open: number, final: boolean): Construct {
     return MARKER_LABEL.test(label) ? { kind: "marker", end: after } : { kind: "none" };
   }
   if (next === "(") return readDestination(text, open, labelEnd, final, nested);
+  if (next === ":" && !nested) {
+    const definition = readDefinition(text, open, label, after + 1, final);
+    if (definition !== null) return definition;
+  }
   if (MARKER_LABEL.test(label)) return { kind: "marker", end: after };
   if (next === "[") {
     for (let q = after + 1; q < text.length; q++) {
@@ -270,6 +295,117 @@ function readConstruct(text: string, open: number, final: boolean): Construct {
     return unfinished(labelEnd);
   }
   return { kind: "none" };
+}
+
+/** Whether only spaces or tabs come before `at` on its line. */
+function lineStartAt(text: string, at: number): boolean {
+  for (let p = at - 1; p >= 0; p--) {
+    if (text[p] === "\n") return true;
+    if (text[p] !== " " && text[p] !== "\t") return false;
+  }
+  return true;
+}
+
+/** What `rest` could still grow into: the start of an address, not yet whole. */
+function addressPrefix(rest: string): boolean {
+  const lower = rest.toLowerCase();
+  return ["https://", "http://", "<https://", "<http://"].some(
+    (start) => start.length > lower.length && start.startsWith(lower),
+  );
+}
+
+/** Where an address written out at `at` ends (parentheses balanced), or the text's end. */
+function addressEnd(text: string, at: number): number {
+  let depth = 0;
+  let end = at;
+  for (; end < text.length; end++) {
+    const char = text[end] as string;
+    if (URL_STOP.test(char)) break;
+    if (char === "(") depth++;
+    else if (char === ")") {
+      if (depth === 0) break;
+      depth--;
+    }
+  }
+  return end;
+}
+
+/**
+ * Reads a reference definition from the ":" after `[label]` (at `colon + 1`
+ * is what follows it), or returns null when it is none. On a line of its
+ * own any destination makes one, as in Markdown; run into the text, only an
+ * http(s) address does (`page.[1]: https://…[2]: https://…`), and a numbered
+ * label with nothing after its ":" is a stray one. Not `final`, one the text
+ * still arriving could change is `unsettled`.
+ */
+function readDefinition(
+  text: string,
+  open: number,
+  label: string,
+  from: number,
+  final: boolean,
+): Construct | null {
+  const ownLine = lineStartAt(text, open);
+  let p = from;
+  while (text[p] === " " || text[p] === "\t") p++;
+  const lineEnd = (at: number): number => {
+    let q = at;
+    while (text[q] === " " || text[q] === "\t") q++;
+    return q;
+  };
+  /** The definition ends at `at`: with its line break when it filled its line. */
+  const ending = (at: number, url: string | null): Construct | null => {
+    const q = lineEnd(at);
+    if (q >= text.length) {
+      return final || url === null
+        ? { kind: "definition", label, url, end: q }
+        : { kind: "unsettled" };
+    }
+    if (text[q] === "\n") {
+      return { kind: "definition", label, url, end: ownLine ? q + 1 : q };
+    }
+    return { kind: "definition", label, url, end: at };
+  };
+  if (p >= text.length) {
+    if (!final) return { kind: "unsettled" };
+    return ownLine || MARKER_LABEL.test(label) ? ending(p, null) : null;
+  }
+  if (text[p] === "\n") return ownLine || MARKER_LABEL.test(label) ? ending(p, null) : null;
+  const rest = text.slice(p, p + 9);
+  if (!final && p + rest.length >= text.length && addressPrefix(rest)) return { kind: "unsettled" };
+  const angle = text[p] === "<";
+  const start = angle ? p + 1 : p;
+  let end: number;
+  if (/^https?:\/\//iu.test(text.slice(start, start + 8))) {
+    end = addressEnd(text, start);
+  } else if (ownLine) {
+    end = start;
+    while (end < text.length && !/[\s<>]/u.test(text[end] as string)) end++;
+  } else {
+    return null;
+  }
+  if (end >= text.length && !final) return { kind: "unsettled" };
+  let url = text.slice(start, end);
+  if (angle) {
+    if (text[end] !== ">") return null;
+    end++;
+  } else if (!ownLine) {
+    url = url.replace(/[.,;:!?]+$/u, "");
+  }
+  // An optional title, kept with the definition only when its line ends there.
+  const titleAt = lineEnd(end);
+  const quote = text[titleAt];
+  if (titleAt > end && (quote === '"' || quote === "'" || quote === "(")) {
+    const closer = quote === "(" ? ")" : quote;
+    let q = titleAt + 1;
+    while (q < text.length && text[q] !== closer && text[q] !== "\n") q++;
+    if (q >= text.length && !final) return { kind: "unsettled" };
+    if (text[q] === closer) {
+      const after = lineEnd(q + 1);
+      if (after >= text.length || text[after] === "\n") return ending(q + 1, url);
+    }
+  }
+  return ending(end, url);
 }
 
 /** Reads an inline link's destination after `](`, with an optional title. */
@@ -392,6 +528,17 @@ export interface LinkScan {
   removed: number;
 }
 
+/** A reference label as Markdown matches it: case and runs of spaces do not count. */
+function referenceLabel(label: string): string {
+  return label.trim().replace(/\s+/gu, " ").toLowerCase();
+}
+
+/** A link's text that is its own address (`[https://…](https://…)`), which is always shown as a link. */
+function addressLabel(label: string, href: string): boolean {
+  const trimmed = label.trim();
+  return [trimmed, unwrittenParentheses(trimmed)].some((raw) => httpUrl(raw)?.href === href);
+}
+
 /** No page to link to: for reading the links a text has, rewriting none. */
 const NO_TARGETS: LinkTargets = { sources: [], allowed: new Set() };
 
@@ -420,36 +567,75 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
   let copied = from;
   let range = 0;
 
+  // The answer's own reference definitions (`[1]: https://…`), by label as
+  // Markdown matches them. A reference link (`[the FAQ][2]`) goes where the
+  // answer's own definition of its label says, never to source 2 because
+  // the numbers look alike: an answer that defines its labels numbers them
+  // its own way.
+  const definitions = new Map<string, string>();
+  let defines = false;
+  for (let i = 0, r = 0; i < text.length; i++) {
+    if (text[i] !== "[") continue;
+    while (r < ranges.length && (ranges[r] as [number, number])[1] <= i) r++;
+    const within = ranges[r];
+    if (within === undefined || within[0] > i || escapedAt(text, i)) continue;
+    const construct = readConstruct(text, i, final);
+    if (construct.kind !== "definition") continue;
+    defines = true;
+    const key = referenceLabel(construct.label);
+    if (construct.url !== null && !definitions.has(key)) definitions.set(key, construct.url);
+  }
+
   /**
-   * A link kept (or already written) to `key`: it counts for the paragraph.
-   * An image counts there too, but is no link to report: neither the widget
-   * nor Markdown makes it one a visitor can follow.
+   * A link kept (or already written) to `key`: it counts for the paragraph,
+   * unless its text is its own address (`counts` false), which may always
+   * be a link. An image counts there too, but is no link to report: neither
+   * the widget nor Markdown makes it one a visitor can follow.
    */
-  const note = (key: string, href: string, image = false) => {
-    paragraph.add(key);
+  const note = (key: string, href: string, image = false, counts = true) => {
+    if (counts) paragraph.add(key);
     if (image) return;
     if (!linked.includes(key)) linked.push(key);
     if (!destinations.includes(href)) destinations.push(href);
   };
-  /** The page a link goes to, as `[key, href]`, or null when it may not. */
-  const resolve = (
-    target: { inline: string } | { reference: string } | null,
-  ): [string, string] | null => {
-    if (target === null) return null;
-    const raw = "inline" in target ? target.inline : target.reference;
-    const number = SOURCE_NUMBER.exec(raw);
-    if (number !== null) {
-      const href = targets.sources[Number(number[1]) - 1] ?? null;
-      const key = href === null ? null : pageKey(href);
-      return href === null || key === null ? null : [key, href];
-    }
-    if ("reference" in target) return null;
+  /** An address the answer wrote, as `[key, href]` when it is one of the answer's pages. */
+  const allowedAddress = (raw: string): [string, string] | null => {
     for (const written of [raw.trim(), unwrittenParentheses(raw.trim())]) {
       const url = httpUrl(written);
       const key = url === null ? null : pageKey(url.href);
       if (url !== null && key !== null && targets.allowed.has(key)) return [key, url.href];
     }
     return null;
+  };
+  /**
+   * The page a link goes to, as `[key, href]`, or null when it may not, or
+   * "held" while the definition its reference needs may still arrive.
+   * `label` is the link's text, the label of a collapsed `[words][]`.
+   */
+  const resolve = (
+    target: { inline: string } | { reference: string } | null,
+    label: string,
+  ): [string, string] | null | "held" => {
+    if (target === null) return null;
+    if ("reference" in target) {
+      const name = referenceLabel(target.reference === "" ? label : target.reference);
+      const defined = definitions.get(name);
+      if (defined !== undefined) return allowedAddress(defined);
+      if (!final) return "held";
+      // With no definition anywhere, a numbered reference can only mean the
+      // numbering the answer was given: its sources'.
+      if (defines) return null;
+      const number = SOURCE_NUMBER.exec(target.reference);
+      return number === null ? null : sourcePage(Number(number[1]));
+    }
+    const number = SOURCE_NUMBER.exec(target.inline);
+    if (number !== null) return sourcePage(Number(number[1]));
+    return allowedAddress(target.inline);
+  };
+  const sourcePage = (n: number): [string, string] | null => {
+    const href = targets.sources[n - 1] ?? null;
+    const key = href === null ? null : pageKey(href);
+    return href === null || key === null ? null : [key, href];
   };
   const stop = (at: number): LinkScan => ({
     out: out + whole.slice(copied, at),
@@ -495,14 +681,44 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
         copied = end;
       } else if (i < from) {
         if (key !== null && href !== null) note(key, href);
-      } else if (key !== null && href !== null && targets.allowed.has(key) && !paragraph.has(key)) {
-        note(key, href);
+      } else if (key !== null && href !== null && targets.allowed.has(key)) {
+        // Its text is its address, so it is always a link, written the way
+        // every kept link is (the widget shows no autolink as one).
+        note(key, href, false, false);
+        out += `${whole.slice(copied, i)}[${auto[1] as string}](${destinationText(href)})`;
+        copied = end;
       } else {
         if (key === null || !targets.allowed.has(key)) removed++;
         out += whole.slice(copied, i) + (auto[1] as string);
         copied = end;
       }
       i = end;
+      continue;
+    }
+    if ((char === "h" || char === "H") && !/[A-Za-z0-9]/u.test(text[i - 1] ?? "")) {
+      // An address written out in the text: a link when it is one of the
+      // answer's pages, otherwise left as text. Held while it may go on.
+      const begins = /^https?:\/\//iu.test(text.slice(i, i + 8));
+      if (!begins) {
+        if (!final && i >= from && addressPrefix(text.slice(i, i + 9))) return stop(i);
+        i++;
+        continue;
+      }
+      const runEnd = addressEnd(text, i);
+      if (i < from) {
+        // Written before a pause, where it was linked if it could be.
+        i = runEnd;
+        continue;
+      }
+      if (runEnd >= text.length && !final) return stop(i);
+      const written = whole.slice(i, runEnd).replace(/[.,;:!?]+$/u, "");
+      const page = allowedAddress(written);
+      if (page !== null) {
+        note(page[0], page[1], false, false);
+        out += `${whole.slice(copied, i)}[${written}](${destinationText(page[1])})`;
+        copied = i + written.length;
+      }
+      i = runEnd;
       continue;
     }
     if (char !== "[") {
@@ -523,7 +739,20 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
       i = construct.end;
       continue;
     }
-    const resolved = resolve(construct.target);
+    if (construct.kind === "definition") {
+      // Taken out: an answer never shows its definitions (its links were
+      // resolved through them). One before a pause was taken out then.
+      if (i >= from) {
+        out += whole.slice(copied, i);
+        copied = construct.end;
+      }
+      i = construct.end;
+      continue;
+    }
+    const linkText = whole.slice(construct.labelStart, construct.labelEnd);
+    const settled = resolve(construct.target, linkText);
+    if (settled === "held" && i >= from) return stop(start);
+    const resolved = settled === "held" ? null : settled;
     if (i < from && construct.end > from) {
       // Begun before a pause and finished after it: what was written stays
       // as it is, and the rest of the link (from its "]") is dropped, so the
@@ -547,8 +776,9 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
       // A link there was kept, so it counts for the paragraph (an image
       // holding a link counts for nothing).
       if (!construct.nested) {
-        if (resolved !== null) note(resolved[0], resolved[1], image);
-        else if ("inline" in construct.target) {
+        if (resolved !== null) {
+          note(resolved[0], resolved[1], image, !addressLabel(linkText, resolved[1]));
+        } else if ("inline" in construct.target) {
           const href = httpUrl(construct.target.inline.trim())?.href ?? null;
           const key = href === null ? null : pageKey(href);
           if (key !== null && href !== null) note(key, href, image);
@@ -557,11 +787,12 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
       i = construct.end;
       continue;
     }
-    const label = whole.slice(construct.labelStart, construct.labelEnd);
+    const label = linkText;
+    const ownAddress = resolved !== null && addressLabel(label, resolved[1]);
     let replacement: string;
-    if (resolved !== null && !construct.nested && !paragraph.has(resolved[0])) {
+    if (resolved !== null && !construct.nested && (ownAddress || !paragraph.has(resolved[0]))) {
       // Kept as an image (its "!" sent before a pause too), it is no link.
-      note(resolved[0], resolved[1], image);
+      note(resolved[0], resolved[1], image, !ownAddress);
       // An image's "!" written before a pause is already sent.
       const bang = image && start >= from ? "!" : "";
       replacement = `${bang}[${label}](${destinationText(resolved[1])})`;

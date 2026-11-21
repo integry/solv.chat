@@ -80,21 +80,31 @@ export const SAFETY_FRAME = [
 
 /**
  * The frame for "Link in the text" (the default): the words that name a page
- * link to it by the source's number, `[the testing guide][2]`, which the
+ * link to it by the source's number, `[the testing guide](2)`, which the
  * engine turns into a link to that source's page (`sourceLinks.ts`). The
  * model never writes an address, so none can be mistyped; the recorded
  * evaluation in `test/fixtures/source-links-eval.json` compares this with
  * copying them (see `sourceLinks.ts`).
+ *
+ * One form, inline: the reference form asked for before (`[words][2]`) is
+ * Markdown's reference link, and models sometimes finished it the Markdown
+ * way, with definitions (`[1]: https://…`) numbered their own way. The
+ * engine resolves such a link through the answer's own definitions and takes
+ * the definitions out (`sourceLinks.ts`) whatever the prompt says; asking
+ * for the inline form, and saying definitions and addresses are not
+ * written, keeps answers from needing it.
  * Links anywhere else, and markers, are taken out of the stream.
  */
 export const SAFETY_FRAME_LINKS = [
   ...FRAME_START,
   "Where the answer relies on a source that has a url, turn the few words that name what that page is about",
-  '(such as "the testing guide", "the pricing page" or the name of a feature) into a link written as [those words][n],',
+  '(such as "the testing guide", "the pricing page" or the name of a feature) into a link written as [those words](n),',
   "where n is the number of that source; it becomes a link to the page.",
+  "Write every link in exactly that form: never a reference definition such as [1]: https://…, never [those words][n],",
+  "and never a web address, neither as a link nor as plain text.",
   "Link each source at most once in a paragraph. Link a short phrase, never a whole sentence,",
   'and never a word such as "here" or "this page".',
-  "Never write a web address yourself. A source with no url gets no link.",
+  "A source with no url gets no link.",
   "Add no citation markers such as [1] and no list of sources.",
   NO_TALK_ABOUT_SOURCES,
 ].join(" ");

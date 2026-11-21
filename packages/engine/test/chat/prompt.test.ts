@@ -35,8 +35,14 @@ describe("chat/prompt", () => {
     expect(SAFETY_FRAME).toContain("that marker is the only way to refer to a source");
     expect(SAFETY_FRAME_NO_CITATIONS).not.toContain("Cite the sources you used");
     expect(SAFETY_FRAME_NO_CITATIONS).toContain("add no citation markers such as [1]");
-    expect(SAFETY_FRAME_LINKS).toContain("[those words][n]");
-    expect(SAFETY_FRAME_LINKS).toContain("Never write a web address yourself");
+    // One form of link, and neither definitions nor addresses.
+    expect(SAFETY_FRAME_LINKS).toContain("into a link written as [those words](n)");
+    expect(SAFETY_FRAME_LINKS).toContain(
+      "never a reference definition such as [1]: https://…, never [those words][n]",
+    );
+    expect(SAFETY_FRAME_LINKS).toContain(
+      "never a web address, neither as a link nor as plain text",
+    );
     expect(SAFETY_FRAME_LINKS).toContain(
       "Add no citation markers such as [1] and no list of sources",
     );

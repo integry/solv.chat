@@ -886,6 +886,35 @@ describe("chat: Show sources in answers", () => {
       expect(reply?.content).toBe(expected);
     });
 
+    it("resolves the model's own reference definitions, not the prompt's numbers, and sends none of them", async () => {
+      await addSources();
+      await configure(withSources("links"));
+      // The model numbers its labels its own way: the reverse of the
+      // prompt's, so read by the prompt's numbers each link would go to the
+      // other page.
+      const app = createApp(fakeSeams(), {
+        chat: {
+          embedder,
+          retriever,
+          provider: numberingProvider(
+            (n) =>
+              `Use [the reset page][${n(BILLING.title)}], then [billing][${n(PAGE.title)}].` +
+              `[${n(PAGE.title)}]: ${BILLING.url}[${n(BILLING.title)}]: ${PAGE.url}`,
+          ),
+        },
+      });
+      const body = await post(app, { message: QUESTION });
+      const events = parseSseBody(body);
+      const expected = `Use [the reset page](${PAGE.url}), then [billing](${BILLING.url}).`;
+      expect(tokenText(events)).toBe(expected);
+      const done = events.at(-1);
+      if (done?.type !== "done") throw new Error("expected done last");
+      const [reply] = (await tenant.messages.list(done.conversationId)).filter(
+        (m) => m.role === "assistant",
+      );
+      expect(reply?.content).toBe(expected);
+    });
+
     it("with List sources under answers, also sends the list", async () => {
       await configure(withSources("links", false, true));
       const app = createApp(fakeSeams(), {
