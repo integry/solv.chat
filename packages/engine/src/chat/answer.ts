@@ -31,7 +31,7 @@ import { cutShortSuffix } from "./cutShort.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
 import type { ReviewJob } from "./review.js";
 import { DEFAULT_SCORE_FLOOR, selectCandidates } from "./scoreFloor.js";
-import { linkTargets, pageKey, sourceLinker } from "./sourceLinks.js";
+import { linkTargets, sourceLinker } from "./sourceLinks.js";
 import {
   MAX_TOOL_CALLS_PER_CONVERSATION,
   resumeToolLoop,
@@ -114,8 +114,8 @@ export interface AnswerDeps {
   review?: AnswerReviewHook | undefined;
   /**
    * Given, once a reply is complete, the pages it could cite, whether or not
-   * the visitor is shown them, and the pages its text links to ("Link in the
-   * text"; empty otherwise). Internal: a test run's "cites" check reads it,
+   * the visitor is shown them, and the complete addresses its text links to,
+   * fragment kept ("Link in the text"; empty otherwise). Internal: a test run's "cites" check reads it,
    * and nothing here reaches a visitor.
    */
   onCitable?: ((citations: readonly Citation[], linked: readonly string[]) => void) | undefined;
@@ -225,8 +225,8 @@ interface AnswerFilter {
   flush(): string;
   /** Everything sent so far, which is exactly the text to store. */
   readonly text: string;
-  /** The pages the text links to so far, by `pageKey`. */
-  readonly linked: readonly string[];
+  /** The complete addresses the text links to so far, fragment kept. */
+  readonly destinations: readonly string[];
 }
 
 /**
@@ -253,7 +253,7 @@ function filterFor(
       get text() {
         return stripper.text;
       },
-      linked: [],
+      destinations: [],
     };
   }
   const linker = sourceLinker(linkTargets(chunks, pages), before);
@@ -263,15 +263,30 @@ function filterFor(
     get text() {
       return stripper.text;
     },
-    get linked() {
-      return linker.linked;
+    get destinations() {
+      return linker.destinations;
     },
   };
 }
 
-/** The linked pages as the citations name them (the stored address), for `onCitable`. */
-function linkedPages(linked: readonly string[], citations: readonly Citation[]): string[] {
-  return linked.map((key) => citations.find((c) => pageKey(c.url) === key)?.url ?? key);
+/**
+ * Where the text's links go, for `onCitable`: the complete address, fragment
+ * kept (a link to a page's section is a link to that section), written as the
+ * citation stores it when it is exactly a citation's page.
+ */
+function linkedPages(destinations: readonly string[], citations: readonly Citation[]): string[] {
+  return destinations.map(
+    (href) => citations.find((c) => normalizedUrl(c.url) === href)?.url ?? href,
+  );
+}
+
+/** An address as `URL` writes it, or null. */
+function normalizedUrl(raw: string): string | null {
+  try {
+    return new URL(raw).href;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -935,7 +950,7 @@ export async function* answerMessage(
       yield { type: "citation", url: chunk.url, title: chunk.title };
     }
   }
-  deps.onCitable?.(citations, linkedPages(filter?.linked ?? [], citations));
+  deps.onCitable?.(citations, linkedPages(filter?.destinations ?? [], citations));
 
   if (!input.preview) {
     await deps.tenant.messages.create({
@@ -1383,7 +1398,7 @@ export async function* answerWithActionResults(
         yield { type: "citation", url: citation.url, title: citation.title };
       }
     }
-    deps.onCitable?.(citations, linkedPages(filter?.linked ?? [], citations));
+    deps.onCitable?.(citations, linkedPages(filter?.destinations ?? [], citations));
 
     yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
     await saveTrace(

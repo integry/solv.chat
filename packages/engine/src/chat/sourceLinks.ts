@@ -295,6 +295,11 @@ export interface LinkScan {
   consumed: number;
   /** The pages the answer links to (before a pause too), by `pageKey`, in order. */
   linked: string[];
+  /**
+   * The complete addresses the answer's links go to (fragment kept), in
+   * order: what a "cites" test compares, where `linked` is the page identity.
+   */
+  destinations: string[];
   /** Links reduced to their text because their target is not one of the answer's pages. */
   removed: number;
 }
@@ -309,15 +314,17 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
   const text = whole.replace(/\r\n?/gu, (eol) => (eol.length === 2 ? " \n" : "\n"));
   const ranges = proseRanges(text, true);
   const linked: string[] = [];
+  const destinations: string[] = [];
   let removed = 0;
   let paragraph = new Set<string>();
   let out = "";
   let copied = from;
   let range = 0;
 
-  const note = (key: string) => {
+  const note = (key: string, href: string) => {
     paragraph.add(key);
     if (!linked.includes(key)) linked.push(key);
+    if (!destinations.includes(href)) destinations.push(href);
   };
   /** The page a link goes to, as `[key, href]`, or null when it may not. */
   const resolve = (
@@ -340,6 +347,7 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
     out: out + whole.slice(copied, at),
     consumed: at,
     linked,
+    destinations,
     removed,
   });
 
@@ -368,11 +376,12 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
         continue;
       }
       const end = i + auto[0].length;
-      const key = pageKey(auto[1] as string);
+      const href = httpUrl(auto[1] as string)?.href ?? null;
+      const key = href === null ? null : pageKey(href);
       if (i < from) {
-        if (key !== null) note(key);
-      } else if (key !== null && targets.allowed.has(key) && !paragraph.has(key)) {
-        note(key);
+        if (key !== null && href !== null) note(key, href);
+      } else if (key !== null && href !== null && targets.allowed.has(key) && !paragraph.has(key)) {
+        note(key, href);
       } else {
         if (key === null || !targets.allowed.has(key)) removed++;
         out += whole.slice(copied, i) + (auto[1] as string);
@@ -400,10 +409,11 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
     const resolved = resolve(construct.target);
     if (i < from) {
       // Already written: a link there was kept, so it counts for the paragraph.
-      if (resolved !== null) note(resolved[0]);
+      if (resolved !== null) note(resolved[0], resolved[1]);
       else if (construct.target !== null && "inline" in construct.target) {
-        const key = pageKey(construct.target.inline.trim());
-        if (key !== null) note(key);
+        const href = httpUrl(construct.target.inline.trim())?.href ?? null;
+        const key = href === null ? null : pageKey(href);
+        if (key !== null && href !== null) note(key, href);
       }
       i = construct.end;
       continue;
@@ -411,7 +421,7 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
     const label = whole.slice(construct.labelStart, construct.labelEnd);
     let replacement: string;
     if (resolved !== null && !paragraph.has(resolved[0])) {
-      note(resolved[0]);
+      note(resolved[0], resolved[1]);
       replacement = `${image ? "!" : ""}[${label}](${destinationText(resolved[1])})`;
     } else {
       if (resolved === null) removed++;
@@ -433,9 +443,14 @@ export function rewriteSourceLinks(
   text: string,
   targets: LinkTargets,
   before = "",
-): { text: string; linked: string[]; removed: number } {
+): { text: string; linked: string[]; destinations: string[]; removed: number } {
   const scan = scanLinks(before + text, targets, before.length, true);
-  return { text: scan.out, linked: scan.linked, removed: scan.removed };
+  return {
+    text: scan.out,
+    linked: scan.linked,
+    destinations: scan.destinations,
+    removed: scan.removed,
+  };
 }
 
 export interface SourceLinker {
@@ -447,6 +462,8 @@ export interface SourceLinker {
   readonly text: string;
   /** The pages the answer links to so far, by `pageKey`. */
   readonly linked: readonly string[];
+  /** The complete addresses the links go to so far, fragment kept. */
+  readonly destinations: readonly string[];
   /** How many links were reduced to text because of where they went. */
   readonly removed: number;
 }
@@ -459,7 +476,13 @@ export interface SourceLinker {
 export function sourceLinker(targets: LinkTargets, before = ""): SourceLinker {
   let raw = "";
   let sent = "";
-  let last: LinkScan = { out: "", consumed: before.length, linked: [], removed: 0 };
+  let last: LinkScan = {
+    out: "",
+    consumed: before.length,
+    linked: [],
+    destinations: [],
+    removed: 0,
+  };
   const emit = (scan: LinkScan): string => {
     last = scan;
     // Decisions are made left to right on text that has fully arrived, so
@@ -483,6 +506,9 @@ export function sourceLinker(targets: LinkTargets, before = ""): SourceLinker {
     },
     get linked() {
       return last.linked;
+    },
+    get destinations() {
+      return last.destinations;
     },
     get removed() {
       return last.removed;

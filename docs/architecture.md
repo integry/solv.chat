@@ -1079,7 +1079,9 @@ by default) is a second one, offered with "Link in the text" only.
   count the same), and the conversation view, which shows a reply's pages
   under "Used content" instead of "Sources" when the visitor saw no list
   (`citationsShown: false` on the turn). A test run's "cites" check passes
-  when the answer links to the page ("Linked to …"), in every mode; else,
+  when the answer links to the page ("Linked to …"), in every mode,
+  compared on the whole address the link goes to, so a test of a page's
+  section (`#fragment`) passes on a link to that section; else,
   with a list shown, when the list has it ("Cited"), and with none, when
   the answer used it ("Used").
 - **No talk about sources.** Every frame tells the model never to write about

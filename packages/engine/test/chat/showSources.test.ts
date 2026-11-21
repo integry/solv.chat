@@ -1022,5 +1022,42 @@ describe("chat: Show sources in answers", () => {
       expect(byTest.tst_2).toMatchObject({ outcome: "passed", reason: `Used ${BILLING.url}.` });
       expect(byTest.tst_3).toMatchObject({ outcome: "failed" });
     });
+
+    it.each([false, true])(
+      "a test run's cites check passes on a link to a page's section (list sources: %s)",
+      async (listSources) => {
+        await addSources();
+        await configure(withSources("numbered"), withSources("links", false, listSources));
+        const SECTION = `${PAGE.url}#steps`;
+        for (const [id, url] of [
+          ["tst_1", SECTION],
+          ["tst_2", `${PAGE.url}#other`],
+        ] as const) {
+          await tenant.tests.create({
+            id,
+            assistantId: "ast_1",
+            question: QUESTION,
+            expectation: { kind: "cites", url },
+            createdAt: id === "tst_1" ? 1000 : 1001,
+          });
+        }
+        const run = await runAnswerTests(
+          {
+            orgId: TEST_ORG_ID,
+            tenant,
+            embedder,
+            retriever,
+            provider: numberingProvider(() => `Follow [the reset steps](${SECTION}).`),
+            usage: { record: async () => {} },
+            limits: fakeSeams().limits,
+          },
+          "ast_1",
+        );
+        const byTest = Object.fromEntries(run.results.map((r) => [r.testId, r]));
+        expect(byTest.tst_1).toMatchObject({ outcome: "passed", reason: `Linked to ${SECTION}.` });
+        // Another section of the same page is not the link the answer gave.
+        expect(byTest.tst_2).toMatchObject({ outcome: "failed" });
+      },
+    );
   });
 });

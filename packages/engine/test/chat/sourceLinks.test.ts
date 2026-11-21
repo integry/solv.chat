@@ -48,6 +48,28 @@ describe("chat/sourceLinks", () => {
     expect(result.removed).toBe(0);
   });
 
+  it("keeps a link's fragment in its destinations, not in the page it counts for", () => {
+    const result = rewriteSourceLinks(
+      `See [the steps](${TESTING}#steps), then [pricing][3] and <${STATUS}#now>.`,
+      TARGETS,
+    );
+    expect(result.text).toBe(
+      `See [the steps](${TESTING}#steps), then [pricing](${PRICING}) and <${STATUS}#now>.`,
+    );
+    expect(result.linked).toEqual([TESTING, PRICING, STATUS]);
+    expect(result.destinations).toEqual([`${TESTING}#steps`, PRICING, `${STATUS}#now`]);
+    // A second link to the page in the paragraph is still reduced, whatever its section.
+    const again = rewriteSourceLinks(`[A](${TESTING}#a) and [B](${TESTING}#b).`, TARGETS);
+    expect(again.text).toBe(`[A](${TESTING}#a) and B.`);
+    expect(again.destinations).toEqual([`${TESTING}#a`]);
+    // Streamed, the same destinations, and those written before a pause count.
+    const linker = sourceLinker(TARGETS, `Earlier [x](${PRICING}#plans).\n\n`);
+    linker.push(`Now [the steps](${TESTING}`);
+    linker.push("#steps).");
+    linker.flush();
+    expect(linker.destinations).toEqual([`${PRICING}#plans`, `${TESTING}#steps`]);
+  });
+
   it("gives a written answer no link, and reduces a reference to no source to its text", () => {
     const result = rewriteSourceLinks(
       "Yes, [refunds][2] are allowed, see [the docs][7] and [the guide][docs] or [it][].",
