@@ -703,6 +703,8 @@ export function Widget({ assistantId }: WidgetProps) {
                   Adds a button to the chat window that opens the chat as a tall column on the same
                   side as the chat button. Your page moves over to make room, so visitors can read
                   it and the chat side by side. On small screens the chat fills the screen instead.
+                  Bars fixed to that edge of your page stay put; the setup guide shows how to move
+                  them.
                 </span>
                 {fieldErrors["widget.allowExpand"] && (
                   <p className="field-error" role="alert">

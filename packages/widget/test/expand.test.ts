@@ -145,6 +145,58 @@ describe("expanding to a side panel", () => {
     expect(root().getAttribute("style")).toBe(hostStyle);
   });
 
+  for (const [side, important] of [
+    ["right", false],
+    ["right", true],
+    ["left", true],
+  ] as const) {
+    it(`gives back the host's own inline margin-${side} and max-width${important ? " (!important)" : ""} on collapse and on removal`, async () => {
+      const bang = important ? " !important" : "";
+      const hostStyle = `margin-${side}: 8px${bang}; max-width: 1100px${bang}; background: rgb(250, 250, 250)`;
+      root().setAttribute("style", hostStyle);
+      serveConfig({ widget: { position: side } });
+      const el = mountWidget();
+      await flushAsync();
+      const r = shadow(el);
+      q<HTMLButtonElement>(r, ".solv-launcher").click();
+      q<HTMLButtonElement>(r, ".solv-expand").click();
+      const style = root().style;
+      expect(style.getPropertyValue(`margin-${side}`)).toBe("calc(8px + 460px)");
+      expect(style.getPropertyPriority(`margin-${side}`)).toBe("important");
+      expect(style.getPropertyValue("max-width")).toMatch(
+        /^min\(1100px, calc\(100% - [\d.]+px\)\)$/,
+      );
+      expect(style.getPropertyPriority("max-width")).toBe("important");
+
+      q<HTMLButtonElement>(r, ".solv-collapse").click();
+      expect(root().getAttribute("style")).toBe(hostStyle);
+
+      q<HTMLButtonElement>(r, ".solv-expand").click();
+      el.remove();
+      expect(root().getAttribute("style")).toBe(hostStyle);
+    });
+  }
+
+  it("puts the host's own margin and max-width back, with their priority, when the host changed something else meanwhile", async () => {
+    root().setAttribute("style", "margin-right: 8px !important; max-width: 1100px");
+    serveConfig({});
+    const el = mountWidget();
+    await flushAsync();
+    const r = shadow(el);
+    q<HTMLButtonElement>(r, ".solv-launcher").click();
+    q<HTMLButtonElement>(r, ".solv-expand").click();
+    // The host's own script sets something while the column is open.
+    root().style.setProperty("color", "red");
+    el.remove();
+    const style = root().style;
+    expect(style.getPropertyValue("margin-right")).toBe("8px");
+    expect(style.getPropertyPriority("margin-right")).toBe("important");
+    expect(style.getPropertyValue("max-width")).toBe("1100px");
+    expect(style.getPropertyPriority("max-width")).toBe("");
+    expect(style.getPropertyValue("--solv-chat-panel-width")).toBe("");
+    expect(style.getPropertyValue("color")).toBe("red");
+  });
+
   it("closing from the expanded state, by the close button or Escape, restores the page width", async () => {
     serveConfig({});
     const el = mountWidget();
@@ -194,9 +246,18 @@ describe("expanding to a side panel", () => {
     serveConfig({});
     const el = mountWidget();
     await flushAsync();
-    expect(sessionStorage.length).toBe(0);
-
     const r = shadow(el);
+    // Before the first open: the expand control cannot act, and a viewport
+    // change runs the layout, yet nothing at all is written.
+    q<HTMLButtonElement>(r, ".solv-expand").click();
+    happy.setViewport({ width: 899, height: 800 });
+    happy.setViewport({ width: 1280, height: 800 });
+    await flushAsync();
+    expect(sessionStorage.length).toBe(0);
+    expect(localStorage.length).toBe(0);
+    expect(el.hasAttribute("data-layout")).toBe(false);
+    expect(root().getAttribute("style")).toBeNull();
+
     q<HTMLButtonElement>(r, ".solv-launcher").click();
     const saved = () => JSON.parse(sessionStorage.getItem("solv-chat-open:pk_expand") ?? "{}");
     expect(saved().expanded).toBeUndefined();
@@ -225,8 +286,12 @@ describe("expanding to a side panel", () => {
     const el = mountWidget();
     await flushAsync();
     const r = shadow(el);
-    expect(q<HTMLButtonElement>(r, ".solv-expand").hidden).toBe(true);
-    expect(q<HTMLButtonElement>(r, ".solv-collapse").hidden).toBe(true);
+    // Not rendered at all: no hidden button left for a screen reader or Tab.
+    expect(r.querySelector(".solv-expand")).toBeNull();
+    expect(r.querySelector(".solv-collapse")).toBeNull();
+    expect([...r.querySelectorAll(".solv-header button")].map((b) => b.className)).toEqual([
+      "solv-close",
+    ]);
     expect(el.hasAttribute("data-layout")).toBe(false);
     expect(root().getAttribute("style")).toBeNull();
     expect(q<HTMLButtonElement>(r, ".solv-launcher").hidden).toBe(false);
@@ -238,8 +303,13 @@ describe("expanding to a side panel", () => {
     };
     document.body.append(el);
     el.preview({ widget: { title: "Docs", allowExpand: false } });
-    expect(q<HTMLButtonElement>(shadow(el), ".solv-expand").hidden).toBe(true);
+    expect(shadow(el).querySelector(".solv-expand")).toBeNull();
+    expect(shadow(el).querySelector(".solv-collapse")).toBeNull();
     el.preview({ widget: { title: "Docs", allowExpand: true } });
     expect(q<HTMLButtonElement>(shadow(el), ".solv-expand").hidden).toBe(false);
+    // Back in the header, before the close button.
+    expect([...shadow(el).querySelectorAll(".solv-header button")].map((b) => b.className)).toEqual(
+      ["solv-expand", "solv-collapse", "solv-close"],
+    );
   });
 });

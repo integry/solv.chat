@@ -80,7 +80,13 @@ export class Cdp {
 
 export interface Browser {
   cdp: Cdp;
-  close(): void;
+  /**
+   * Closes Chromium and waits for it to exit. Asked to close over DevTools,
+   * Chromium ends and reaps its own helper processes; killing it outright
+   * leaves them to the container's init, which may never reap them, and a
+   * few runs of that fill the process table. The kill is the fallback.
+   */
+  close(): Promise<void>;
 }
 
 export async function launch(chromePath: string, extraArgs: string[] = []): Promise<Browser> {
@@ -90,6 +96,12 @@ export async function launch(chromePath: string, extraArgs: string[] = []): Prom
     [
       "--headless=new",
       "--no-sandbox",
+      // Renderers as direct children the browser reaps on a clean close. The
+      // crash handler still double-forks, so its two processes are left to
+      // init each launch (eleven were with a kill and the zygote).
+      "--no-zygote",
+      "--disable-crash-reporter",
+      "--disable-breakpad",
       "--disable-gpu",
       "--disable-dev-shm-usage",
       "--no-first-run",
@@ -108,6 +120,10 @@ export async function launch(chromePath: string, extraArgs: string[] = []): Prom
       env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: "/dev/null" },
     },
   );
+  const exited = new Promise<void>((ok) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) ok();
+    else proc.once("exit", () => ok());
+  });
   const stop = () => {
     try {
       if (proc.pid !== undefined) process.kill(-proc.pid, "SIGKILL");
@@ -115,6 +131,23 @@ export async function launch(chromePath: string, extraArgs: string[] = []): Prom
       proc.kill("SIGKILL");
     }
     rmSync(userDataDir, { recursive: true, force: true });
+  };
+  let browserWs: string | null = null;
+  const closeGracefully = async () => {
+    try {
+      if (browserWs !== null) {
+        const browserCdp = await Cdp.connect(browserWs);
+        // No reply comes once it has closed: the exit is what is awaited.
+        void browserCdp.send("Browser.close").catch(() => undefined);
+        await Promise.race([exited, new Promise((r) => setTimeout(r, 5_000))]);
+        browserCdp.close();
+      }
+    } catch {
+      // Fall through to the kill.
+    }
+    // Whatever is left of the group (nothing, after a clean close).
+    stop();
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 2_000))]);
   };
   try {
     const portFile = resolve(userDataDir, "DevToolsActivePort");
@@ -124,6 +157,10 @@ export async function launch(chromePath: string, extraArgs: string[] = []): Prom
       await new Promise((r) => setTimeout(r, 100));
     }
     const port = readFileSync(portFile, "utf8").split("\n")[0]?.trim();
+    const version = (await (await fetch(`http://127.0.0.1:${port}/json/version`)).json()) as {
+      webSocketDebuggerUrl?: string;
+    };
+    browserWs = version.webSocketDebuggerUrl ?? null;
     const targets = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()) as Array<{
       type: string;
       webSocketDebuggerUrl?: string;
@@ -135,9 +172,9 @@ export async function launch(chromePath: string, extraArgs: string[] = []): Prom
     await cdp.send("Runtime.enable");
     return {
       cdp,
-      close() {
+      async close() {
         cdp.close();
-        stop();
+        await closeGracefully();
       },
     };
   } catch (err) {

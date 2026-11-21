@@ -182,6 +182,7 @@ describe("Widget screen", () => {
     // The help text says what it does to the owner's page.
     const hint = document.getElementById(toggle.getAttribute("aria-describedby") ?? "");
     expect(hint?.textContent).toMatch(/Your page moves over to make room/);
+    expect(hint?.textContent).toMatch(/Bars fixed to that edge of your page stay put/);
 
     const frameWindow = previewFrame().contentWindow;
     if (!frameWindow) throw new Error("no frame window");

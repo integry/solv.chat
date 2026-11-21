@@ -48,6 +48,8 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   let preflights = 0;
   /** Where the engine's config puts the widget for the next page load. */
   let position: "left" | "right" = "right";
+  /** The next answer starts with a tool round (searching) before its text. */
+  let toolFirst = false;
 
   const engineOrigin = () => `http://127.0.0.1:${enginePort}`;
   const hostOrigin = () => `http://127.0.0.1:${hostPort}`;
@@ -58,7 +60,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   ) => `<!doctype html><html${hostStyle ? ` style="${hostStyle}"` : ""}>
 <head><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>body { margin: 0; font: 16px sans-serif; } #content { padding: 16px; } ${hostCss}</style></head>
-<body><main id="content"><h1>Owner's page</h1><p>${"Some documentation text. ".repeat(40)}</p></main>
+<body><header id="bar" style="position: fixed; top: 0; left: 0; right: var(--solv-chat-panel-width, 0px); height: 8px"></header><main id="content"><h1>Owner's page</h1><p>${"Some documentation text. ".repeat(40)}</p></main>
 <script src="${engineOrigin()}/widget.js"></script>
 <solv-chat assistant="pk_layout"></solv-chat></body></html>`;
 
@@ -116,6 +118,13 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
           ...cors,
         });
         // The model thinks for a moment, then writes a token every 70 ms.
+        if (toolFirst) {
+          res.write('event: tool\ndata: {"name":"search_docs","state":"running"}\n\n');
+          setTimeout(
+            () => res.write('event: tool\ndata: {"name":"search_docs","state":"done"}\n\n'),
+            200,
+          );
+        }
         let i = 0;
         const next = () => {
           const token = ANSWER_TOKENS[i++];
@@ -137,8 +146,8 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     browser = await launch(chrome as string);
   }, 90_000);
 
-  afterAll(() => {
-    browser?.close();
+  afterAll(async () => {
+    await browser?.close();
     for (const server of servers) server.close();
   });
 
@@ -394,5 +403,204 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     expect(now).toBeLessThan(before);
     await q(`(r.querySelector(".solv-expand").click(), true)`);
     expect(await overflow()).toBeLessThanOrEqual(now);
+  }, 60_000);
+  it("gives back the host's own inline margin and max-width, !important included, after collapse and removal", async () => {
+    await viewport(1280, 800);
+    const hostStyle =
+      "margin-right: 8px !important; max-width: 1100px !important; background: rgb(250, 250, 250)";
+    await open(`/?style=${encodeURIComponent(hostStyle)}`);
+    await q(
+      `(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click(), true)`,
+    );
+    const inner = await page_<number>("document.documentElement.clientWidth");
+    expect(await page_("getComputedStyle(document.documentElement).marginRight")).toBe("468px");
+    const content = await page_<{ right: number }>(
+      "document.getElementById('content').getBoundingClientRect().toJSON()",
+    );
+    expect(content.right).toBeLessThanOrEqual(inner - 460);
+    expect(await noSidewaysScroll()).toBe(true);
+    await q(`(r.querySelector(".solv-collapse").click(), true)`);
+    expect(await page_("document.documentElement.getAttribute('style')")).toBe(hostStyle);
+    expect(await page_("getComputedStyle(document.documentElement).maxWidth")).toBe("1100px");
+
+    await q(`(r.querySelector(".solv-expand").click(), true)`);
+    await page_(`(document.querySelector("solv-chat").remove(), true)`);
+    expect(await page_("document.documentElement.getAttribute('style')")).toBe(hostStyle);
+    expect(await page_("getComputedStyle(document.documentElement).marginRight")).toBe("8px");
+  }, 60_000);
+
+  for (const [name, css] of [
+    ["a margin from the host's stylesheet", "html { margin-right: 24px; }"],
+    ["a centred root", "html { max-width: 1000px; margin: 0 auto; }"],
+  ] as const) {
+    it(`a column beside ${name}: the page sits beside it and comes back as it was`, async () => {
+      await viewport(1280, 800);
+      await open(`/?css=${encodeURIComponent(css)}`);
+      const before = await page_<{ left: number; right: number }>(
+        "document.documentElement.getBoundingClientRect().toJSON()",
+      );
+      await q(
+        `(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click(), true)`,
+      );
+      const panel = await rect(".solv-panel");
+      const content = await page_<{ left: number; right: number }>(
+        "document.getElementById('content').getBoundingClientRect().toJSON()",
+      );
+      expect(content.left).toBeGreaterThanOrEqual(0);
+      expect(content.right).toBeLessThanOrEqual(panel.left);
+      expect(await noSidewaysScroll()).toBe(true);
+      await q(`(r.querySelector(".solv-collapse").click(), true)`);
+      expect(await page_("document.documentElement.getAttribute('style')")).toBeNull();
+      expect(
+        await page_<{ left: number; right: number }>(
+          "document.documentElement.getBoundingClientRect().toJSON()",
+        ),
+      ).toEqual(before);
+    }, 60_000);
+  }
+
+  it("a bar the host fixed to the edge moves clear using --solv-chat-panel-width", async () => {
+    await viewport(1280, 800);
+    await open();
+    const inner = await page_<number>("document.documentElement.clientWidth");
+    const bar = () =>
+      page_<{ right: number }>("document.getElementById('bar').getBoundingClientRect().toJSON()");
+    expect((await bar()).right).toBe(inner);
+    await q(
+      `(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click(), true)`,
+    );
+    expect((await bar()).right).toBe((await rect(".solv-panel")).left);
+    await q(`(r.querySelector(".solv-collapse").click(), true)`);
+    expect((await bar()).right).toBe(inner);
+  }, 60_000);
+
+  it("the expand and collapse controls: named buttons with their state, by keyboard, focus kept, reduced motion", async () => {
+    await viewport(1280, 800);
+    await open();
+    await q(`(r.querySelector(".solv-launcher").click(), true)`);
+    await browser.cdp.send("Accessibility.enable");
+    const buttons = async () => {
+      const { nodes } = await browser.cdp.send<{
+        nodes: Array<{
+          ignored: boolean;
+          role?: { value?: string };
+          name?: { value?: string };
+          properties?: Array<{ name: string; value: { value?: unknown } }>;
+        }>;
+      }>("Accessibility.getFullAXTree");
+      return nodes
+        .filter((n) => !n.ignored && n.role?.value === "button")
+        .map((n) => ({
+          name: n.name?.value ?? "",
+          expanded: n.properties?.find((p) => p.name === "expanded")?.value.value,
+        }));
+    };
+    const key = async (key: string, code: string, keyCode: number, modifiers = 0) => {
+      const text = key === "Enter" ? "\r" : key === " " ? " " : undefined;
+      for (const type of ["keyDown", "keyUp"] as const) {
+        await browser.cdp.send("Input.dispatchKeyEvent", {
+          type,
+          key,
+          code,
+          windowsVirtualKeyCode: keyCode,
+          modifiers,
+          ...(type === "keyDown" && text ? { text } : {}),
+        });
+      }
+    };
+    const focused = () => q<string>(`r.activeElement ? r.activeElement.className : ""`);
+
+    // Only the expand control is in the tree; the collapse one is hidden.
+    expect(await buttons()).toEqual(
+      expect.arrayContaining([{ name: "Expand to a side panel", expanded: false }]),
+    );
+    expect((await buttons()).some((b) => b.name === "Collapse to a small window")).toBe(false);
+
+    // Reached by keyboard: back from the close button.
+    await q(`(r.querySelector(".solv-close").focus(), true)`);
+    await key("Tab", "Tab", 9, 8);
+    expect(await focused()).toBe("solv-expand");
+    await key("Enter", "Enter", 13);
+    expect(await q("el.getAttribute('data-layout')")).toBe("side");
+    expect(await focused()).toBe("solv-collapse");
+    const expanded = await buttons();
+    expect(expanded).toEqual(
+      expect.arrayContaining([{ name: "Collapse to a small window", expanded: true }]),
+    );
+    expect(expanded.some((b) => b.name === "Expand to a side panel")).toBe(false);
+    // Tab from the collapse control stays in the panel.
+    await key("Tab", "Tab", 9);
+    expect(await focused()).toBe("solv-close");
+    await key("Tab", "Tab", 9, 8);
+    await key(" ", "Space", 32);
+    expect(await q("el.hasAttribute('data-layout')")).toBe(false);
+    expect(await focused()).toBe("solv-expand");
+
+    // Escape still closes the panel and gives focus to the launcher.
+    await key("Enter", "Enter", 13);
+    await key("Escape", "Escape", 27);
+    expect(await q(`r.querySelector(".solv-panel").hidden`)).toBe(true);
+    expect(await focused()).toBe("solv-launcher");
+    expect(await page_("document.documentElement.getAttribute('style')")).toBeNull();
+
+    // Reduced motion: the side panel appears without its animation.
+    await browser.cdp.send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+    });
+    try {
+      await q(`(r.querySelector(".solv-launcher").click(), true)`);
+      expect(await q(`getComputedStyle(r.querySelector(".solv-panel")).animationName`)).toBe(
+        "none",
+      );
+      expect(await q(`getComputedStyle(r.querySelector(".solv-panel")).transitionDuration`)).toBe(
+        "0s",
+      );
+    } finally {
+      await browser.cdp.send("Emulation.setEmulatedMedia", { features: [] });
+    }
+    await browser.cdp.send("Accessibility.disable");
+  }, 60_000);
+
+  it('says "Writing an answer" once in the live region, through a tool round, and never again', async () => {
+    await viewport(1280, 800);
+    await open();
+    toolFirst = true;
+    try {
+      await q(`(r.querySelector(".solv-launcher").click(), true)`);
+      await q(`(() => {
+        window.__said = [];
+        const log = r.querySelector(".solv-messages");
+        new MutationObserver((records) => {
+          // One batch can report a bubble and the indicator inside it, both
+          // added in the same task: each label counts once per batch, and a
+          // later batch adding it again (a re-insertion) counts again.
+          const labels = new Set();
+          for (const record of records) {
+            for (const node of record.addedNodes) {
+              if (node.nodeType !== 1) continue;
+              const found = [node, ...node.querySelectorAll("*")].filter(
+                (n) => n.childElementCount === 0 && n.textContent === "Writing an answer",
+              );
+              for (const label of found) labels.add(label);
+            }
+          }
+          for (const label of labels) window.__said.push(!!label.closest("[aria-live]"));
+        }).observe(log, { childList: true, subtree: true });
+        r.querySelector("#solv-input").value = "How do I search?";
+        r.querySelector(".solv-form").requestSubmit();
+        return true;
+      })()`);
+      await waitFor(
+        async () => (await q<boolean>(`!!r.querySelector(".solv-feedback")`)) === true,
+        "answer done",
+      );
+      // Added once (in the answer's bubble, inside the role="log" live region).
+      expect(await page_("window.__said")).toEqual([true]);
+      expect(await q(`r.querySelector(".solv-messages").getAttribute("aria-live")`)).toBe("polite");
+      expect(await q(`r.querySelectorAll("[aria-live]").length`)).toBeGreaterThanOrEqual(1);
+      expect(await q(`!!r.querySelector(".solv-typing")`)).toBe(false);
+    } finally {
+      toolFirst = false;
+    }
   }, 60_000);
 });

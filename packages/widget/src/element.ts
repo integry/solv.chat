@@ -252,6 +252,7 @@ export class SolvChat extends HTMLElement {
   #launcher!: HTMLButtonElement;
   #expandBtn!: HTMLButtonElement;
   #collapseBtn!: HTMLButtonElement;
+  #closeBtn!: HTMLButtonElement;
   #panel!: HTMLDivElement;
   #titleEl!: HTMLHeadingElement;
   #messagesEl!: HTMLDivElement;
@@ -536,6 +537,7 @@ export class SolvChat extends HTMLElement {
     this.#launcher = launcher;
     this.#expandBtn = expandBtn;
     this.#collapseBtn = collapseBtn;
+    this.#closeBtn = closeBtn;
   }
 
   /**
@@ -695,8 +697,16 @@ export class SolvChat extends HTMLElement {
     if (layout === "panel") this.removeAttribute("data-layout");
     else this.setAttribute("data-layout", layout);
     this.#launcher.hidden = layout !== "panel";
-    this.#expandBtn.hidden = !allow || this.#expanded;
-    this.#collapseBtn.hidden = !allow || !this.#expanded;
+    // With the owner's setting off the controls are not in the panel at all,
+    // so nothing announces or focuses them; on, they sit before the close button.
+    if (!allow) {
+      this.#expandBtn.remove();
+      this.#collapseBtn.remove();
+    } else if (this.#expandBtn.parentNode === null) {
+      this.#closeBtn.before(this.#expandBtn, this.#collapseBtn);
+    }
+    this.#expandBtn.hidden = this.#expanded;
+    this.#collapseBtn.hidden = !this.#expanded;
   }
 
   /**
@@ -1152,13 +1162,24 @@ export class SolvChat extends HTMLElement {
       }
     }
     // Last in the bubble, after any note about an action.
-    if (bubble.lastElementChild !== indicator) bubble.append(indicator);
+    this.#moveTypingLast(bubble, indicator);
     this.#scrollToBottom();
   }
 
   #keepTypingLast(bubble: HTMLDivElement): void {
-    const indicator = bubble.querySelector(".solv-typing");
-    if (indicator && bubble.lastElementChild !== indicator) bubble.append(indicator);
+    const indicator = bubble.querySelector<HTMLDivElement>(".solv-typing");
+    if (indicator) this.#moveTypingLast(bubble, indicator);
+  }
+
+  /**
+   * Moves the indicator to the end of `bubble`. A node moved inside a live
+   * region is added again, and would be read out again, so the label it was
+   * announced with is dropped first and the dots move alone.
+   */
+  #moveTypingLast(bubble: HTMLDivElement, indicator: HTMLDivElement): void {
+    if (bubble.lastElementChild === indicator) return;
+    if (indicator.parentNode === bubble) indicator.querySelector(".sr-only")?.remove();
+    bubble.append(indicator);
   }
 
   #hideTyping(bubble: HTMLDivElement): void {

@@ -4,6 +4,7 @@
  * @vitest-environment-options {"settings": {"navigation": {"disableChildFrameNavigation": true}}}
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderMarkdown } from "../src/markdown.js";
 import "../src/widget.js";
 
 function shadow(el: HTMLElement): ShadowRoot {
@@ -144,6 +145,71 @@ describe("progress while an answer is written", () => {
     expect(q(bubble, ".solv-bubble-text").textContent).toBe("Open Settings.");
   });
 
+  it("announces once when a page action runs before any text, though its note goes under the dots", async () => {
+    const solv = (
+      globalThis as unknown as {
+        solv: { actions: { register(a: unknown): void; unregister(n: string): void } };
+      }
+    ).solv;
+    solv.actions.register({
+      name: "open_invoice",
+      description: "Open invoice",
+      input: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      confirm: false,
+      run: async () => ({ opened: true }),
+    });
+    try {
+      let calls = 0;
+      const first = controlledStream();
+      const second = controlledStream();
+      serve({}, () => {
+        calls++;
+        return new Response((calls === 1 ? first : second).body, {
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
+      const { r } = await openAndSend("Open invoice 42");
+      // Every time the label is put into the live region, which is when it is read.
+      let insertions = 0;
+      new MutationObserver((records) => {
+        const labels = new Set<Node>();
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            if (!(node instanceof Element)) continue;
+            for (const n of [node, ...node.querySelectorAll("*")]) {
+              if (n.childElementCount === 0 && n.textContent === "Writing an answer") labels.add(n);
+            }
+          }
+        }
+        insertions += labels.size;
+      }).observe(q(r, ".solv-messages"), { childList: true, subtree: true });
+
+      first.send("action", {
+        callId: "c1",
+        name: "open_invoice",
+        input: { id: "42" },
+        confirm: false,
+      });
+      first.send("done", { messageId: "msg_p", conversationId: "cnv_p", awaitingActions: ["c1"] });
+      first.close();
+      await flushAsync();
+      const bubble = lastAnswer(r);
+      // The note about the action, with the dots still last after it.
+      expect(bubble.querySelector(".solv-action")).not.toBeNull();
+      expect(bubble.lastElementChild?.classList.contains("solv-typing")).toBe(true);
+
+      second.send("token", { text: "Opened it." });
+      second.send("done", { messageId: "msg_f", conversationId: "cnv_p" });
+      second.close();
+      await flushAsync();
+      expect(insertions).toBe(0);
+      expect(q(bubble, ".solv-bubble-text").textContent).toBe("Opened it.");
+      expect(bubble.querySelector(".solv-typing")).toBeNull();
+    } finally {
+      solv.actions.unregister("open_invoice");
+    }
+  });
+
   it("shows the typing indicator while the visitor check runs", async () => {
     serve({ visitorCheck: true }, () => {
       throw new Error("no chat request may be sent before the check");
@@ -219,6 +285,116 @@ describe("progress while an answer is written", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  for (const c of [
+    {
+      name: "a code fence being opened, then its closing fence",
+      held: ["Run this:\n\n``"],
+      before: (el: HTMLElement) => {
+        expect(el.textContent).toBe("Run this:");
+        expect(el.querySelector("pre")).toBeNull();
+      },
+      after: (el: HTMLElement) => expect(el.textContent).toContain("``"),
+      // In the block now: it grows as code, and a possible closing fence waits.
+      next: ["`sh\nnpm install\n", "``"],
+      during: (el: HTMLElement) => {
+        expect(el.querySelector("pre")?.textContent).toBe("npm install");
+        expect(el.textContent).not.toContain("``");
+      },
+      rest: ["`\nDone."],
+      done: (el: HTMLElement) => expect(el.querySelector("pre")?.textContent).toBe("npm install"),
+    },
+    {
+      name: "a table whose delimiter row is slow to arrive",
+      held: ["Plans:\n\n| Plan | Price |\n|--"],
+      before: (el: HTMLElement) => {
+        expect(el.textContent).toBe("Plans:");
+        expect(el.textContent).not.toContain("|");
+      },
+      after: (el: HTMLElement) => expect(el.textContent).toContain("| Plan | Price |"),
+      // The renderer shows a table as it was written, in a block of its own.
+      next: ["-|---|\n| Pro | $9 |\n", "| Team | $2"],
+      during: (el: HTMLElement) => {
+        const table = el.querySelector(".solv-md-literal");
+        expect(table?.textContent).toBe("| Plan | Price |\n|---|---|\n| Pro | $9 |");
+        // The row still being written waits.
+        expect(el.textContent).not.toContain("Team");
+      },
+      rest: ["9 |"],
+      done: (el: HTMLElement) =>
+        expect(el.querySelector(".solv-md-literal")?.textContent).toContain("| Team | $29 |"),
+    },
+    {
+      name: "emphasis nested in strong emphasis",
+      held: ["This is **very *impor"],
+      before: (el: HTMLElement) => {
+        expect(el.textContent).toBe("This is ");
+        expect(el.textContent).not.toContain("*");
+      },
+      after: (el: HTMLElement) => expect(el.textContent).toBe("This is **very *impor"),
+      next: ["tant* indeed** and "],
+      during: (el: HTMLElement) => {
+        expect(el.querySelector("strong em")?.textContent).toBe("important");
+        expect(el.textContent).toBe("This is very important indeed and ");
+      },
+      rest: ["*done*."],
+      done: (el: HTMLElement) => expect(el.querySelectorAll("em")).toHaveLength(2),
+    },
+  ]) {
+    it(`holds ${c.name} back, shows it as it stands after the bound, then completes it`, async () => {
+      const frames: FrameRequestCallback[] = [];
+      vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => frames.push(cb));
+      vi.stubGlobal("cancelAnimationFrame", () => {});
+      const runFrames = async () => {
+        for (const cb of frames.splice(0)) cb(performance.now());
+        await flushAsync();
+      };
+      let now = 1_000_000;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      try {
+        const stream = controlledStream();
+        serve(
+          {},
+          () => new Response(stream.body, { headers: { "content-type": "text/event-stream" } }),
+        );
+        const { r } = await openAndSend("Show me");
+        await flushAsync();
+        const text = () => q<HTMLElement>(lastAnswer(r), ".solv-bubble-text");
+        const send = async (chunks: string[]) => {
+          for (const chunk of chunks) stream.send("token", { text: chunk });
+          await flushAsync();
+          await runFrames();
+        };
+
+        await send(c.held);
+        c.before(text());
+        // A token that changes nothing held, short of the bound: still held.
+        now += 500;
+        await send([""]);
+        c.before(text());
+        // Past the bound: the widget's own timer asks for the paint.
+        now += 200;
+        await new Promise((resolve) => setTimeout(resolve, 650));
+        await runFrames();
+        c.after(text());
+
+        await send(c.next);
+        c.during(text());
+
+        await send(c.rest);
+        stream.send("done", { messageId: "msg_1", conversationId: "cnv_1" });
+        stream.close();
+        await flushAsync();
+        // At the end: exactly what rendering the whole answer at once gives.
+        const whole = document.createElement("div");
+        renderMarkdown(whole, [...c.held, ...c.next, ...c.rest].join(""));
+        expect(text().innerHTML).toBe(whole.innerHTML);
+        c.done(text());
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  }
 
   it("keeps the view at the newest text only while the visitor has not scrolled up", async () => {
     const stream = controlledStream();
