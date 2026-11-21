@@ -149,6 +149,7 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const CONFIG_TIMEOUT_MS = 2_000;
 const DROPPED_RESUME_TIMEOUT_MS = 5_000;
 
 const ACTION_WORDING: Record<string, string> = {
@@ -294,6 +295,7 @@ export class SolvChat extends HTMLElement {
   #initialized = false;
   #connection = 0;
   #configLoading: Promise<void> | null = null;
+  #configController: AbortController | null = null;
   #open = false;
   #sending = false;
   #abortController: AbortController | null = null;
@@ -372,8 +374,13 @@ export class SolvChat extends HTMLElement {
     }
     connectedWidgets.add(this);
     const connection = ++this.#connection;
-    this.#configLoading = this.#loadConfig(connection).finally(() => {
-      if (connection === this.#connection) this.#configLoading = null;
+    const controller = new AbortController();
+    this.#configController = controller;
+    this.#configLoading = this.#loadConfig(connection, controller).finally(() => {
+      if (connection === this.#connection) {
+        this.#configLoading = null;
+        this.#configController = null;
+      }
     });
     this.#updateLauncher();
     this.#watchShortcut();
@@ -412,6 +419,8 @@ export class SolvChat extends HTMLElement {
 
   disconnectedCallback(): void {
     this.#connection++;
+    this.#configController?.abort();
+    this.#configController = null;
     this.#configLoading = null;
     connectedWidgets.delete(this);
     if (connectedWidgets.size === 0) {
@@ -701,20 +710,26 @@ export class SolvChat extends HTMLElement {
     this.#applyConfig();
   }
 
-  async #loadConfig(connection: number): Promise<void> {
+  async #loadConfig(connection: number, controller: AbortController): Promise<void> {
     const assistant = this.#assistant();
     if (!assistant || this.#previewing) return;
+    const { signal } = controller;
+    // Aborting fetch also aborts the response body read after headers arrive.
+    const timer = setTimeout(() => controller.abort(), CONFIG_TIMEOUT_MS);
     try {
       const response = await fetch(
         `${this.#endpoint()}/v1/assistants/${encodeURIComponent(assistant)}`,
+        { signal },
       );
       if (!response.ok) return;
-      const parsed = parsePublicConfig(await response.json());
-      if (connection !== this.#connection || this.#previewing) return;
-      this.#config = { ...DEFAULT_CONFIG, ...parsed };
+      const value: unknown = await response.json();
+      if (signal.aborted || connection !== this.#connection || this.#previewing) return;
+      this.#config = { ...DEFAULT_CONFIG, ...parsePublicConfig(value) };
       this.#applyConfig();
     } catch {
-      // Keep default config if the config endpoint is unreachable.
+      // Keep the current settings if config fails or times out.
+    } finally {
+      clearTimeout(timer);
     }
   }
 

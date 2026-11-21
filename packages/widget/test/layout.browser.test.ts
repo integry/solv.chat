@@ -53,6 +53,8 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   let widgetOptions: Record<string, unknown> = {};
   let visitorCheck = false;
   let configGate: Promise<void> | null = null;
+  let stallConfigHeaders = false;
+  let gatedConfigResponse: ServerResponse | undefined;
   const engineRequests: string[] = [];
 
   const engineOrigin = () => `http://127.0.0.1:${enginePort}`;
@@ -134,7 +136,8 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       };
       if (req.method === "OPTIONS") {
         preflights++;
-        res.writeHead(204, cors).end();
+        // Each test can observe its own preflight.
+        res.writeHead(204, { ...cors, "access-control-max-age": "0" }).end();
         return;
       }
       if (url.pathname === "/widget.js") {
@@ -149,8 +152,11 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
           behaviour: { greeting: "Hi", suggestedQuestions: [] },
           visitorCheck,
         });
-        if (configGate) void configGate.then(() => res.end(config));
-        else res.end(config);
+        if (configGate) {
+          gatedConfigResponse = res;
+          if (!stallConfigHeaders) res.flushHeaders();
+          void configGate.then(() => res.end(config));
+        } else res.end(config);
         return;
       }
       if (url.pathname === "/v1/chat" && req.method === "POST") {
@@ -192,6 +198,8 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   afterEach(() => {
     widgetOptions = {};
     visitorCheck = false;
+    stallConfigHeaders = false;
+    gatedConfigResponse = undefined;
   });
 
   afterAll(async () => {
@@ -489,6 +497,108 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       expect(await layout()).toBe("side");
     } finally {
       release();
+      configGate = null;
+    }
+  });
+
+  it.each([
+    ["launcher", "body"],
+    ["host button", "headers"],
+    ["toggle API", "body"],
+  ])("opens from the %s when config stalls at the %s", async (trigger, stalledAt) => {
+    widgetOptions = { opensAs: "side", title: "Late settings" };
+    stallConfigHeaders = stalledAt === "headers";
+    let release = () => {};
+    configGate = new Promise<void>((resolveConfig) => {
+      release = resolveConfig;
+    });
+    try {
+      await viewport(1280, 800);
+      await open("/host-controls", true, false);
+      const response = await waitFor(async () => gatedConfigResponse, "stalled config request");
+      if (trigger === "launcher") {
+        await click(".solv-launcher", true);
+      } else {
+        await q(
+          trigger === "host button"
+            ? 'document.querySelector("#host-ask").setAttribute("data-solv-chat-open", "")'
+            : '(document.querySelector("#host-ask").onclick = () => { void el.toggle(); }, true)',
+        );
+        await click("#host-ask");
+      }
+      expect(await panelHidden()).toBe(true);
+      await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
+      expect(await layout()).toBeNull();
+      expect(await focus()).toBe("solv-input");
+      // The browser has cancelled the unread request before the server can send its settings.
+      await waitFor(async () => response.destroyed, "config request cancellation", 1_000);
+      release();
+      expect(await q('r.querySelector(".solv-title").textContent')).toBe("Ask a question");
+    } finally {
+      release();
+      configGate = null;
+    }
+  });
+
+  it("discards a pending config load and queued open when the widget reconnects", async () => {
+    widgetOptions = { title: "Old settings" };
+    let release = () => {};
+    configGate = new Promise<void>((resolveConfig) => {
+      release = resolveConfig;
+    });
+    try {
+      await viewport(1280, 800);
+      await open("/host-controls", true, false);
+      const response = await waitFor(async () => gatedConfigResponse, "stalled config request");
+      await click(".solv-launcher", true);
+      expect(await panelHidden()).toBe(true);
+
+      configGate = null;
+      widgetOptions = { opensAs: "side" };
+      await q("(el.remove(), document.body.append(el))");
+      await waitFor(async () => response.destroyed, "disconnected config cancellation", 1_000);
+      release();
+      await waitFor(
+        async () => (await q('r.querySelector(".solv-title").textContent')) === "Docs",
+        "reconnected config",
+      );
+      expect(await panelHidden()).toBe(true);
+      await click(".solv-launcher", true);
+      expect(await layout()).toBe("side");
+    } finally {
+      release();
+      configGate = null;
+    }
+  });
+
+  it("continues a restored answer when the config response body stalls", async () => {
+    await viewport(1280, 800);
+    await open("/host-controls");
+    await page_(`sessionStorage.setItem("solv-chat-open:pk_layout", JSON.stringify({
+      conversationId: "cnv_1",
+      open: true,
+      turns: [{ role: "assistant", text: "", messageId: "msg_1", awaiting: ["call_1"] }],
+      pendingResume: {
+        conversationId: "cnv_1",
+        resumeMessageId: "msg_1",
+        actionResults: [{ callId: "call_1", ok: true, result: "{}" }],
+        depth: 1,
+        createdAt: Date.now(),
+      },
+    }))`);
+    // Leave the response incomplete until the restored turn has finished.
+    configGate = new Promise<void>(() => {});
+    try {
+      await open("/host-controls?resume", false, false);
+      expect(await q('r.querySelector(".solv-send").disabled')).toBe(true);
+      await waitFor(
+        () => q<boolean>('r.querySelector(".solv-panel").textContent.includes("That is all.")'),
+        "restored answer",
+        4_500,
+      );
+      await waitFor(() => q<boolean>('!r.querySelector(".solv-send").disabled'), "send enabled");
+    } finally {
+      gatedConfigResponse?.destroy();
       configGate = null;
     }
   });
