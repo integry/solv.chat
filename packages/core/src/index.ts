@@ -87,6 +87,18 @@ export {
   type SyncSchedule,
 } from "./schemas/source.js";
 export {
+  isToolCredentialHeader,
+  isToolToken,
+  MAX_TOOL_CREDENTIALS,
+  MAX_TOOL_TOKEN_LENGTH,
+  type McpAuthKind,
+  type PageToolServer,
+  parseToolCredentials,
+  type ToolCredentialSource,
+  type ToolCredentials,
+  toolCredentialUrl,
+} from "./schemas/toolCredentials.js";
+export {
   checkTopicName,
   cleanTopicName,
   MAX_TOPICS_PER_ASSISTANT,

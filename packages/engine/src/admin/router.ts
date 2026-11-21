@@ -660,7 +660,8 @@ async function mcpServerRoutes(
   if (segments.length === 3) {
     const sub = segments[2];
     if (sub === "refresh" && method === "POST") {
-      const tools = await refreshMcpTools(mcpDeps(deps), serverId);
+      const body = request.body === null ? undefined : await readJsonBody(request);
+      const tools = await refreshMcpTools(mcpDeps(deps), serverId, body);
       return Response.json({ tools });
     }
     if (sub === "tools" && method === "GET") {

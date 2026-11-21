@@ -2,8 +2,11 @@ import {
   type ActionResult,
   CHAT_PROTOCOL_VERSION,
   CONFIG_LIMITS,
+  isToolToken,
   MAX_CHAT_MESSAGE_LENGTH,
+  MAX_TOOL_CREDENTIALS,
   parseChatEventLine,
+  toolCredentialUrl,
   type WidgetOpenMode,
   type WidgetShortcut,
 } from "@solvchat/core";
@@ -316,6 +319,7 @@ export class SolvChat extends HTMLElement {
   #pendingResume: PendingResume | null = null;
   #resumedBubble: { bubble: HTMLDivElement; textEl: HTMLDivElement; turn: SavedTurn } | null = null;
   #config = DEFAULT_CONFIG;
+  #toolCredentials = new Map<string, string>();
   #configReady = false;
   #configNeedsSaving = false;
   #cachedConfigExpiresAt: number | undefined;
@@ -466,6 +470,7 @@ export class SolvChat extends HTMLElement {
   }
 
   disconnectedCallback(): void {
+    this.#toolCredentials.clear();
     this.#connection++;
     this.#reloadConfigOnConnect = this.#configLoading !== null;
     this.#openingWithConfig = null;
@@ -787,6 +792,58 @@ export class SolvChat extends HTMLElement {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** Holds a visitor's key in memory until replaced, cleared or disconnected. */
+  setToolCredential(serverUrl: string, token: string | null): void {
+    const url = toolCredentialUrl(serverUrl);
+    if (url === null) return;
+    if (isToolToken(token)) this.#toolCredentials.set(url, token);
+    else this.#toolCredentials.delete(url);
+  }
+
+  async #requestToolCredentials(signal: AbortSignal): Promise<Record<string, string> | undefined> {
+    if (this.#toolCredentials.size === 0) return;
+    const url = this.#publicConfigUrl();
+    if (!url) return;
+    try {
+      // The presentation config can be cached or restored from storage.
+      // Revalidate before releasing any key to the chat endpoint.
+      const response = await fetch(url, {
+        cache: "no-cache",
+        redirect: "error",
+        signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]),
+      });
+      if (!response.ok) return;
+      const config = await response.json();
+      if (
+        signal.aborted ||
+        url !== this.#publicConfigUrl() ||
+        !Array.isArray(config?.pageToolServerUrls)
+      )
+        return;
+      const credentials: [string, string][] = [];
+      for (const [server, token] of this.#toolCredentials) {
+        if (config.pageToolServerUrls.includes(server)) credentials.push([server, token]);
+        if (credentials.length === MAX_TOOL_CREDENTIALS) break;
+      }
+      return credentials.length > 0 ? Object.fromEntries(credentials) : undefined;
+    } catch {
+      // A failed confirmation leaves the chat available without these tools.
+    }
+  }
+
+  async #postChat(body: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
+    const endpoint = this.#endpoint();
+    const toolCredentials =
+      body.assistant === this.#assistant() ? await this.#requestToolCredentials(signal) : undefined;
+    return fetch(`${endpoint}/v1/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(toolCredentials ? { ...body, toolCredentials } : body),
+      ...(toolCredentials ? { redirect: "error" } : {}),
+      signal,
+    });
   }
 
   /** Shows public config in the admin preview without requesting or storing anything. */
@@ -1802,17 +1859,15 @@ export class SolvChat extends HTMLElement {
       await this.#consumeStream(
         (session) => {
           const pageActions = listForRequest();
-          return fetch(`${this.#endpoint()}/v1/chat`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
+          return this.#postChat(
+            {
               ...requestBody,
               ...(session ? { session } : {}),
               // A site that registers no actions sends the phase 1 body.
               ...(pageActions.length > 0 ? { pageActions } : {}),
-            }),
+            },
             signal,
-          });
+          );
         },
         bubble,
         textEl,
@@ -2191,12 +2246,7 @@ export class SolvChat extends HTMLElement {
       requestBody.pageActions = pageActions;
     }
 
-    return fetch(`${this.#endpoint()}/v1/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(requestBody),
-      signal,
-    });
+    return this.#postChat(requestBody, signal);
   }
 
   /**

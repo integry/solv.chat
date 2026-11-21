@@ -1,5 +1,6 @@
 import type {
   AnswerOutcome,
+  McpAuthKind,
   OverviewAttention,
   OverviewPeriod,
   OverviewSetup,
@@ -8,6 +9,7 @@ import type {
   SourceKind,
   SourceSyncStatus,
   TestExpectation,
+  ToolCredentialSource,
   TopicItem,
   TopicsReport,
   VersionConfig,
@@ -344,7 +346,7 @@ export interface VisitorCheckStatus {
   missing: VisitorCheckMissing[];
 }
 
-export type McpAuthKind = "none" | "static_header";
+export type { McpAuthKind } from "@solvchat/core";
 
 export interface McpServerSummary {
   id: string;
@@ -354,6 +356,9 @@ export interface McpServerSummary {
   authKind: McpAuthKind;
   headerName: string | null;
   hasSecret: boolean;
+  credentialSource?: ToolCredentialSource;
+  pageHeaderName?: string;
+  hasTestSecret?: boolean;
   enabled: boolean;
   /**
    * "Send conversation context". Optional so a host serving an older engine,

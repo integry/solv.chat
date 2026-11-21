@@ -125,7 +125,7 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
   const [discardError, setDiscardError] = useState<string | null>(null);
 
   if (!snapshot) return null;
-  const { state, published } = snapshot;
+  const { state, draft, published } = snapshot;
   // Publishing sends the saved draft, so edits still open on the screen would
   // be left out; the owner saves them first, as the screen's own Publish asks.
   const { unsaved } = mutation;
@@ -165,10 +165,12 @@ export function PublishControls({ assistantId, showActions, refreshKey }: Publis
     try {
       // Saving the published config as the draft; screens reload on a "saving" mutation.
       const result = await mutation.run("saving", () =>
-        putJson<{ draft: VersionRow }>(
-          `/api/admin/assistants/${assistantId}/draft`,
-          published.config,
-        ),
+        putJson<{ draft: VersionRow }>(`/api/admin/assistants/${assistantId}/draft`, {
+          ...published.config,
+          pageToolServers:
+            published.config.pageToolServers ??
+            (draft?.config.pageToolServers?.length ? [] : undefined),
+        }),
       );
       if (!result.ran) return;
       setConfirmDiscard(false);

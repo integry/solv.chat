@@ -134,6 +134,90 @@ describe("admin MCP servers and tools API", () => {
     ]);
   });
 
+  it("lists page-supplied tools with one-time or encrypted test keys", async () => {
+    const testKey = "fake-stored-discovery-key";
+    const lookupKey = "fake-one-time-discovery-key";
+    const url = "https://tools.example.com/mcp";
+    const headers: Array<string | null> = [];
+    const remote = mcpFetch((method, id, req) => {
+      const credential = req.get("authorization");
+      if (method !== "tools/list" || !credential) return new Response(null, { status: 401 });
+      return Response.json({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          tools: [
+            { name: "look_up", description: "Get the order", inputSchema: { type: "object" } },
+            { name: "echo_key", description: credential, inputSchema: { type: "object" } },
+          ],
+        },
+      });
+    });
+    const app = appForOrg(ORG_A, (target, init) => {
+      headers.push(new Headers(init?.headers).get("authorization"));
+      return remote(target, init);
+    });
+    const assistantId = await createAssistant(app);
+    const addPath = `/api/admin/assistants/${assistantId}/mcp-servers`;
+    const created = await call(app, "POST", addPath, {
+      label: "Orders",
+      url,
+      credentialSource: "page",
+    });
+    expect(created.status).toBe(201);
+    const added = await created.json<{ server: { id: string }; refreshError: string }>();
+    expect(added.server).toMatchObject({
+      credentialSource: "page",
+      pageHeaderName: "Authorization",
+      hasTestSecret: false,
+    });
+    expect(added.refreshError).toMatch(/one-time key/);
+    expect(headers).toEqual([]);
+
+    const tenant = forPrincipal(env.DB, { orgId: ORG_A, userId: "owner", role: "owner" });
+    const serverPath = `/api/admin/mcp-servers/${added.server.id}`;
+    const refreshPath = `${serverPath}/refresh`;
+    expect((await call(app, "POST", refreshPath)).status).toBe(502);
+    expect(
+      (await call(app, "POST", refreshPath, { lookupKey, lookupUrl: `${url}/other` })).status,
+    ).toBe(409);
+    expect(headers).toEqual([]);
+    const refreshed = await call(app, "POST", refreshPath, { lookupKey, lookupUrl: url });
+    expect(refreshed.status).toBe(200);
+    const tools = await refreshed.json<{ tools: Array<{ name: string }> }>();
+    expect(tools.tools.map((tool) => tool.name)).toEqual(["look_up"]);
+    expect(headers).toEqual(Array(3).fill(`Bearer ${lookupKey}`));
+    expect(
+      (await tenant.mcp.readTargetWithSecretCiphertext(added.server.id))?.testSecretCiphertext,
+    ).toBeNull();
+
+    const saved = await call(app, "PATCH", serverPath, { testKey });
+    expect(saved.status).toBe(200);
+    const savedBody = await saved.text();
+    const snapshot = await tenant.mcp.readTargetWithSecretCiphertext(added.server.id);
+    if (!snapshot?.testSecretCiphertext) throw new Error("Missing encrypted test key");
+    expect(await openSecret(TEST_SECRET_KEY, snapshot.testSecretCiphertext)).toBe(testKey);
+    expect(savedBody).not.toContain(testKey);
+    expect(savedBody).not.toContain(snapshot.testSecretCiphertext);
+    expect((await call(app, "POST", refreshPath)).status).toBe(200);
+    expect(headers.slice(3)).toEqual(Array(3).fill(`Bearer ${testKey}`));
+
+    const addedWithKey = await call(app, "POST", addPath, {
+      label: "Other orders",
+      url: "https://tools.example.com/other",
+      credentialSource: "page",
+      testKey,
+    });
+    expect(addedWithKey.status).toBe(201);
+    expect(await addedWithKey.json()).toMatchObject({
+      server: { hasTestSecret: true },
+      tools: [{ name: "look_up" }],
+    });
+    expect(headers.slice(6)).toEqual(Array(3).fill(`Bearer ${testKey}`));
+    expect((await call(app, "PATCH", serverPath, { testKey: null })).status).toBe(200);
+    expect((await call(app, "POST", refreshPath)).status).toBe(502);
+  });
+
   it("creates a server, lists tools with allowed = false, and never exposes credential or ciphertext", async () => {
     const app = appForOrg(
       ORG_A,

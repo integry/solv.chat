@@ -136,6 +136,16 @@ export const VERSION_DIFF_FIELDS: readonly DiffField[] = [
     screen: "Widget",
     kind: "list",
   },
+  {
+    path: "pageToolServers",
+    label: "Servers that use visitor keys",
+    screen: "Tools",
+    kind: "list",
+    format: (value) => {
+      const server = value as NonNullable<VersionConfig["pageToolServers"]>[number];
+      return `${server.url} (${server.headerName}, ${server.serverId})`;
+    },
+  },
   { path: "allowedTools", label: "Tools visitors can use", screen: "Tools", kind: "list" },
   {
     path: "limits.dailyCostCapMicros",
@@ -195,8 +205,8 @@ function asText(value: unknown): string {
   return typeof value === "string" ? value : String(value);
 }
 
-function asList(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(asText) : [];
+function asList(value: unknown, format = asText): string[] {
+  return Array.isArray(value) ? value.map(format) : [];
 }
 
 function sameList(a: string[], b: string[]): boolean {
@@ -295,8 +305,8 @@ function diffField(field: DiffField, beforeRaw: unknown, afterRaw: unknown): Con
       return { ...base, kind: "secret", summary: secretSummary(beforeRaw, afterRaw) };
     }
     case "list": {
-      const before = asList(beforeRaw);
-      const after = asList(afterRaw);
+      const before = asList(beforeRaw, field.format);
+      const after = asList(afterRaw, field.format);
       if (sameList(before, after)) return null;
       const added = after.filter((item) => !before.includes(item));
       const removed = before.filter((item) => !after.includes(item));

@@ -1,5 +1,6 @@
 import { Errors, fail, ok, type Result } from "../result.js";
 import { isPlainObject, parseUrl, readTrimmedString } from "./shared.js";
+import { parseToolCredentials, type ToolCredentials } from "./toolCredentials.js";
 
 /**
  * The chat wire protocol version. The widget sends it on every request; the
@@ -85,6 +86,8 @@ export interface ChatRequest {
    * engine that runs the visitor check; absent otherwise.
    */
   session?: string;
+  /** Request-only MCP credentials keyed by HTTPS endpoint. */
+  toolCredentials?: ToolCredentials;
 }
 
 /**
@@ -328,6 +331,14 @@ export function parseChatRequest(value: unknown): Result<ChatRequest> {
   }
 
   const session = parseSessionField(value.session, errors);
+  const toolCredentials =
+    value.toolCredentials === undefined ? undefined : parseToolCredentials(value.toolCredentials);
+  if (toolCredentials === null) {
+    errors.add(
+      "toolCredentials",
+      "must contain up to 8 HTTPS endpoints with valid keys of up to 4096 characters",
+    );
+  }
 
   let conversationId: string | undefined;
   if (value.conversationId !== undefined) {
@@ -396,6 +407,7 @@ export function parseChatRequest(value: unknown): Result<ChatRequest> {
   if (actionResults !== undefined) result.actionResults = actionResults;
   if (resumeMessageId !== undefined) result.resumeMessageId = resumeMessageId;
   if (session !== undefined) result.session = session;
+  if (toolCredentials) result.toolCredentials = toolCredentials;
   return ok(result);
 }
 
