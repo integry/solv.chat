@@ -66,6 +66,21 @@ describe("Try it: links in the answer text", () => {
     expect(log.querySelector(".turn-citations")).toBeNull();
   });
 
+  it("keeps a code example literal and still links the source in the prose", async () => {
+    stubDraftChat([
+      "See [the guide](https://site.example/docs/links). Write a link like ",
+      "`[example](https://example.com)` or:\n\n```md\n[example](https://ex",
+      "ample.com)\n```\n",
+    ]);
+    const log = await ask("How do I write a link?");
+    const link = await within(log).findByRole("link", { name: "the guide" });
+    expect(link.getAttribute("href")).toBe("https://site.example/docs/links");
+    expect(within(log).getAllByRole("link")).toHaveLength(1);
+    expect(log.textContent).toContain(
+      "Write a link like `[example](https://example.com)` or:\n\n```md\n[example](https://example.com)\n```",
+    );
+  });
+
   it("does not turn the owner's own question into links", async () => {
     stubDraftChat(["Sure."]);
     const log = await ask("What is [this](https://site.example/x)?");
@@ -117,5 +132,47 @@ describe("InlineLinks", () => {
       "https://a.example/b",
     );
     expect(el.textContent).toBe("a \\\\b");
+  });
+
+  it("leaves links in code as written and links the prose around them", () => {
+    const code = [
+      "Inline `[a](https://a.example/a)` and ``[b](https://a.example/b) ` here``.",
+      "```\n[c](https://a.example/c)\n```",
+      "~~~~md\n[d](https://a.example/d)\n```\n[e](https://a.example/e)\n~~~~",
+      "    [f](https://a.example/f)",
+      "- A step:\n\n  ```\n  [g](https://a.example/g)\n  ```",
+      "> ```\n> [h](https://a.example/h)\n> ```",
+      "Unclosed `[i](https://a.example/i)",
+    ];
+    for (const text of code) {
+      const el = shown(text);
+      expect(within(el).queryByRole("link"), text).toBeNull();
+      expect(el.textContent).toBe(text);
+    }
+  });
+
+  it("links prose next to code, after a closed fence and with Windows line endings", () => {
+    const text = [
+      "Use `x` with [one](https://a.example/1).",
+      "```\r\n[code](https://a.example/c)\r\n```",
+      "Then [two](https://a.example/2) and `[not](https://a.example/n)`.",
+      "[a `flag` here](https://a.example/3)",
+    ].join("\r\n\r\n");
+    const el = shown(text);
+    expect(
+      within(el)
+        .getAllByRole("link")
+        .map((a) => a.getAttribute("href")),
+    ).toEqual(["https://a.example/1", "https://a.example/2", "https://a.example/3"]);
+    expect(el.textContent).toContain("```\r\n[code](https://a.example/c)\r\n```");
+    expect(el.textContent).toContain("`[not](https://a.example/n)`");
+    expect(within(el).getByRole("link", { name: "a `flag` here" })).toBeTruthy();
+  });
+
+  it("does not link a link whose address starts inside a code span", () => {
+    const text = "[a`](https://a.example/a)`";
+    const el = shown(text);
+    expect(within(el).queryByRole("link")).toBeNull();
+    expect(el.textContent).toBe(text);
   });
 });

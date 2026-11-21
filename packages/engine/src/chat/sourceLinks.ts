@@ -20,9 +20,10 @@
  * to a page already linked in the same paragraph is reduced too: at most one
  * link per source per paragraph.
  *
- * Code is left alone (an inline span, a fenced or indented block; found as
- * `citationMarkers.ts` finds it), and so is an escaped bracket (`\[`). A bare
- * marker such as `[1]` is left for `markerStripper`, which runs after this.
+ * Code is left alone (an inline span, a fenced or indented block; found by
+ * `proseRanges` from `@solvchat/core`, as for citation markers), and so is an
+ * escaped bracket (`\[`). A bare marker such as `[1]` is left for
+ * `markerStripper`, which runs after this.
  *
  * Streaming: a link is never sent half-written. From a "[" (or "![", or an
  * autolink's "<") that could still become a link, the stream is held until
@@ -32,7 +33,7 @@
  * ever stored or sent.
  */
 
-import { escapedAt, proseRanges } from "./citationMarkers.js";
+import { escapedAt, proseRanges } from "@solvchat/core";
 
 export interface LinkTargets {
   /** Source n's page address (at index n - 1), or null when it has no page. */
