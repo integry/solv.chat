@@ -297,6 +297,20 @@ describe("expanding to a side panel", () => {
     expect(q<HTMLButtonElement>(r, ".solv-launcher").hidden).toBe(false);
   });
 
+  it("keeps the floating layout from an older tab when the owner switches to side panel", async () => {
+    sessionStorage.setItem(
+      "solv-chat-open:pk_expand",
+      JSON.stringify({ conversationId: null, open: false, turns: [] }),
+    );
+    serveConfig({ widget: { opensAs: "side" } });
+    const el = mountWidget();
+    await flushAsync();
+
+    q<HTMLButtonElement>(shadow(el), ".solv-launcher").click();
+    expect(q<HTMLDivElement>(shadow(el), ".solv-panel").hidden).toBe(false);
+    expect(el.hasAttribute("data-layout")).toBe(false);
+  });
+
   it("preview() hides the control when the setting is off", () => {
     const el = document.createElement("solv-chat") as HTMLElement & {
       preview(config: unknown): void;

@@ -1,12 +1,8 @@
+import type { WidgetConfig } from "@solvchat/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 export interface WidgetPreviewConfig {
-  widget: {
-    title: string;
-    accentColor: string;
-    position: "left" | "right";
-    allowExpand: boolean;
-  };
+  widget: WidgetConfig;
   behaviour: { greeting: string; suggestedQuestions: string[] };
 }
 
@@ -34,6 +30,7 @@ const READY = "solv-preview-ready";
 export function WidgetPreview({ config }: WidgetPreviewProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [ready, setReady] = useState(false);
+  const [showPanel, setShowPanel] = useState(true);
 
   useEffect(() => {
     function onMessage(event: MessageEvent) {
@@ -49,11 +46,20 @@ export function WidgetPreview({ config }: WidgetPreviewProps) {
     if (!ready) return;
     // The frame has an opaque origin, so "*" is the only target that reaches it.
     // The values are the widget's public settings, which visitors see anyway.
-    frameRef.current?.contentWindow?.postMessage(JSON.parse(message), "*");
-  }, [ready, message]);
+    frameRef.current?.contentWindow?.postMessage({ ...JSON.parse(message), showPanel }, "*");
+  }, [ready, message, showPanel]);
 
   return (
     <figure className="widget-preview">
+      <div>
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={() => setShowPanel(!showPanel)}
+        >
+          {showPanel ? "Preview launcher" : "Preview open chat"}
+        </button>
+      </div>
       <iframe
         ref={frameRef}
         className="widget-preview-frame"

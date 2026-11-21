@@ -2,8 +2,10 @@ import {
   type ActionsConfig,
   CONFIG_LIMITS,
   checkOrigin,
+  defaultVersionConfig,
+  WIDGET_OPEN_MODE_LABELS,
+  WIDGET_SHORTCUT_LABELS,
   type WidgetConfig,
-  type WidgetPosition,
 } from "@solvchat/core";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, patchJson, putJson } from "../api/client.js";
@@ -77,13 +79,30 @@ function LineProblems({ id, problems }: { id: string; problems: LineProblem[] })
   );
 }
 
+const widgetFields = Object.keys(defaultVersionConfig().widget) as (keyof WidgetConfig)[];
+
 function widgetEqual(a: WidgetConfig, b: WidgetConfig): boolean {
-  return (
-    a.title === b.title &&
-    a.accentColor === b.accentColor &&
-    a.position === b.position &&
-    a.allowExpand === b.allowExpand
-  );
+  return widgetFields.every((field) => a[field] === b[field]);
+}
+
+// Keep any field edited while a save, publish or reload was in flight.
+function syncWidget(
+  current: WidgetConfig,
+  saved: WidgetConfig,
+  snapshot?: WidgetConfig,
+): WidgetConfig {
+  if (!snapshot) return saved;
+  const next = { ...current };
+  for (const field of widgetFields) {
+    if (current[field] === snapshot[field]) Object.assign(next, { [field]: saved[field] });
+  }
+  return next;
+}
+
+interface WidgetEdits {
+  widget: WidgetConfig;
+  builtins: boolean;
+  actionOriginsText: string;
 }
 
 function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
@@ -114,10 +133,13 @@ export function Widget({ assistantId }: WidgetProps) {
   const savedWidget = draftRes.value?.draft.config.widget;
   const savedActions = draftRes.value?.draft.config.actions;
 
-  const [title, setTitle] = useState("");
-  const [accentColor, setAccentColor] = useState("#2563eb");
-  const [position, setPosition] = useState<WidgetPosition>("right");
-  const [allowExpand, setAllowExpand] = useState(true);
+  const [currentWidget, setCurrentWidget] = useState(() => defaultVersionConfig().widget);
+  const { title, accentColor, position, allowExpand, opensAs, launcherLabel, keyboardShortcut } =
+    currentWidget;
+  function setWidgetField<K extends keyof WidgetConfig>(field: K, value: WidgetConfig[K]) {
+    setCurrentWidget((widget) => ({ ...widget, [field]: value }));
+  }
+
   const [originsText, setOriginsText] = useState("");
   const [builtins, setBuiltins] = useState(false);
   const [actionOriginsText, setActionOriginsText] = useState("");
@@ -138,38 +160,16 @@ export function Widget({ assistantId }: WidgetProps) {
   const mutation = useAssistantMutation(assistantId);
   const { saving, publishing, busy } = mutation;
 
-  const latestRef = useRef({
-    title,
-    accentColor,
-    position,
-    allowExpand,
-    originsText,
-    builtins,
-    actionOriginsText,
-  });
-  latestRef.current = {
-    title,
-    accentColor,
-    position,
-    allowExpand,
-    originsText,
-    builtins,
-    actionOriginsText,
-  };
+  const edits = { widget: currentWidget, builtins, actionOriginsText };
+  const latestRef = useRef({ ...edits, originsText });
+  latestRef.current = { ...edits, originsText };
   const savedDraftRef = useRef({ widget: savedWidget, actions: savedActions });
   savedDraftRef.current = { widget: savedWidget, actions: savedActions };
   const lastTickRef = useRef(mutation.tick);
   const ignoreNextTickRef = useRef(false);
   const syncWidgetOnLoadRef = useRef(false);
   const syncOriginsOnLoadRef = useRef(false);
-  const syncWidgetSnapshotRef = useRef<{
-    title: string;
-    accentColor: string;
-    position: WidgetPosition;
-    allowExpand: boolean;
-    builtins: boolean;
-    actionOriginsText: string;
-  } | null>(null);
+  const syncWidgetSnapshotRef = useRef<WidgetEdits | null>(null);
   const syncOriginsSnapshotRef = useRef<string | null>(null);
   const prevSavedWidgetRef = useRef<WidgetConfig | undefined>(undefined);
   const prevSavedActionsRef = useRef<ActionsConfig | undefined>(undefined);
@@ -179,14 +179,7 @@ export function Widget({ assistantId }: WidgetProps) {
   // field changed while the publish was in flight keeps its edit.
   const publishSnapshotRef = useRef<{
     assistantId: string;
-    fields: {
-      title: string;
-      accentColor: string;
-      position: WidgetPosition;
-      allowExpand: boolean;
-      builtins: boolean;
-      actionOriginsText: string;
-    };
+    fields: WidgetEdits;
   } | null>(null);
 
   useEffect(() => {
@@ -211,10 +204,7 @@ export function Widget({ assistantId }: WidgetProps) {
         publishSnapshotRef.current = {
           assistantId,
           fields: {
-            title: widget.title,
-            accentColor: widget.accentColor,
-            position: widget.position,
-            allowExpand: widget.allowExpand,
+            widget,
             builtins: actions.builtins,
             actionOriginsText: actionOriginsSame
               ? latest.actionOriginsText
@@ -230,14 +220,7 @@ export function Widget({ assistantId }: WidgetProps) {
       return;
     }
     if (!syncWidgetOnLoadRef.current) {
-      syncWidgetSnapshotRef.current = {
-        title: latestRef.current.title,
-        accentColor: latestRef.current.accentColor,
-        position: latestRef.current.position,
-        allowExpand: latestRef.current.allowExpand,
-        builtins: latestRef.current.builtins,
-        actionOriginsText: latestRef.current.actionOriginsText,
-      };
+      syncWidgetSnapshotRef.current = latestRef.current;
       syncWidgetOnLoadRef.current = true;
     }
     if (!syncOriginsOnLoadRef.current) {
@@ -266,14 +249,7 @@ export function Widget({ assistantId }: WidgetProps) {
       const keep =
         published !== null && published.assistantId === assistantId ? published.fields : null;
       const latest = latestRef.current;
-      if (!keep || latest.title === keep.title) setTitle(savedWidget.title);
-      if (!keep || latest.accentColor === keep.accentColor) {
-        setAccentColor(savedWidget.accentColor);
-      }
-      if (!keep || latest.position === keep.position) setPosition(savedWidget.position);
-      if (!keep || latest.allowExpand === keep.allowExpand) {
-        setAllowExpand(savedWidget.allowExpand);
-      }
+      setCurrentWidget((current) => syncWidget(current, savedWidget, keep?.widget));
       if (!keep || latest.builtins === keep.builtins) setBuiltins(savedActions.builtins);
       if (!keep || latest.actionOriginsText === keep.actionOriginsText) {
         setActionOriginsText(savedActionOrigins);
@@ -294,18 +270,7 @@ export function Widget({ assistantId }: WidgetProps) {
       syncWidgetSnapshotRef.current = null;
       prevSavedWidgetRef.current = savedWidget;
       prevSavedActionsRef.current = savedActions;
-      if (!snapshot || latestRef.current.title === snapshot.title) {
-        setTitle(savedWidget.title);
-      }
-      if (!snapshot || latestRef.current.accentColor === snapshot.accentColor) {
-        setAccentColor(savedWidget.accentColor);
-      }
-      if (!snapshot || latestRef.current.position === snapshot.position) {
-        setPosition(savedWidget.position);
-      }
-      if (!snapshot || latestRef.current.allowExpand === snapshot.allowExpand) {
-        setAllowExpand(savedWidget.allowExpand);
-      }
+      setCurrentWidget((current) => syncWidget(current, savedWidget, snapshot?.widget));
       if (!snapshot || latestRef.current.builtins === snapshot.builtins) {
         setBuiltins(savedActions.builtins);
       }
@@ -339,7 +304,6 @@ export function Widget({ assistantId }: WidgetProps) {
     }
   }, [assistantId, initOriginsKey, savedAssistant]);
 
-  const currentWidget: WidgetConfig = { title, accentColor, position, allowExpand };
   const currentOrigins = parseOrigins(originsText);
   const currentActions: ActionsConfig = {
     builtins,
@@ -363,17 +327,18 @@ export function Widget({ assistantId }: WidgetProps) {
   const previewConfig = useMemo(
     () => ({
       widget: {
-        title: title.trim() || "Ask a question",
-        accentColor: HEX_COLOUR.test(accentColor.trim()) ? accentColor.trim() : "#2563eb",
-        position,
-        allowExpand,
+        ...currentWidget,
+        title: currentWidget.title.trim() || "Ask a question",
+        accentColor: HEX_COLOUR.test(currentWidget.accentColor.trim())
+          ? currentWidget.accentColor.trim()
+          : "#2563eb",
       },
       behaviour: {
         greeting: savedBehaviour?.greeting ?? "",
         suggestedQuestions: savedBehaviour?.suggestedQuestions ?? [],
       },
     }),
-    [title, accentColor, position, allowExpand, savedBehaviour],
+    [currentWidget, savedBehaviour],
   );
   const originProblems = checkOriginLines(originsText);
   const actionOriginProblems = checkOriginLines(actionOriginsText);
@@ -424,7 +389,7 @@ export function Widget({ assistantId }: WidgetProps) {
     setFailedRun(null);
 
     const submittedOriginsText = originsText;
-    const submittedWidget = { title, accentColor, position, allowExpand };
+    const submittedWidget = currentWidget;
     const submittedActions = { builtins, actionOriginsText };
     const nextFieldErrors: Record<string, string> = {};
     let generalError: string | null = null;
@@ -460,18 +425,9 @@ export function Widget({ assistantId }: WidgetProps) {
             body,
           );
           draftRes.setValue(res);
-          if (latestRef.current.title === submittedWidget.title) {
-            setTitle(res.draft.config.widget.title);
-          }
-          if (latestRef.current.accentColor === submittedWidget.accentColor) {
-            setAccentColor(res.draft.config.widget.accentColor);
-          }
-          if (latestRef.current.position === submittedWidget.position) {
-            setPosition(res.draft.config.widget.position);
-          }
-          if (latestRef.current.allowExpand === submittedWidget.allowExpand) {
-            setAllowExpand(res.draft.config.widget.allowExpand);
-          }
+          setCurrentWidget((current) =>
+            syncWidget(current, res.draft.config.widget, submittedWidget),
+          );
           if (latestRef.current.builtins === submittedActions.builtins) {
             setBuiltins(res.draft.config.actions.builtins);
           }
@@ -508,25 +464,7 @@ export function Widget({ assistantId }: WidgetProps) {
     if (busy || unsaved) return;
     setFormError(null);
     setFailedRun(null);
-    const {
-      title: t,
-      accentColor: a,
-      position: p,
-      allowExpand: x,
-      builtins: b,
-      actionOriginsText: ao,
-    } = latestRef.current;
-    const snapshot = {
-      assistantId,
-      fields: {
-        title: t,
-        accentColor: a,
-        position: p,
-        allowExpand: x,
-        builtins: b,
-        actionOriginsText: ao,
-      },
-    };
+    const snapshot = { assistantId, fields: edits };
     try {
       await mutation.run("publishing", async () => {
         const res = await publishAssistant(assistantId, force, runId, confirmed);
@@ -619,13 +557,66 @@ export function Widget({ assistantId }: WidgetProps) {
                   type="text"
                   value={title}
                   aria-describedby="widget-title-count"
-                  onChange={(e) => setTitle(e.target.value)}
+                  onChange={(e) => setWidgetField("title", e.target.value)}
                   disabled={saving}
                 />
                 <CharCount id="widget-title-count" value={title} max={CONFIG_LIMITS.title} />
                 {fieldErrors["widget.title"] && (
                   <p className="field-error" role="alert">
                     {fieldErrors["widget.title"]}
+                  </p>
+                )}
+              </div>
+
+              <div className="field">
+                <label htmlFor="widget-launcher-label">Launcher label</label>
+                <input
+                  id="widget-launcher-label"
+                  type="text"
+                  required
+                  maxLength={CONFIG_LIMITS.launcherLabel}
+                  value={launcherLabel}
+                  onChange={(e) => setWidgetField("launcherLabel", e.target.value)}
+                  disabled={saving}
+                  aria-describedby="widget-launcher-label-hint"
+                />
+                <span id="widget-launcher-label-hint" className="field-hint">
+                  Text on the chat button. Use 1 to 24 characters.
+                </span>
+                {fieldErrors["widget.launcherLabel"] && (
+                  <p className="field-error" role="alert">
+                    {fieldErrors["widget.launcherLabel"]}
+                  </p>
+                )}
+              </div>
+
+              <div className="field">
+                <label htmlFor="widget-shortcut">Keyboard shortcut</label>
+                <select
+                  id="widget-shortcut"
+                  className="select"
+                  value={keyboardShortcut}
+                  onChange={(e) =>
+                    setWidgetField(
+                      "keyboardShortcut",
+                      e.target.value as WidgetConfig["keyboardShortcut"],
+                    )
+                  }
+                  disabled={saving}
+                  aria-describedby="widget-shortcut-hint"
+                >
+                  {Object.entries(WIDGET_SHORTCUT_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+                <span id="widget-shortcut-hint" className="field-hint">
+                  Lets visitors open the chat and start typing from the keyboard.
+                </span>
+                {fieldErrors["widget.keyboardShortcut"] && (
+                  <p className="field-error" role="alert">
+                    {fieldErrors["widget.keyboardShortcut"]}
                   </p>
                 )}
               </div>
@@ -638,14 +629,14 @@ export function Widget({ assistantId }: WidgetProps) {
                     className="color-picker"
                     aria-label="Pick accent colour"
                     value={HEX_COLOUR.test(accentColor) ? accentColor.toLowerCase() : "#2563eb"}
-                    onChange={(e) => setAccentColor(e.target.value)}
+                    onChange={(e) => setWidgetField("accentColor", e.target.value)}
                     disabled={saving}
                   />
                   <input
                     id="widget-accent"
                     type="text"
                     value={accentColor}
-                    onChange={(e) => setAccentColor(e.target.value)}
+                    onChange={(e) => setWidgetField("accentColor", e.target.value)}
                     placeholder="#2563eb"
                     aria-describedby="widget-accent-hint"
                     spellCheck={false}
@@ -675,7 +666,9 @@ export function Widget({ assistantId }: WidgetProps) {
                   id="widget-position"
                   className="select"
                   value={position}
-                  onChange={(e) => setPosition(e.target.value as WidgetPosition)}
+                  onChange={(e) =>
+                    setWidgetField("position", e.target.value as WidgetConfig["position"])
+                  }
                   disabled={saving}
                 >
                   <option value="right">Bottom right</option>
@@ -695,7 +688,7 @@ export function Widget({ assistantId }: WidgetProps) {
                     checked={allowExpand}
                     disabled={saving}
                     aria-describedby="widget-expand-hint"
-                    onChange={(e) => setAllowExpand(e.target.checked)}
+                    onChange={(e) => setWidgetField("allowExpand", e.target.checked)}
                   />
                   <span>Allow expanding to a side panel</span>
                 </label>
@@ -709,6 +702,36 @@ export function Widget({ assistantId }: WidgetProps) {
                 {fieldErrors["widget.allowExpand"] && (
                   <p className="field-error" role="alert">
                     {fieldErrors["widget.allowExpand"]}
+                  </p>
+                )}
+              </div>
+
+              <div className="field">
+                <label htmlFor="widget-opens-as">Opens as</label>
+                <select
+                  id="widget-opens-as"
+                  className="select"
+                  value={allowExpand ? opensAs : "panel"}
+                  onChange={(e) =>
+                    setWidgetField("opensAs", e.target.value as WidgetConfig["opensAs"])
+                  }
+                  disabled={saving || !allowExpand}
+                  aria-describedby="widget-opens-as-hint"
+                >
+                  {Object.entries(WIDGET_OPEN_MODE_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+                <span id="widget-opens-as-hint" className="field-hint">
+                  {allowExpand
+                    ? "The side panel opens beside the page on wide screens. Visitors can switch views."
+                    : "Turn on Allow expanding to a side panel to choose how the chat opens."}
+                </span>
+                {fieldErrors["widget.opensAs"] && (
+                  <p className="field-error" role="alert">
+                    {fieldErrors["widget.opensAs"]}
                   </p>
                 )}
               </div>

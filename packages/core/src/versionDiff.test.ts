@@ -61,6 +61,9 @@ describe("version diff field table", () => {
       c.widget.accentColor = "#ff0000";
       c.widget.position = "left";
       c.widget.allowExpand = false;
+      c.widget.opensAs = "side";
+      c.widget.launcherLabel = "Ask the docs";
+      c.widget.keyboardShortcut = "mod-k";
       c.actions.builtins = true;
       c.actions.allowedOrigins = ["https://shop.example.com"];
       c.allowedTools = ["search"];
@@ -108,11 +111,15 @@ describe("diffVersionConfigs", () => {
       defaultVersionConfig(),
       config((c) => {
         c.widget.position = "left";
+        c.widget.opensAs = "side";
+        c.widget.keyboardShortcut = "mod-k";
         c.limits.dailyCostCapMicros = 0;
       }),
     );
     expect(changes.map((c) => ("before" in c ? [c.before, c.after] : null))).toEqual([
       ["Bottom right", "Bottom left"],
+      ["Floating panel", "Side panel"],
+      ["None", "Ctrl/⌘ K"],
       ["$2.00 a day", "No cap"],
     ]);
   });

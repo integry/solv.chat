@@ -283,6 +283,46 @@ describe("Publish confirmation", () => {
     ).toEqual(["Behaviour"]);
   });
 
+  it("shows the launcher label, opening mode and shortcut in Publish and History", async () => {
+    const edited = config((c) => {
+      c.widget.opensAs = "side";
+      c.widget.launcherLabel = "Ask the docs";
+      c.widget.keyboardShortcut = "mod-k";
+    });
+    stubVersions([
+      row("ver_draft", "draft", edited, null, 1_700_000_300_000),
+      row("ver_live", "published", LIVE, 1_700_000_200_000),
+    ]);
+    render(
+      <PublishConfirmDialog assistantId="ast_1" open onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    const dialog = screen.getByRole("dialog");
+    await within(dialog).findByText("Opens as");
+    const changes = [
+      ["Opens as", "Floating panel", "Side panel"],
+      ["Launcher label", "Chat", "Ask the docs"],
+      ["Keyboard shortcut", "None", "Ctrl/⌘ K"],
+    ] as const;
+    for (const [label, before, after] of changes) {
+      expect(within(dialog).getByText(label).closest("li")?.textContent).toBe(
+        `${label}Was${before}Now${after}`,
+      );
+    }
+
+    cleanup();
+    render(<History assistantId="ast_1" />);
+    const summary = await screen.findByText(
+      "3 changes: opens as, launcher label, keyboard shortcut",
+    );
+    const draft = summary.closest(".history-item") as HTMLElement;
+    fireEvent.click(within(draft).getByRole("button", { name: "Show changes" }));
+    for (const [label, before, after] of changes) {
+      expect(within(draft).getByText(label).closest("li")?.textContent).toBe(
+        `${label}Was${before}Now${after}`,
+      );
+    }
+  });
+
   it("shows a change of Show sources in answers in History", async () => {
     const before = config((c) => {
       c.behaviour.sources = "none";

@@ -6,7 +6,8 @@
   let latest = null;
   const show = () => {
     const el = document.querySelector("solv-chat");
-    if (latest !== null && el && typeof el.preview === "function") el.preview(latest);
+    if (latest !== null && el && typeof el.preview === "function")
+      el.preview(latest, latest.showPanel);
   };
   addEventListener("message", (event) => {
     if (event.source !== parent) return;

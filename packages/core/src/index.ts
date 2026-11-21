@@ -107,8 +107,12 @@ export {
   SOURCES_MODES,
   type SourcesMode,
   type VersionConfig,
+  WIDGET_OPEN_MODE_LABELS,
+  WIDGET_SHORTCUT_LABELS,
   type WidgetConfig,
+  type WidgetOpenMode,
   type WidgetPosition,
+  type WidgetShortcut,
 } from "./schemas/versionConfig.js";
 export {
   MAX_TURNSTILE_TOKEN_LENGTH,

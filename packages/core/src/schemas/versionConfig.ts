@@ -3,6 +3,18 @@ import { parseOriginValue } from "./assistant.js";
 import { isPlainObject, readTrimmedString } from "./shared.js";
 
 export type WidgetPosition = "left" | "right";
+export type WidgetOpenMode = "panel" | "side";
+export type WidgetShortcut = "none" | "/" | "mod-k";
+
+export const WIDGET_OPEN_MODE_LABELS: Record<WidgetOpenMode, string> = {
+  panel: "Floating panel",
+  side: "Side panel",
+};
+export const WIDGET_SHORTCUT_LABELS: Record<WidgetShortcut, string> = {
+  none: "None",
+  "/": "/",
+  "mod-k": "Ctrl/⌘ K",
+};
 
 /**
  * How an answer shows the pages it came from ("Show sources in answers"):
@@ -44,6 +56,9 @@ export interface WidgetConfig {
    * Off: the control is not shown.
    */
   allowExpand: boolean;
+  opensAs: WidgetOpenMode;
+  launcherLabel: string;
+  keyboardShortcut: WidgetShortcut;
 }
 
 export interface LimitsConfig {
@@ -81,6 +96,7 @@ export const CONFIG_LIMITS = {
   suggestedQuestion: 200,
   suggestedQuestions: 6,
   title: 80,
+  launcherLabel: 24,
 } as const;
 
 const MAX_SUGGESTED_QUESTIONS = CONFIG_LIMITS.suggestedQuestions;
@@ -104,6 +120,9 @@ export const defaultVersionConfig = (): VersionConfig => ({
     position: "right",
     // On, so an assistant stored before the setting existed gets the control.
     allowExpand: true,
+    opensAs: "panel",
+    launcherLabel: "Chat",
+    keyboardShortcut: "none",
   },
   // 0 means no cap, so an owner who never sets one is not locked out.
   limits: { dailyCostCapMicros: 2_000_000 },
@@ -209,6 +228,29 @@ function parseWidgetSection(raw: unknown, target: WidgetConfig, errors: Errors):
       errors.add("widget.allowExpand", "must be true or false");
     } else {
       target.allowExpand = raw.allowExpand;
+    }
+  }
+  if (raw.opensAs !== undefined) {
+    if (raw.opensAs === "panel" || raw.opensAs === "side") {
+      target.opensAs = raw.opensAs;
+    } else {
+      errors.add("widget.opensAs", 'must be "panel" or "side"');
+    }
+  }
+  if (raw.launcherLabel !== undefined) {
+    const label = readTrimmedString(raw.launcherLabel, 1, CONFIG_LIMITS.launcherLabel);
+    if (label === null) errors.add("widget.launcherLabel", "must be 1 to 24 characters");
+    else target.launcherLabel = label;
+  }
+  if (raw.keyboardShortcut !== undefined) {
+    if (
+      raw.keyboardShortcut === "none" ||
+      raw.keyboardShortcut === "/" ||
+      raw.keyboardShortcut === "mod-k"
+    ) {
+      target.keyboardShortcut = raw.keyboardShortcut;
+    } else {
+      errors.add("widget.keyboardShortcut", 'must be "none", "/" or "mod-k"');
     }
   }
 }

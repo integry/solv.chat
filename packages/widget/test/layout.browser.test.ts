@@ -11,7 +11,7 @@ import type { AddressInfo } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { type Browser, findChrome, launch, waitFor } from "./support/chromium.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -50,6 +50,10 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   let position: "left" | "right" = "right";
   /** The next answer starts with a tool round (searching) before its text. */
   let toolFirst = false;
+  let widgetOptions: Record<string, unknown> = {};
+  let visitorCheck = false;
+  let configGate: Promise<void> | null = null;
+  const engineRequests: string[] = [];
 
   const engineOrigin = () => `http://127.0.0.1:${enginePort}`;
   const hostOrigin = () => `http://127.0.0.1:${hostPort}`;
@@ -64,6 +68,39 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
 <script src="${engineOrigin()}/widget.js"></script>
 <solv-chat assistant="pk_layout"></solv-chat></body></html>`;
 
+  const hostControls = () => `<!doctype html>
+<html lang="en"><head><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fieldnotes API documentation</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.65 system-ui, sans-serif; color: #17253b; background: #f8fafc; }
+  header { background: #fff; border-bottom: 1px solid #dce4ef; }
+  header > div, main { width: min(100% - 48px, 680px); margin: auto; }
+  header > div { padding: 16px 0; display: flex; align-items: center; justify-content: space-between; }
+  main { padding: 40px 0; }
+  h1 { font-size: clamp(1.75rem, 4vw, 2.5rem); line-height: 1.15; margin: 0 0 12px; }
+  h2 { margin: 30px 0 0; font-size: 1.15rem; }
+  p { margin: 8px 0 16px; color: #415471; }
+  pre { background: #eaf0f8; border-radius: 8px; padding: 14px; overflow: auto; }
+  button, input { font: inherit; color: inherit; border: 1px solid #bacbe0; background: #fff; border-radius: 6px; padding: 5px 12px; }
+</style>
+</head><body>
+<header><div><strong>Fieldnotes API</strong><button id="host-ask" type="button">Ask</button></div></header>
+<main>
+  <h1>Search your documents</h1>
+  <p>Use the Search API to find matching documents across a workspace.</p>
+  <label for="host-input">Search the docs</label>
+  <input id="host-input" type="search">
+  <h2>Make a request</h2>
+  <p>Send the query as a URL parameter. Use the cursor from the response to load the next page.</p>
+  <pre>GET /v1/documents/search?q=release+notes</pre>
+  <h2>Read the results</h2>
+  <p>Each match includes the document title, its URL and a short excerpt.</p>
+</main>
+<script src="${engineOrigin()}/widget.js"></script>
+<solv-chat assistant="pk_layout"></solv-chat>
+</body></html>`;
+
   beforeAll(async () => {
     const bundle = await build({
       entryPoints: [resolve(ROOT, "src/widget.ts")],
@@ -76,6 +113,10 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
 
     const host = createServer((req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? "/", "http://x");
+      if (url.pathname === "/host-controls") {
+        res.writeHead(200, { "content-type": "text/html" }).end(hostControls());
+        return;
+      }
       if (url.pathname === "/" || url.pathname === "/other") {
         res.writeHead(200, { "content-type": "text/html" });
         res.end(page(url.searchParams.get("style") ?? "", url.searchParams.get("css") ?? ""));
@@ -85,6 +126,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     });
     const engine = createServer((req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? "/", "http://x");
+      engineRequests.push(url.pathname);
       const cors = {
         "access-control-allow-origin": hostOrigin(),
         "access-control-allow-headers": "content-type",
@@ -102,12 +144,13 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       }
       if (url.pathname === "/v1/assistants/pk_layout") {
         res.writeHead(200, { "content-type": "application/json", ...cors });
-        res.end(
-          JSON.stringify({
-            widget: { title: "Docs", position },
-            behaviour: { greeting: "Hi", suggestedQuestions: [] },
-          }),
-        );
+        const config = JSON.stringify({
+          widget: { title: "Docs", position, ...widgetOptions },
+          behaviour: { greeting: "Hi", suggestedQuestions: [] },
+          visitorCheck,
+        });
+        if (configGate) void configGate.then(() => res.end(config));
+        else res.end(config);
         return;
       }
       if (url.pathname === "/v1/chat" && req.method === "POST") {
@@ -146,6 +189,11 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     browser = await launch(chrome as string);
   }, 90_000);
 
+  afterEach(() => {
+    widgetOptions = {};
+    visitorCheck = false;
+  });
+
   afterAll(async () => {
     await browser?.close();
     for (const server of servers) server.close();
@@ -165,7 +213,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     });
   }
 
-  async function open(path = "/", fresh = true): Promise<void> {
+  async function open(path = "/", fresh = true, waitForConfig = true): Promise<void> {
     await browser.cdp.evaluate(
       `(() => { window.__leaving = true; ${fresh ? "try { sessionStorage.clear(); } catch {}" : ""} })()`,
     );
@@ -179,6 +227,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       "widget",
     );
     // The config has arrived when the title shows it.
+    if (!waitForConfig) return;
     await waitFor(
       async () => (await q<string>(`r.querySelector(".solv-title").textContent`)) === "Docs",
       "config",
@@ -192,6 +241,319 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   const page_ = <T>(expr: string) => browser.cdp.evaluate<T>(`(() => ${expr})()`);
   const noSidewaysScroll = () =>
     page_<boolean>("document.documentElement.scrollWidth <= document.documentElement.clientWidth");
+
+  const panelHidden = () => q<boolean>('r.querySelector(".solv-panel").hidden');
+  const layout = () => q<string | null>('el.getAttribute("data-layout")');
+  const focus = () => q<string | null>("r.activeElement?.id ?? null");
+
+  async function click(selector: string, shadow = false) {
+    const bounds = shadow
+      ? await rect(selector)
+      : await page_<{ left: number; top: number; width: number; height: number }>(
+          `document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect().toJSON()`,
+        );
+    const x = bounds.left + bounds.width / 2;
+    const y = bounds.top + bounds.height / 2;
+    await browser.cdp.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      button: "left",
+      x,
+      y,
+      clickCount: 1,
+    });
+    await browser.cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      button: "left",
+      x,
+      y,
+      clickCount: 1,
+    });
+  }
+
+  async function keypress(key: string, code: string, modifiers = 0) {
+    await browser.cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key, code, modifiers });
+    await browser.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, code, modifiers });
+  }
+
+  for (const mode of ["panel", "side"] as const) {
+    it(`stays closed on first load in ${mode} mode, including a tab with copied storage`, async () => {
+      widgetOptions = { opensAs: mode };
+      visitorCheck = true;
+      engineRequests.length = 0;
+      await viewport(1280, 800);
+      await open("/host-controls");
+      expect(await panelHidden()).toBe(true);
+      expect(await page_<number>("sessionStorage.length + localStorage.length")).toBe(0);
+      expect(engineRequests).toEqual(["/widget.js", "/v1/assistants/pk_layout"]);
+
+      // Runtime.evaluate does not grant activation. Opening via the API or
+      // clicking a declarative trigger programmatically cannot write anything.
+      expect(
+        await q<boolean>(`(async () => {
+          const ask = document.querySelector("#host-ask");
+          ask.dataset.solvChatOpen = "side";
+          ask.click();
+          await el.open({ mode: "side" });
+          await el.close();
+          await el.toggle();
+          return r.querySelector(".solv-panel").hidden;
+        })()`),
+      ).toBe(true);
+      expect(await page_<number>("sessionStorage.length + localStorage.length")).toBe(0);
+      expect(engineRequests).toHaveLength(2);
+
+      await click(".solv-launcher", true);
+      expect(await panelHidden()).toBe(false);
+      expect(await layout()).toBe(mode === "side" ? "side" : null);
+      await open("/host-controls?next", false);
+      expect(await panelHidden()).toBe(false);
+
+      const popupState = () =>
+        browser.cdp.evaluate<{
+          hidden: boolean;
+          storage: Record<string, unknown>;
+        } | null>(`(() => {
+        const popup = window.widgetPopup;
+        const widget = popup?.document.querySelector("solv-chat");
+        if (widget?.shadowRoot.querySelector(".solv-title").textContent !== "Docs") return null;
+        return {
+          hidden: widget.shadowRoot.querySelector(".solv-panel").hidden,
+          storage: JSON.parse(popup.sessionStorage.getItem("solv-chat-open:pk_layout")),
+        };
+      })()`);
+      try {
+        await page_(`(() => {
+          const ask = document.querySelector("#host-ask");
+          ask.style.cssText = "position:fixed;left:20px;top:16px";
+          ask.onclick = () => {
+            window.widgetPopup = window.open("${hostOrigin()}/host-controls");
+          };
+        })()`);
+        await click("#host-ask");
+        const copied = await waitFor(popupState, "assistant in a new tab");
+        expect(copied.hidden).toBe(true);
+        expect(copied.storage).toMatchObject({ open: true });
+        expect(copied.storage).toEqual(
+          await page_('JSON.parse(sessionStorage.getItem("solv-chat-open:pk_layout"))'),
+        );
+      } finally {
+        await page_("window.widgetPopup?.close()");
+        await browser.cdp.send("Page.bringToFront");
+      }
+      await click(".solv-close", true);
+      await open("/host-controls", false);
+      expect(await panelHidden()).toBe(true);
+    }, 15_000);
+  }
+
+  it("opens the configured side panel on desktop and remembers a collapse across navigation", async () => {
+    widgetOptions = { opensAs: "side" };
+    await viewport(1280, 800);
+    await open("/host-controls");
+    await click(".solv-launcher", true);
+    expect(await layout()).toBe("side");
+    await click(".solv-collapse", true);
+    expect(await layout()).toBeNull();
+    await click(".solv-close", true);
+    await open("/other", false);
+    await click(".solv-launcher", true);
+    expect(await panelHidden()).toBe(false);
+    expect(await layout()).toBeNull();
+
+    await viewport(380, 700);
+    await open("/host-controls");
+    await click(".solv-launcher", true);
+    expect(await panelHidden()).toBe(false);
+    expect(await layout()).toBeNull();
+
+    widgetOptions.allowExpand = false;
+    await viewport(1280, 800);
+    await open("/host-controls");
+    await click(".solv-launcher", true);
+    expect(await panelHidden()).toBe(false);
+    expect(await layout()).toBeNull();
+    expect(await q<boolean>('r.querySelector(".solv-expand") === null')).toBe(true);
+  });
+
+  it("opens from a real host click after config, supports API options and emits composed events", async () => {
+    widgetOptions = { opensAs: "side", launcherLabel: "Ask the docs", keyboardShortcut: "mod-k" };
+    await viewport(1280, 800);
+    await open("/host-controls");
+    await browser.cdp.evaluate(`(() => {
+      const widget = document.querySelector("solv-chat");
+      window.widgetEvents = [];
+      for (const action of ["open", "close", "expand", "collapse"]) {
+        document.addEventListener("solv-chat:" + action, e => {
+          window.widgetEvents.push([action, e.bubbles, e.composed, e.detail ?? null, e.target === widget]);
+        });
+      }
+
+      // A host control added after the page and widget have loaded.
+      const trigger = document.querySelector("#host-ask").cloneNode();
+      trigger.id = "late-ask";
+      trigger.setAttribute("data-solv-chat-open", "");
+      trigger.innerHTML = "<span>Ask</span>";
+      document.querySelector("#host-ask").replaceWith(trigger);
+    })()`);
+    await click("#late-ask span");
+    expect(await layout()).toBe("side");
+    expect(await focus()).toBe("solv-input");
+    await click(".solv-collapse", true);
+    await q("el.close()");
+    expect(await panelHidden()).toBe(true);
+
+    await q(`(() => {
+      const trigger = document.querySelector("#late-ask");
+      trigger.removeAttribute("data-solv-chat-open");
+      trigger.onclick = () => { window.widgetAction = el.open({ mode: "side", focus: false }); };
+    })()`);
+    await click("#late-ask");
+    await page_("window.widgetAction");
+    expect(await layout()).toBe("side");
+    expect(await focus()).toBeNull();
+    await q("el.toggle()");
+    expect(await panelHidden()).toBe(true);
+    await q(
+      `(document.querySelector("#late-ask").onclick = () => { window.widgetAction = el.toggle(); }, true)`,
+    );
+    await click("#late-ask");
+    await page_("window.widgetAction");
+    expect(await panelHidden()).toBe(false);
+    expect(await layout()).toBeNull();
+    await q("el.close()");
+    await q(`(() => {
+      const trigger = document.querySelector("#late-ask");
+      trigger.onclick = null;
+      trigger.setAttribute("data-solv-chat-open", "side");
+    })()`);
+    await click("#late-ask");
+    expect(await layout()).toBe("side");
+    await page_('(document.querySelector("#late-ask").dataset.solvChatOpen = "panel")');
+    await click("#late-ask");
+    expect(await layout()).toBeNull();
+    expect(await panelHidden()).toBe(false);
+    expect(await page_("window.widgetEvents")).toEqual(
+      [
+        "open",
+        "expand",
+        "collapse",
+        "close",
+        "open",
+        "expand",
+        "close",
+        "open",
+        "close",
+        "open",
+        "expand",
+        "collapse",
+      ].map((action) => [action, true, true, null, true]),
+    );
+  });
+
+  it("accepts a host click before the config arrives and uses the published opening mode", async () => {
+    widgetOptions = { opensAs: "side" };
+    let release = () => {};
+    configGate = new Promise<void>((resolveConfig) => {
+      release = resolveConfig;
+    });
+    try {
+      await viewport(1280, 800);
+      await open("/host-controls", true, false);
+      await q(`(document.querySelector("#host-ask").onclick = () => {
+        window.widgetAction = el.open();
+      })`);
+      await click("#host-ask");
+      expect(await panelHidden()).toBe(true);
+      expect(await page_<number>("sessionStorage.length")).toBe(0);
+      release();
+      await page_("window.widgetAction");
+      expect(await layout()).toBe("side");
+    } finally {
+      release();
+      configGate = null;
+    }
+  });
+
+  it("respects host text fields and handled shortcuts, and runs the visitor check on the first accepted key", async () => {
+    await viewport(1280, 800);
+    await open("/host-controls");
+    await keypress("/", "Slash");
+    expect(await panelHidden()).toBe(true);
+
+    visitorCheck = true;
+    widgetOptions = { keyboardShortcut: "/" };
+    await open("/host-controls");
+    await browser.cdp.evaluate(`(() => {
+      window.handled = [];
+      document.addEventListener("keydown", (event) => {
+        if (window.hostHandlesKey) event.preventDefault();
+      });
+      window.addEventListener("keydown", (event) => window.handled.push(event.defaultPrevented));
+      document.querySelector("main").insertAdjacentHTML("beforeend",
+        '<textarea></textarea><select><option>A</option></select><div contenteditable><span>Write here</span></div>');
+    })()`);
+    for (const selector of ["#host-input", "textarea", "select", "[contenteditable]"]) {
+      await page_(`document.querySelector(${JSON.stringify(selector)}).focus()`);
+      await keypress("/", "Slash");
+      expect(await panelHidden()).toBe(true);
+    }
+    expect(await page_("window.handled")).toEqual([false, false, false, false]);
+
+    await page_("(document.activeElement.blur(), window.hostHandlesKey = true)");
+    await keypress("/", "Slash");
+    expect(await panelHidden()).toBe(true);
+    expect(await q<boolean>('r.querySelector("iframe") === null')).toBe(true);
+
+    await page_("window.hostHandlesKey = false");
+    await keypress("/", "Slash");
+    expect(await page_("window.handled.at(-1)")).toBe(true);
+    expect(await panelHidden()).toBe(false);
+    expect(await focus()).toBe("solv-input");
+    expect(await q<boolean>(`!!r.querySelector('iframe[src*="/v1/check/frame"]')`)).toBe(true);
+
+    visitorCheck = false;
+    widgetOptions = { keyboardShortcut: "mod-k" };
+    await open("/host-controls");
+    await keypress("k", "KeyK");
+    expect(await panelHidden()).toBe(true);
+    await keypress("k", "KeyK", 2); // Ctrl
+    expect(await panelHidden()).toBe(false);
+    expect(await focus()).toBe("solv-input");
+    await q("el.close()");
+    await page_("document.activeElement.blur()");
+    await keypress("k", "KeyK", 4); // Meta
+    expect(await panelHidden()).toBe(false);
+    expect(await focus()).toBe("solv-input");
+  });
+
+  it("fits one and 24 characters at 320px and hides the shortcut badge on touch-only devices", async () => {
+    await viewport(320, 700);
+    for (const label of ["A", "W".repeat(24), "<b>Ask</b>"]) {
+      widgetOptions = { launcherLabel: label, keyboardShortcut: "mod-k" };
+      await open("/host-controls");
+      const bounds = await rect(".solv-launcher");
+      expect(bounds.left).toBeGreaterThanOrEqual(0);
+      expect(bounds.right).toBeLessThanOrEqual(320);
+      expect(await noSidewaysScroll()).toBe(true);
+      expect(await q('r.querySelector(".solv-launcher-label").textContent')).toBe(label);
+      expect(await q('r.querySelector(".solv-launcher-label").childElementCount')).toBe(0);
+      expect(await q('r.querySelector(".solv-launcher").getAttribute("aria-label")')).toBe(
+        `${label} — Docs`,
+      );
+    }
+    expect(await q('getComputedStyle(r.querySelector(".solv-shortcut")).display')).not.toBe("none");
+    try {
+      await browser.cdp.send("Emulation.setTouchEmulationEnabled", {
+        enabled: true,
+        maxTouchPoints: 1,
+      });
+      expect(await page_('matchMedia("(any-pointer: coarse)").matches')).toBe(true);
+      expect(await page_('matchMedia("(any-pointer: fine)").matches')).toBe(false);
+      expect(await q('getComputedStyle(r.querySelector(".solv-shortcut")).display')).toBe("none");
+    } finally {
+      await browser.cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+    }
+  });
 
   for (const [width, height, panelWidth, side] of [
     [1280, 800, 460, true],

@@ -148,6 +148,9 @@ describe("Widget screen", () => {
       accentColor: "#2563eb",
       position: "right",
       allowExpand: true,
+      opensAs: "panel",
+      launcherLabel: "Chat",
+      keyboardShortcut: "none",
     });
     expect(first.behaviour.suggestedQuestions).toEqual(["First?", "Second?", "Third?"]);
 
@@ -161,6 +164,9 @@ describe("Widget screen", () => {
         accentColor: "#0f766e",
         position: "left",
         allowExpand: true,
+        opensAs: "panel",
+        launcherLabel: "Chat",
+        keyboardShortcut: "none",
       });
     });
 
@@ -207,6 +213,45 @@ describe("Widget screen", () => {
     await waitFor(() =>
       expect([...fake.drafts.values()][0]?.config.widget.allowExpand).toBe(false),
     );
+  });
+
+  it("previews and saves how the chat opens, its launcher text and its shortcut", async () => {
+    const fake = installBuildScreensFake();
+    render(<App />);
+    const opensAs = (await screen.findByLabelText("Opens as")) as HTMLSelectElement;
+    const label = screen.getByLabelText("Launcher label");
+    const shortcut = screen.getByLabelText("Keyboard shortcut");
+    const expand = screen.getByLabelText("Allow expanding to a side panel");
+    expect(opensAs.value).toBe("panel");
+    expect((label as HTMLInputElement).value).toBe("Chat");
+    expect((shortcut as HTMLSelectElement).value).toBe("none");
+
+    const frameWindow = previewFrame().contentWindow;
+    if (!frameWindow) throw new Error("no frame window");
+    const post = vi.spyOn(frameWindow, "postMessage").mockImplementation(() => {});
+    window.dispatchEvent(
+      new MessageEvent("message", { data: "solv-preview-ready", source: frameWindow }),
+    );
+
+    fireEvent.change(opensAs, { target: { value: "side" } });
+    fireEvent.change(label, { target: { value: "Ask the docs" } });
+    fireEvent.change(shortcut, { target: { value: "mod-k" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview launcher" }));
+    const changes = { opensAs: "side", launcherLabel: "Ask the docs", keyboardShortcut: "mod-k" };
+    await waitFor(() =>
+      expect(post.mock.calls.at(-1)?.[0]).toMatchObject({ widget: changes, showPanel: false }),
+    );
+
+    fireEvent.click(expand);
+    expect(opensAs.disabled).toBe(true);
+    expect(opensAs.value).toBe("panel");
+    const hint = document.getElementById(opensAs.getAttribute("aria-describedby") ?? "");
+    expect(hint?.textContent).toContain("Turn on Allow expanding");
+    fireEvent.click(expand);
+    expect(opensAs.value).toBe("side");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect([...fake.drafts.values()][0]?.config.widget).toMatchObject(changes));
   });
 
   it("explains page help in plain words and keeps it off by default", async () => {
