@@ -151,7 +151,8 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-const CONFIG_OPEN_WAIT_MS = 2_000;
+const CONFIG_OPEN_WAIT_MS = 3_000;
+const CONFIG_RESUME_WAIT_MS = 2_000;
 const CONFIG_RECOVERY_WAIT_MS = 2_000;
 const DROPPED_RESUME_TIMEOUT_MS = 5_000;
 
@@ -264,14 +265,15 @@ function hasUserActivation(): boolean {
   return navigator.userActivation?.isActive ?? Boolean(legacyClick?.eventPhase);
 }
 
+function hostTrigger(event: Event, selector: string): Element | undefined {
+  return event
+    .composedPath()
+    .find((node): node is Element => node instanceof Element && node.matches(selector));
+}
+
 function openFromHostClick(event: MouseEvent): void {
   if (!event.isTrusted || event.defaultPrevented || !hasUserActivation()) return;
-  const trigger = event
-    .composedPath()
-    .find(
-      (node): node is Element =>
-        node instanceof Element && node.hasAttribute("data-solv-chat-open"),
-    );
+  const trigger = hostTrigger(event, "[data-solv-chat-open]");
   if (!trigger) return;
   const widget = connectedWidgets.values().next().value;
   if (!widget) return;
@@ -323,7 +325,8 @@ export class SolvChat extends HTMLElement {
   #configUrl: string | undefined;
   #triggerEvents: AbortController | undefined;
   #reloadConfigOnConnect = false;
-  #openingWithConfig = false;
+  #openingWithConfig: { mode: WidgetOpenMode | undefined } | null = null;
+  #pendingShortcuts = new Set<WidgetShortcut>();
   /** Set by `preview()`: the element then loads and sends nothing. */
   #previewing = false;
   /** An interaction that can start the visitor check has happened. */
@@ -334,12 +337,10 @@ export class SolvChat extends HTMLElement {
   #expanded = false;
   #preferredMode: WidgetOpenMode | undefined;
   #onShortcut = (event: KeyboardEvent): void => {
-    if (
-      !event.isTrusted ||
-      event.defaultPrevented ||
-      !matchesShortcut(event, this.#config.keyboardShortcut)
-    )
-      return;
+    if (!event.isTrusted || event.defaultPrevented) return;
+    const shortcut = this.#keyboardShortcut();
+    const candidate = shortcut ?? (matchesShortcut(event, "/") ? "/" : "mod-k");
+    if (!matchesShortcut(event, candidate)) return;
     if (
       event
         .composedPath()
@@ -350,8 +351,14 @@ export class SolvChat extends HTMLElement {
         )
     )
       return;
-    event.preventDefault();
-    void this.#afterConfig(() => this.#openRequested({}, true));
+    if (shortcut === undefined) {
+      // The response can confirm the key after dispatch. Leave the page's
+      // default key action alone until we know the owner configured it.
+      this.#pendingShortcuts.add(candidate);
+    } else {
+      event.preventDefault();
+      void this.#openRequested({}, true);
+    }
   };
   #reservation: RootReservation | null = null;
   #wideQuery: MediaQueryList | null = null;
@@ -364,6 +371,7 @@ export class SolvChat extends HTMLElement {
 
   #launcher!: HTMLButtonElement;
   #launcherLabel!: HTMLSpanElement;
+  #launcherIcon!: SVGSVGElement;
   #shortcutBadge!: HTMLElement;
   #expandBtn!: HTMLButtonElement;
   #collapseBtn!: HTMLButtonElement;
@@ -447,6 +455,12 @@ export class SolvChat extends HTMLElement {
       void this.#resumeAfterConfigLoad(pending, target);
     } else if (this.#open || this.#reloadConfigOnConnect) {
       void this.#loadConfig();
+    } else if (url && this.#keyboardShortcut() === undefined) {
+      // Give same-tick callers a chance to supply an admin preview.
+      const connection = this.#connection;
+      queueMicrotask(() => {
+        if (this.isConnected && connection === this.#connection) void this.#loadConfig();
+      });
     }
     this.#reloadConfigOnConnect = false;
   }
@@ -454,7 +468,8 @@ export class SolvChat extends HTMLElement {
   disconnectedCallback(): void {
     this.#connection++;
     this.#reloadConfigOnConnect = this.#configLoading !== null;
-    this.#openingWithConfig = false;
+    this.#openingWithConfig = null;
+    this.#pendingShortcuts.clear();
     this.#triggerEvents?.abort();
     this.#configAbort?.abort();
     this.#configAbort = undefined;
@@ -527,19 +542,18 @@ export class SolvChat extends HTMLElement {
   }
 
   #onHostTrigger = (event: Event): void => {
-    if (!(event.target instanceof Element)) return;
-    const trigger = event.target.closest("[data-solv-chat-trigger], [data-solv-chat-open]");
+    const trigger = hostTrigger(event, "[data-solv-chat-trigger], [data-solv-chat-open]");
     if (!trigger) return;
     const targeted = this.id !== "" && trigger.getAttribute("data-solv-chat-trigger") === this.id;
     if (event.type === "click") {
       if (!targeted || event.defaultPrevented) return;
       event.preventDefault();
-      if (!this.#open) this.#openFromLauncher(true);
+      if (!this.#open) void this.#openRequested({}, true);
     } else if (
       (targeted ||
         (trigger.hasAttribute("data-solv-chat-open") &&
           connectedWidgets.values().next().value === this)) &&
-      (event.type !== "pointerenter" || event.target === trigger)
+      (event.type !== "pointerenter" || event.composedPath()[0] === trigger)
     ) {
       void this.#loadConfig();
     }
@@ -712,22 +726,19 @@ export class SolvChat extends HTMLElement {
     launcher.setAttribute("aria-controls", "solv-panel");
     const launcherLabel = document.createElement("span");
     launcherLabel.className = "solv-launcher-label";
+    const launcherIcon = headerIcon(
+      "M4 3h16a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H8l-6 4V5a2 2 0 0 1 2-2Zm0 2v13l3.4-2H20V5Z",
+    );
     const shortcutBadge = document.createElement("kbd");
     shortcutBadge.className = "solv-shortcut";
     shortcutBadge.setAttribute("aria-hidden", "true");
-    launcher.append(launcherLabel, shortcutBadge);
+    launcher.append(launcherIcon, launcherLabel, shortcutBadge);
     for (const type of ["pointerenter", "focus", "touchstart"]) {
       launcher.addEventListener(type, () => void this.#loadConfig(), { passive: true });
     }
     launcher.addEventListener("click", () => {
       if (this.#open) this.#closePanel(true);
-      else if (this.#configLoading && !this.#configReady) {
-        // Let a prefetch choose the opening layout before the panel appears.
-        void this.#afterConfig(() => {
-          if (this.#open) this.#closePanel(true);
-          else this.#openRequested({}, false);
-        });
-      } else this.#openFromLauncher(false);
+      else void this.#openRequested({}, false);
     });
 
     wrap.append(panel, launcher);
@@ -743,6 +754,7 @@ export class SolvChat extends HTMLElement {
     this.#sendBtn = sendBtn;
     this.#launcher = launcher;
     this.#launcherLabel = launcherLabel;
+    this.#launcherIcon = launcherIcon;
     this.#shortcutBadge = shortcutBadge;
     this.#expandBtn = expandBtn;
     this.#collapseBtn = collapseBtn;
@@ -752,50 +764,36 @@ export class SolvChat extends HTMLElement {
   /** Opens the chat during a user gesture. */
   open(options: WidgetOpenOptions = {}): Promise<void> {
     if (!hasUserActivation() || !this.isConnected) return Promise.resolve();
-    return this.#afterConfig(() => this.#openRequested(options, true));
+    return this.#openRequested(options, true);
   }
 
   async close(): Promise<void> {
-    const connection = this.#connection;
-    if (!this.#open && this.#configOpenWait) await this.#configOpenWait;
-    if (!this.isConnected || connection !== this.#connection) return;
     this.#closePanel(this.#root.activeElement !== null);
   }
 
   toggle(): Promise<void> {
     if (this.#open) return this.close();
     if (!hasUserActivation() || !this.isConnected) return Promise.resolve();
-    return this.#afterConfig(() => {
-      if (this.#open) this.#closePanel(this.#root.activeElement !== null);
-      else this.#openRequested({}, true);
-    });
+    return this.#openRequested({}, true);
   }
 
-  async #afterConfig(action: () => void): Promise<void> {
-    const connection = this.#connection;
-    const loading = this.#loadConfig();
-    if (!this.#configReady) await this.#waitForConfig(loading);
-    if (!this.isConnected || connection !== this.#connection) return;
-    if (!this.#configReady) this.#applyConfig(DEFAULT_CONFIG);
-    action();
-  }
-
-  #waitForConfig(loading: Promise<void>): Promise<void> {
-    if (this.#configOpenWait) return this.#configOpenWait;
-    let timer: ReturnType<typeof setTimeout>;
+  async #waitForConfig(loading: Promise<void>, ms: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, CONFIG_OPEN_WAIT_MS);
+      timer = setTimeout(resolve, ms);
     });
-    this.#configOpenWait = Promise.race([loading, deadline]).finally(() => {
+    try {
+      await Promise.race([loading, deadline]);
+    } finally {
       clearTimeout(timer);
-    });
-    return this.#configOpenWait;
+    }
   }
 
   /** Shows public config in the admin preview without requesting or storing anything. */
   preview(config: unknown, showPanel = true): void {
     this.#previewing = true;
-    this.#openingWithConfig = false;
+    this.#openingWithConfig = null;
+    this.#pendingShortcuts.clear();
     const settings = {
       ...DEFAULT_CONFIG,
       ...parsePublicConfig(config),
@@ -925,13 +923,17 @@ export class SolvChat extends HTMLElement {
       this.#renderSuggestions();
     }
     if (this.#openingWithConfig) {
-      this.#openingWithConfig = false;
-      this.#openPanel(false, this.#expandedOnOpen());
+      const { mode } = this.#openingWithConfig;
+      this.#openingWithConfig = null;
+      this.#openPanel(false, this.#expandedOnOpen(mode) ?? false);
     } else {
       this.#applyLayout();
     }
     if (!previous && this.#open && this.#root.activeElement === this.#closeBtn) this.#focusInput();
     if (this.#interacted) this.#visitorInteracted();
+    const shortcutPressed = this.#pendingShortcuts.has(config.keyboardShortcut);
+    this.#pendingShortcuts.clear();
+    if (shortcutPressed) void this.#openRequested({}, true);
   }
 
   #checkRequired(): boolean {
@@ -978,8 +980,15 @@ export class SolvChat extends HTMLElement {
     this.#suggestionsEl.hidden = false;
   }
 
+  #keyboardShortcut(): WidgetShortcut | undefined {
+    if (this.#configReady) return this.#config.keyboardShortcut;
+    const hint = this.getAttribute("launcher-shortcut");
+    if (hint === "none" || hint === "/" || hint === "mod-k") return hint;
+    return this.#configUrl ? undefined : "none";
+  }
+
   #watchShortcut(): void {
-    if (this.isConnected && this.#config.keyboardShortcut !== "none") {
+    if (this.isConnected && this.#keyboardShortcut() !== "none") {
       window.addEventListener("keydown", this.#onShortcut);
     } else {
       window.removeEventListener("keydown", this.#onShortcut);
@@ -987,10 +996,12 @@ export class SolvChat extends HTMLElement {
   }
 
   #updateLauncher(): void {
-    const { launcherLabel, title, keyboardShortcut } = this.#config;
+    const { launcherLabel, title } = this.#config;
+    const keyboardShortcut = this.#keyboardShortcut() ?? "none";
     const label = this.#configReady
       ? launcherLabel
-      : this.getAttribute("launcher-label")?.trim() || launcherLabel;
+      : this.getAttribute("launcher-label")?.trim() || (this.#configUrl ? "" : launcherLabel);
+    this.#launcherIcon.toggleAttribute("hidden", label !== "");
     if (this.#launcherLabel.textContent !== label) this.#launcherLabel.textContent = label;
     this.#launcher.setAttribute("aria-expanded", String(this.#open));
     let accessibleName = label;
@@ -998,7 +1009,7 @@ export class SolvChat extends HTMLElement {
       accessibleName = `${label} — ${title}`;
     } else if (!this.#configReady) {
       if (this.#open) accessibleName = "Close chat";
-      else if (label === DEFAULT_CONFIG.launcherLabel) accessibleName = "Open chat";
+      else if (!label || label === DEFAULT_CONFIG.launcherLabel) accessibleName = "Open chat";
     }
     this.#launcher.setAttribute("aria-label", accessibleName);
     this.#shortcutBadge.hidden = keyboardShortcut === "none";
@@ -1013,26 +1024,35 @@ export class SolvChat extends HTMLElement {
       );
   }
 
-  #openFromLauncher(visitorCheck: boolean): void {
-    void this.#loadConfig();
-    this.#openingWithConfig = !this.#configReady;
-    this.#openRequested({}, visitorCheck);
-  }
-
-  #expandedOnOpen(mode?: WidgetOpenMode): boolean {
-    if (!this.#configReady || !this.#config.allowExpand) return false;
+  #expandedOnOpen(mode?: WidgetOpenMode): boolean | undefined {
+    if (this.#configReady && !this.#config.allowExpand) return false;
     if (mode === undefined && this.#preferredMode !== undefined) {
       return this.#preferredMode === "side";
     }
-    return (mode ?? this.#config.opensAs) === "side" && this.#isWide();
+    if (!this.#isWide()) return false;
+    const hint = this.getAttribute("opens-as");
+    const openingMode = mode ?? (this.#configReady ? this.#config.opensAs : hint);
+    if (openingMode === "panel" || openingMode === "side") return openingMode === "side";
+    return undefined;
   }
 
-  #openRequested(options: WidgetOpenOptions, visitorCheck: boolean): void {
+  async #openRequested(options: WidgetOpenOptions, visitorCheck: boolean): Promise<void> {
+    const connection = this.#connection;
+    const loading = this.#loadConfig();
     const { mode, focus = true } = options;
-    const expanded =
-      !this.#open || mode !== undefined ? this.#expandedOnOpen(mode) : this.#expanded;
-    this.#openPanel(focus, expanded);
+    if (!this.#open || mode !== undefined) {
+      this.#openingWithConfig = this.#configReady ? null : { mode };
+      this.#openPanel(focus, this.#expandedOnOpen(mode) ?? false);
+    } else {
+      this.#openPanel(focus);
+    }
     if (visitorCheck) this.#visitorInteracted();
+    if (this.#configReady) return;
+    this.#configOpenWait ??= this.#waitForConfig(loading, CONFIG_OPEN_WAIT_MS);
+    await this.#configOpenWait;
+    if (this.isConnected && connection === this.#connection && this.#open && !this.#configReady) {
+      this.#applyConfig(DEFAULT_CONFIG);
+    }
   }
 
   #emit(action: "open" | "close" | "expand" | "collapse"): void {
@@ -1042,6 +1062,7 @@ export class SolvChat extends HTMLElement {
   #openPanel(moveFocus = false, expanded = this.#expanded): void {
     const wasOpen = this.#open;
     const wasExpanded = wasOpen && this.#expanded && this.#config.allowExpand;
+    if (!wasOpen) this.#panel.toggleAttribute("data-opened-while-loading", !this.#configReady);
     this.#expanded = expanded;
     this.#dismissedTurn = null;
     this.#open = true;
@@ -1049,7 +1070,7 @@ export class SolvChat extends HTMLElement {
     this.#updateLauncher();
     this.#applyLayout();
     this.#saveConfig();
-    this.#persist();
+    if (this.#configReady) this.#persist();
     if (moveFocus) {
       if (this.#configReady) this.#focusInput();
       else this.#closeBtn.focus();
@@ -1066,7 +1087,7 @@ export class SolvChat extends HTMLElement {
     this.#dismissedTurn = this.#abortController;
     this.#open = false;
     this.#panel.hidden = true;
-    this.#openingWithConfig = false;
+    this.#openingWithConfig = null;
     this.#updateLauncher();
     this.#applyLayout();
     this.#persist();
@@ -1079,6 +1100,7 @@ export class SolvChat extends HTMLElement {
     if (!this.#config.allowExpand || !this.#open || this.#expanded === expanded) return;
     this.#expanded = expanded;
     this.#preferredMode = expanded ? "side" : "panel";
+    this.#panel.removeAttribute("data-opened-while-loading");
     this.#applyLayout();
     this.#persist();
     (expanded ? this.#collapseBtn : this.#expandBtn).focus();
@@ -1106,11 +1128,14 @@ export class SolvChat extends HTMLElement {
   #applyLayout(): void {
     if (!this.#initialized) return;
     const allow = this.#configReady && this.#config.allowExpand;
-    const wanted = this.#open && this.#expanded && allow;
+    const opening = this.#openingWithConfig;
+    const expanded = opening ? this.#expandedOnOpen(opening.mode) : this.#expanded;
+    const wanted = this.#open && expanded === true && (allow || !this.#configReady);
+    this.#panel.toggleAttribute("data-layout-pending", this.#open && expanded === undefined);
     const layout: Layout = wanted ? (this.#isWide() ? "side" : "full") : "panel";
     if (layout === "side" && this.isConnected) this.#reserveRoom();
     else this.#releaseRoom();
-    this.#watchViewport(wanted && this.isConnected);
+    this.#watchViewport((wanted || opening !== null) && this.isConnected);
     if (layout === "panel") this.removeAttribute("data-layout");
     else this.setAttribute("data-layout", layout);
     this.#launcher.hidden = layout !== "panel";
@@ -1133,7 +1158,7 @@ export class SolvChat extends HTMLElement {
    * to move what it fixed to that edge. What was there is kept to put back.
    */
   #reserveRoom(): void {
-    const side = this.#config.position === "left" ? "left" : "right";
+    const side = this.getAttribute("data-position") === "left" ? "left" : "right";
     const property = `margin-${side}`;
     if (this.#reservation?.property === property) return;
     this.#releaseRoom();
@@ -2019,7 +2044,7 @@ export class SolvChat extends HTMLElement {
     let keepPending = false;
 
     try {
-      await this.#waitForConfig(this.#loadConfig());
+      await this.#waitForConfig(this.#loadConfig(), CONFIG_RESUME_WAIT_MS);
       if (!this.isConnected || signal.aborted) return;
       if (!this.#configReady) this.#applyConfig(DEFAULT_CONFIG);
       if (this.#configLoading) {

@@ -156,21 +156,32 @@ attributes on the embed.
 
 ```html
 <solv-chat assistant="pk_..." launcher-label="Get help"
-  launcher-position="left" launcher-accent-color="#126146"></solv-chat>
+  launcher-shortcut="/" launcher-position="left"
+  launcher-accent-color="#126146" opens-as="side"></solv-chat>
 ```
 
 `launcher-label` sets the button text, `launcher-position` takes `left` or
 `right`, and `launcher-accent-color` takes a three- or six-digit hex colour.
-Once settings are available, the launcher uses its standard **Chat** label
-and the published position and colour. The panel always uses the
-published settings when they are available.
+`launcher-shortcut` takes `/`, `mod-k`, or `none`. `opens-as` takes
+`panel` or `side` and gives the loading frame its layout on desktop.
+Keep these hints in sync with the published Widget settings. A fresh saved
+copy for the tab takes precedence over the hints, and a successful response
+from the engine supplies the current settings. If the label is unknown, the
+launcher shows a chat icon until it knows the published label.
+
+Without a valid shortcut hint or a fresh saved copy for the tab, the widget
+reads the public settings when it loads so the published shortcut works on
+the first keypress. With either one, a closed widget waits for interaction.
+Use `launcher-shortcut="none"` when shortcuts are off and you want the
+widget to wait. A page view alone creates no visitor session and saves no
+conversation or tab settings.
 
 To open the chat from a button on your page, give `<solv-chat>` an `id` and
 set `data-solv-chat-trigger` on the button to that same ID. For example,
 `<button type="button" data-solv-chat-trigger="help-chat">Ask a question</button>`
 opens `<solv-chat id="help-chat" assistant="pk_..."></solv-chat>`.
 Hovering over, focusing or touching either button starts loading the
-configuration.
+configuration if it hasn't started already.
 
 The tab can restore its last configuration for up to two minutes and
 rechecks it in the background when the chat is open. A browser may reuse a
@@ -191,18 +202,19 @@ Add `data-solv-chat-open` to a button anywhere on the page, including one you ad
 
 ```html
 <button type="button" data-solv-chat-open>Ask</button>
-<button type="button" id="ask-in-side-panel">Ask in the side panel</button>
+<button type="button" id="ask-in-side-panel" data-solv-chat-open="side">Ask in the side panel</button>
 <script>
   customElements.whenDefined("solv-chat").then(() => {
     const chat = document.querySelector("solv-chat");
-    document.querySelector("#ask-in-side-panel").addEventListener("click", () => {
+    document.querySelector("#ask-in-side-panel").addEventListener("click", (event) => {
+      event.preventDefault();
       chat.open({ mode: "side", focus: true });
     });
   });
 </script>
 ```
 
-`open({ mode?, focus? })`, `close()` and `toggle()` return promises that resolve after configuration loads and the action finishes. Omit `mode` to use the visitor's choice or the **Opens as** setting. Omit `focus` to move focus to the message box. Call `open()` or a `toggle()` that opens from a real visitor gesture, such as a button click. The API cannot auto-open on page load. Chat only reopens on navigation in a tab where the visitor already had it open.
+`open({ mode?, focus? })`, `close()` and `toggle()` return promises that resolve when the action finishes. Hover or focus on a marked trigger starts the same request that an open uses. If settings are pending, an accepted open shows a neutral loading frame with the message box disabled. When the layout is unknown, the compact frame keeps the host page in place until the published layout and content are ready. Omit `mode` to use the visitor's choice or the **Opens as** setting. Omit `focus` to move focus to the message box. Call `open()` or a `toggle()` that opens from a real visitor gesture, such as a button click. Chat only reopens on navigation in a tab where the visitor already had it open.
 
 Listen on the element or the page for `solv-chat:open`, `solv-chat:close`, `solv-chat:expand` and `solv-chat:collapse`. These events bubble, cross shadow boundaries and carry no conversation content.
 

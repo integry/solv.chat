@@ -249,9 +249,9 @@ describe("expanding to a side panel", () => {
     const el = mountWidget(false);
     await flushAsync();
     const r = shadow(el);
-    // Before the first open: the expand control cannot act, and a viewport
-    // change runs the layout, yet nothing at all is written.
-    expect(r.querySelector(".solv-expand")).toBeNull();
+    // The load-time config can prepare the controls in the hidden panel.
+    // A viewport change before the first open still writes nothing.
+    expect(q<HTMLDivElement>(r, ".solv-panel").hidden).toBe(true);
     happy.setViewport({ width: 899, height: 800 });
     happy.setViewport({ width: 1280, height: 800 });
     await flushAsync();

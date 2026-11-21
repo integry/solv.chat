@@ -211,8 +211,8 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
   `Cache-Control: private, max-age=60, must-revalidate, no-transform`. Both
   200 and 304 responses vary on `Origin`. Origin and limit checks happen
   before accepting a validator. The browser can reuse a fresh response for
-  up to one minute after publishing. A tab restoring a saved configuration
-  asks the browser to revalidate it in the background.
+  up to one minute after publishing. A tab restoring an open panel from
+  saved configuration asks the browser to revalidate it in the background.
 - `POST /v1/session` — exchanges a Turnstile token for a visitor session (see
   "Visitor check"). Answers 404 when the check is off.
 - `GET /v1/check/frame` — the page the widget frames to run Turnstile on the
@@ -1866,16 +1866,25 @@ with the visitor check on, Turnstile runs inside a frame served by the
 engine's origin, created only after a visitor interaction (see "Visitor
 check").
 
-**First paint.** The first pointer enter, focus, touch, or click on the
-launcher or a host trigger starts a single shared request. An accepted
-`open()` or `toggle()` can start the same request. A page view in a fresh tab
-makes no configuration request and writes no storage. When a launcher click
-starts the request, or an ID-targeted `data-solv-chat-trigger` opens while
-settings are loading, the panel shows “Loading chat…” with neutral colours
-and disabled input. If a launcher click finds a prefetch already running,
-it waits up to two seconds for the opening settings. The title, greeting,
-colour and suggestions appear together. If the request fails or a wait
-expires, the widget uses the existing defaults and chat error handling.
+**First paint.** When the shortcut is unknown, the widget requests the
+public configuration at load. This covers fresh embeds without
+`launcher-shortcut` and lets the first eligible keypress open the chat, even
+if the response is still pending when the visitor presses it. If the embed
+declares the shortcut or the tab has a fresh copy, the first pointer enter,
+focus, touch, or click on the launcher or a marked host trigger starts the
+request. An accepted `open()` or `toggle()` can also start it. All these
+paths share the same request. Loading a fresh embed creates no visitor session
+and writes no conversation or tab configuration.
+
+An open while configuration is pending shows “Loading chat…” with neutral
+colours and disabled input. The frame uses the opening layout when known
+from the embed, the caller's requested mode or the tab. When the layout is
+unknown, a compact loading frame keeps the host page in place. The layout,
+title, greeting, colour and suggestions are applied together before the
+first content paint. A failed request uses the existing defaults and chat
+error handling. After a three-second wait on open, the fallback also lets
+the visitor continue while a stalled request runs. Late settings can update
+that fallback. A late `opensAs` value can take effect on the next open.
 
 A successful response is kept in sessionStorage once the panel is open,
 scoped to the engine and assistant on the embedding origin. The widget can
@@ -1948,22 +1957,27 @@ page its width back). The appearing animation is off under
 `prefers-reduced-motion: reduce`.
 
 **Launcher and shortcut.** "Launcher label" (`widget.launcherLabel`) is 1–24
-characters of plain text and defaults to "Chat". Before settings are available,
-the embed can supply a label, position and accent with `launcher-label`,
-`launcher-position` and `launcher-accent-color`. Once published settings load,
-the accessible name includes the label and the assistant title when they
-differ. "Keyboard shortcut"
+characters of plain text and defaults to "Chat". A fresh tab copy supplies
+the first label and badge, or the embed can supply them with `launcher-label`
+and `launcher-shortcut`. If the label is unknown, the launcher uses a chat
+icon until configuration arrives. The embed can also supply
+`launcher-position`, `launcher-accent-color` and `opens-as` (`panel` or
+`side`, when side panels are enabled) for the loading view. Published
+settings take over once available, and the accessible name includes the
+label and the assistant title when they differ. "Keyboard shortcut"
 (`widget.keyboardShortcut`) can be None (`none`, the default), `/`, or Ctrl/⌘ K
-(`mod-k`). The widget listens only when a shortcut is configured, and displays
-it on the launcher outside touch-only layouts. A handled key or a key in an
-editable field is left to the host page. The shortcut opens the assistant,
-focuses its input and starts the visitor check when enabled.
+(`mod-k`). The embed accepts the same shortcut values. The widget displays
+the badge outside touch-only layouts. A handled key or a key in an editable
+field is left to the host page. While the shortcut is unknown the widget
+records candidate keys without cancelling their browser action, then opens
+only if a candidate matches the published shortcut. The shortcut opens the
+assistant, focuses its input and starts the visitor check when enabled.
 
 **Host-page API.** Once `solv-chat` is defined, `open({ mode?, focus? })`,
 `close()` and `toggle()` return promises that resolve when the requested
-action finishes. When opening with no settings available, the API waits up
-to two seconds, then uses the defaults while the request continues. `mode`
-accepts `panel` or `side`, and omitting it uses the visitor's layout preference
+action finishes. An accepted open shows the loading frame immediately
+when settings are pending. `mode` accepts `panel` or `side`, and omitting it
+uses the visitor's layout preference
 or the owner's opening setting. `focus` defaults to true. A delegated click listener handles
 `data-solv-chat-open` on host elements, including elements added later, with an
 optional `side` or `panel` value. Call `open()` or a `toggle()` that opens from
@@ -1972,11 +1986,12 @@ API or declarative open counts as interaction for the visitor check.
 
 ```html
 <button type="button" data-solv-chat-open>Ask</button>
-<button type="button" id="ask-in-side-panel">Ask in the side panel</button>
+<button type="button" id="ask-in-side-panel" data-solv-chat-open="side">Ask in the side panel</button>
 <script>
   customElements.whenDefined("solv-chat").then(() => {
     const chat = document.querySelector("solv-chat");
-    document.querySelector("#ask-in-side-panel").addEventListener("click", () => {
+    document.querySelector("#ask-in-side-panel").addEventListener("click", (event) => {
+      event.preventDefault();
       chat.open({ mode: "side", focus: true });
     });
   });

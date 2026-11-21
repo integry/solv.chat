@@ -95,6 +95,7 @@ describe("<solv-chat>", () => {
     globalThis.fetch = fetchConfig as typeof fetch;
     const el = document.createElement("solv-chat");
     el.setAttribute("assistant", "pk_unavailable");
+    el.setAttribute("launcher-shortcut", "none");
     document.body.append(el);
     const root = shadow(el);
 
