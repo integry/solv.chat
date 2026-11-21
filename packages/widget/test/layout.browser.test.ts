@@ -777,6 +777,149 @@ document.querySelector("button").onclick = () => {
     }
   }, 12_000);
 
+  it("shows the chat refusal and allows a new submission while config is still stalled", async () => {
+    visitorCheck = true;
+    widgetOptions = { title: "Fieldnotes assistant" };
+    const release = delayConfig();
+    const submit = () =>
+      q(`(() => {
+        r.querySelector("#solv-input").value = "How do I search my documents?";
+        r.querySelector(".solv-form").requestSubmit();
+      })()`);
+    try {
+      await viewport(1280, 800);
+      await open("/host-controls?stalled-chat-config", true, false);
+      await click(".solv-launcher", true);
+      await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
+      await submit();
+      await waitFor(async () => submissions.length === 1, "chat refusal");
+      expect(submissions[0]?.body).not.toHaveProperty("session");
+
+      await waitFor(
+        () => q<boolean>('r.querySelector(".solv-bubble-error") !== null'),
+        "visible chat refusal with config still stalled",
+        4_000,
+      );
+      expect(await q('r.querySelector(".solv-bubble-error").textContent')).toBe(
+        "Complete the security check.",
+      );
+      expect(await q('r.querySelector(".solv-send").disabled')).toBe(false);
+      expect(gatedConfigResponse?.writableEnded).toBe(false);
+
+      release();
+      await waitFor(
+        () => q<boolean>('r.querySelector(".solv-title").textContent === "Fieldnotes assistant"'),
+        "late config applied",
+      );
+      expect(submissions).toHaveLength(1);
+      await submit();
+      await waitForVisitorCheck();
+      await click(".solv-check iframe", true);
+      await waitFor(
+        () => q<boolean>('r.querySelector(".solv-feedback") !== null'),
+        "answer to the new submission",
+      );
+      expect(submissions).toHaveLength(2);
+      expect(submissions[1]?.body).toEqual({ ...submissions[0]?.body, session: TEST_SESSION });
+    } finally {
+      release();
+    }
+  }, 12_000);
+
+  it("restores feedback controls while config is still stalled", async () => {
+    await open("/host-controls");
+    await page_(`sessionStorage.setItem("solv-chat-open:pk_layout", JSON.stringify({
+      conversationId: "cnv_1",
+      turns: [{ role: "assistant", text: "Search your docs", messageId: "msg_1" }],
+    }))`);
+    visitorCheck = true;
+    const release = delayConfig();
+    const vote = () => click('.solv-fb-btn[aria-label="Helpful"]', true);
+    try {
+      await open("/host-controls?stalled-feedback-config", false, false);
+      await click(".solv-launcher", true);
+      await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
+      await vote();
+      await waitFor(async () => submissions.length === 1, "feedback refusal");
+      expect(submissions[0]?.body).not.toHaveProperty("session");
+
+      await waitFor(
+        () => q<boolean>('r.querySelector(".solv-fb-ack").textContent.includes("Try again.")'),
+        "feedback failure with config still stalled",
+        4_000,
+      );
+      expect(await q('r.querySelectorAll(".solv-fb-btn:disabled").length')).toBe(0);
+      expect(await q("r.querySelectorAll('.solv-fb-btn[aria-pressed=\"true\"]').length")).toBe(0);
+      expect(gatedConfigResponse?.writableEnded).toBe(false);
+
+      release();
+      await waitFor(
+        () => q<boolean>('r.querySelector(".solv-title").textContent === "Docs"'),
+        "config",
+      );
+      expect(submissions).toHaveLength(1);
+      await vote();
+      await waitForVisitorCheck();
+      await click(".solv-check iframe", true);
+      await waitFor(
+        () =>
+          q<boolean>('r.querySelector(".solv-fb-ack").textContent === "Thanks for the feedback."'),
+        "feedback acknowledgement",
+      );
+      expect(submissions).toHaveLength(2);
+      expect(submissions[1]?.body).toEqual({ ...submissions[0]?.body, session: TEST_SESSION });
+    } finally {
+      release();
+    }
+  }, 12_000);
+
+  it("keeps a refused restored continuation available after the config wait expires", async () => {
+    await viewport(1280, 800);
+    await open("/host-controls");
+    await savePausedAnswer();
+    visitorCheck = true;
+    const release = delayConfig();
+    try {
+      await open("/host-controls?stalled-resume-config", false, false);
+      await waitFor(async () => submissions.length === 1, "resume refusal", 4_000);
+      expect(submissions[0]?.body).not.toHaveProperty("session");
+      await waitFor(
+        () => q<boolean>('r.querySelector(".solv-bubble-error") !== null'),
+        "visible resume refusal with config still stalled",
+        4_000,
+      );
+      expect(await q('r.querySelector(".solv-send").disabled')).toBe(false);
+      expect(await pendingResume()).toMatchObject({ resumeMessageId: "msg_1" });
+      expect(
+        await page_('JSON.parse(sessionStorage.getItem("solv-chat-open:pk_layout")).turns[0]'),
+      ).toMatchObject({ error: "Complete the security check.", awaiting: ["call_1"] });
+      expect(gatedConfigResponse?.writableEnded).toBe(false);
+
+      release();
+      await waitFor(
+        () => q<boolean>('r.querySelector(".solv-title").textContent === "Docs"'),
+        "config",
+      );
+      expect(submissions).toHaveLength(1);
+      await open("/host-controls?retry-resume", false);
+      await waitForVisitorCheck();
+      expect(await q('r.querySelector(".solv-bubble-error") === null')).toBe(true);
+      await click(".solv-check iframe", true);
+      await waitFor(
+        () => q<boolean>('r.querySelector(".solv-feedback") !== null'),
+        "answer to the restored continuation",
+      );
+      expect(submissions).toHaveLength(2);
+      expect(submissions[1]?.body).toMatchObject({
+        resumeMessageId: "msg_1",
+        session: TEST_SESSION,
+      });
+      expect(await pendingResume()).toBeUndefined();
+    } finally {
+      release();
+    }
+  }, 12_000);
+
   it("respects host text fields and handled shortcuts, and runs the visitor check on the first accepted key", async () => {
     await viewport(1280, 800);
     await open("/host-controls");

@@ -150,7 +150,12 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 const CONFIG_OPEN_WAIT_MS = 2_000;
+const CONFIG_RECOVERY_WAIT_MS = 2_000;
 const DROPPED_RESUME_TIMEOUT_MS = 5_000;
+
+type ChatStreamEvent = Exclude<ReturnType<typeof parseChatEventLine>, { type: "unknown" }> & {
+  configUnavailable?: true;
+};
 
 const ACTION_WORDING: Record<string, string> = {
   navigate: "Taking you to another page on this site.",
@@ -1081,13 +1086,14 @@ export class SolvChat extends HTMLElement {
         }
         const canResume =
           this.#pendingResume !== null &&
-          !turn.error &&
-          turn.messageId === this.#pendingResume.resumeMessageId;
+          turn.messageId === this.#pendingResume.resumeMessageId &&
+          (!turn.error || Boolean(turn.awaiting?.length));
         const unfinished =
           !canResume &&
           !turn.error &&
           (!turn.messageId || (turn.awaiting !== undefined && turn.awaiting.length > 0));
         if (canResume) {
+          delete turn.error;
           this.#resumedBubble = { bubble, textEl, turn };
         } else if (unfinished) {
           delete turn.awaiting;
@@ -1513,7 +1519,17 @@ export class SolvChat extends HTMLElement {
     isCurrent: () => boolean,
   ): Promise<CheckResult | undefined> {
     if (!isCurrent()) return;
-    await configLoading;
+    // Give this refusal its own deadline. The config request can still finish
+    // later and apply settings for future interactions.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, CONFIG_RECOVERY_WAIT_MS);
+    });
+    try {
+      await Promise.race([configLoading, deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
     if (isCurrent() && this.#checkRequired()) return this.#sessionFor();
   }
 
@@ -1626,7 +1642,7 @@ export class SolvChat extends HTMLElement {
   async *#chatEvents(
     send: (session?: string) => Promise<Response>,
     signal: AbortSignal,
-  ): AsyncGenerator<Exclude<ReturnType<typeof parseChatEventLine>, { type: "unknown" }>> {
+  ): AsyncGenerator<ChatStreamEvent> {
     const assistant = this.#assistant();
     const endpoint = this.#endpoint();
     const isCurrent = () =>
@@ -1668,7 +1684,7 @@ export class SolvChat extends HTMLElement {
       check = await this.#recoverVisitorSession(configLoading, isCurrent);
       if (!isCurrent()) return;
       if (!check) {
-        yield { type: "error", message: refusalMessage };
+        yield { type: "error", message: refusalMessage, configUnavailable: true };
         return;
       }
       configLoading = null;
@@ -1683,7 +1699,7 @@ export class SolvChat extends HTMLElement {
     controller: AbortController,
     depth: number,
     onAdmitted?: () => void,
-  ): Promise<void> {
+  ): Promise<"config_unavailable" | undefined> {
     const { signal } = controller;
     if (signal.aborted) return;
 
@@ -1760,11 +1776,17 @@ export class SolvChat extends HTMLElement {
           terminated = true;
           this.#finishPaint(textEl);
           this.#hideTyping(bubble);
+          const msg = event.message.trim() || "Something went wrong. Please try again.";
+          if (onAdmitted && event.configUnavailable) {
+            // The refusal came before the engine could claim the saved
+            // continuation. Show the error here and let a later page resume it.
+            this.#setTurnError(bubble, assistantTurn, msg);
+            return "config_unavailable";
+          }
           delete assistantTurn.awaiting;
           // The engine will not take more in this conversation; the next
           // question starts a new one, as the message says.
           if (event.code === "conversation_cap") this.#conversationId = null;
-          const msg = event.message.trim() || "Something went wrong. Please try again.";
           this.#setTurnError(bubble, assistantTurn, msg);
           this.#persist();
         }
@@ -1794,6 +1816,7 @@ export class SolvChat extends HTMLElement {
         depth + 1,
       );
     }
+    return undefined;
   }
 
   async #resumeAfterConfigLoad(
@@ -1815,6 +1838,7 @@ export class SolvChat extends HTMLElement {
         this.#persist();
       }
     };
+    let keepPending = false;
 
     try {
       await this.#configOpenWait;
@@ -1839,7 +1863,7 @@ export class SolvChat extends HTMLElement {
             )
           : pending.actionResults;
 
-      await this.#consumeStream(
+      const outcome = await this.#consumeStream(
         (session) =>
           this.#sendActionResumeRequest(
             pending.conversationId,
@@ -1855,6 +1879,7 @@ export class SolvChat extends HTMLElement {
         pending.depth,
         releasePending,
       );
+      keepPending = outcome === "config_unavailable";
     } catch {
       if (!signal.aborted && !target.turn.error) {
         delete target.turn.awaiting;
@@ -1872,7 +1897,7 @@ export class SolvChat extends HTMLElement {
         this.#dismissedTurn = null;
       }
       if (!signal.aborted) {
-        releasePending();
+        if (!keepPending) releasePending();
         this.#persist();
       }
     }
