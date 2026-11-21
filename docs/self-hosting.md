@@ -216,6 +216,33 @@ Add `data-solv-chat-open` to a button anywhere on the page, including one you ad
 
 `open({ mode?, focus? })`, `close()` and `toggle()` return promises that resolve when the action finishes. Hover or focus on a marked trigger starts the same request that an open uses. If settings are pending, an accepted open shows a neutral loading frame with the message box disabled. When the layout is unknown, the compact frame keeps the host page in place until the published layout and content are ready. Omit `mode` to use the visitor's choice or the **Opens as** setting. Omit `focus` to move focus to the message box. Call `open()` or a `toggle()` that opens from a real visitor gesture, such as a button click. Chat only reopens on navigation in a tab where the visitor already had it open.
 
+`send(text, options?)` sends a message from your own input and returns a promise for `{ text }` when the assistant finishes. By default, a closed panel stays closed and the exchange appears in the chat history when the visitor opens it. Pass `{ open: true }` to open it before sending. The visitor check, message limits and page actions also apply to this method. The panel opens if a page action needs approval or the security check needs the visitor's help. The promise rejects with a displayable error if the message is blank, too long or refused, if another reply is in progress, if the assistant is unavailable, or if the reply is interrupted.
+
+```html
+<form id="ask-form">
+  <label for="ask-input">Ask a question</label>
+  <input id="ask-input" name="question" required>
+  <button>Ask</button>
+</form>
+<p id="ask-reply" role="status"></p>
+<script>
+  customElements.whenDefined("solv-chat").then(() => {
+    const chat = document.querySelector("solv-chat");
+    const form = document.querySelector("#ask-form");
+    const reply = document.querySelector("#ask-reply");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const { text } = await chat.send(form.elements.question.value);
+        reply.textContent = text;
+      } catch (error) {
+        reply.textContent = error.message;
+      }
+    });
+  });
+</script>
+```
+
 Listen on the element or the page for `solv-chat:open`, `solv-chat:close`, `solv-chat:expand` and `solv-chat:collapse`. These events bubble, cross shadow boundaries and carry no conversation content.
 
 While the column is open the widget adds three inline styles to your `<html>` element and removes exactly what it added when the visitor collapses or closes the chat, or when the widget is removed from the page (an inline style you set yourself comes back as it was):

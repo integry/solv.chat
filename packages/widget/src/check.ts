@@ -50,6 +50,7 @@ export interface CheckControllerOptions {
   endpoint: () => string;
   assistant: () => string;
   visitorId: () => string;
+  onInteractive: () => void;
   /** "light" or "dark", as the widget shows itself. */
   theme: () => "light" | "dark";
 }
@@ -130,7 +131,9 @@ export class CheckController {
   async ensure(): Promise<CheckResult> {
     this.#waiting += 1;
     try {
-      return await this.#run();
+      const result = this.#run();
+      if (this.#opts.host.getAttribute("data-state") === "interactive") this.#opts.onInteractive();
+      return await result;
     } finally {
       this.#waiting -= 1;
     }
@@ -210,6 +213,7 @@ export class CheckController {
         this.#arm(null);
         this.#opts.host.setAttribute("data-state", "interactive");
         frame.tabIndex = 0;
+        this.#opts.onInteractive();
         break;
       case "settled":
         this.#opts.host.removeAttribute("data-state");

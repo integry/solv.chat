@@ -298,7 +298,8 @@ origin in `script-src`, `connect-src` and `frame-src` and nothing else.
 **When it runs.** Turnstile waits for the visitor. The widget creates the
 frame when the visitor focuses or types in the message input, picks a
 suggested question, uses the keyboard shortcut, or opens the assistant through
-a host-page trigger. The launcher moves focus to the input without starting
+a host-page trigger. A message submitted through `send()` also starts the
+check. The launcher moves focus to the input without starting
 the check. The frame renders Turnstile explicitly, in managed mode
 with `appearance: "interaction-only"`, `retry: "never"`, action
 `solv-chat` and `cData` set to the frame's binding (64 hex characters: the
@@ -1899,7 +1900,7 @@ public configuration at load. This covers fresh embeds without
 if the response is still pending when the visitor presses it. If the embed
 declares the shortcut or the tab has a fresh copy, the first pointer enter,
 focus, touch, or click on the launcher or a marked host trigger starts the
-request. An accepted `open()` or `toggle()` can also start it. All these
+request. An accepted `open()`, `toggle()` or `send()` can also start it. All these
 paths share the same request. Loading a fresh embed creates no visitor session
 and writes no conversation or tab configuration.
 
@@ -1963,8 +1964,9 @@ offsets them with the custom property (see the embedding notes in
 `docs/self-hosting.md`).
 
 **Opening and restoring.** A fresh tab starts with a closed assistant.
-Conversation state is first saved when the visitor opens the panel. The
-open layout and any choice made with the expand or collapse controls are
+Conversation state is first saved when the visitor opens the panel or the
+host submits a message through `send()`. The open layout and any choice
+made with the expand or collapse controls are
 saved with the conversation in sessionStorage, so an open panel reopens in
 the same layout on navigation in the tab.
 
@@ -2008,8 +2010,8 @@ uses the visitor's layout preference
 or the owner's opening setting. `focus` defaults to true. A delegated click listener handles
 `data-solv-chat-open` on host elements, including elements added later, with an
 optional `side` or `panel` value. Call `open()` or a `toggle()` that opens from
-a real visitor gesture. The API cannot auto-open on page load. An accepted
-API or declarative open counts as interaction for the visitor check.
+a real visitor gesture. An accepted API or declarative open counts as
+interaction for the visitor check.
 
 ```html
 <button type="button" data-solv-chat-open>Ask</button>
@@ -2024,6 +2026,20 @@ API or declarative open counts as interaction for the visitor check.
   });
 </script>
 ```
+
+`send(text: string, options?: { open?: boolean }): Promise<{ text: string }>`
+submits a visitor message to the current conversation. It loads settings and
+uses the same visitor check, caps, and page-action flow as the message box.
+The panel stays in its current state by default and the exchange is saved.
+`open: true` opens it before submitting. A confirmation or an interactive
+visitor check opens a closed panel so the visitor can respond. The promise
+returns the accumulated reply text after the final stream completion,
+including any page-action continuations. It rejects with a displayable
+`Error` if a turn is already in progress, the message is blank, too long or
+refused, the assistant is unavailable, or the reply is interrupted.
+If a page action navigates to another page on the same origin, the widget
+on that page resumes the conversation. The promise belongs to the original
+page.
 
 The element emits `solv-chat:open` and `solv-chat:close` when visibility changes,
 and `solv-chat:expand` and `solv-chat:collapse` when it enters or leaves the
