@@ -273,9 +273,14 @@ function openFromHostClick(event: MouseEvent): void {
 }
 
 function matchesShortcut(event: KeyboardEvent, shortcut: WidgetShortcut): boolean {
-  if (event.altKey || event.shiftKey || event.isComposing || event.repeat) return false;
+  if (event.altKey || event.isComposing || event.repeat) return false;
   if (shortcut === "/") return event.key === "/" && !event.ctrlKey && !event.metaKey;
-  return shortcut === "mod-k" && event.key.toLowerCase() === "k" && event.ctrlKey !== event.metaKey;
+  return (
+    shortcut === "mod-k" &&
+    !event.shiftKey &&
+    event.key.toLowerCase() === "k" &&
+    event.ctrlKey !== event.metaKey
+  );
 }
 
 /**

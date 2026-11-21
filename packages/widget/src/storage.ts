@@ -191,7 +191,11 @@ export function loadConversation(assistant: string): SavedConversation | null {
     const saved = parseSavedConversation(JSON.parse(raw));
     // A same-origin popup starts with a copy of its opener's sessionStorage.
     // The id is kept for the lifetime of the conversation, even as turns change.
-    if (saved && copiedFromOpener(key, saved.tabId)) return null;
+    if (saved && copiedFromOpener(key, saved.tabId)) {
+      // Discard the copy now, since the opener may be gone on the next load.
+      sessionStorage.removeItem(key);
+      return null;
+    }
     return saved;
   } catch {
     // Private-mode quota errors and malformed data both mean "no saved

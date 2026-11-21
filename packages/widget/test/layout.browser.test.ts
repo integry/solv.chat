@@ -186,7 +186,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     servers.push(host, engine);
     hostPort = await listen(host);
     enginePort = await listen(engine);
-    browser = await launch(chrome as string);
+    browser = await launch(chrome as string, ["--disable-popup-blocking"]);
   }, 90_000);
 
   afterEach(() => {
@@ -311,33 +311,52 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       const popupState = () =>
         browser.cdp.evaluate<{
           hidden: boolean;
-          storage: Record<string, unknown>;
+          storage: string | null;
         } | null>(`(() => {
         const popup = window.widgetPopup;
-        const widget = popup?.document.querySelector("solv-chat");
-        if (widget?.shadowRoot.querySelector(".solv-title").textContent !== "Docs") return null;
+        if (!popup || popup.__reloading) return null;
+        const widget = popup.document.querySelector("solv-chat");
+        if (widget?.shadowRoot?.querySelector(".solv-title").textContent !== "Docs") return null;
         return {
           hidden: widget.shadowRoot.querySelector(".solv-panel").hidden,
-          storage: JSON.parse(popup.sessionStorage.getItem("solv-chat-open:pk_layout")),
+          storage: popup.sessionStorage.getItem("solv-chat-open:pk_layout"),
         };
       })()`);
+      const storageKey = "solv-chat-open:pk_layout";
+      const original = await page_<string>(`sessionStorage.getItem("${storageKey}")`);
+      expect(JSON.parse(original)).toMatchObject({ open: true });
       try {
         await page_(`(() => {
           const ask = document.querySelector("#host-ask");
           ask.style.cssText = "position:fixed;left:20px;top:16px";
           ask.onclick = () => {
-            window.widgetPopup = window.open("${hostOrigin()}/host-controls");
+            // Keep this test's driver alive when the popup's opener closes.
+            window.widgetOpener = window.open("about:blank");
+            window.widgetPopup = window.widgetOpener.eval('window.open("about:blank")');
           };
         })()`);
         await click("#host-ask");
-        const copied = await waitFor(popupState, "assistant in a new tab");
-        expect(copied.hidden).toBe(true);
-        expect(copied.storage).toMatchObject({ open: true });
-        expect(copied.storage).toEqual(
-          await page_('JSON.parse(sessionStorage.getItem("solv-chat-open:pk_layout"))'),
+        expect(await page_("window.widgetPopup.opener === window.widgetOpener")).toBe(true);
+        expect(await page_(`window.widgetPopup.sessionStorage.getItem("${storageKey}")`)).toBe(
+          original,
         );
+        await page_(`(window.widgetPopup.location.href = "${hostOrigin()}/host-controls")`);
+        expect((await waitFor(popupState, "assistant in a new tab")).hidden).toBe(true);
+        expect(await page_(`window.widgetOpener.sessionStorage.getItem("${storageKey}")`)).toBe(
+          original,
+        );
+
+        await page_("window.widgetOpener.close()");
+        await waitFor(() => page_<boolean>("window.widgetOpener.closed"), "opener to close");
+        await page_(
+          "((window.widgetPopup.__reloading = true), window.widgetPopup.location.reload())",
+        );
+        expect(await waitFor(popupState, "assistant after reload")).toEqual({
+          hidden: true,
+          storage: null,
+        });
       } finally {
-        await page_("window.widgetPopup?.close()");
+        await page_("(window.widgetPopup?.close(), window.widgetOpener?.close())");
         await browser.cdp.send("Page.bringToFront");
       }
       await click(".solv-close", true);
@@ -511,10 +530,17 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     expect(await focus()).toBe("solv-input");
     expect(await q<boolean>(`!!r.querySelector('iframe[src*="/v1/check/frame"]')`)).toBe(true);
 
+    await open("/host-controls");
+    await keypress("/", "Digit7", 8); // Shift+7 produces slash on a German layout.
+    expect(await panelHidden()).toBe(false);
+    expect(await focus()).toBe("solv-input");
+
     visitorCheck = false;
     widgetOptions = { keyboardShortcut: "mod-k" };
     await open("/host-controls");
     await keypress("k", "KeyK");
+    expect(await panelHidden()).toBe(true);
+    await keypress("K", "KeyK", 10); // Ctrl+Shift
     expect(await panelHidden()).toBe(true);
     await keypress("k", "KeyK", 2); // Ctrl
     expect(await panelHidden()).toBe(false);
