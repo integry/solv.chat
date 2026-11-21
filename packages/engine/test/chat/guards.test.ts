@@ -71,6 +71,7 @@ describe("chat/guards", () => {
           title: "Docs",
           accentColor: "#2563eb",
           position: "right",
+          allowExpand: true,
         },
         limits: { dailyCostCapMicros: 2_000_000 },
         allowedTools: [],

@@ -437,6 +437,7 @@ describe("admin versions API", () => {
       title: "Support Bot",
       accentColor: "#112233",
       position: "right",
+      allowExpand: true,
     });
     expect(fetched.draft.config.limits.dailyCostCapMicros).toBe(500);
   });

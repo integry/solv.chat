@@ -34,7 +34,13 @@ import {
   saveConversation,
   visitorId,
 } from "./storage.js";
-import { styles } from "./styles.js";
+import { HOLD_BOUND_MS, streamingView } from "./streaming.js";
+import {
+  PANEL_WIDTH_PROPERTY,
+  SIDE_BY_SIDE_MIN_WIDTH_PX,
+  SIDE_PANEL_WIDTH_PX,
+  styles,
+} from "./styles.js";
 
 interface WidgetPublicConfig {
   title: string;
@@ -45,6 +51,67 @@ interface WidgetPublicConfig {
   actions: BuiltinSettings;
   /** The engine runs the visitor check: every request needs a session. */
   visitorCheck: boolean;
+  /** "Allow expanding to a side panel": the header shows the expand control. */
+  allowExpand: boolean;
+}
+
+/**
+ * How the open panel is laid out: the floating panel, a column beside the
+ * page (the page is narrowed to make room), or the whole screen on a viewport
+ * too narrow for side by side.
+ */
+type Layout = "panel" | "side" | "full";
+
+/** What the widget added to the host's root element, and what was there before. */
+interface RootReservation {
+  root: HTMLElement;
+  property: string;
+  value: string;
+  priority: string;
+  variableValue: string;
+  variablePriority: string;
+  /** The root's style attribute before, and its parsed form, to put back byte for byte. */
+  styleAttribute: string | null;
+  cssText: string;
+}
+
+/** The answer text being painted while it streams in. */
+interface LivePaint {
+  textEl: HTMLDivElement;
+  turn: SavedTurn;
+  frame: number | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  /** Where the held-back text started, and when it was first held there. */
+  heldFrom: number;
+  heldSince: number;
+}
+
+const TYPING_LABEL = "Writing an answer";
+
+/** A 24-unit square icon for a header button, built from DOM nodes. */
+function headerIcon(path: string): SVGSVGElement {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "16");
+  svg.setAttribute("height", "16");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const shape = document.createElementNS(ns, "path");
+  shape.setAttribute("d", path);
+  shape.setAttribute("fill", "currentColor");
+  svg.append(shape);
+  return svg;
+}
+
+function requestFrame(callback: () => void): number {
+  if (typeof requestAnimationFrame === "function") return requestAnimationFrame(callback);
+  return setTimeout(callback, 16) as unknown as number;
+}
+
+function cancelFrame(handle: number): void {
+  if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(handle);
+  clearTimeout(handle);
 }
 
 const DEFAULT_CONFIG: WidgetPublicConfig = {
@@ -55,6 +122,7 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
   suggestedQuestions: [],
   actions: { enabled: false, allowedOrigins: [] },
   visitorCheck: false,
+  allowExpand: true,
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
@@ -112,6 +180,10 @@ export function parsePublicConfig(raw: unknown): Partial<WidgetPublicConfig> {
   if (widget.position === "left" || widget.position === "right") {
     out.position = widget.position;
   }
+  // Absent from an older engine's response: the default (on) stays.
+  if (typeof widget.allowExpand === "boolean") {
+    out.allowExpand = widget.allowExpand;
+  }
   if (typeof behaviour.greeting === "string" && behaviour.greeting.trim()) {
     out.greeting = behaviour.greeting.trim();
   }
@@ -164,8 +236,20 @@ export class SolvChat extends HTMLElement {
   /** Set while the widget itself moves focus to the input, which is not the visitor's doing. */
   #focusingInput = false;
   #check!: CheckController;
+  /** The visitor chose the side panel; remembered with the open conversation. */
+  #expanded = false;
+  #reservation: RootReservation | null = null;
+  #wideQuery: MediaQueryList | null = null;
+  #onWideChange = (): void => this.#applyLayout();
+  /** The visitor has not scrolled up from the newest message. */
+  #pinned = true;
+  #paints = new Map<HTMLDivElement, LivePaint>();
+  /** Bubbles whose typing indicator has been announced once already. */
+  #announced = new WeakSet<HTMLDivElement>();
 
   #launcher!: HTMLButtonElement;
+  #expandBtn!: HTMLButtonElement;
+  #collapseBtn!: HTMLButtonElement;
   #panel!: HTMLDivElement;
   #titleEl!: HTMLHeadingElement;
   #messagesEl!: HTMLDivElement;
@@ -195,6 +279,8 @@ export class SolvChat extends HTMLElement {
         }
       }
       this.#restore(saved ?? { conversationId: null, open: false, turns: [] });
+    } else {
+      this.#applyLayout();
     }
 
     if (expiredPending) {
@@ -227,6 +313,11 @@ export class SolvChat extends HTMLElement {
     setOnExternalNavigate(null);
     this.#pendingResume = null;
     this.#resumedBubble = null;
+    // The page gets back exactly what it had; the choice itself stays saved,
+    // so the panel opens expanded again on the next page.
+    this.#releaseRoom();
+    this.#watchViewport(false);
+    for (const textEl of [...this.#paints.keys()]) this.#finishPaint(textEl);
     if (this.#abortController) {
       this.#abortController.abort();
       this.#abortController = null;
@@ -285,13 +376,46 @@ export class SolvChat extends HTMLElement {
     closeBtn.textContent = "\u00d7";
     closeBtn.addEventListener("click", () => this.#closePanel(true));
 
-    header.append(title, closeBtn);
+    const expandBtn = document.createElement("button");
+    expandBtn.type = "button";
+    expandBtn.className = "solv-expand";
+    expandBtn.setAttribute("aria-label", "Expand to a side panel");
+    expandBtn.setAttribute("aria-controls", "solv-panel");
+    expandBtn.setAttribute("aria-expanded", "false");
+    expandBtn.title = "Expand";
+    expandBtn.append(
+      headerIcon("M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM4 14h2v4h4v2H4v-6zm14 4v-4h2v6h-6v-2h4z"),
+    );
+    expandBtn.addEventListener("click", () => this.#setExpanded(true));
+
+    const collapseBtn = document.createElement("button");
+    collapseBtn.type = "button";
+    collapseBtn.className = "solv-collapse";
+    collapseBtn.setAttribute("aria-label", "Collapse to a small window");
+    collapseBtn.setAttribute("aria-controls", "solv-panel");
+    collapseBtn.setAttribute("aria-expanded", "true");
+    collapseBtn.title = "Collapse";
+    collapseBtn.hidden = true;
+    collapseBtn.append(
+      headerIcon("M8 4h2v6H4V8h4V4zm6 0h2v4h4v2h-6V4zM4 14h6v6H8v-4H4v-2zm10 0h6v2h-4v4h-2v-6z"),
+    );
+    collapseBtn.addEventListener("click", () => this.#setExpanded(false));
+
+    const headerActions = document.createElement("div");
+    headerActions.className = "solv-header-actions";
+    headerActions.append(expandBtn, collapseBtn, closeBtn);
+
+    header.append(title, headerActions);
 
     const messages = document.createElement("div");
     messages.className = "solv-messages";
     messages.setAttribute("role", "log");
     messages.setAttribute("aria-live", "polite");
     messages.setAttribute("aria-relevant", "additions text");
+    // Kept at the newest message only while the visitor has not scrolled up.
+    messages.addEventListener("scroll", () => {
+      this.#pinned = messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 32;
+    });
 
     const greeting = document.createElement("div");
     greeting.className = "solv-bubble solv-bubble--assistant";
@@ -408,6 +532,8 @@ export class SolvChat extends HTMLElement {
     this.#inputEl = input;
     this.#sendBtn = sendBtn;
     this.#launcher = launcher;
+    this.#expandBtn = expandBtn;
+    this.#collapseBtn = collapseBtn;
   }
 
   /**
@@ -452,6 +578,7 @@ export class SolvChat extends HTMLElement {
     } else {
       this.removeAttribute("data-position");
     }
+    this.#applyLayout();
     // Registered after the config says so, and removed if it says not to.
     installBuiltins(this.#config.actions);
     this.#renderSuggestions();
@@ -505,6 +632,7 @@ export class SolvChat extends HTMLElement {
     this.#panel.hidden = false;
     this.#launcher.setAttribute("aria-expanded", "true");
     this.#launcher.setAttribute("aria-label", "Close chat");
+    this.#applyLayout();
     this.#persist();
     if (moveFocus) {
       this.#focusInput();
@@ -519,19 +647,130 @@ export class SolvChat extends HTMLElement {
     this.#panel.hidden = true;
     this.#launcher.setAttribute("aria-expanded", "false");
     this.#launcher.setAttribute("aria-label", "Open chat");
+    this.#applyLayout();
     this.#persist();
     if (restoreFocus) {
       this.#launcher.focus();
     }
   }
 
+  /** Expands to the side panel or collapses back, keeping focus in the panel. */
+  #setExpanded(expanded: boolean): void {
+    if (!this.#config.allowExpand || !this.#open || this.#expanded === expanded) return;
+    this.#expanded = expanded;
+    this.#applyLayout();
+    this.#persist();
+    // The control pressed is now hidden; its counterpart sits in the same place.
+    (expanded ? this.#collapseBtn : this.#expandBtn).focus();
+  }
+
+  #isWide(): boolean {
+    return (
+      typeof matchMedia === "function" &&
+      matchMedia(`(min-width: ${SIDE_BY_SIDE_MIN_WIDTH_PX}px)`).matches
+    );
+  }
+
+  #watchViewport(on: boolean): void {
+    if (on && this.#wideQuery === null && typeof matchMedia === "function") {
+      this.#wideQuery = matchMedia(`(min-width: ${SIDE_BY_SIDE_MIN_WIDTH_PX}px)`);
+      this.#wideQuery.addEventListener?.("change", this.#onWideChange);
+    } else if (!on && this.#wideQuery !== null) {
+      this.#wideQuery.removeEventListener?.("change", this.#onWideChange);
+      this.#wideQuery = null;
+    }
+  }
+
+  /** Puts the panel, the launcher, the header controls and the page in line with the state. */
+  #applyLayout(): void {
+    if (!this.#initialized) return;
+    const allow = this.#config.allowExpand;
+    const wanted = this.#open && this.#expanded && allow;
+    const layout: Layout = wanted ? (this.#isWide() ? "side" : "full") : "panel";
+    if (layout === "side" && this.isConnected) this.#reserveRoom();
+    else this.#releaseRoom();
+    this.#watchViewport(wanted && this.isConnected);
+    if (layout === "panel") this.removeAttribute("data-layout");
+    else this.setAttribute("data-layout", layout);
+    this.#launcher.hidden = layout !== "panel";
+    this.#expandBtn.hidden = !allow || this.#expanded;
+    this.#collapseBtn.hidden = !allow || !this.#expanded;
+  }
+
+  /**
+   * Narrows the host page by the column's width: a margin on the root element
+   * on the widget's side, and the width in a custom property the host can use
+   * to move what it fixed to that edge. What was there is kept to put back.
+   */
+  #reserveRoom(): void {
+    const side = this.#config.position === "left" ? "left" : "right";
+    const property = `margin-${side}`;
+    if (this.#reservation?.property === property) return;
+    this.#releaseRoom();
+    const root = document.documentElement;
+    if (!root) return;
+    const style = root.style;
+    const reservation: RootReservation = {
+      root,
+      property,
+      value: style.getPropertyValue(property),
+      priority: style.getPropertyPriority(property),
+      variableValue: style.getPropertyValue(PANEL_WIDTH_PROPERTY),
+      variablePriority: style.getPropertyPriority(PANEL_WIDTH_PROPERTY),
+      styleAttribute: root.getAttribute("style"),
+      cssText: style.cssText,
+    };
+    const width = `${SIDE_PANEL_WIDTH_PX}px`;
+    // The host's own margin is kept and the column added to it.
+    if (reservation.value)
+      style.setProperty(property, `calc(${reservation.value} + ${width})`, "important");
+    if (!reservation.value || style.getPropertyValue(property) === reservation.value) {
+      style.setProperty(property, width, "important");
+    }
+    style.setProperty(PANEL_WIDTH_PROPERTY, width);
+    this.#reservation = reservation;
+  }
+
+  /** Removes exactly what `#reserveRoom` added. */
+  #releaseRoom(): void {
+    const reservation = this.#reservation;
+    if (reservation === null) return;
+    this.#reservation = null;
+    const { root } = reservation;
+    const style = root.style;
+    if (reservation.value) {
+      style.setProperty(reservation.property, reservation.value, reservation.priority);
+    } else {
+      style.removeProperty(reservation.property);
+    }
+    if (reservation.variableValue) {
+      style.setProperty(
+        PANEL_WIDTH_PROPERTY,
+        reservation.variableValue,
+        reservation.variablePriority,
+      );
+    } else {
+      style.removeProperty(PANEL_WIDTH_PROPERTY);
+    }
+    // Nothing else changed meanwhile: put the attribute back as it was written.
+    // Reading it first makes the browser write out the changes above now
+    // (Chromium does so lazily), so they cannot land after it is restored.
+    root.getAttribute("style");
+    if (style.cssText === reservation.cssText) {
+      if (reservation.styleAttribute === null) root.removeAttribute("style");
+      else root.setAttribute("style", reservation.styleAttribute);
+    }
+  }
+
   #restore(saved: {
     conversationId: string | null;
     open: boolean;
+    expanded?: boolean;
     turns: SavedTurn[];
     pendingResume?: PendingResume;
   }): void {
     this.#conversationId = saved.conversationId;
+    this.#expanded = saved.expanded === true;
     this.#pendingResume = saved.pendingResume ?? null;
     this.#resumedBubble = null;
     this.#turns = saved.turns.map((turn) => ({
@@ -595,6 +834,7 @@ export class SolvChat extends HTMLElement {
       this.#panel.hidden = true;
       this.#launcher.setAttribute("aria-expanded", "false");
       this.#launcher.setAttribute("aria-label", "Open chat");
+      this.#applyLayout();
       if (restoredUnfinished) {
         this.#persist();
       }
@@ -605,6 +845,7 @@ export class SolvChat extends HTMLElement {
     return {
       conversationId: this.#conversationId,
       open: this.#open,
+      ...(this.#expanded ? { expanded: true } : {}),
       turns: this.#turns,
       ...(this.#pendingResume ? { pendingResume: this.#pendingResume } : {}),
     };
@@ -695,6 +936,7 @@ export class SolvChat extends HTMLElement {
     note.className = "solv-action-note";
     note.textContent = ACTION_WORDING[name] ?? `Using ${name} on this page.`;
     bubble.append(note);
+    this.#keepTypingLast(bubble);
     this.#scrollToBottom();
     return note;
   }
@@ -710,6 +952,7 @@ export class SolvChat extends HTMLElement {
     note.className = "solv-action";
     note.textContent = ok ? `Ran ${name}` : `Could not run ${name}`;
     container.append(note);
+    this.#keepTypingLast(bubble);
   }
 
   #appendFeedbackControls(bubble: HTMLDivElement, turn: SavedTurn): void {
@@ -806,6 +1049,7 @@ export class SolvChat extends HTMLElement {
   }
 
   #setTurnError(bubble: HTMLDivElement, turn: SavedTurn, message: string): void {
+    this.#hideTyping(bubble);
     turn.error = message;
     this.#renderBubbleError(bubble, message);
     this.#scrollToBottom();
@@ -830,8 +1074,114 @@ export class SolvChat extends HTMLElement {
     errorEl.textContent = message;
   }
 
-  #scrollToBottom(): void {
+  /**
+   * Keeps the newest message in view, unless the visitor has scrolled up to
+   * read something earlier. `force` is for the visitor's own new message.
+   */
+  #scrollToBottom(force = false): void {
+    if (force) this.#pinned = true;
+    if (!this.#pinned) return;
     this.#messagesEl.scrollTop = this.#messagesEl.scrollHeight;
+  }
+
+  /**
+   * Shows the typing indicator at the end of `bubble`: three dots, and the
+   * first time for this answer a visually hidden "Writing an answer" that
+   * the live region announces. Shown again later (a tool, a page action) it
+   * is the dots alone, so the announcement is made once.
+   */
+  #showTyping(bubble: HTMLDivElement): void {
+    let indicator = bubble.querySelector<HTMLDivElement>(".solv-typing");
+    if (!indicator) {
+      indicator = document.createElement("div");
+      indicator.className = "solv-typing";
+      for (let i = 0; i < 3; i++) {
+        const dot = document.createElement("span");
+        dot.className = "solv-typing-dot";
+        dot.setAttribute("aria-hidden", "true");
+        indicator.append(dot);
+      }
+      if (!this.#announced.has(bubble)) {
+        this.#announced.add(bubble);
+        const label = document.createElement("span");
+        label.className = "sr-only";
+        label.textContent = TYPING_LABEL;
+        indicator.append(label);
+      }
+    }
+    // Last in the bubble, after any note about an action.
+    if (bubble.lastElementChild !== indicator) bubble.append(indicator);
+    this.#scrollToBottom();
+  }
+
+  #keepTypingLast(bubble: HTMLDivElement): void {
+    const indicator = bubble.querySelector(".solv-typing");
+    if (indicator && bubble.lastElementChild !== indicator) bubble.append(indicator);
+  }
+
+  #hideTyping(bubble: HTMLDivElement): void {
+    bubble.querySelector(".solv-typing")?.remove();
+  }
+
+  /**
+   * Paints the streamed answer in `textEl` on the next animation frame, so a
+   * fast stream lays out once a frame rather than once a token.
+   */
+  #queuePaint(textEl: HTMLDivElement, turn: SavedTurn): void {
+    let entry = this.#paints.get(textEl);
+    if (!entry) {
+      entry = { textEl, turn, frame: null, timer: null, heldFrom: -1, heldSince: 0 };
+      this.#paints.set(textEl, entry);
+    }
+    entry.turn = turn;
+    if (entry.frame !== null) return;
+    const live = entry;
+    entry.frame = requestFrame(() => {
+      live.frame = null;
+      this.#paint(live);
+    });
+  }
+
+  #paint(entry: LivePaint): void {
+    const text = entry.turn.text;
+    const view = streamingView(text);
+    let markdown = view.markdown;
+    if (view.heldFrom < text.length) {
+      const now = Date.now();
+      if (entry.heldFrom !== view.heldFrom) {
+        entry.heldFrom = view.heldFrom;
+        entry.heldSince = now;
+      }
+      const waited = now - entry.heldSince;
+      if (waited >= HOLD_BOUND_MS) {
+        // Held long enough: shown as it stands, so text never waits for long.
+        markdown = text;
+      } else if (entry.timer === null) {
+        entry.timer = setTimeout(() => {
+          entry.timer = null;
+          if (this.#paints.get(entry.textEl) === entry) this.#queuePaint(entry.textEl, entry.turn);
+        }, HOLD_BOUND_MS - waited);
+      }
+    } else {
+      entry.heldFrom = -1;
+    }
+    renderMarkdown(entry.textEl, markdown);
+    if (entry.textEl.childNodes.length > 0) {
+      const bubble = entry.textEl.parentElement;
+      if (bubble instanceof HTMLDivElement) this.#hideTyping(bubble);
+    }
+    this.#scrollToBottom();
+    this.#persist();
+  }
+
+  /** Paints the whole text now, as it renders at rest, and stops painting `textEl`. */
+  #finishPaint(textEl: HTMLDivElement): void {
+    const entry = this.#paints.get(textEl);
+    if (!entry) return;
+    this.#paints.delete(textEl);
+    if (entry.frame !== null) cancelFrame(entry.frame);
+    if (entry.timer !== null) clearTimeout(entry.timer);
+    renderMarkdown(textEl, entry.turn.text);
   }
 
   /** Why the last check failed, for the bubble that waited on it. */
@@ -884,6 +1234,9 @@ export class SolvChat extends HTMLElement {
     const assistantTurn: SavedTurn = { role: "assistant", text: "" };
     this.#turns.push(assistantTurn);
     const { bubble, textEl } = this.#appendBubble("assistant");
+    // From the moment it is sent, through the visitor check, until text arrives.
+    this.#showTyping(bubble);
+    this.#scrollToBottom(true);
     this.#persist();
 
     const controller = new AbortController();
@@ -940,6 +1293,8 @@ export class SolvChat extends HTMLElement {
         this.#markTurnInterrupted(bubble, assistantTurn);
       }
     } finally {
+      this.#finishPaint(textEl);
+      this.#hideTyping(bubble);
       if (this.#abortController === controller) {
         this.#abortController = null;
         this.#sending = false;
@@ -992,13 +1347,17 @@ export class SolvChat extends HTMLElement {
           // DOM nodes and textContent only, never raw HTML assignment: the text
           // comes from a model that can be talked into emitting markup, and a
           // chat bubble is the last place that should execute anything.
+          // Painted once a frame, holding back a half-written link or list
+          // marker for a moment (see `streaming.ts`).
           assistantTurn.text += event.text;
-          renderMarkdown(textEl, assistantTurn.text);
-          this.#scrollToBottom();
-          this.#persist();
+          this.#queuePaint(textEl, assistantTurn);
         } else if (event.type === "citation") {
           this.#appendCitation(bubble, assistantTurn, event.url, event.title);
           this.#persist();
+        } else if (event.type === "tool") {
+          // A tool is working: the answer is not stuck.
+          if (event.state === "running") this.#showTyping(bubble);
+          else if (assistantTurn.text !== "") this.#hideTyping(bubble);
         } else if (event.type === "action") {
           // Queued rather than run on arrival: `done` names the full set, and
           // running them in one pass keeps one follow-up request per pause.
@@ -1010,6 +1369,7 @@ export class SolvChat extends HTMLElement {
           });
         } else if (event.type === "done") {
           terminated = true;
+          this.#finishPaint(textEl);
           this.#conversationId = event.conversationId;
           assistantTurn.messageId = event.messageId;
           if (event.awaitingActions && event.awaitingActions.length > 0) {
@@ -1038,6 +1398,8 @@ export class SolvChat extends HTMLElement {
           }
         } else if (event.type === "error") {
           terminated = true;
+          this.#finishPaint(textEl);
+          this.#hideTyping(bubble);
           delete assistantTurn.awaiting;
           if (event.code === "check_required") this.#check.clear();
           // The engine will not take more in this conversation; the next
@@ -1059,6 +1421,8 @@ export class SolvChat extends HTMLElement {
         this.#markTurnInterrupted(bubble, assistantTurn);
       }
     }
+    this.#finishPaint(textEl);
+    if (!resumeEvent) this.#hideTyping(bubble);
 
     if (resumeEvent && !signal.aborted) {
       await this.#resumeWithActionResults(
@@ -1084,6 +1448,8 @@ export class SolvChat extends HTMLElement {
     this.#sending = true;
     this.#sendBtn.disabled = true;
     const { signal } = controller;
+    // The answer carries on after the page change: say so straight away.
+    this.#showTyping(target.bubble);
 
     try {
       await this.#loadConfig();
@@ -1130,6 +1496,8 @@ export class SolvChat extends HTMLElement {
         this.#markTurnInterrupted(target.bubble, target.turn);
       }
     } finally {
+      this.#finishPaint(target.textEl);
+      this.#hideTyping(target.bubble);
       if (this.#abortController === controller) {
         this.#abortController = null;
         this.#sending = false;
@@ -1257,6 +1625,8 @@ export class SolvChat extends HTMLElement {
     );
 
     const results: ActionResult[] = [];
+    // A page action is in progress, then the answer continues.
+    this.#showTyping(bubble);
     try {
       for (let i = 0; i < toRun.length; i++) {
         const request = toRun[i];

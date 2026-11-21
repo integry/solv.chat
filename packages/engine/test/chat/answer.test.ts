@@ -169,6 +169,8 @@ describe("chat/answer", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/event-stream");
+    // Nothing between the Worker and the visitor may compress (and so gather) the stream.
+    expect(res.headers.get("cache-control")).toBe("no-cache, no-transform");
 
     const reader = res.body?.getReader();
     expect(reader).toBeDefined();

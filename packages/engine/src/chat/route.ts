@@ -86,7 +86,14 @@ const encoder = new TextEncoder();
 function sseHeaders(origin: string | null): Record<string, string> {
   return {
     "content-type": "text/event-stream; charset=utf-8",
-    "cache-control": "no-cache",
+    // `no-transform` asks Cloudflare not to compress or otherwise change the
+    // stream, so nothing on the way gathers tokens into larger pieces. The
+    // page lists the compressed types (text/event-stream is not one) and says
+    // compression can be disabled "by including a `cache-control: no-transform`
+    // HTTP header in the response from your origin web server".
+    // Source: https://developers.cloudflare.com/speed/optimization/content/compression/
+    // — checked 2026-11-21
+    "cache-control": "no-cache, no-transform",
     ...corsHeaders(origin),
   };
 }
@@ -956,6 +963,8 @@ export async function publicConfigRoute(
       title: published.config.widget.title,
       accentColor: published.config.widget.accentColor,
       position: published.config.widget.position,
+      // Stored versions from before the setting have no value: on, as the default.
+      allowExpand: published.config.widget.allowExpand !== false,
       greeting: published.config.behaviour.greeting,
       suggestedQuestions: [...published.config.behaviour.suggestedQuestions],
       // What the widget needs to gate the built-ins and check a navigate

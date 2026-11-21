@@ -35,6 +35,12 @@ export interface PendingResume {
 export interface SavedConversation {
   conversationId: string | null;
   open: boolean;
+  /**
+   * The visitor expanded the panel to the side panel. Saved only when true,
+   * and only with the rest of the conversation, which is first written when
+   * the visitor opens the assistant.
+   */
+  expanded?: boolean;
   turns: SavedTurn[];
   pendingResume?: PendingResume;
 }
@@ -146,11 +152,13 @@ function parseSavedConversation(parsed: unknown): SavedConversation | null {
   const record = parsed as Record<string, unknown>;
   const conversationId = typeof record.conversationId === "string" ? record.conversationId : null;
   const open = typeof record.open === "boolean" ? record.open : false;
+  const expanded = record.expanded === true;
   const turns = Array.isArray(record.turns) ? (record.turns as SavedTurn[]) : [];
   const pendingResume = parsePendingResume(record.pendingResume);
   return {
     conversationId,
     open,
+    ...(expanded ? { expanded } : {}),
     turns,
     ...(pendingResume ? { pendingResume } : {}),
   };
@@ -191,6 +199,7 @@ export function saveConversation(assistant: string, saved: SavedConversation, ow
       JSON.stringify({
         conversationId: saved.conversationId,
         open: saved.open,
+        ...(saved.expanded ? { expanded: true } : {}),
         turns: saved.turns.slice(-MAX_SAVED_TURNS),
         ...(saved.pendingResume ? { pendingResume: saved.pendingResume } : {}),
       }),
