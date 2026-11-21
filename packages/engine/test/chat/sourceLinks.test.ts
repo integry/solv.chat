@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   type LinkTargets,
+  linkDestinations,
   linkTargets,
+  pageKey,
   rewriteSourceLinks,
   sourceLinker,
 } from "../../src/chat/sourceLinks.js";
@@ -286,5 +288,205 @@ describe("chat/sourceLinks", () => {
     expect(rewrite("A [x][1]\r\n\r\nB [y][1]\r\n")).toBe(
       `A [x](${TESTING})\r\n\r\nB [y](${TESTING})\r\n`,
     );
+  });
+
+  describe("a link inside a link's text, or one left behind by a rewrite, is checked too", () => {
+    const UNLISTED = "https://unlisted.example";
+    // Each line: the answer, what it must become, and how many links were
+    // reduced because of where they went.
+    const cases: Array<[string, string, string, number]> = [
+      [
+        "a link in a link's text",
+        `[outer [inner](${UNLISTED}/inner)](${UNLISTED}/outer)`,
+        "outer inner",
+        2,
+      ],
+      ["a reference in a link's text", `[outer [inner][9]](${UNLISTED}/outer)`, "outer inner", 2],
+      [
+        "an image in a link's text",
+        `[outer ![inner](${UNLISTED}/i.png)](${UNLISTED}/outer)`,
+        "outer inner",
+        2,
+      ],
+      ["brackets in a link's text", `[see [the guide]](${UNLISTED}/x)`, "see [the guide]", 1],
+      [
+        "brackets in a link's text, then a destination",
+        `[a [b]](${UNLISTED}/x)(${UNLISTED}/c)`,
+        "a b",
+        2,
+      ],
+      [
+        "a source's link in an unlisted link's text",
+        `[outer [inner][1]](${UNLISTED}/outer)`,
+        `outer [inner](${TESTING})`,
+        1,
+      ],
+      [
+        "an unlisted link in a source's link's text",
+        `[outer [inner](${UNLISTED}/i)](${PRICING})`,
+        "outer inner",
+        1,
+      ],
+      [
+        "an autolink in a source's link's text",
+        `[a <${UNLISTED}/a> b](${PRICING})`,
+        `a ${UNLISTED}/a b`,
+        1,
+      ],
+      [
+        "an image reduced to nothing between a bracket and a destination",
+        `[x]![](${UNLISTED}/i)(${UNLISTED}/c)`,
+        "x",
+        2,
+      ],
+      [
+        "an autolink reduced to an address ending in a bracket",
+        `[x <${UNLISTED}/a]>(${UNLISTED}/c)`,
+        `x ${UNLISTED}/a`,
+        2,
+      ],
+      [
+        "an autolink reduced to an address holding a bracket",
+        `<${UNLISTED}/a[>](${UNLISTED}/c)`,
+        `${UNLISTED}/a`,
+        2,
+      ],
+    ];
+
+    it.each(cases)("%s, whole", (_name, text, expected, removed) => {
+      const result = rewriteSourceLinks(text, TARGETS);
+      expect(result.text).toBe(expected);
+      expect(result.removed).toBe(removed);
+      // What is left reads as it is: nothing in it is a link not checked.
+      expect(rewrite(result.text)).toBe(result.text);
+    });
+
+    it.each(cases)("%s, split anywhere on the stream", (_name, text, expected) => {
+      for (let a = 1; a < text.length; a++) {
+        for (const b of [a + 1, a + 9]) {
+          const deltas = stream(text, b < text.length ? [a, b] : [a]);
+          expect(deltas.join("")).toBe(expected);
+          // Nothing sent is taken back: each delta continues the result.
+          let sent = "";
+          for (const delta of deltas) {
+            sent += delta;
+            expect(expected.startsWith(sent)).toBe(true);
+          }
+        }
+      }
+    });
+
+    it("still keeps a source's link as written, reading it again", () => {
+      // The address it writes reads back as the page it is, so it stays.
+      const targets = linkTargets([{ url: "https://docs.example.com/a_(b) c", text: "" }]);
+      const result = rewriteSourceLinks("[A][1] and [B](1)", targets);
+      expect(result.text).toBe("[A](https://docs.example.com/a_%28b%29%20c) and B");
+      expect(result.destinations).toEqual(["https://docs.example.com/a_(b)%20c"]);
+      expect(result.removed).toBe(0);
+    });
+  });
+
+  describe("a paused reply: a link begun before the pause is not finished after it", () => {
+    const UNLISTED = "https://unlisted.example/c";
+    const cases: Array<[string, string, string, string, number]> = [
+      ["a destination", "See [x]", `(${UNLISTED}) more`, " more", 1],
+      ["a source's number", "See [the guide]", "[1] for more", " for more", 0],
+      ["an autolink's close", `See <${UNLISTED}`, "> more", " more", 1],
+      ["an autolink's address", `See <${UNLISTED}`, "/more> now", "/more now", 1],
+    ];
+
+    it.each(cases)("%s, whole", (_name, before, text, expected, removed) => {
+      const result = rewriteSourceLinks(text, TARGETS, before);
+      expect(result.text).toBe(expected);
+      expect(result.removed).toBe(removed);
+      expect(result.destinations).toEqual([]);
+      // The stored reply, read again, links nowhere.
+      expect(linkDestinations(before + result.text)).toEqual([]);
+    });
+
+    it.each(cases)("%s, split anywhere on the stream", (_name, before, text, expected) => {
+      for (let a = 1; a < text.length; a++) {
+        expect(stream(text, [a], before).join("")).toBe(expected);
+      }
+    });
+  });
+
+  describe("linkDestinations", () => {
+    it("reads where a text's links go, rewriting nothing", () => {
+      const text = [
+        `See [the steps](${TESTING}#steps), [pricing][3], [1] and <${STATUS}>.`,
+        `Also [mail](mailto:help@example.com), \`[code](${PRICING})\` and ![chart](${PRICING}).`,
+      ].join("\n");
+      expect(linkDestinations(text)).toEqual([`${TESTING}#steps`, STATUS, PRICING]);
+    });
+
+    it("counts the link inside another link's text, not the outer one", () => {
+      expect(linkDestinations(`[outer [inner](${TESTING})](${PRICING})`)).toEqual([TESTING]);
+      expect(linkDestinations(`[see [the guide]](${PRICING})`)).toEqual([]);
+    });
+  });
+
+  describe("whatever the model writes", () => {
+    const OK = "https://ok.example/a";
+    const targets = linkTargets([{ url: OK, text: "" }]);
+    const allowed = (href: string) => {
+      const key = pageKey(href);
+      return key === null || key === pageKey(OK);
+    };
+    /** The addresses the widget would make links of (`findLinkEnd` in its renderer), at any "[". */
+    const widgetLinks = (text: string): string[] => {
+      const hrefs: string[] = [];
+      for (let at = 0; at < text.length; at++) {
+        if (text[at] !== "[" || text[at - 1] === "!") continue;
+        const close = text.indexOf("]", at + 1);
+        if (close === -1 || text.slice(at, close).includes("\n") || text[close + 1] !== "(") {
+          continue;
+        }
+        let depth = 1;
+        for (let p = close + 2; p < text.length && !/[\s]/u.test(text[p] as string); p++) {
+          if (text[p] === "(") depth++;
+          if (text[p] === ")" && --depth === 0) {
+            hrefs.push(text.slice(close + 2, p));
+            break;
+          }
+        }
+      }
+      return hrefs;
+    };
+    // Pieces of Markdown link syntax, and addresses allowed and not.
+    const pieces = [..."[]()<> \nx1", "![", OK, "https://bad.example/b"];
+    let seed = 7;
+    const next = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const texts = Array.from({ length: 300 }, () =>
+      Array.from(
+        { length: 3 + Math.floor(next() * 12) },
+        () => pieces[Math.floor(next() * pieces.length)],
+      ).join(""),
+    );
+
+    it("sends no link to an unlisted page, whole, streamed or across a pause", () => {
+      for (const text of texts) {
+        const out = rewriteSourceLinks(text, targets).text;
+        expect(rewriteSourceLinks(out, targets).text, text).toBe(out);
+        expect(linkDestinations(out).every(allowed), text).toBe(true);
+        expect(widgetLinks(out).every(allowed), text).toBe(true);
+        const cut = Math.floor(text.length / 2);
+        const linker = sourceLinker(targets);
+        const deltas = [
+          linker.push(text.slice(0, cut)),
+          linker.push(text.slice(cut)),
+          linker.flush(),
+        ];
+        expect(deltas.join(""), text).toBe(out);
+        // Paused at the cut: the stored part, then the rest written after it.
+        const before = rewriteSourceLinks(text.slice(0, cut), targets).text;
+        const stored = before + rewriteSourceLinks(text.slice(cut), targets, before).text;
+        expect(linkDestinations(stored).every(allowed), text).toBe(true);
+        expect(widgetLinks(stored).every(allowed), text).toBe(true);
+      }
+    });
   });
 });

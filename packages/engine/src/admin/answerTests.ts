@@ -105,7 +105,7 @@ function evaluate(
     citationsShown: boolean;
     /** The pages the answer was given, whether or not the visitor saw them. */
     used: string[];
-    /** The complete addresses its text links to, fragment kept ("Link in the text"). */
+    /** The complete addresses its text links to, fragment kept, in every source mode. */
     linked: string[];
     usedFallback: boolean;
   },

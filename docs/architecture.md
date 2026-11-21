@@ -1035,7 +1035,15 @@ by default) is a second one, offered with "Link in the text" only.
   (another site, a made-up page, a relative or `mailto:` address, a
   reference to no source or to a definition, an image, an autolink) and a
   second link to the same page in a paragraph is reduced to its text, in the
-  stream and the stored text alike. Code (an inline span, a fenced or
+  stream and the stored text alike. A link whose words hold another link or
+  a pair of brackets (`[see [the guide]](…)`, `[outer [inner](…)](…)`) is
+  reduced to its words whatever its target, and the links in those words
+  are checked like any other. The rewritten text is read again until that
+  changes nothing, so dropping a link's syntax never leaves an unchecked
+  link made of the text around it (`[x]![](…)(…)` reads `[x](…)` once the
+  image is gone). What was stored before a pause stays as it was, and a
+  link it began (`[words]`, `<https://…`) is not finished after the pause:
+  the rest of that link is dropped. Code (an inline span, a fenced or
   indented block) and escaped brackets are left alone, found as below.
   Markers (`[1]`) that still appear are then taken out as for "None". A link
   is never sent half-written: from a "[" (or "![", or an autolink's "<")
@@ -1079,9 +1087,11 @@ by default) is a second one, offered with "Link in the text" only.
   count the same), and the conversation view, which shows a reply's pages
   under "Used content" instead of "Sources" when the visitor saw no list
   (`citationsShown: false` on the turn). A test run's "cites" check passes
-  when the answer links to the page ("Linked to …"), in every mode,
-  compared on the whole address the link goes to, so a test of a page's
-  section (`#fragment`) passes on a link to that section; else,
+  when the answer links to the page ("Linked to …"), in every mode (with
+  "Numbered" and "None" the links as the model wrote them, which the
+  visitor gets unchanged), compared on the whole address the link goes to,
+  so a test of a page's section (`#fragment`) passes on a link to that
+  section; else,
   with a list shown, when the list has it ("Cited"), and with none, when
   the answer used it ("Used").
 - **No talk about sources.** Every frame tells the model never to write about

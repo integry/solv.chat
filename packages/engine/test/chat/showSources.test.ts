@@ -13,6 +13,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { runAnswerTests } from "../../src/admin/answerTests.js";
 import { getConversation } from "../../src/admin/conversations.js";
 import { createApp } from "../../src/app.js";
+import { actionRunnerFor } from "../../src/chat/actionRunner.js";
+import { answerMessage, answerWithActionResults } from "../../src/chat/answer.js";
 import {
   SAFETY_FRAME,
   SAFETY_FRAME_LINKS,
@@ -1057,6 +1059,110 @@ describe("chat: Show sources in answers", () => {
         expect(byTest.tst_1).toMatchObject({ outcome: "passed", reason: `Linked to ${SECTION}.` });
         // Another section of the same page is not the link the answer gave.
         expect(byTest.tst_2).toMatchObject({ outcome: "failed" });
+      },
+    );
+
+    it.each(["numbered", "none"] as const)(
+      "a test run's cites check passes on a link to a page's section with sources set to %s",
+      async (mode) => {
+        await addSources();
+        // Neither rewrites links: the visitor gets the one the model wrote.
+        await configure(withSources("links"), withSources(mode));
+        const SECTION = `${PAGE.url}#steps`;
+        for (const [id, url] of [
+          ["tst_1", SECTION],
+          ["tst_2", `${PAGE.url}#other`],
+        ] as const) {
+          await tenant.tests.create({
+            id,
+            assistantId: "ast_1",
+            question: QUESTION,
+            expectation: { kind: "cites", url },
+            createdAt: id === "tst_1" ? 1000 : 1001,
+          });
+        }
+        const run = await runAnswerTests(
+          {
+            orgId: TEST_ORG_ID,
+            tenant,
+            embedder,
+            retriever,
+            provider: numberingProvider(() => `Follow [the reset steps](${SECTION}) [1].`),
+            usage: { record: async () => {} },
+            limits: fakeSeams().limits,
+          },
+          "ast_1",
+        );
+        const byTest = Object.fromEntries(run.results.map((r) => [r.testId, r]));
+        expect(byTest.tst_1).toMatchObject({ outcome: "passed", reason: `Linked to ${SECTION}.` });
+        expect(byTest.tst_2).toMatchObject({ outcome: "failed" });
+      },
+    );
+
+    it.each(["numbered", "none"] as const)(
+      "a resumed reply with sources set to %s reports its links from before and after the pause",
+      async (mode) => {
+        await addSources();
+        const behaviour = withSources(mode, true).behaviour;
+        const STEPS = `${PAGE.url}#steps`;
+        const runner = actionRunnerFor([NAVIGATE_ACTION], { builtinsEnabled: true });
+        if (runner === null) throw new Error("expected the navigate action");
+        const navigate: ToolCall = {
+          callId: "call_nav_1",
+          name: "navigate",
+          input: { path: "/docs/reset" },
+        };
+        const deps = {
+          tenant,
+          embedder,
+          retriever,
+          model: ANTHROPIC_MODELS.balanced,
+          usage: { record: async () => {} },
+          runners: [runner],
+          provider: scriptedProvider([
+            { chunks: [`See [the steps](${STEPS}). `], calls: [navigate] },
+            { chunks: [`Then [billing](${BILLING.url}) [1].`] },
+          ]),
+        };
+        const first: ChatEvent[] = [];
+        for await (const event of answerMessage(deps, {
+          orgId: TEST_ORG_ID,
+          assistantId: "ast_1",
+          visitorId: "vis_1",
+          message: QUESTION,
+          behaviour,
+          pageActions: [NAVIGATE_ACTION],
+        })) {
+          first.push(event);
+        }
+        const done = first.at(-1);
+        if (done?.type !== "done") throw new Error("expected done last");
+        expect(done.awaitingActions).toEqual(["call_nav_1"]);
+
+        let linked: readonly string[] = [];
+        const second: ChatEvent[] = [];
+        for await (const event of answerWithActionResults(
+          { ...deps, onCitable: (_citations, links) => (linked = links) },
+          {
+            orgId: TEST_ORG_ID,
+            assistantId: "ast_1",
+            visitorId: "vis_1",
+            conversationId: done.conversationId,
+            resumeMessageId: done.messageId,
+            actionResults: [{ callId: "call_nav_1", ok: true, result: "opened" }],
+            behaviour,
+            pageActions: [NAVIGATE_ACTION],
+          },
+        )) {
+          second.push(event);
+        }
+        // The text is sent as the model wrote it (none only takes the marker out).
+        expect(tokenText(second)).toBe(
+          mode === "numbered"
+            ? `Then [billing](${BILLING.url}) [1].`
+            : `Then [billing](${BILLING.url}).`,
+        );
+        expect(linked).toEqual([STEPS, BILLING.url]);
       },
     );
   });

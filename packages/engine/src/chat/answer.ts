@@ -31,7 +31,7 @@ import { cutShortSuffix } from "./cutShort.js";
 import { buildPrompt, MAX_TURNS } from "./prompt.js";
 import type { ReviewJob } from "./review.js";
 import { DEFAULT_SCORE_FLOOR, selectCandidates } from "./scoreFloor.js";
-import { linkTargets, sourceLinker } from "./sourceLinks.js";
+import { linkDestinations, linkTargets, sourceLinker } from "./sourceLinks.js";
 import {
   MAX_TOOL_CALLS_PER_CONVERSATION,
   resumeToolLoop,
@@ -115,8 +115,10 @@ export interface AnswerDeps {
   /**
    * Given, once a reply is complete, the pages it could cite, whether or not
    * the visitor is shown them, and the complete addresses its text links to,
-   * fragment kept ("Link in the text"; empty otherwise). Internal: a test run's "cites" check reads it,
-   * and nothing here reaches a visitor.
+   * fragment kept, in every mode (with "Link in the text" the links the
+   * rewrite kept; otherwise the links as the model wrote them, which is what
+   * the visitor gets). Internal: a test run's "cites" check reads it, and
+   * nothing here reaches a visitor.
    */
   onCitable?: ((citations: readonly Citation[], linked: readonly string[]) => void) | undefined;
 }
@@ -225,7 +227,7 @@ interface AnswerFilter {
   flush(): string;
   /** Everything sent so far, which is exactly the text to store. */
   readonly text: string;
-  /** The complete addresses the text links to so far, fragment kept. */
+  /** The complete addresses the text links to so far (before a pause too), fragment kept. */
   readonly destinations: readonly string[];
 }
 
@@ -253,7 +255,10 @@ function filterFor(
       get text() {
         return stripper.text;
       },
-      destinations: [],
+      // Links pass as the model wrote them, so they are read from the text.
+      get destinations() {
+        return linkDestinations(before + stripper.text);
+      },
     };
   }
   const linker = sourceLinker(linkTargets(chunks, pages), before);
@@ -272,10 +277,16 @@ function filterFor(
 /**
  * Where the text's links go, for `onCitable`: the complete address, fragment
  * kept (a link to a page's section is a link to that section), written as the
- * citation stores it when it is exactly a citation's page.
+ * citation stores it when it is exactly a citation's page. With no filter
+ * (numbered) the text is the model's own, so its links are read from `text`,
+ * the whole reply.
  */
-function linkedPages(destinations: readonly string[], citations: readonly Citation[]): string[] {
-  return destinations.map(
+function linkedPages(
+  filter: AnswerFilter | null,
+  text: string,
+  citations: readonly Citation[],
+): string[] {
+  return (filter?.destinations ?? linkDestinations(text)).map(
     (href) => citations.find((c) => normalizedUrl(c.url) === href)?.url ?? href,
   );
 }
@@ -950,7 +961,7 @@ export async function* answerMessage(
       yield { type: "citation", url: chunk.url, title: chunk.title };
     }
   }
-  deps.onCitable?.(citations, linkedPages(filter?.destinations ?? [], citations));
+  deps.onCitable?.(citations, linkedPages(filter, text, citations));
 
   if (!input.preview) {
     await deps.tenant.messages.create({
@@ -1398,7 +1409,7 @@ export async function* answerWithActionResults(
         yield { type: "citation", url: citation.url, title: citation.title };
       }
     }
-    deps.onCitable?.(citations, linkedPages(filter?.destinations ?? [], citations));
+    deps.onCitable?.(citations, linkedPages(filter, text, citations));
 
     yield { type: "done", messageId: pendingReply.id, conversationId: conversation.id };
     await saveTrace(
