@@ -48,8 +48,8 @@ from the auth seam and pass it down.
 
 - `orgs` — id, name.
 - `assistants` — id, org_id, name, public_key (used by the widget), allowed_origins,
-  tried_at and widget_seen_at (first "Try it" question and first widget load on an
-  allowed origin; set once, for the Overview checklist), and content_changed_at
+  tried_at and widget_seen_at (first "Try it" question and first widget
+  configuration request on an allowed origin; set once, for the Overview checklist), and content_changed_at
   (when its searchable content last changed: chunks committed with new
   vectors, documents deleted, a Rebuild queued; see "Index lag").
 - `assistant_versions` — id, assistant_id, state (`draft` | `published` | `archived`),
@@ -206,7 +206,12 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
 - `POST /v1/feedback` — thumbs up or down on a message.
 - `GET /v1/assistants/:publicKey` — published widget config (title, colours, greeting,
   suggested questions, and `visitorCheck: true` when the visitor check runs).
-  No secrets, no prompts.
+  No secrets, no prompts. The response has an `ETag` for the JSON bytes and
+  `Cache-Control: private, max-age=60, must-revalidate, no-transform`. Both
+  200 and 304 responses vary on `Origin`. Origin and limit checks happen
+  before accepting a validator. The browser can reuse a fresh response for
+  up to one minute after publishing. A tab restoring a saved configuration
+  asks the browser to revalidate it in the background.
 - `POST /v1/session` — exchanges a Turnstile token for a visitor session (see
   "Visitor check"). Answers 404 when the check is off.
 - `GET /v1/check/frame` — the page the widget frames to run Turnstile on the
@@ -864,8 +869,8 @@ The Monitor screens read:
 - Overview: the four Reports figures for the last 7 UTC days and the 7 before,
   the median time until the answer starts appearing for the same two periods
   (see "Reports"), questions per day, the getting-started checklist (content added, a question
-  tried in "Try it" or a test run, published, widget loaded on an allowed
-  origin or a visitor question received, first visitor question) and what needs
+  tried in "Try it" or a test run, published, widget configuration requested
+  on an allowed origin or a visitor question received, first visitor question) and what needs
   attention (open gaps, failed tests in the latest run, the configuration
   error, sources with documents that failed to index, reported as soon as the
   failure is recorded, and sources with documents still not indexed 15 minutes
@@ -1859,6 +1864,23 @@ with the visitor check on, Turnstile runs inside a frame served by the
 engine's origin, created only once the visitor starts typing (see "Visitor
 check").
 
+**First paint.** The first pointer enter, focus, touch, or click on the
+launcher or a host trigger starts a single shared request. A page view in
+a fresh tab makes no configuration request and writes no storage. When
+opening before the request finishes, the panel shows “Loading chat…” with
+neutral colours and disabled input. The title, greeting, colour and
+suggestions appear together. If the initial request fails, the widget uses
+the existing defaults and chat error handling.
+
+A successful response is kept in sessionStorage, scoped to the engine and
+assistant on the embedding origin. The widget can use it for up to two
+minutes after loading it. This covers ordinary page-to-page navigation
+while limiting how long a tab can start from old settings. An already-open
+panel restores that copy in its first frame and revalidates in the
+background. A closed panel starts revalidation on the next launcher or
+host-trigger interaction. Only changed settings update the view. A panel
+left open on one page does not poll for updates.
+
 Links in an answer's text (http and https only) open as the source links
 under an answer do: `target="_blank"`, `rel="noopener noreferrer"`, and a
 link to a page on the host site is no different, also with page help on
@@ -1901,7 +1923,7 @@ offsets them with the custom property (see the embedding notes in
 
 Expanded or not is saved with the open conversation in sessionStorage
 (`expanded: true`, left out when false), so it survives navigation in the tab;
-nothing is written before the visitor first opens the panel. Page actions
+conversation state is first written when the visitor opens the panel. Page actions
 (`navigate`, `highlight`, `fill`) work the same while expanded. Both controls
 are buttons with a name ("Expand to a side panel", "Collapse to a small
 window"), `aria-controls` on the panel and `aria-expanded` (false, true);

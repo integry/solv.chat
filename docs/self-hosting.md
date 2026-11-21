@@ -151,6 +151,32 @@ Other folders are pushed as they always were. Run with `--dry-run` to see each d
 
 ### The chat on your page
 
+You can set the launcher’s appearance for its first paint with optional
+attributes on the embed.
+
+```html
+<solv-chat assistant="pk_..." launcher-label="Get help"
+  launcher-position="left" launcher-accent-color="#126146"></solv-chat>
+```
+
+`launcher-label` sets the button text, `launcher-position` takes `left` or
+`right`, and `launcher-accent-color` takes a three- or six-digit hex colour.
+Once settings are available, the launcher uses its standard **Chat** label
+and the published position and colour. The panel always uses the
+published settings when they are available.
+
+To open the chat from a button on your page, give `<solv-chat>` an `id` and
+set `data-solv-chat-trigger` on the button to that same ID. For example,
+`<button type="button" data-solv-chat-trigger="help-chat">Ask a question</button>`
+opens `<solv-chat id="help-chat" assistant="pk_..."></solv-chat>`.
+Hovering over, focusing or touching either button starts loading the
+configuration.
+
+The tab can restore its last configuration for up to two minutes and
+rechecks it in the background when the chat is open. A browser may reuse a
+fresh HTTP response for up to one minute after you publish. A chat left
+open on a single page picks up changes on the next page load.
+
 The chat window is 460 × 720 pixels on a desktop screen (never more than the screen less a small margin) and 380 pixels wide on a phone.
 
 With **Allow expanding to a side panel** on (the default, under **Widget**), visitors can expand the chat into a full-height column on the same side as the chat button. On a screen at least 900 pixels wide your page moves over to make room; on a narrower screen the chat fills the screen and your page is not changed. Turn the setting off and the expand button is not shown.

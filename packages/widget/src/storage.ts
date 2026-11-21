@@ -50,6 +50,39 @@ const OPEN_PREFIX = "solv-chat-open:";
 const MAX_SAVED_TURNS = 20;
 export const PENDING_RESUME_TTL_MS = 2 * 60 * 1000;
 
+const CONFIG_PREFIX = "solv-chat-config:";
+const CONFIG_MAX_AGE_MS = 2 * 60 * 1000;
+
+export function loadPublicConfig(url: string): { config: unknown; expiresAt: number } | null {
+  try {
+    const raw = sessionStorage.getItem(CONFIG_PREFIX + url);
+    if (raw === null) return null;
+    const { config, savedAt } = JSON.parse(raw);
+    const now = Date.now();
+    if (
+      typeof savedAt === "number" &&
+      savedAt <= now &&
+      now - savedAt < CONFIG_MAX_AGE_MS &&
+      config &&
+      typeof config === "object" &&
+      !Array.isArray(config)
+    ) {
+      return { config, expiresAt: savedAt + CONFIG_MAX_AGE_MS };
+    }
+  } catch {
+    // Storage may be unavailable, or the entry may be malformed.
+  }
+  return null;
+}
+
+export function savePublicConfig(url: string, config: object): void {
+  try {
+    sessionStorage.setItem(CONFIG_PREFIX + url, JSON.stringify({ config, savedAt: Date.now() }));
+  } catch {
+    // A storage failure must never stop the widget opening.
+  }
+}
+
 let fallbackVisitorId: string | null = null;
 const activeOwners = new Map<string, symbol>();
 

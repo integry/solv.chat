@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../src/widget.js";
+import { mountWithIntent } from "./support/intent.js";
 
 const happy = (
   window as unknown as {
@@ -7,10 +8,11 @@ const happy = (
   }
 ).happyDOM;
 
-function mountWidget(assistant = "pk_expand"): HTMLElement {
+function mountWidget(prefetch = true): HTMLElement {
   const el = document.createElement("solv-chat");
-  el.setAttribute("assistant", assistant);
-  document.body.append(el);
+  el.setAttribute("assistant", "pk_expand");
+  if (prefetch) mountWithIntent(el);
+  else document.body.append(el);
   return el;
 }
 
@@ -244,12 +246,12 @@ describe("expanding to a side panel", () => {
 
   it("stores nothing before the visitor opens the assistant, and remembers expanded across a page change", async () => {
     serveConfig({});
-    const el = mountWidget();
+    const el = mountWidget(false);
     await flushAsync();
     const r = shadow(el);
     // Before the first open: the expand control cannot act, and a viewport
     // change runs the layout, yet nothing at all is written.
-    q<HTMLButtonElement>(r, ".solv-expand").click();
+    expect(r.querySelector(".solv-expand")).toBeNull();
     happy.setViewport({ width: 899, height: 800 });
     happy.setViewport({ width: 1280, height: 800 });
     await flushAsync();
@@ -259,6 +261,7 @@ describe("expanding to a side panel", () => {
     expect(root().getAttribute("style")).toBeNull();
 
     q<HTMLButtonElement>(r, ".solv-launcher").click();
+    await flushAsync();
     const saved = () => JSON.parse(sessionStorage.getItem("solv-chat-open:pk_expand") ?? "{}");
     expect(saved().expanded).toBeUndefined();
     q<HTMLButtonElement>(r, ".solv-expand").click();

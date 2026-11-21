@@ -27,11 +27,13 @@ import { readEventLines } from "./sse.js";
 import {
   claimConversation,
   loadConversation,
+  loadPublicConfig,
   PENDING_RESUME_TTL_MS,
   type PendingResume,
   type SavedConversation,
   type SavedTurn,
   saveConversation,
+  savePublicConfig,
   visitorId,
 } from "./storage.js";
 import { HOLD_BOUND_MS, streamingView } from "./streaming.js";
@@ -230,7 +232,13 @@ export class SolvChat extends HTMLElement {
   #turns: SavedTurn[] = [];
   #pendingResume: PendingResume | null = null;
   #resumedBubble: { bubble: HTMLDivElement; textEl: HTMLDivElement; turn: SavedTurn } | null = null;
-  #config: WidgetPublicConfig = { ...DEFAULT_CONFIG };
+  #config = DEFAULT_CONFIG;
+  #configReady = false;
+  #cachedConfigExpiresAt: number | undefined;
+  #configRequest: Promise<void> | undefined;
+  #configAbort: AbortController | undefined;
+  #configUrl: string | undefined;
+  #triggerEvents: AbortController | undefined;
   /** Set by `preview()`: the element then loads and sends nothing. */
   #previewing = false;
   /** The visitor has focused or typed in the input, or picked a suggestion. */
@@ -270,6 +278,19 @@ export class SolvChat extends HTMLElement {
     }
     setHighlightHost(this.#root);
 
+    const url = this.#publicConfigUrl();
+    if (url !== this.#configUrl) {
+      this.#configUrl = url;
+      this.#configRequest = undefined;
+      if (!this.#previewing) {
+        this.#showLoading();
+        const cached = url ? loadPublicConfig(url) : null;
+        this.#cachedConfigExpiresAt = cached?.expiresAt;
+        if (cached) this.#applyConfig({ ...DEFAULT_CONFIG, ...parsePublicConfig(cached.config) });
+      }
+    }
+    this.#bindHostTriggers();
+
     let expiredPending: PendingResume | null = null;
     const assistant = this.#assistant();
     if (assistant) {
@@ -288,7 +309,9 @@ export class SolvChat extends HTMLElement {
 
     if (expiredPending) {
       this.#persist();
-      void this.#reportDroppedResume(expiredPending);
+      const loading = this.#loadConfig();
+      const signal = this.#configAbort?.signal;
+      void loading.then(() => this.#reportDroppedResume(expiredPending, signal));
     }
 
     if (this.#pendingResume && this.#resumedBubble) {
@@ -299,12 +322,15 @@ export class SolvChat extends HTMLElement {
       this.#resumedBubble = null;
       this.#persist();
       void this.#resumeAfterConfigLoad(pending, target);
-    } else {
+    } else if (this.#open) {
       void this.#loadConfig();
     }
   }
 
   disconnectedCallback(): void {
+    this.#triggerEvents?.abort();
+    this.#configAbort?.abort();
+    this.#configRequest = undefined;
     // A pending promise here would hang the answer; every one of these paths
     // means the visitor did not say yes.
     for (const handle of this.#openConfirms) handle.dismiss();
@@ -325,9 +351,7 @@ export class SolvChat extends HTMLElement {
       this.#abortController.abort();
       this.#abortController = null;
       this.#sending = false;
-      if (this.#sendBtn) {
-        this.#sendBtn.disabled = false;
-      }
+      this.#sendBtn.disabled = !this.#configReady;
     }
   }
 
@@ -346,6 +370,38 @@ export class SolvChat extends HTMLElement {
     }
     return SCRIPT_ORIGIN;
   }
+
+  #publicConfigUrl(): string {
+    const assistant = this.#assistant();
+    return assistant ? `${this.#endpoint()}/v1/assistants/${encodeURIComponent(assistant)}` : "";
+  }
+
+  #bindHostTriggers(): void {
+    if (!this.id) return;
+    this.#triggerEvents = new AbortController();
+    const { signal } = this.#triggerEvents;
+    for (const type of ["pointerenter", "focus", "touchstart"]) {
+      this.ownerDocument.addEventListener(type, this.#onHostTrigger, {
+        capture: true,
+        passive: true,
+        signal,
+      });
+    }
+    this.ownerDocument.addEventListener("click", this.#onHostTrigger, { signal });
+  }
+
+  #onHostTrigger = (event: Event): void => {
+    const trigger =
+      event.target instanceof Element ? event.target.closest("[data-solv-chat-trigger]") : null;
+    if (trigger?.getAttribute("data-solv-chat-trigger") !== this.id) return;
+    if (event.type === "click") {
+      if (event.defaultPrevented) return;
+      event.preventDefault();
+      if (!this.#open) this.#openPanel(true);
+    } else if (event.type !== "pointerenter" || event.target === trigger) {
+      void this.#loadConfig();
+    }
+  };
 
   #renderShell(): void {
     const wrap = document.createElement("div");
@@ -370,7 +426,6 @@ export class SolvChat extends HTMLElement {
     const title = document.createElement("h2");
     title.className = "solv-title";
     title.id = "solv-title";
-    title.textContent = this.#config.title;
 
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
@@ -422,7 +477,7 @@ export class SolvChat extends HTMLElement {
 
     const greeting = document.createElement("div");
     greeting.className = "solv-bubble solv-bubble--assistant";
-    greeting.textContent = this.#config.greeting;
+
     messages.append(greeting);
 
     const suggestions = document.createElement("div");
@@ -447,7 +502,7 @@ export class SolvChat extends HTMLElement {
     input.className = "solv-input";
     input.id = "solv-input";
     input.rows = 1;
-    input.placeholder = "Ask a question...";
+
     input.setAttribute("aria-describedby", "solv-input-error");
     // The visitor check starts here and nowhere earlier: not on page load,
     // not when the panel opens (which moves focus here by itself).
@@ -513,8 +568,9 @@ export class SolvChat extends HTMLElement {
     launcher.className = "solv-launcher";
     launcher.setAttribute("aria-expanded", "false");
     launcher.setAttribute("aria-controls", "solv-panel");
-    launcher.setAttribute("aria-label", "Open chat");
-    launcher.textContent = "Chat";
+    for (const type of ["pointerenter", "focus", "touchstart"]) {
+      launcher.addEventListener(type, () => void this.#loadConfig(), { passive: true });
+    }
     launcher.addEventListener("click", () => {
       if (this.#open) {
         this.#closePanel(true);
@@ -548,45 +604,125 @@ export class SolvChat extends HTMLElement {
    */
   preview(config: unknown): void {
     this.#previewing = true;
-    this.#config = {
+    this.#applyConfig({
       ...DEFAULT_CONFIG,
       ...parsePublicConfig(config),
       actions: { enabled: false, allowedOrigins: [] },
-    };
-    this.#applyConfig();
+    });
     if (!this.#open) this.#openPanel(false);
   }
 
-  async #loadConfig(): Promise<void> {
-    const assistant = this.#assistant();
-    if (!assistant || this.#previewing) return;
+  #loadConfig(): Promise<void> {
+    if (this.#previewing) return Promise.resolve();
+    if (this.#configRequest) return this.#configRequest;
+    if (this.#cachedConfigExpiresAt !== undefined && Date.now() >= this.#cachedConfigExpiresAt) {
+      this.#cachedConfigExpiresAt = undefined;
+      this.#showLoading();
+    }
+    const url = this.#configUrl;
+    if (!url) {
+      this.#applyConfig(DEFAULT_CONFIG);
+      return Promise.resolve();
+    }
+    // Let the browser attach its own validator, avoiding a CORS preflight.
+    this.#configAbort = new AbortController();
+    this.#configRequest = this.#fetchConfig(url, this.#configReady, this.#configAbort.signal);
+    return this.#configRequest;
+  }
+
+  async #fetchConfig(url: string, revalidate: boolean, signal: AbortSignal): Promise<void> {
     try {
-      const response = await fetch(
-        `${this.#endpoint()}/v1/assistants/${encodeURIComponent(assistant)}`,
-      );
-      if (!response.ok) return;
-      const parsed = parsePublicConfig(await response.json());
-      this.#config = { ...this.#config, ...parsed };
-      this.#applyConfig();
+      const response = await fetch(url, { cache: revalidate ? "no-cache" : "default", signal });
+      if (response.ok) {
+        const config = { ...DEFAULT_CONFIG, ...parsePublicConfig(await response.json()) };
+        if (signal.aborted || this.#previewing) return;
+        const { actions, ...presentation } = config;
+        savePublicConfig(url, {
+          ...presentation,
+          actions: { builtins: actions.enabled, allowedOrigins: actions.allowedOrigins },
+        });
+        this.#cachedConfigExpiresAt = undefined;
+        this.#applyConfig(config);
+      }
     } catch {
-      // Keep default config if the config endpoint is unreachable.
+      // An unreachable endpoint follows the same fallback as a refused read.
+    }
+    if (signal.aborted || this.#previewing) return;
+    if (!this.#configReady) this.#applyConfig(DEFAULT_CONFIG);
+  }
+
+  #showLoading(): void {
+    this.#configReady = false;
+    this.#config = DEFAULT_CONFIG;
+    this.#panel.setAttribute("data-loading", "");
+    this.#titleEl.textContent = "Loading chat…";
+    this.#messagesEl.hidden = true;
+    this.#suggestionsEl.hidden = true;
+    this.#inputEl.placeholder = "";
+    this.#inputEl.disabled = true;
+    this.#sendBtn.disabled = true;
+    const accent = this.getAttribute("launcher-accent-color")?.trim();
+    this.#applyLauncher(
+      this.getAttribute("launcher-label")?.trim() || "Chat",
+      this.getAttribute("launcher-position") === "left" ? "left" : "right",
+      accent && HEX_COLOR_RE.test(accent) ? accent : DEFAULT_CONFIG.accentColor,
+    );
+    this.#applyLayout();
+  }
+
+  #applyLauncher(label: string, position: "left" | "right", accentColor: string): void {
+    if (this.#launcher.textContent !== label) this.#launcher.textContent = label;
+    this.#labelLauncher();
+
+    if (this.style.getPropertyValue("--solv-accent") !== accentColor) {
+      this.style.setProperty("--solv-accent", accentColor);
+    }
+    if (position === "left") {
+      if (this.getAttribute("data-position") !== position)
+        this.setAttribute("data-position", position);
+    } else if (this.hasAttribute("data-position")) {
+      this.removeAttribute("data-position");
     }
   }
 
-  #applyConfig(): void {
-    this.#titleEl.textContent = this.#config.title;
-    this.#greetingEl.textContent = this.#config.greeting;
-    this.style.setProperty("--solv-accent", this.#config.accentColor);
-    if (this.#config.position === "left") {
-      this.setAttribute("data-position", "left");
-    } else {
-      this.removeAttribute("data-position");
+  #labelLauncher(): void {
+    const label = this.#launcher.textContent;
+    const name = this.#open
+      ? "Close chat"
+      : label === "Chat"
+        ? "Open chat"
+        : (label ?? "Open chat");
+    if (this.#launcher.getAttribute("aria-label") !== name) {
+      this.#launcher.setAttribute("aria-label", name);
+    }
+  }
+
+  #applyConfig(config: WidgetPublicConfig): void {
+    const previous = this.#configReady ? this.#config : null;
+    if (previous && JSON.stringify(previous) === JSON.stringify(config)) return;
+    this.#config = config;
+    this.#configReady = true;
+    this.#applyLauncher("Chat", config.position, config.accentColor);
+    if (this.#titleEl.textContent !== config.title) this.#titleEl.textContent = config.title;
+    if (this.#greetingEl.textContent !== config.greeting)
+      this.#greetingEl.textContent = config.greeting;
+    if (!previous) {
+      this.#panel.removeAttribute("data-loading");
+      this.#messagesEl.hidden = false;
+      this.#inputEl.placeholder = "Ask a question...";
+      this.#inputEl.disabled = false;
+      this.#sendBtn.disabled = this.#sending;
     }
     this.#applyLayout();
-    // Registered after the config says so, and removed if it says not to.
-    installBuiltins(this.#config.actions);
-    this.#renderSuggestions();
-    // The visitor got to the input before the config arrived.
+    if (JSON.stringify(previous?.actions) !== JSON.stringify(config.actions)) {
+      installBuiltins(config.actions);
+    }
+    if (
+      JSON.stringify(previous?.suggestedQuestions) !== JSON.stringify(config.suggestedQuestions)
+    ) {
+      this.#renderSuggestions();
+    }
+    if (!previous && this.#open && this.#root.activeElement === this.#closeBtn) this.#focusInput();
     if (this.#interacted) this.#visitorInteracted();
   }
 
@@ -610,7 +746,11 @@ export class SolvChat extends HTMLElement {
 
   #renderSuggestions(): void {
     this.#suggestionsEl.replaceChildren();
-    if (this.#turns.length > 0 || this.#config.suggestedQuestions.length === 0) {
+    if (
+      !this.#configReady ||
+      this.#turns.length > 0 ||
+      this.#config.suggestedQuestions.length === 0
+    ) {
       this.#suggestionsEl.hidden = true;
       return;
     }
@@ -631,15 +771,17 @@ export class SolvChat extends HTMLElement {
   }
 
   #openPanel(moveFocus: boolean): void {
+    if (moveFocus) void this.#loadConfig();
     this.#dismissedTurn = null;
     this.#open = true;
     this.#panel.hidden = false;
     this.#launcher.setAttribute("aria-expanded", "true");
-    this.#launcher.setAttribute("aria-label", "Close chat");
+    this.#labelLauncher();
     this.#applyLayout();
     this.#persist();
     if (moveFocus) {
-      this.#focusInput();
+      if (this.#configReady) this.#focusInput();
+      else this.#closeBtn.focus();
     }
   }
 
@@ -650,7 +792,7 @@ export class SolvChat extends HTMLElement {
     this.#open = false;
     this.#panel.hidden = true;
     this.#launcher.setAttribute("aria-expanded", "false");
-    this.#launcher.setAttribute("aria-label", "Open chat");
+    this.#labelLauncher();
     this.#applyLayout();
     this.#persist();
     if (restoreFocus) {
@@ -688,7 +830,7 @@ export class SolvChat extends HTMLElement {
   /** Puts the panel, the launcher, the header controls and the page in line with the state. */
   #applyLayout(): void {
     if (!this.#initialized) return;
-    const allow = this.#config.allowExpand;
+    const allow = this.#configReady && this.#config.allowExpand;
     const wanted = this.#open && this.#expanded && allow;
     const layout: Layout = wanted ? (this.#isWide() ? "side" : "full") : "panel";
     if (layout === "side" && this.isConnected) this.#reserveRoom();
@@ -885,7 +1027,7 @@ export class SolvChat extends HTMLElement {
       this.#open = false;
       this.#panel.hidden = true;
       this.#launcher.setAttribute("aria-expanded", "false");
-      this.#launcher.setAttribute("aria-label", "Open chat");
+      this.#labelLauncher();
       this.#applyLayout();
       if (restoredUnfinished) {
         this.#persist();
@@ -904,6 +1046,7 @@ export class SolvChat extends HTMLElement {
   }
 
   #persist(): void {
+    if (this.#previewing) return;
     saveConversation(this.#assistant(), this.#snapshot(), this.#owner);
   }
 
@@ -1266,7 +1409,7 @@ export class SolvChat extends HTMLElement {
   async #send(message: string, onAccepted?: () => void): Promise<void> {
     const assistant = this.#assistant();
     const trimmed = message.trim();
-    if (!assistant || this.#previewing || this.#sending || !trimmed) return;
+    if (!assistant || !this.#configReady || this.#previewing || this.#sending || !trimmed) return;
 
     if (trimmed.length > MAX_CHAT_MESSAGE_LENGTH) {
       this.#showInputError(

@@ -24,6 +24,8 @@ import { llmProviderFor } from "../providers/factory.js";
 import { type Embedder, type Retriever, vectorizeRetriever } from "../providers/retrieval.js";
 import type { LlmProvider } from "../providers/types.js";
 import type { AuthProvider, LlmProviderName, Principal, Seams } from "../seams/types.js";
+import { sha256Hex } from "../util/crypto.js";
+import { matchesETag } from "../util/etag.js";
 import { actionRunnerFor } from "./actionRunner.js";
 import {
   type AnswerReviewHook,
@@ -922,19 +924,17 @@ export async function publicConfigRoute(
     const origin = assistant ? matchedOrigin(assistant, request) : null;
     return preflightResponse(request, "GET, OPTIONS", origin);
   }
-  if (request.method !== "GET") {
-    return Response.json({ error: "Not found." }, { status: 404 });
-  }
-  if (assistant === null) {
-    return Response.json({ error: "Not found." }, { status: 404 });
+  const origin = assistant ? matchedOrigin(assistant, request) : null;
+  const headers = { ...corsHeaders(origin), vary: "Origin", "cache-control": "no-store" };
+  if (request.method !== "GET" || assistant === null) {
+    return Response.json({ error: "Not found." }, { status: 404, headers });
   }
 
-  const origin = matchedOrigin(assistant, request);
   const failure = await runPublicChecks(seams.limits, assistant, request, "config");
   if (failure !== null) {
     return Response.json(
       { error: failure.message },
-      { status: failure.reason === "origin" ? 403 : 429, headers: corsHeaders(origin) },
+      { status: failure.reason === "origin" ? 403 : 429, headers },
     );
   }
 
@@ -944,11 +944,11 @@ export async function publicConfigRoute(
   });
   const published = await tenant.versions.published(assistant.id);
   if (published === null) {
-    return Response.json({ error: "Not found." }, { status: 404 });
+    return Response.json({ error: "Not found." }, { status: 404, headers });
   }
 
   // The Overview checklist's "Install on your site" step. Written once: the
-  // lookup above already read the column, so later page loads skip the write.
+  // lookup above already read the column, so later config requests skip the write.
   // A failed write only leaves a step unticked: the widget still loads.
   if (origin !== null && assistant.widgetSeenAt === null) {
     await recordMilestone("widget_seen", () =>
@@ -958,26 +958,35 @@ export async function publicConfigRoute(
 
   const visitorCheckOn = (await resolveVisitorCheck(env, seams.visitorCheck)).state === "on";
 
-  return Response.json(
-    {
-      title: published.config.widget.title,
-      accentColor: published.config.widget.accentColor,
-      position: published.config.widget.position,
-      // Stored versions from before the setting have no value: on, as the default.
-      allowExpand: published.config.widget.allowExpand !== false,
-      greeting: published.config.behaviour.greeting,
-      suggestedQuestions: [...published.config.behaviour.suggestedQuestions],
-      // What the widget needs to gate the built-ins and check a navigate
-      // target. No secrets: both values are the owner's public choices.
-      actions: {
-        builtins: published.config.actions.builtins,
-        allowedOrigins: [...published.config.actions.allowedOrigins],
-      },
-      // Present only when the visitor check runs: the widget then starts it
-      // on the first focus or keystroke. Left out otherwise, so an engine
-      // without it answers exactly as before.
-      ...(visitorCheckOn ? { visitorCheck: true } : {}),
+  const body = JSON.stringify({
+    title: published.config.widget.title,
+    accentColor: published.config.widget.accentColor,
+    position: published.config.widget.position,
+    // Stored versions from before the setting have no value: on, as the default.
+    allowExpand: published.config.widget.allowExpand !== false,
+    greeting: published.config.behaviour.greeting,
+    suggestedQuestions: [...published.config.behaviour.suggestedQuestions],
+    // What the widget needs to gate the built-ins and check a navigate
+    // target. No secrets: both values are the owner's public choices.
+    actions: {
+      builtins: published.config.actions.builtins,
+      allowedOrigins: [...published.config.actions.allowedOrigins],
     },
-    { status: 200, headers: corsHeaders(origin) },
-  );
+    // Present only when the visitor check runs: the widget then starts it
+    // on the first focus or keystroke. Left out otherwise, so an engine
+    // without it answers exactly as before.
+    ...(visitorCheckOn ? { visitorCheck: true } : {}),
+  });
+  const etag = `"${await sha256Hex(body)}"`;
+  const cacheHeaders = {
+    ...headers,
+    "cache-control": "private, max-age=60, must-revalidate, no-transform",
+    etag,
+  };
+  if (matchesETag(request.headers.get("if-none-match"), etag)) {
+    return new Response(null, { status: 304, headers: cacheHeaders });
+  }
+  return new Response(body, {
+    headers: { ...cacheHeaders, "content-type": "application/json" },
+  });
 }

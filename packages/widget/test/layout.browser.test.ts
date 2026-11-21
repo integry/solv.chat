@@ -178,6 +178,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
         ),
       "widget",
     );
+    await q('(r.querySelector(".solv-launcher").dispatchEvent(new Event("pointerenter")), true)');
     // The config has arrived when the title shows it.
     await waitFor(
       async () => (await q<string>(`r.querySelector(".solv-title").textContent`)) === "Docs",

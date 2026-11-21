@@ -1,6 +1,7 @@
 import { CHAT_PROTOCOL_VERSION, MAX_CHAT_MESSAGE_LENGTH } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../src/widget.js";
+import { mountWithIntent } from "./support/intent.js";
 
 function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -20,7 +21,7 @@ function mountWidget(assistant = "pk_test_123", endpoint?: string): HTMLElement 
   if (endpoint) {
     el.setAttribute("endpoint", endpoint);
   }
-  document.body.append(el);
+  mountWithIntent(el);
   return el;
 }
 
@@ -81,6 +82,33 @@ describe("<solv-chat>", () => {
     expect(panel.hidden).toBe(true);
     expect(launcher.getAttribute("aria-expanded")).toBe("false");
     expect(root.activeElement).toBe(launcher);
+  });
+
+  it("keeps the existing fallback after a failed config load without saving it", async () => {
+    let finish!: (response: Response) => void;
+    const fetchConfig = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    globalThis.fetch = fetchConfig as typeof fetch;
+    const el = document.createElement("solv-chat");
+    el.setAttribute("assistant", "pk_unavailable");
+    document.body.append(el);
+    const root = shadow(el);
+
+    expect(fetchConfig).not.toHaveBeenCalled();
+    const launcher = mustQuery<HTMLButtonElement>(root, ".solv-launcher");
+    launcher.click();
+    expect(mustQuery<HTMLTextAreaElement>(root, "#solv-input").disabled).toBe(true);
+    expect(mustQuery(root, ".solv-title").textContent).toBe("Loading chat…");
+
+    finish(new Response(null, { status: 503 }));
+    await flushAsync();
+    expect(mustQuery(root, ".solv-title").textContent).toBe("Ask a question");
+    expect(mustQuery<HTMLTextAreaElement>(root, "#solv-input").disabled).toBe(false);
+    expect(sessionStorage.length).toBe(1); // Only the open conversation.
   });
 
   it("streams tokens in order, sends CHAT_PROTOCOL_VERSION, ignores unknown events, and renders safe citations", async () => {
@@ -640,9 +668,9 @@ describe("<solv-chat>", () => {
   it("preview() shows the given config with the panel open and never makes a request", async () => {
     const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
     globalThis.fetch = fetchMock as typeof fetch;
-    const el = mountWidget("pk_preview");
-    await flushAsync();
-    fetchMock.mockClear();
+    const el = document.createElement("solv-chat");
+    el.setAttribute("assistant", "pk_preview");
+    document.body.append(el);
     const preview = el as HTMLElement & { preview(config: unknown): void };
 
     preview.preview({
@@ -670,6 +698,7 @@ describe("<solv-chat>", () => {
     mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
     await flushAsync();
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(sessionStorage.length).toBe(0);
     expect(root.querySelectorAll(".solv-bubble--user")).toHaveLength(0);
   });
 

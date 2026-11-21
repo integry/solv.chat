@@ -12,6 +12,7 @@ import { HIGHLIGHT_DURATION_MS, installBuiltins } from "../src/builtins.js";
 import { parsePublicConfig } from "../src/element.js";
 import { PENDING_RESUME_TTL_MS } from "../src/storage.js";
 import "../src/widget.js";
+import { mountWithIntent } from "./support/intent.js";
 
 function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -71,7 +72,7 @@ describe("built-in page actions", () => {
 
       const el = document.createElement("solv-chat");
       el.setAttribute("assistant", "pk_test");
-      document.body.append(el);
+      mountWithIntent(el);
       await flushAsync();
 
       const names = listForRequest().map((a) => a.name);
@@ -91,14 +92,14 @@ describe("built-in page actions", () => {
 
       const el = document.createElement("solv-chat");
       el.setAttribute("assistant", "pk_test");
-      document.body.append(el);
+      mountWithIntent(el);
       await flushAsync();
 
       expect(listForRequest().map((a) => a.name)).toEqual(["fill", "highlight", "navigate"]);
 
       enabled = false;
       el.remove();
-      document.body.append(el);
+      mountWithIntent(el);
       await flushAsync();
 
       expect(listForRequest()).toEqual([]);
@@ -216,7 +217,7 @@ describe("built-in page actions", () => {
 
       const el = document.createElement("solv-chat");
       el.setAttribute("assistant", "pk_nav_refused");
-      document.body.append(el);
+      mountWithIntent(el);
       await flushAsync();
 
       const root = el.shadowRoot as ShadowRoot;
@@ -627,7 +628,7 @@ describe("built-in page actions", () => {
 
       const el1 = document.createElement("solv-chat");
       el1.setAttribute("assistant", "pk_nav_resume");
-      document.body.append(el1);
+      mountWithIntent(el1);
       await flushAsync();
 
       const root1 = el1.shadowRoot as ShadowRoot;
@@ -648,10 +649,10 @@ describe("built-in page actions", () => {
       clearRegistry();
       const el2 = document.createElement("solv-chat");
       el2.setAttribute("assistant", "pk_nav_resume");
-      document.body.append(el2);
+      mountWithIntent(el2);
       const el3 = document.createElement("solv-chat");
       el3.setAttribute("assistant", "pk_nav_resume");
-      document.body.append(el3);
+      mountWithIntent(el3);
       await flushAsync();
 
       expect(assignCalls).toBe(1);
@@ -724,7 +725,7 @@ describe("built-in page actions", () => {
       try {
         const el1 = document.createElement("solv-chat");
         el1.setAttribute("assistant", "pk_nav_long");
-        document.body.append(el1);
+        mountWithIntent(el1);
         await flushAsync();
 
         const root1 = el1.shadowRoot as ShadowRoot;
@@ -737,7 +738,7 @@ describe("built-in page actions", () => {
         clearRegistry();
         const el2 = document.createElement("solv-chat");
         el2.setAttribute("assistant", "pk_nav_long");
-        document.body.append(el2);
+        mountWithIntent(el2);
         await flushAsync();
 
         expect(chatBodies).toHaveLength(2);
@@ -927,7 +928,7 @@ describe("built-in page actions", () => {
 
       const el = document.createElement("solv-chat");
       el.setAttribute("assistant", "pk_ext_nav");
-      document.body.append(el);
+      mountWithIntent(el);
       await flushAsync();
 
       const root = el.shadowRoot as ShadowRoot;
@@ -1013,7 +1014,7 @@ describe("built-in page actions", () => {
 
       const el = document.createElement("solv-chat");
       el.setAttribute("assistant", "pk_moved_on");
-      document.body.append(el);
+      mountWithIntent(el);
       await flushAsync();
 
       const root = el.shadowRoot as ShadowRoot;
@@ -1102,7 +1103,7 @@ describe("built-in page actions", () => {
 
       const el = document.createElement("solv-chat");
       el.setAttribute("assistant", "pk_expired");
-      document.body.append(el);
+      mountWithIntent(el);
       await flushAsync();
 
       expect(chatBodies).toHaveLength(1);
@@ -1176,7 +1177,7 @@ describe("built-in page actions", () => {
       try {
         const el = document.createElement("solv-chat");
         el.setAttribute("assistant", "pk_frag_clear");
-        document.body.append(el);
+        mountWithIntent(el);
         await vi.advanceTimersByTimeAsync(0);
 
         const root = el.shadowRoot as ShadowRoot;
@@ -1260,7 +1261,7 @@ describe("built-in page actions", () => {
       for (let i = 0; i < 5; i++) {
         const el = document.createElement("button");
         el.setAttribute("data-solv-target", `${i}_${"a".repeat(3998)}`);
-        document.body.append(el);
+        mountWithIntent(el);
       }
 
       installBuiltins({ enabled: true, allowedOrigins: [] });
@@ -1321,7 +1322,7 @@ describe("built-in page actions", () => {
 
       const el = document.createElement("solv-chat");
       el.setAttribute("assistant", "pk_nav_throw");
-      document.body.append(el);
+      mountWithIntent(el);
       await flushAsync();
 
       const root = el.shadowRoot as ShadowRoot;
@@ -1408,7 +1409,7 @@ describe("built-in page actions", () => {
 
       const el = document.createElement("solv-chat");
       el.setAttribute("assistant", "pk_f16");
-      document.body.append(el);
+      mountWithIntent(el);
 
       const root = el.shadowRoot as ShadowRoot;
       const sendBtn = root.querySelector(".solv-send") as HTMLButtonElement;
@@ -1489,7 +1490,7 @@ describe("built-in page actions", () => {
 
       const el = document.createElement("solv-chat");
       el.setAttribute("assistant", "pk_f16_disc");
-      document.body.append(el);
+      mountWithIntent(el);
 
       const root = el.shadowRoot as ShadowRoot;
       const sendBtn = root.querySelector(".solv-send") as HTMLButtonElement;
@@ -1497,8 +1498,8 @@ describe("built-in page actions", () => {
 
       // Disconnect while config is still loading, then reconnect.
       el.remove();
-      expect(sendBtn.disabled).toBe(false);
-      document.body.append(el);
+      expect(sendBtn.disabled).toBe(true);
+      mountWithIntent(el);
 
       resolveConfig(
         Response.json({
@@ -1568,7 +1569,7 @@ describe("built-in page actions", () => {
 
       const el = document.createElement("solv-chat");
       el.setAttribute("assistant", "pk_f17");
-      document.body.append(el);
+      mountWithIntent(el);
       await flushAsync();
 
       const root = el.shadowRoot as ShadowRoot;
