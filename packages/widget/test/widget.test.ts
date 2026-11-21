@@ -15,7 +15,7 @@ function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
   });
 }
 
-function mountWidget(assistant = "pk_test_123", endpoint?: string): HTMLElement {
+function mountWidget(assistant = "pk_test_123", endpoint?: string) {
   const el = document.createElement("solv-chat");
   el.setAttribute("assistant", assistant);
   if (endpoint) {
@@ -55,6 +55,162 @@ describe("<solv-chat>", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
+  });
+
+  describe("sending from the host page", () => {
+    const done = 'event: done\ndata: {"messageId":"msg_1","conversationId":"conv_1"}\n\n';
+    const token = 'event: token\ndata: {"text":"Your **answer**."}\n\n';
+
+    function mockEngine(chat: () => Response | Promise<Response>, status = 200) {
+      const fetchMock = vi.fn(async (url: string, _init?: RequestInit) =>
+        url.endsWith("/v1/chat") ? chat() : Response.json({ title: "Helper" }, { status }),
+      );
+      globalThis.fetch = fetchMock as typeof fetch;
+      return fetchMock;
+    }
+
+    it("loads settings, keeps the panel closed, and returns text and saves the exchange", async () => {
+      const fetchMock = mockEngine(() => new Response(sseStream([token, done])));
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_send");
+      el.setAttribute("launcher-shortcut", "none");
+      const opened = vi.fn();
+      el.addEventListener("solv-chat:open", opened);
+      document.body.append(el);
+
+      await expect(el.send("  My question  ")).resolves.toEqual({ text: "Your **answer**." });
+      expect(fetchMock.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+        "/v1/assistants/pk_send",
+        "/v1/chat",
+      ]);
+      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+        message: "My question",
+      });
+      expect(mustQuery<HTMLElement>(shadow(el), ".solv-panel").hidden).toBe(true);
+      expect(opened).not.toHaveBeenCalled();
+
+      el.remove();
+      const restored = mountWidget("pk_send");
+      const root = shadow(restored);
+      expect(mustQuery<HTMLElement>(root, ".solv-panel").hidden).toBe(true);
+      mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+      expect(root.querySelector(".solv-bubble--user")?.textContent).toBe("My question");
+      expect(root.querySelector(".solv-bubble--assistant strong")?.textContent).toBe("answer");
+
+      await restored.send("Follow-up");
+      const request = fetchMock.mock.lastCall?.[1];
+      expect(JSON.parse(String(request?.body))).toMatchObject({
+        message: "Follow-up",
+        conversationId: "conv_1",
+      });
+    });
+
+    it("opens before submitting when requested and emits the existing open event", async () => {
+      const opened = vi.fn();
+      const chat = vi.fn(() => new Response(sseStream([token, done])));
+      mockEngine(() => {
+        expect(panel.hidden).toBe(false);
+        expect(opened).toHaveBeenCalledWith(expect.any(Event));
+        expect(opened.mock.calls[0]?.[0]).not.toHaveProperty("detail");
+        return chat();
+      });
+      const el = mountWidget();
+      const panel = mustQuery<HTMLElement>(shadow(el), ".solv-panel");
+      el.addEventListener("solv-chat:open", opened);
+      await expect(el.send("My question", { open: true })).resolves.toEqual({
+        text: "Your **answer**.",
+      });
+      expect(chat).toHaveBeenCalledOnce();
+    });
+
+    it("rejects competing sends during settings load and streaming", async () => {
+      const encoder = new TextEncoder();
+      let finish = () => {};
+      const chat = vi.fn(
+        () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(encoder.encode(token));
+                finish = () => {
+                  controller.enqueue(encoder.encode(done));
+                  controller.close();
+                };
+              },
+            }),
+          ),
+      );
+      mockEngine(chat);
+      const el = mountWidget();
+      const answer = el.send("First");
+      await expect(el.send("Second")).rejects.toThrow("Wait for the current reply");
+      await vi.waitFor(() =>
+        expect(shadow(el).querySelector(".solv-bubble--assistant strong")?.textContent).toBe(
+          "answer",
+        ),
+      );
+      await expect(el.send("Third")).rejects.toThrow("Wait for the current reply");
+      finish();
+      await expect(answer).resolves.toEqual({ text: "Your **answer**." });
+      expect(chat).toHaveBeenCalledOnce();
+    });
+
+    it("rejects blank or oversized messages without a request", async () => {
+      const fetchMock = mockEngine(() => new Response(sseStream([token, done])));
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_send");
+      el.setAttribute("launcher-shortcut", "none");
+      document.body.append(el);
+      await expect(el.send(" \t\n ")).rejects.toThrow("Enter a message.");
+      await expect(el.send("x".repeat(MAX_CHAT_MESSAGE_LENGTH + 1))).rejects.toThrow(
+        "Message must be 4,000 characters or fewer.",
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects when the assistant is unpublished", async () => {
+      const fetchMock = mockEngine(() => new Response(sseStream([token, done])), 404);
+      await expect(mountWidget().send("My question")).rejects.toThrow(
+        "This assistant is not available.",
+      );
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      [
+        "a refusal",
+        ['event: error\ndata: {"message":"This assistant is not available on this page."}\n\n'],
+        "This assistant is not available on this page.",
+      ],
+      [
+        "a cap",
+        [
+          'event: error\ndata: {"code":"conversation_cap","message":"Start a new conversation."}\n\n',
+        ],
+        "Start a new conversation.",
+      ],
+      [
+        "an error after partial text",
+        [
+          token,
+          'event: error\ndata: {"message":"The assistant could not complete this response."}\n\n',
+        ],
+        "The assistant could not complete this response.",
+      ],
+      ["a stream ending early", [token], "Response interrupted. Please try again."],
+    ])("rejects on %s with the error shown in the conversation", async (_, chunks, message) => {
+      mockEngine(() => new Response(sseStream(chunks)));
+      const el = mountWidget();
+      await expect(el.send("My question")).rejects.toThrow(message);
+      expect(shadow(el).querySelector(".solv-bubble-error")?.textContent).toBe(message);
+    });
+
+    it("does not expose a network exception", async () => {
+      mockEngine(() => Promise.reject(new Error("internal network details")));
+      await expect(mountWidget().send("My question")).rejects.toThrow(
+        "Unable to reach the assistant. Please try again.",
+      );
+    });
   });
 
   it("renders closed, opens on click, moves focus in, and returns focus to launcher on Escape", async () => {
@@ -1522,6 +1678,70 @@ describe("<solv-chat>", () => {
       getSolv().actions.unregister("open_invoice");
       getSolv().actions.unregister("highlight_section");
     });
+
+    it.each(["custom action", "confirmed action", "fill"])(
+      "continues a host send after running a %s",
+      async (kind) => {
+        const name = kind === "fill" ? "fill" : "open_invoice";
+        const input =
+          kind === "fill" ? { fields: [{ name: "email", value: "visitor@example.com" }] } : {};
+        const field = document.createElement("input");
+        field.setAttribute("data-solv-fill", "email");
+        document.body.append(field);
+        const run = vi.fn(() => ({ opened: true }));
+        getSolv().actions.register({
+          name: "open_invoice",
+          description: "Open invoice",
+          input: { type: "object", properties: {} },
+          confirm: kind === "confirmed action",
+          run,
+        });
+        const chatBodies: unknown[] = [];
+        globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+          if (!url.endsWith("/v1/chat")) return Response.json({ actions: { builtins: true } });
+          chatBodies.push(JSON.parse(String(init?.body)));
+          return new Response(
+            sseStream(
+              chatBodies.length === 1
+                ? [
+                    'event: token\ndata: {"text":"All "}\n\n',
+                    `event: action\ndata: ${JSON.stringify({ callId: "call_1", name, input, confirm: false })}\n\n`,
+                    'event: done\ndata: {"messageId":"msg_pause","conversationId":"conv_1","awaitingActions":["call_1"]}\n\n',
+                  ]
+                : [
+                    'event: token\ndata: {"text":"done."}\n\n',
+                    'event: done\ndata: {"messageId":"msg_final","conversationId":"conv_1"}\n\n',
+                  ],
+            ),
+          );
+        }) as typeof fetch;
+
+        const el = mountWidget();
+        const root = shadow(el);
+        const panel = mustQuery<HTMLElement>(root, ".solv-panel");
+        const answer = el.send("Run the action");
+        expect(panel.hidden).toBe(true);
+        if (kind !== "custom action") {
+          const allow = await vi.waitFor(() =>
+            mustQuery<HTMLButtonElement>(root, ".solv-confirm .solv-send"),
+          );
+          expect(panel.hidden).toBe(false);
+          expect(run).not.toHaveBeenCalled();
+          expect(field.value).toBe("");
+          expect(chatBodies).toHaveLength(1);
+          await expect(el.send("Another message")).rejects.toThrow("Wait for the current reply");
+          allow.click();
+        }
+        await expect(answer).resolves.toEqual({ text: "All done." });
+        expect(panel.hidden).toBe(kind === "custom action");
+        expect(chatBodies[1]).toMatchObject({
+          resumeMessageId: "msg_pause",
+          actionResults: [{ callId: "call_1", ok: true }],
+        });
+        if (kind === "fill") expect(field.value).toBe("visitor@example.com");
+        else expect(run).toHaveBeenCalledOnce();
+      },
+    );
 
     it("omits pageActions when none are registered and sends replaced registration once", async () => {
       const chatBodies: Array<Record<string, unknown>> = [];

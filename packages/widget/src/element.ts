@@ -75,6 +75,14 @@ export interface WidgetOpenOptions {
   focus?: boolean;
 }
 
+export interface WidgetSendOptions {
+  open?: boolean;
+}
+
+export interface WidgetSendResult {
+  text: string;
+}
+
 /**
  * How the open panel is laid out: the floating panel, a column beside the
  * page (the page is narrowed to make room), or the whole screen on a viewport
@@ -109,6 +117,10 @@ interface LivePaint {
 }
 
 const TYPING_LABEL = "Writing an answer";
+const MESSAGE_TOO_LONG = `Message must be ${MAX_CHAT_MESSAGE_LENGTH.toLocaleString("en-US")} characters or fewer.`;
+const ASSISTANT_UNAVAILABLE = "This assistant is not available.";
+const RESPONSE_INTERRUPTED = "Response interrupted. Please try again.";
+const CHAT_FAILED = "Something went wrong. Please try again.";
 
 /** A 24-unit square icon for a header button, built from DOM nodes. */
 function headerIcon(path: string): SVGSVGElement {
@@ -307,6 +319,7 @@ export class SolvChat extends HTMLElement {
   #open = false;
   #sending = false;
   #abortController: AbortController | null = null;
+  #hostSend = false;
   /** Open confirmation prompts, refused if the panel closes or we unmount. */
   #openConfirms = new Set<ConfirmHandle>();
   /** Turn controller whose remaining confirmations were dismissed by closing the panel. */
@@ -317,6 +330,7 @@ export class SolvChat extends HTMLElement {
   #resumedBubble: { bubble: HTMLDivElement; textEl: HTMLDivElement; turn: SavedTurn } | null = null;
   #config = DEFAULT_CONFIG;
   #configReady = false;
+  #configMissing = false;
   #configNeedsSaving = false;
   #cachedConfigExpiresAt: number | undefined;
   #configRequest: Promise<void> | undefined;
@@ -503,6 +517,7 @@ export class SolvChat extends HTMLElement {
       this.#abortController.abort();
       this.#abortController = null;
       this.#sending = false;
+      this.#hostSend = false;
       this.#sendBtn.disabled = !this.#configReady;
     }
   }
@@ -711,6 +726,11 @@ export class SolvChat extends HTMLElement {
       endpoint: () => this.#endpoint(),
       assistant: () => this.#assistant(),
       visitorId: () => visitorId(),
+      onInteractive: () => {
+        if (this.#hostSend && !this.#open && !this.#dismissedTurn) {
+          this.#openPanel(false, this.#expandedOnOpen() ?? false);
+        }
+      },
       theme: () =>
         typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches
           ? "dark"
@@ -777,6 +797,13 @@ export class SolvChat extends HTMLElement {
     return this.#openRequested({}, true);
   }
 
+  /** Submits host-page input and returns the complete reply as text. */
+  async send(text: string, options: WidgetSendOptions = {}): Promise<WidgetSendResult> {
+    const result = await this.#send(text, undefined, options);
+    if (result instanceof Error) throw result;
+    return result;
+  }
+
   async #waitForConfig(loading: Promise<void>, ms: number): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<void>((resolve) => {
@@ -836,6 +863,7 @@ export class SolvChat extends HTMLElement {
     const isCurrent = () => !signal.aborted && !this.#previewing && url === this.#publicConfigUrl();
     try {
       const response = await fetch(url, { cache: revalidate ? "no-cache" : "default", signal });
+      if (isCurrent()) this.#configMissing = response.status === 404;
       if (response.ok) {
         const config = { ...DEFAULT_CONFIG, ...parsePublicConfig(await response.json()) };
         if (!isCurrent()) return;
@@ -853,6 +881,7 @@ export class SolvChat extends HTMLElement {
 
   #showLoading(): void {
     this.#configReady = false;
+    this.#configMissing = false;
     this.#configNeedsSaving = false;
     this.#config = DEFAULT_CONFIG;
     this.#panel.setAttribute("data-loading", "");
@@ -1300,7 +1329,7 @@ export class SolvChat extends HTMLElement {
           this.#resumedBubble = { bubble, textEl, turn };
         } else if (unfinished) {
           delete turn.awaiting;
-          turn.error = "Response interrupted. Please try again.";
+          turn.error = RESPONSE_INTERRUPTED;
           restoredUnfinished = true;
         }
         if (turn.error) {
@@ -1404,11 +1433,13 @@ export class SolvChat extends HTMLElement {
    * without losing `this`.
    */
   #confirmAction = async (request: RunRequest, action: RegisteredAction): Promise<boolean> => {
-    if (this.#dismissedTurn && this.#dismissedTurn === this.#abortController) {
+    const controller = this.#abortController;
+    if (this.#dismissedTurn && this.#dismissedTurn === controller) {
       return false;
     }
     // Opening the panel first: a prompt the visitor cannot see is not consent.
     if (!this.#open) this.#openPanel();
+    if (!this.#open || controller?.signal.aborted) return false;
     const handle = askToConfirm(this.#messagesEl, request, action, () => this.#focusInput());
     this.#openConfirms.add(handle);
     try {
@@ -1574,7 +1605,7 @@ export class SolvChat extends HTMLElement {
 
   #markTurnInterrupted(bubble: HTMLDivElement, turn: SavedTurn): void {
     const msg = turn.text
-      ? "Response interrupted. Please try again."
+      ? RESPONSE_INTERRUPTED
       : "Unable to reach the assistant. Please try again.";
     this.#setTurnError(bubble, turn, msg);
   }
@@ -1736,22 +1767,68 @@ export class SolvChat extends HTMLElement {
     if (isCurrent() && this.#checkRequired()) return this.#sessionFor();
   }
 
-  async #send(message: string, onAccepted?: () => void): Promise<void> {
+  async #send(
+    message: string,
+    onAccepted?: () => void,
+    options?: WidgetSendOptions,
+  ): Promise<WidgetSendResult | Error> {
     const assistant = this.#assistant();
-    const trimmed = message.trim();
-    if (!assistant || !this.#configReady || this.#previewing || this.#sending || !trimmed) return;
-
+    if (this.#sending)
+      return new Error("Wait for the current reply before sending another message.");
+    const trimmed = typeof message === "string" ? message.trim() : "";
+    if (!trimmed) return new Error("Enter a message.");
+    if (!assistant || !this.isConnected || this.#previewing || (!options && !this.#configReady)) {
+      return new Error(ASSISTANT_UNAVAILABLE);
+    }
     if (trimmed.length > MAX_CHAT_MESSAGE_LENGTH) {
-      this.#showInputError(
-        `Message must be ${MAX_CHAT_MESSAGE_LENGTH.toLocaleString("en-US")} characters or fewer.`,
-      );
-      return;
+      if (!options) this.#showInputError(MESSAGE_TOO_LONG);
+      return new Error(MESSAGE_TOO_LONG);
     }
 
+    // Reserve the turn before settings load or an open event reaches the host.
+    const controller = new AbortController();
+    this.#abortController = controller;
+    this.#sending = true;
+    this.#hostSend = options !== undefined;
+    this.#sendBtn.disabled = true;
+
+    try {
+      if (options) {
+        if (options.open) {
+          await this.#openRequested({}, false);
+        } else {
+          await this.#waitForConfig(this.#loadConfig(), CONFIG_OPEN_WAIT_MS);
+        }
+        if (controller.signal.aborted) return new Error(RESPONSE_INTERRUPTED);
+        if (this.#previewing || this.#configMissing || assistant !== this.#assistant()) {
+          return new Error(ASSISTANT_UNAVAILABLE);
+        }
+        if (!this.#configReady) this.#applyConfig(DEFAULT_CONFIG);
+      }
+      return await this.#sendTurn(assistant, trimmed, controller, onAccepted);
+    } catch {
+      return new Error(CHAT_FAILED);
+    } finally {
+      if (this.#abortController === controller) {
+        this.#abortController = null;
+        this.#sending = false;
+        this.#hostSend = false;
+        this.#sendBtn.disabled = !this.#configReady;
+      }
+      if (this.#dismissedTurn === controller) {
+        this.#dismissedTurn = null;
+      }
+    }
+  }
+
+  async #sendTurn(
+    assistant: string,
+    trimmed: string,
+    controller: AbortController,
+    onAccepted?: () => void,
+  ): Promise<WidgetSendResult | Error> {
     this.#clearInputError();
     onAccepted?.();
-    this.#sending = true;
-    this.#sendBtn.disabled = true;
 
     const pending = this.#pendingResume;
     if (pending) {
@@ -1775,8 +1852,6 @@ export class SolvChat extends HTMLElement {
     this.#scrollToBottom(true);
     this.#persist();
 
-    const controller = new AbortController();
-    this.#abortController = controller;
     const { signal } = controller;
 
     try {
@@ -1828,18 +1903,13 @@ export class SolvChat extends HTMLElement {
     } finally {
       this.#finishPaint(textEl);
       this.#hideTyping(bubble);
-      if (this.#abortController === controller) {
-        this.#abortController = null;
-        this.#sending = false;
-        this.#sendBtn.disabled = false;
-      }
-      if (this.#dismissedTurn === controller) {
-        this.#dismissedTurn = null;
-      }
-      if (!signal.aborted) {
-        this.#persist();
-      }
+      if (!signal.aborted) this.#persist();
     }
+    if (assistantTurn.error) return new Error(assistantTurn.error);
+    if (signal.aborted || assistantTurn.awaiting?.length || !assistantTurn.messageId) {
+      return new Error(RESPONSE_INTERRUPTED);
+    }
+    return { text: assistantTurn.text };
   }
 
   async *#chatEvents(
@@ -1864,7 +1934,7 @@ export class SolvChat extends HTMLElement {
       const response = await send(check?.session);
       if (!isCurrent()) return;
       if (!response.ok || !response.body) {
-        yield { type: "error", message: "Something went wrong. Please try again." };
+        yield { type: "error", message: CHAT_FAILED };
         return;
       }
       let refusalMessage: string | undefined;
@@ -1979,7 +2049,7 @@ export class SolvChat extends HTMLElement {
           terminated = true;
           this.#finishPaint(textEl);
           this.#hideTyping(bubble);
-          const msg = event.message.trim() || "Something went wrong. Please try again.";
+          const msg = event.message.trim() || CHAT_FAILED;
           if (onAdmitted && event.configUnavailable) {
             // The refusal came before the engine could claim the saved
             // continuation. Show the error here and let a later page resume it.

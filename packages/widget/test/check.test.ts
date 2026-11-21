@@ -85,7 +85,7 @@ function fakeEngine(
   return requests;
 }
 
-function mount(): { el: HTMLElement; root: ShadowRoot } {
+function mount() {
   const el = document.createElement("solv-chat");
   el.setAttribute("assistant", "pk_test_check");
   mountWithIntent(el);
@@ -375,6 +375,24 @@ describe("visitor check in the widget", () => {
     );
     fromFrame(frame, { type: "settled" });
     expect(host.hasAttribute("data-state")).toBe(false);
+  });
+
+  it("waits for the visitor check before sending from the host page", async () => {
+    const requests = fakeEngine();
+    const { el, root } = mount();
+    const answer = el.send("My question");
+    const frame = await vi.waitFor(() => mustQuery<HTMLIFrameElement>(root, ".solv-check iframe"));
+    const panel = mustQuery<HTMLElement>(root, ".solv-panel");
+    expect(panel.hidden).toBe(true);
+    expect(requests.some((r) => r.url.endsWith("/v1/chat"))).toBe(false);
+    fromFrame(frame, { type: "interactive" });
+    expect(panel.hidden).toBe(false);
+    fromFrame(frame, { type: "token", token: "test-token" });
+    await expect(answer).resolves.toEqual({ text: "Answer" });
+    expect(requests.find((r) => r.url.endsWith("/v1/chat"))?.body).toMatchObject({
+      message: "My question",
+      session: "vs1.session-for-test",
+    });
   });
 
   it("gives no answer and says how to retry when the check fails", async () => {
