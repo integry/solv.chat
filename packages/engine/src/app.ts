@@ -46,6 +46,7 @@ import {
 } from "./providers/config.js";
 import { vectorizeRetriever } from "./providers/retrieval.js";
 import type { Seams } from "./seams/types.js";
+import { scriptAsset } from "./util/scriptAsset.js";
 import { WIDGET_BUNDLE } from "./widgetBundle.js";
 
 /**
@@ -62,15 +63,7 @@ function decodeSegment(segment: string): string | null {
 
 const notFound = (): Response => Response.json({ error: "Not found." }, { status: 404 });
 
-function widgetAsset(): Response {
-  return new Response(WIDGET_BUNDLE, {
-    status: 200,
-    headers: {
-      "content-type": "application/javascript; charset=utf-8",
-      "cache-control": "public, max-age=86400",
-    },
-  });
-}
+const widgetAsset = scriptAsset(WIDGET_BUNDLE);
 
 export interface Env extends ProviderEnv, ScoreFloorEnv, VisitorCheckEnv {
   DB: D1Database;
@@ -196,7 +189,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         return checkFrameRoute(request, env, { seams });
       }
       if (request.method === "GET" && url.pathname === "/v1/check/frame.js") {
-        return checkFrameScript();
+        return checkFrameScript(request);
       }
       const publicConfigMatch = /^\/v1\/assistants\/([^/]+)$/.exec(url.pathname);
       if (publicConfigMatch?.[1]) {
@@ -205,11 +198,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         return publicConfigRoute(request, env, seams, publicKey);
       }
       if (request.method === "GET" && url.pathname === "/widget.js") {
-        // Long cache: the owner embeds a stable URL, so a long max-age keeps
-        // the script tag from costing a round trip on every page view. Forward
-        // compatibility is handled by the protocol version rather than by
-        // making owners bust a cache.
-        return widgetAsset();
+        return widgetAsset(request);
       }
       const resolveRunDeps = async (orgId: string, tenant: Tenant) => {
         const providers = await resolveChatProviders(env, seams, orgId, chatOverrides);

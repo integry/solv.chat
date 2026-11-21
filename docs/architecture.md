@@ -209,10 +209,22 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
   No secrets, no prompts.
 - `POST /v1/session` — exchanges a Turnstile token for a visitor session (see
   "Visitor check"). Answers 404 when the check is off.
-- `GET /v1/check/frame` and `GET /v1/check/frame.js` — the page the widget
-  frames to run Turnstile on the engine's origin, and its script. 404 when the
-  check is off.
+- `GET /v1/check/frame` — the page the widget frames to run Turnstile on the
+  engine's origin. 404 when the check is off.
+- `GET /v1/check/frame.js` — the public script for that page.
 - `GET /widget.js` — the widget bundle.
+
+Both script URLs are stable and send
+`Cache-Control: public, max-age=300, must-revalidate, no-transform` and a
+strong `ETag` based on the SHA-256 hash of the response bytes. Five minutes
+of freshness keep repeat page views from fetching the script. After that,
+the next load revalidates before using the cached copy. The Worker sends a
+bodyless 304 when `If-None-Match` matches and the new script when the bytes
+have changed. Once this policy is in effect, a cached copy can delay a
+release by up to five minutes. Returning visitors get the release on their
+first load after the cached copy expires. A CDN in front must honor these
+headers, including `no-transform` to preserve the bytes the strong tag
+identifies.
 
 With the visitor check on, the requests that cost money or write carry the
 visitor session in the body's `session` field: `POST /v1/chat` (model,
