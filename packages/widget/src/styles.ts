@@ -84,8 +84,9 @@ textarea:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  height: 44px;
-  padding: 0 16px;
+  min-height: 44px;
+  max-width: calc(100vw - 40px);
+  padding: 6px 16px;
   border: none;
   border-radius: 9999px;
   background: var(--solv-accent);
@@ -94,6 +95,28 @@ textarea:focus-visible {
   font-weight: 600;
   cursor: pointer;
   box-shadow: var(--solv-shadow);
+}
+
+.solv-launcher-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.solv-shortcut {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 4px;
+  font: 500 11px/1.4 system-ui, sans-serif;
+  white-space: nowrap;
+}
+
+@media (any-pointer: coarse) {
+  .solv-shortcut { display: none; }
+}
+
+@media (any-pointer: fine) {
+  .solv-shortcut:not([hidden]) { display: inline-block; }
 }
 
 .solv-launcher:hover {

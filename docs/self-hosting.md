@@ -181,6 +181,31 @@ The chat window is 460 × 720 pixels on a desktop screen (never more than the sc
 
 With **Allow expanding to a side panel** on (the default, under **Widget**), visitors can expand the chat into a full-height column on the same side as the chat button. On a screen at least 900 pixels wide your page moves over to make room; on a narrower screen the chat fills the screen and your page is not changed. Turn the setting off and the expand button is not shown.
 
+On **Widget**, set **Opens as** to **Side panel** to open beside the page at 900 pixels wide or more. It requires **Allow expanding to a side panel**. On smaller screens the assistant opens as a floating panel. **Floating panel** is the default. After visitors expand or collapse the chat, their choice takes precedence in that tab.
+
+Set **Launcher label** to 1–24 characters of plain text. The default is **Chat**. **Keyboard shortcut** is off by default. Choose **/** or **Ctrl/⌘ K** to let visitors open the chat and focus its message box. The launcher shows the shortcut on devices with a keyboard. The widget leaves keys alone when the page handles them or the visitor is typing in a field.
+
+#### Use your own Ask button
+
+Add `data-solv-chat-open` to a button anywhere on the page, including one you add later. Give the attribute a value of `side` or `panel` to request that view. Use the element's methods when your site needs to control the chat from JavaScript.
+
+```html
+<button type="button" data-solv-chat-open>Ask</button>
+<button type="button" id="ask-in-side-panel">Ask in the side panel</button>
+<script>
+  customElements.whenDefined("solv-chat").then(() => {
+    const chat = document.querySelector("solv-chat");
+    document.querySelector("#ask-in-side-panel").addEventListener("click", () => {
+      chat.open({ mode: "side", focus: true });
+    });
+  });
+</script>
+```
+
+`open({ mode?, focus? })`, `close()` and `toggle()` return promises that resolve after configuration loads and the action finishes. Omit `mode` to use the visitor's choice or the **Opens as** setting. Omit `focus` to move focus to the message box. Call `open()` or a `toggle()` that opens from a real visitor gesture, such as a button click. The API cannot auto-open on page load. Chat only reopens on navigation in a tab where the visitor already had it open.
+
+Listen on the element or the page for `solv-chat:open`, `solv-chat:close`, `solv-chat:expand` and `solv-chat:collapse`. These events bubble, cross shadow boundaries and carry no conversation content.
+
 While the column is open the widget adds three inline styles to your `<html>` element and removes exactly what it added when the visitor collapses or closes the chat, or when the widget is removed from the page (an inline style you set yourself comes back as it was):
 
 - `margin-right` (or `margin-left` for a chat on the left) of the column's width, added to an inline margin you already set;

@@ -1,4 +1,4 @@
-import type { ActionResult } from "@solvchat/core";
+import type { ActionResult, WidgetOpenMode } from "@solvchat/core";
 
 export interface SavedCitation {
   url: string;
@@ -36,11 +36,11 @@ export interface SavedConversation {
   conversationId: string | null;
   open: boolean;
   /**
-   * The visitor expanded the panel to the side panel. Saved only when true,
-   * and only with the rest of the conversation, which is first written when
-   * the visitor opens the assistant.
+   * The open panel was expanded. Saved only when true.
    */
   expanded?: boolean;
+  preferredMode?: WidgetOpenMode;
+  tabId?: string;
   turns: SavedTurn[];
   pendingResume?: PendingResume;
 }
@@ -84,7 +84,7 @@ export function savePublicConfig(url: string, config: object): void {
 }
 
 let fallbackVisitorId: string | null = null;
-const activeOwners = new Map<string, symbol>();
+const activeOwners = new Map<string, { owner: symbol; tabId: string | undefined }>();
 
 /**
  * A random id that works on plain-http pages too. `crypto.randomUUID` exists
@@ -192,17 +192,44 @@ function parseSavedConversation(parsed: unknown): SavedConversation | null {
     conversationId,
     open,
     ...(expanded ? { expanded } : {}),
+    ...(record.preferredMode === "panel" || record.preferredMode === "side"
+      ? { preferredMode: record.preferredMode }
+      : {}),
+    ...(typeof record.tabId === "string" ? { tabId: record.tabId } : {}),
     turns,
     ...(pendingResume ? { pendingResume } : {}),
   };
 }
 
+function copiedFromOpener(key: string, tabId: string | undefined): boolean {
+  const opener = window.opener as Window | null;
+  if (!opener) return false;
+  try {
+    const raw = opener.sessionStorage.getItem(key);
+    if (raw === null) return false;
+    const saved = parseSavedConversation(JSON.parse(raw));
+    return saved !== null && saved.tabId === tabId;
+  } catch {
+    // A cross-origin or closed opener does not expose its sessionStorage.
+    return false;
+  }
+}
+
 export function loadConversation(assistant: string): SavedConversation | null {
   if (!assistant) return null;
   try {
-    const raw = sessionStorage.getItem(`${OPEN_PREFIX}${assistant}`);
+    const key = `${OPEN_PREFIX}${assistant}`;
+    const raw = sessionStorage.getItem(key);
     if (raw === null) return null;
-    return parseSavedConversation(JSON.parse(raw));
+    const saved = parseSavedConversation(JSON.parse(raw));
+    // A same-origin popup starts with a copy of its opener's sessionStorage.
+    // The id is kept for the lifetime of the conversation, even as turns change.
+    if (saved && copiedFromOpener(key, saved.tabId)) {
+      // Discard the copy now, since the opener may be gone on the next load.
+      sessionStorage.removeItem(key);
+      return null;
+    }
+    return saved;
   } catch {
     // Private-mode quota errors and malformed data both mean "no saved
     // conversation". A storage failure must never stop the widget opening.
@@ -214,9 +241,9 @@ export function loadConversation(assistant: string): SavedConversation | null {
  * Marks `owner` as the active widget instance for `assistant`, fencing out any
  * superseded instance that still has an in-flight stream or request.
  */
-export function claimConversation(assistant: string, owner: symbol): void {
+export function claimConversation(assistant: string, owner: symbol, tabId?: string): void {
   if (!assistant) return;
-  activeOwners.set(assistant, owner);
+  activeOwners.set(assistant, { owner, tabId });
 }
 
 /**
@@ -225,14 +252,18 @@ export function claimConversation(assistant: string, owner: symbol): void {
  * is never exhausted by a long session.
  */
 export function saveConversation(assistant: string, saved: SavedConversation, owner: symbol): void {
-  if (!assistant || activeOwners.get(assistant) !== owner) return;
+  const active = activeOwners.get(assistant);
+  if (!assistant || active?.owner !== owner) return;
   try {
+    active.tabId ??= randomId();
     sessionStorage.setItem(
       `${OPEN_PREFIX}${assistant}`,
       JSON.stringify({
         conversationId: saved.conversationId,
         open: saved.open,
         ...(saved.expanded ? { expanded: true } : {}),
+        ...(saved.preferredMode ? { preferredMode: saved.preferredMode } : {}),
+        tabId: active.tabId,
         turns: saved.turns.slice(-MAX_SAVED_TURNS),
         ...(saved.pendingResume ? { pendingResume: saved.pendingResume } : {}),
       }),

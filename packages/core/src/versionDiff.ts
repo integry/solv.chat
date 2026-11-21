@@ -1,4 +1,10 @@
-import type { VersionConfig } from "./schemas/versionConfig.js";
+import {
+  type VersionConfig,
+  WIDGET_OPEN_MODE_LABELS,
+  WIDGET_SHORTCUT_LABELS,
+  type WidgetOpenMode,
+  type WidgetShortcut,
+} from "./schemas/versionConfig.js";
 
 /**
  * What changed between two stored version configs, worded for the owner.
@@ -107,6 +113,21 @@ export const VERSION_DIFF_FIELDS: readonly DiffField[] = [
     label: "Allow expanding to a side panel",
     screen: "Widget",
     kind: "boolean",
+  },
+  {
+    path: "widget.opensAs",
+    label: "Opens as",
+    screen: "Widget",
+    kind: "text",
+    format: (value) => WIDGET_OPEN_MODE_LABELS[value as WidgetOpenMode] ?? String(value),
+  },
+  { path: "widget.launcherLabel", label: "Launcher label", screen: "Widget", kind: "text" },
+  {
+    path: "widget.keyboardShortcut",
+    label: "Keyboard shortcut",
+    screen: "Widget",
+    kind: "text",
+    format: (value) => WIDGET_SHORTCUT_LABELS[value as WidgetShortcut] ?? String(value),
   },
   { path: "actions.builtins", label: "Help on the page", screen: "Widget", kind: "boolean" },
   {
