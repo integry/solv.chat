@@ -1,5 +1,4 @@
 import { env } from "cloudflare:test";
-import { defaultVersionConfig } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { answerMessage } from "../../src/chat/answer.js";
 import { SAFETY_FRAME } from "../../src/chat/prompt.js";
@@ -26,6 +25,7 @@ import type { UsageEvent } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { TEST_ORG_ID } from "../helpers/app.js";
+import { numberedConfig } from "../helpers/config.js";
 
 const LOOKUP_TOOL: ToolDefinition = {
   name: "lookup_order",
@@ -81,7 +81,7 @@ describe("chat/toolLoop", () => {
   });
   const embedder = fakeEmbedder();
   let retriever = memoryRetriever();
-  const behaviour = defaultVersionConfig().behaviour;
+  const behaviour = numberedConfig().behaviour;
 
   beforeEach(async () => {
     retriever = memoryRetriever();
@@ -107,7 +107,7 @@ describe("chat/toolLoop", () => {
     const draft = await tenant.versions.createDraft({
       id: "ver_1",
       assistantId: "ast_1",
-      config: defaultVersionConfig(),
+      config: numberedConfig(),
       createdAt: 1000,
     });
     await tenant.versions.publishDraft("ast_1", draft.id, "ver_2", 2000);

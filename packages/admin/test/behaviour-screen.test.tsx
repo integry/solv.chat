@@ -139,30 +139,59 @@ describe("Behaviour screen", () => {
     expect(await screen.findByLabelText("First thing it says")).toBeTruthy();
   });
 
-  it("turns Show sources in answers off and saves it with the draft", async () => {
+  it("chooses how sources are shown and saves it with the draft", async () => {
     const server = installBuildScreensFake();
     render(<App />);
-    const toggle = (await screen.findByRole("checkbox", {
-      name: "Show sources in answers",
-    })) as HTMLInputElement;
+    const group = await screen.findByRole("group", { name: "Show sources in answers" });
     const region = screen.getByRole("region", { name: "Sources" });
     expect(within(region).getByRole("heading", { name: "Sources" })).toBeTruthy();
-    // On by default, as for every assistant made before the setting.
-    expect(toggle.checked).toBe(true);
+    const links = within(group).getByRole("radio", {
+      name: /Link in the text/,
+    }) as HTMLInputElement;
+    const numbered = within(group).getByRole("radio", {
+      name: /Numbered, with a list/,
+    }) as HTMLInputElement;
+    const none = within(group).getByRole("radio", { name: /None/ }) as HTMLInputElement;
+    // Links in the text by default, with no list under the answer.
+    expect(links.checked).toBe(true);
+    const list = screen.getByRole("checkbox", {
+      name: "List sources under answers",
+    }) as HTMLInputElement;
+    expect(list.checked).toBe(false);
     expect(screen.queryByText("Unsaved changes")).toBeNull();
 
-    fireEvent.click(toggle);
-    expect(toggle.checked).toBe(false);
+    // The list choice belongs to links in the text only.
+    fireEvent.click(numbered);
+    expect(numbered.checked).toBe(true);
+    expect(screen.queryByRole("checkbox", { name: "List sources under answers" })).toBeNull();
+    fireEvent.click(none);
+    expect(none.checked).toBe(true);
     expect(screen.getByText("Unsaved changes")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Draft saved.")).toBeTruthy();
     const put = server.calls.filter((c) => c.method === "PUT" && c.path.endsWith("/draft")).at(-1);
-    const sent = put?.body as { behaviour: { showSources: boolean } } | undefined;
-    expect(sent?.behaviour.showSources).toBe(false);
-    expect(server.drafts.get("ast_1")?.config.behaviour.showSources).toBe(false);
+    const sent = put?.body as { behaviour: { sources: string; listSources: boolean } } | undefined;
+    expect(sent?.behaviour).toMatchObject({ sources: "none", listSources: false });
+    expect(server.drafts.get("ast_1")?.config.behaviour.sources).toBe("none");
     await waitFor(() => expect(screen.queryByText("Unsaved changes")).toBeNull());
-    expect(toggle.checked).toBe(false);
+    expect(none.checked).toBe(true);
+  });
+
+  it("turns List sources under answers on with links in the text and saves it", async () => {
+    const server = installBuildScreensFake();
+    render(<App />);
+    const list = (await screen.findByRole("checkbox", {
+      name: "List sources under answers",
+    })) as HTMLInputElement;
+    fireEvent.click(list);
+    expect(list.checked).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Draft saved.")).toBeTruthy();
+    expect(server.drafts.get("ast_1")?.config.behaviour).toMatchObject({
+      sources: "links",
+      listSources: true,
+    });
   });
 
   it("has no serious accessibility problems", async () => {

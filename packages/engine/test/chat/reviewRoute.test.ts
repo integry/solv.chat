@@ -1,5 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { type ChatEvent, defaultVersionConfig, parseChatEventLine } from "@solvchat/core";
+import { type ChatEvent, parseChatEventLine } from "@solvchat/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/app.js";
 import { type AnswerReviewer, REVIEW_FRAME } from "../../src/chat/review.js";
@@ -12,6 +12,7 @@ import type { Limits, UsageEvent } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
+import { numberedConfig } from "../helpers/config.js";
 
 const QUESTION = "How does billing work?";
 const CHUNK_TEXT = "Invoices are sent monthly CHUNK_MARKER.";
@@ -96,7 +97,7 @@ describe("chat: answer review on the answer path", () => {
       allowedOrigins: ["https://site.example"],
       createdAt: 1000,
     });
-    const config = defaultVersionConfig();
+    const config = numberedConfig();
     config.behaviour.persona = PERSONA;
     const draft = await tenant.versions.createDraft({
       id: "ver_1",
@@ -266,7 +267,7 @@ describe("chat: answer review on the answer path", () => {
     async (label) => {
       const seen: SeenRequest[] = [];
       const { reply } = await ask(appWith({ fetch: anthropicFetch(seen, label) }), MISS_QUESTION);
-      const fallback = defaultVersionConfig().behaviour.fallbackText;
+      const fallback = numberedConfig().behaviour.fallbackText;
       expect(reply?.answered).toBe(false);
       expect(reply?.content).toBe(fallback);
       expect(reply?.outcome).toBe(label);
@@ -281,7 +282,7 @@ describe("chat: answer review on the answer path", () => {
       expect(seen[0]?.body).toContain(
         "The assistant found nothing on the website for this question: the reply is its fixed fallback text.",
       );
-      expect(seen[0]?.body).toContain(`greeting: ${defaultVersionConfig().behaviour.greeting}`);
+      expect(seen[0]?.body).toContain(`greeting: ${numberedConfig().behaviour.greeting}`);
       expect(seen[0]?.body).toContain(`description: ${PERSONA}`);
       // Its cost is model use, never a message.
       expect(await usageRow()).toMatchObject({ messages: 1, tokens_in: 90, tokens_out: 1 });

@@ -1,5 +1,6 @@
 export { ADMIN_CSP, ADMIN_PREVIEW_CSP } from "./csp.js";
 export { type IdPrefix, isId, newId } from "./ids.js";
+export { escapedAt, proseRanges } from "./markdownCode.js";
 export {
   ANSWER_OUTCOMES,
   type AnswerOutcome,
@@ -103,6 +104,8 @@ export {
   defaultVersionConfig,
   type LimitsConfig,
   parseVersionConfig,
+  SOURCES_MODES,
+  type SourcesMode,
   type VersionConfig,
   type WidgetConfig,
   type WidgetPosition,

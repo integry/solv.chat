@@ -25,7 +25,7 @@ const EXPECTATIONS = [
   {
     kind: "cites",
     label: "It must link to",
-    hint: "The answer has to show this page as a source.",
+    hint: "The answer has to link to this page or use it.",
     field: "url",
   },
   {

@@ -285,13 +285,19 @@ describe("chat/persistence", () => {
 
     if (!res.body) throw new Error("expected response body");
     const reader = res.body.getReader();
-    const firstChunk = await reader.read();
-    expect(firstChunk.done).toBe(false);
-    const firstText = new TextDecoder().decode(firstChunk.value);
-    expect(firstText).toContain("First ");
-
-    await reader.cancel();
-    releaseNextChunk();
+    try {
+      const firstChunk = await reader.read();
+      expect(firstChunk.done).toBe(false);
+      const firstText = new TextDecoder().decode(firstChunk.value);
+      // The trailing space is held until the next text shows it starts no
+      // citation marker, so the first token is the word alone.
+      expect(firstText).toContain('"First"');
+      await reader.cancel();
+    } finally {
+      // Released whatever happened above: a provider left waiting would keep
+      // the request, and so the whole Workers test run, from ever finishing.
+      releaseNextChunk();
+    }
     await waitOnExecutionContext(ctx);
 
     const convs = await tenant.conversations.list("ast_1");

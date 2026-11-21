@@ -1,5 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { defaultVersionConfig, newId, parseChatEventLine } from "@solvchat/core";
+import { newId, parseChatEventLine } from "@solvchat/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { reportFor } from "../../src/admin/reports.js";
 import { createApp } from "../../src/app.js";
@@ -9,6 +9,7 @@ import type { Embedder } from "../../src/providers/retrieval.js";
 import type { LlmProvider } from "../../src/providers/types.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
+import { numberedConfig } from "../helpers/config.js";
 
 /**
  * Reports "Content used most" / "Content never used" through the real answer
@@ -95,7 +96,7 @@ async function seed(
   const draft = await tenant.versions.createDraft({
     id: newId("ver"),
     assistantId,
-    config: defaultVersionConfig(),
+    config: numberedConfig(),
     createdAt: 1000,
   });
   await tenant.versions.publishDraft(assistantId, draft.id, newId("ver"), 2000);

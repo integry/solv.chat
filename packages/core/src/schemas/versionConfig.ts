@@ -4,17 +4,34 @@ import { isPlainObject, readTrimmedString } from "./shared.js";
 
 export type WidgetPosition = "left" | "right";
 
+/**
+ * How an answer shows the pages it came from ("Show sources in answers"):
+ * - `links`: the words that name a page link to it, in the text (the default);
+ * - `numbered`: `[n]` markers after sentences and the list of pages under the
+ *   answer (how answers cited before this setting had three values);
+ * - `none`: neither.
+ */
+export type SourcesMode = "links" | "numbered" | "none";
+
+export const SOURCES_MODES: readonly SourcesMode[] = ["links", "numbered", "none"];
+
 export interface BehaviourConfig {
   greeting: string;
   persona: string;
   fallbackText: string;
   suggestedQuestions: string[];
   /**
-   * "Show sources in answers". On: answers carry `[n]` markers and the
-   * visitor gets the cited pages under the answer. Off: neither, though the
-   * owner's own records of what an answer used are kept as before.
+   * "Show sources in answers". Whatever it is, the owner's own records of what
+   * an answer used are kept as before. Replaces the on/off `showSources` of
+   * older versions: on reads as `links`, off as `none` (see the parser).
    */
-  showSources: boolean;
+  sources: SourcesMode;
+  /**
+   * "List sources under answers": with `sources: "links"`, also list the
+   * pages under the answer. Off by default. `numbered` always lists them and
+   * `none` never does, so it changes nothing there.
+   */
+  listSources: boolean;
 }
 
 export interface WidgetConfig {
@@ -76,8 +93,10 @@ export const defaultVersionConfig = (): VersionConfig => ({
     persona: "",
     fallbackText: "I could not find an answer to that on this site.",
     suggestedQuestions: [],
-    // On, so an assistant stored before the setting existed keeps citing.
-    showSources: true,
+    // A version stored before the setting existed had sources on, which is
+    // now links in the text, with no list unless the owner asks for it.
+    sources: "links",
+    listSources: false,
   },
   widget: {
     title: "Ask a question",
@@ -137,11 +156,26 @@ function parseBehaviourSection(raw: unknown, target: BehaviourConfig, errors: Er
       target.suggestedQuestions = questions;
     }
   }
-  if (raw.showSources !== undefined) {
+  if (raw.sources !== undefined) {
+    if (typeof raw.sources !== "string" || !SOURCES_MODES.includes(raw.sources as SourcesMode)) {
+      errors.add("behaviour.sources", 'must be "links", "numbered" or "none"');
+    } else {
+      target.sources = raw.sources as SourcesMode;
+    }
+  } else if (raw.showSources !== undefined) {
+    // The on/off setting this replaces, as stored by older versions and still
+    // accepted from a config file: on is links in the text, off is none.
     if (typeof raw.showSources !== "boolean") {
       errors.add("behaviour.showSources", "must be true or false");
     } else {
-      target.showSources = raw.showSources;
+      target.sources = raw.showSources ? "links" : "none";
+    }
+  }
+  if (raw.listSources !== undefined) {
+    if (typeof raw.listSources !== "boolean") {
+      errors.add("behaviour.listSources", "must be true or false");
+    } else {
+      target.listSources = raw.listSources;
     }
   }
 }

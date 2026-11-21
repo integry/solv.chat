@@ -2,7 +2,6 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import {
   CHAT_PROTOCOL_VERSION,
   type ChatEvent,
-  defaultVersionConfig,
   type PageAction,
   parseChatEventLine,
 } from "@solvchat/core";
@@ -26,6 +25,7 @@ import type { UsageEvent } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
+import { numberedConfig } from "../helpers/config.js";
 
 const QUESTION = "Show me example code for CORS headers in Express";
 const CUT_IN_FENCE =
@@ -170,7 +170,7 @@ describe("chat/cutShort", () => {
         allowedOrigins: ["https://site.example"],
         createdAt: 1000,
       });
-      const config = defaultVersionConfig();
+      const config = numberedConfig();
       config.actions = { builtins: true, allowedOrigins: [] };
       const draft = await tenant.versions.createDraft({
         id: "ver_1",

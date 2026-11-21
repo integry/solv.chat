@@ -248,13 +248,14 @@ describe("Publish confirmation", () => {
     expect(onConfirm).toHaveBeenCalledWith({ draftId: "ver_draft", revision: "rev_ver_draft" });
   });
 
-  it("names Show sources in answers when the draft turns it off", async () => {
+  it("names Show sources in answers and List sources under answers when the draft changes them", async () => {
     stubVersions([
       row(
         "ver_draft",
         "draft",
         config((c) => {
-          c.behaviour.showSources = false;
+          c.behaviour.sources = "numbered";
+          c.behaviour.listSources = true;
         }),
         null,
         1_700_000_200_000,
@@ -270,12 +271,38 @@ describe("Publish confirmation", () => {
     const item = (await within(region).findByText("Show sources in answers")).closest(
       "li",
     ) as HTMLElement;
-    expect(item.textContent).toBe("Show sources in answersWasOnNowOff");
+    expect(item.textContent).toBe(
+      "Show sources in answersWasLink in the textNowNumbered, with a list",
+    );
+    const list = within(region).getByText("List sources under answers").closest("li");
+    expect(list?.textContent).toBe("List sources under answersWasOffNowOn");
     expect(
       within(region)
         .getAllByRole("heading", { level: 4 })
         .map((h) => h.textContent),
     ).toEqual(["Behaviour"]);
+  });
+
+  it("shows a change of Show sources in answers in History", async () => {
+    const before = config((c) => {
+      c.behaviour.sources = "none";
+    });
+    stubVersions([
+      row("ver_draft", "draft", LIVE, null, 1_700_000_300_000),
+      row("ver_2", "published", LIVE, 1_700_000_200_000, 1_700_000_150_000),
+      row("ver_1", "archived", before, 1_700_000_100_000),
+    ]);
+    render(<History assistantId="ast_1" />);
+    const items = await screen.findAllByRole("listitem");
+    const rows = items.filter((li) => li.classList.contains("history-item"));
+    const published = rows[1] as HTMLElement;
+    expect(published.querySelector(".history-summary")?.textContent).toBe(
+      "1 change: show sources in answers",
+    );
+    fireEvent.click(within(published).getByRole("button", { name: "Show changes" }));
+    expect(within(published).getByText("Show sources in answers").closest("li")?.textContent).toBe(
+      "Show sources in answersWasNoneNowLink in the text",
+    );
   });
 
   it("says why it is asking again", async () => {

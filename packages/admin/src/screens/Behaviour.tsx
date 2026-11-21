@@ -1,4 +1,4 @@
-import { type BehaviourConfig, CONFIG_LIMITS } from "@solvchat/core";
+import { type BehaviourConfig, CONFIG_LIMITS, type SourcesMode } from "@solvchat/core";
 import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { ApiError, putJson } from "../api/client.js";
 import {
@@ -216,7 +216,8 @@ function behaviourEqual(a: BehaviourConfig, b: BehaviourConfig): boolean {
     a.greeting === b.greeting &&
     a.persona === b.persona &&
     a.fallbackText === b.fallbackText &&
-    a.showSources === b.showSources &&
+    a.sources === b.sources &&
+    a.listSources === b.listSources &&
     sameStrings(a.suggestedQuestions, b.suggestedQuestions)
   );
 }
@@ -231,6 +232,20 @@ function findQuestionError(fields: Record<string, string>): string | undefined {
 
 const DESCRIPTION = "How your assistant greets visitors and answers them.";
 
+const SOURCES_CHOICES: readonly { value: SourcesMode; title: string; hint: string }[] = [
+  {
+    value: "links",
+    title: "Link in the text",
+    hint: "Words in the answer link to the page they come from.",
+  },
+  {
+    value: "numbered",
+    title: "Numbered, with a list",
+    hint: "Numbers like [1] in the answer, and a list of links under it.",
+  },
+  { value: "none", title: "None", hint: "No links, numbers or list." },
+];
+
 export function Behaviour({ assistantId }: BehaviourProps) {
   const draft = useResource<{ draft: VersionRow }>(`/api/admin/assistants/${assistantId}/draft`);
   const savedBehaviour = draft.value?.draft.config.behaviour;
@@ -239,7 +254,8 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const [persona, setPersona] = useState("");
   const [fallbackText, setFallbackText] = useState("");
   const [questions, setQuestions] = useState<string[]>([]);
-  const [showSources, setShowSources] = useState(true);
+  const [sources, setSources] = useState<SourcesMode>("links");
+  const [listSources, setListSources] = useState(false);
   const [initializedFor, setInitializedFor] = useState<string | null>(null);
 
   // "See History" on a conversation's answer details opens it with `history=open`.
@@ -258,8 +274,15 @@ export function Behaviour({ assistantId }: BehaviourProps) {
   const mutation = useAssistantMutation(assistantId);
   const { saving, publishing, busy } = mutation;
 
-  const latestRef = useRef({ greeting, persona, fallbackText, questions, showSources });
-  latestRef.current = { greeting, persona, fallbackText, questions, showSources };
+  const latestRef = useRef({
+    greeting,
+    persona,
+    fallbackText,
+    questions,
+    sources,
+    listSources,
+  });
+  latestRef.current = { greeting, persona, fallbackText, questions, sources, listSources };
   const savedBehaviourRef = useRef(savedBehaviour);
   savedBehaviourRef.current = savedBehaviour;
   const lastTickRef = useRef(mutation.tick);
@@ -270,7 +293,8 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     persona: string;
     fallbackText: string;
     questions: string[];
-    showSources: boolean;
+    sources: SourcesMode;
+    listSources: boolean;
   } | null>(null);
   const prevSavedBehaviourRef = useRef<BehaviourConfig | undefined>(undefined);
   // What the fields held when Publish was pressed. Publishing replaces the
@@ -283,7 +307,8 @@ export function Behaviour({ assistantId }: BehaviourProps) {
       persona: string;
       fallbackText: string;
       questions: string[];
-      showSources: boolean;
+      sources: SourcesMode;
+      listSources: boolean;
     };
   } | null>(null);
 
@@ -313,7 +338,8 @@ export function Behaviour({ assistantId }: BehaviourProps) {
             persona: saved.persona,
             fallbackText: saved.fallbackText,
             questions: questionsSame ? latest.questions : saved.suggestedQuestions,
-            showSources: saved.showSources,
+            sources: saved.sources,
+            listSources: saved.listSources,
           },
         };
       }
@@ -354,8 +380,9 @@ export function Behaviour({ assistantId }: BehaviourProps) {
       if (!keep || sameStrings(latest.questions, keep.questions)) {
         setQuestions(savedBehaviour.suggestedQuestions);
       }
-      if (!keep || latest.showSources === keep.showSources) {
-        setShowSources(savedBehaviour.showSources);
+      if (!keep || latest.sources === keep.sources) setSources(savedBehaviour.sources);
+      if (!keep || latest.listSources === keep.listSources) {
+        setListSources(savedBehaviour.listSources);
       }
       setInitializedFor(key);
     } else if (
@@ -383,8 +410,11 @@ export function Behaviour({ assistantId }: BehaviourProps) {
       if (!snapshot || sameStrings(latestRef.current.questions, snapshot.questions)) {
         setQuestions(savedBehaviour.suggestedQuestions);
       }
-      if (!snapshot || latestRef.current.showSources === snapshot.showSources) {
-        setShowSources(savedBehaviour.showSources);
+      if (!snapshot || latestRef.current.sources === snapshot.sources) {
+        setSources(savedBehaviour.sources);
+      }
+      if (!snapshot || latestRef.current.listSources === snapshot.listSources) {
+        setListSources(savedBehaviour.listSources);
       }
       setInitializedFor(key);
     }
@@ -395,7 +425,8 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     persona,
     fallbackText,
     suggestedQuestions: cleanQuestions(questions),
-    showSources,
+    sources,
+    listSources,
   };
   const unsaved =
     savedBehaviour !== undefined &&
@@ -435,7 +466,7 @@ export function Behaviour({ assistantId }: BehaviourProps) {
     setFormError(null);
     setFailedRun(null);
 
-    const submitted = { greeting, persona, fallbackText, questions, showSources };
+    const submitted = { greeting, persona, fallbackText, questions, sources, listSources };
 
     try {
       await mutation.run("saving", async () => {
@@ -457,8 +488,11 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         if (sameStrings(latestRef.current.questions, submitted.questions)) {
           setQuestions(res.draft.config.behaviour.suggestedQuestions);
         }
-        if (latestRef.current.showSources === submitted.showSources) {
-          setShowSources(res.draft.config.behaviour.showSources);
+        if (latestRef.current.sources === submitted.sources) {
+          setSources(res.draft.config.behaviour.sources);
+        }
+        if (latestRef.current.listSources === submitted.listSources) {
+          setListSources(res.draft.config.behaviour.listSources);
         }
         toast.success("Draft saved.");
       });
@@ -652,30 +686,65 @@ export function Behaviour({ assistantId }: BehaviourProps) {
         <FieldGroup
           id="behaviour-sources-group"
           title="Sources"
-          help="Links to the pages an answer came from, shown under the answer."
+          help="How answers point to the pages they came from. You always see which content each answer used."
         >
-          <div className="field">
-            <label className="checkbox-label">
-              <input
-                id="behaviour-show-sources"
-                type="checkbox"
-                checked={showSources}
-                disabled={saving}
-                aria-describedby="behaviour-show-sources-hint"
-                onChange={(e) => setShowSources(e.target.checked)}
-              />
-              <span>Show sources in answers</span>
-            </label>
-            <p id="behaviour-show-sources-hint" className="field-hint">
-              When this is off, answers have no numbers like [1] and no list of links. You still see
-              which content each answer used.
+          <fieldset
+            className="choice-group sources-choices"
+            aria-describedby="behaviour-sources-hint"
+          >
+            <legend className="field-label">Show sources in answers</legend>
+            {SOURCES_CHOICES.map((choice) => (
+              <label
+                key={choice.value}
+                className={sources === choice.value ? "choice-card is-selected" : "choice-card"}
+              >
+                <input
+                  type="radio"
+                  name="behaviour-sources"
+                  value={choice.value}
+                  checked={sources === choice.value}
+                  disabled={saving}
+                  onChange={() => setSources(choice.value)}
+                />
+                <span className="choice-card-text">
+                  <span className="choice-card-title">{choice.title}</span>
+                  <span className="choice-card-hint">{choice.hint}</span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          <p id="behaviour-sources-hint" className="field-hint">
+            Links only ever go to pages of yours that the answer used. Written answers have no page,
+            so they get no link.
+          </p>
+          {fieldErrors["behaviour.sources"] && (
+            <p className="field-error" role="alert">
+              {fieldErrors["behaviour.sources"]}
             </p>
-            {fieldErrors["behaviour.showSources"] && (
-              <p className="field-error" role="alert">
-                {fieldErrors["behaviour.showSources"]}
+          )}
+          {sources === "links" && (
+            <div className="field">
+              <label className="checkbox-label">
+                <input
+                  id="behaviour-list-sources"
+                  type="checkbox"
+                  checked={listSources}
+                  disabled={saving}
+                  aria-describedby="behaviour-list-sources-hint"
+                  onChange={(e) => setListSources(e.target.checked)}
+                />
+                <span>List sources under answers</span>
+              </label>
+              <p id="behaviour-list-sources-hint" className="field-hint">
+                Also show the pages an answer used as a list of links under it.
               </p>
-            )}
-          </div>
+              {fieldErrors["behaviour.listSources"] && (
+                <p className="field-error" role="alert">
+                  {fieldErrors["behaviour.listSources"]}
+                </p>
+              )}
+            </div>
+          )}
         </FieldGroup>
 
         <div className="actions form-footer">

@@ -1,5 +1,10 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { CHAT_PROTOCOL_VERSION, defaultVersionConfig } from "@solvchat/core";
+import {
+  CHAT_PROTOCOL_VERSION,
+  defaultVersionConfig,
+  SOURCES_MODES,
+  type SourcesMode,
+} from "@solvchat/core";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../../src/app.js";
 import { forPrincipal } from "../../src/db/tenant.js";
@@ -11,7 +16,7 @@ import { fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
  * Issue #135: where is an answer held back on its way to the widget? The
  * whole engine path runs here in workerd (the runtime `wrangler dev` and a
  * deployed Worker use): the route, the answer pipeline, the tool loop, the
- * real Anthropic stream parser, the marker filter (sources off) and the
+ * real Anthropic stream parser, the link and marker filters and the
  * cut-short handling. Only the model is a stand-in: an upstream that thinks
  * for a while (a thinking block, which shows nothing) and then writes one
  * text delta at a steady pace. Each `token` event's arrival is timed at the
@@ -105,7 +110,7 @@ function pacedUpstream(stopReason: "end_turn" | "max_tokens"): typeof fetch {
   }) as typeof fetch;
 }
 
-async function seed(showSources: boolean): Promise<void> {
+async function seed(sources: SourcesMode): Promise<void> {
   const tenant = forPrincipal(env.DB, { orgId: TEST_ORG_ID, userId: "usr_1", role: "owner" });
   await env.DB.batch(
     [
@@ -127,7 +132,7 @@ async function seed(showSources: boolean): Promise<void> {
     createdAt: 1000,
   });
   const config = defaultVersionConfig();
-  config.behaviour.showSources = showSources;
+  config.behaviour.sources = sources;
   const draft = await tenant.versions.createDraft({
     id: "ver_t1",
     assistantId: "ast_t",
@@ -158,10 +163,10 @@ async function seed(showSources: boolean): Promise<void> {
 }
 
 async function timedAnswer(
-  showSources: boolean,
+  sources: SourcesMode,
   stopReason: "end_turn" | "max_tokens" = "end_turn",
 ): Promise<Timing> {
-  await seed(showSources);
+  await seed(sources);
   const embedder = fakeEmbedder();
   const retriever = memoryRetriever();
   const {
@@ -226,11 +231,11 @@ async function timedAnswer(
 const UPSTREAM_SPREAD_MS = (DELTAS.length - 1) * DELTA_MS;
 
 describe("issue #135: the engine passes text on as the model writes it", () => {
-  for (const showSources of [true, false]) {
-    it(`sources ${showSources ? "on" : "off"}: first text right after the thinking, then spread as written`, async () => {
-      const t = await timedAnswer(showSources);
+  for (const sources of SOURCES_MODES) {
+    it(`sources ${sources}: first text right after the thinking, then spread as written`, async () => {
+      const t = await timedAnswer(sources);
       // For the pull request: the numbers measured here.
-      console.info(`stream timing, sources ${showSources ? "on" : "off"}`, JSON.stringify(t));
+      console.info(`stream timing, sources ${sources}`, JSON.stringify(t));
       // Nothing visible while the model thinks; the first text follows its
       // first delta, not the end of the answer.
       expect(t.firstTokenMs).toBeGreaterThanOrEqual(THINK_MS);
@@ -239,20 +244,23 @@ describe("issue #135: the engine passes text on as the model writes it", () => {
       // in many separate reads: nothing gathers the deltas into one piece.
       expect(t.lastTokenMs - t.firstTokenMs).toBeGreaterThanOrEqual(UPSTREAM_SPREAD_MS * 0.7);
       expect(t.tokenReads).toBeGreaterThanOrEqual(DELTAS.length - 3);
-      if (showSources) {
+      if (sources === "numbered") {
+        // Numbered passes the stream on untouched.
         expect(t.tokenEvents).toBe(DELTAS.length);
         expect(t.text).toBe(DELTAS.join(""));
       } else {
-        // The markers go, the link and the code stay.
+        // The markers go, the code stays.
         expect(t.text).not.toMatch(/\[\d\]/);
-        expect(t.text).toContain("[Settings](https://site.example/settings)");
         expect(t.text).toContain("solv reset --email you@example.com");
+      }
+      if (sources === "none") {
+        expect(t.text).toContain("[Settings](https://site.example/settings)");
       }
     }, 30_000);
   }
 
   it("an answer cut at the output limit still streams, with the closing line at the end", async () => {
-    const t = await timedAnswer(true, "max_tokens");
+    const t = await timedAnswer("numbered", "max_tokens");
     expect(t.firstTokenMs).toBeLessThan(THINK_MS + 3 * DELTA_MS + 100);
     expect(t.lastTokenMs - t.firstTokenMs).toBeGreaterThanOrEqual(UPSTREAM_SPREAD_MS * 0.7);
     expect(t.text.startsWith(DELTAS.join(""))).toBe(true);

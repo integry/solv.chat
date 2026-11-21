@@ -5,7 +5,7 @@ import {
   parseTestInput,
   type TestExpectation,
 } from "@solvchat/core";
-import { answerMessage } from "../chat/answer.js";
+import { answerMessage, listsSources } from "../chat/answer.js";
 import { mcpRunnerFor } from "../chat/mcpRunner.js";
 import type { ToolRunner } from "../chat/toolLoop.js";
 import { type KeySource, modelKeySource } from "../chat/trace.js";
@@ -103,6 +103,10 @@ function evaluate(
     text: string;
     citations: Array<{ url: string }>;
     citationsShown: boolean;
+    /** The pages the answer was given, whether or not the visitor saw them. */
+    used: string[];
+    /** The complete addresses its text links to, fragment kept, in every source mode. */
+    linked: string[];
     usedFallback: boolean;
   },
   fallbackText: string,
@@ -111,23 +115,29 @@ function evaluate(
     case "cites": {
       // Whole-URL comparison. A substring match would pass a test about
       // /pricing when the answer cited /pricing-archive.
-      const found = answer.citations.some((citation) => citation.url === expectation.url);
-      const listed = answer.citations.map((citation) => citation.url).join(", ") || "nothing";
-      // With "Show sources in answers" off the visitor sees no citations, so
-      // the check is on the pages the answer used, and says so.
-      if (!answer.citationsShown) {
+      // A link in the text to the page passes in every mode, and says so.
+      if (answer.linked.includes(expectation.url)) {
+        return { passed: true, reason: `Linked to ${expectation.url}.` };
+      }
+      if (answer.citationsShown) {
+        const found = answer.citations.some((citation) => citation.url === expectation.url);
+        const listed = answer.citations.map((citation) => citation.url).join(", ") || "nothing";
         return {
           passed: found,
           reason: found
-            ? `Used ${expectation.url}.`
-            : `Did not use ${expectation.url}. Used: ${listed}.`,
+            ? `Cited ${expectation.url}.`
+            : `Did not cite ${expectation.url}. Cited: ${listed}.`,
         };
       }
+      // With no list the visitor sees no citations, so the check is on the
+      // pages the answer used, and says so.
+      const used = answer.used.includes(expectation.url);
+      const usedList = answer.used.join(", ") || "nothing";
       return {
-        passed: found,
-        reason: found
-          ? `Cited ${expectation.url}.`
-          : `Did not cite ${expectation.url}. Cited: ${listed}.`,
+        passed: used,
+        reason: used
+          ? `Used ${expectation.url}.`
+          : `Did not use ${expectation.url}. Used: ${usedList}.`,
       };
     }
     case "contains": {
@@ -395,7 +405,9 @@ export async function runAnswerTests(
     const answer = {
       text: "",
       citations: [] as Array<{ url: string }>,
-      citationsShown: draft.config.behaviour.showSources,
+      citationsShown: listsSources(draft.config.behaviour),
+      used: [] as string[],
+      linked: [] as string[],
       usedFallback: false,
       traceId: undefined as string | undefined,
     };
@@ -432,15 +444,12 @@ export async function runAnswerTests(
           scoreFloor: deps.scoreFloor,
           runners,
           signal: controller.signal,
-          // Off, no citation event is sent; the pages the answer used still
-          // decide a "cites" test.
-          ...(draft.config.behaviour.showSources
-            ? {}
-            : {
-                onCitable: (citations: readonly { url: string }[]) => {
-                  for (const c of citations) answer.citations.push({ url: c.url });
-                },
-              }),
+          // With no list no citation event is sent; the pages the answer
+          // linked to and used still decide a "cites" test.
+          onCitable: (citations: readonly { url: string }[], linked: readonly string[]) => {
+            for (const c of citations) answer.used.push(c.url);
+            answer.linked.push(...linked);
+          },
           // Kept apart from visitor replies, marked as a test run of this run.
           trace: {
             version: { id: draft.id, state: "draft" },

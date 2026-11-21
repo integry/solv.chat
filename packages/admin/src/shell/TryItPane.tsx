@@ -11,6 +11,7 @@ import { AnswerTrace } from "../screens/AnswerTrace.js";
 import { TRY_IT_ANSWERED_EVENT } from "../screens/OverviewParts.js";
 import { RecentChangesNotice } from "../screens/RecentChangesNotice.js";
 import { Icon } from "../ui/Icon.js";
+import { InlineLinks } from "./InlineLinks.js";
 
 interface Citation {
   id: string;
@@ -307,7 +308,11 @@ export function TryItPane({
           turns.map((turn) => (
             <div key={turn.id} className={`turn turn-${turn.role}`}>
               <div className="turn-role">{turn.role === "user" ? "You" : assistant.name}</div>
-              {turn.content && <div className="turn-content">{turn.content}</div>}
+              {turn.content && (
+                <div className="turn-content">
+                  {turn.role === "assistant" ? <InlineLinks text={turn.content} /> : turn.content}
+                </div>
+              )}
               {turn.error && (
                 <p className="error-text" role="alert">
                   {turn.error}

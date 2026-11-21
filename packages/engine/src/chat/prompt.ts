@@ -1,4 +1,4 @@
-import type { BehaviourConfig } from "@solvchat/core";
+import type { BehaviourConfig, SourcesMode } from "@solvchat/core";
 import type { ResolvedChunk } from "../ingest/resolve.js";
 import type { LlmMessage, LlmRequest } from "../providers/types.js";
 
@@ -68,8 +68,8 @@ const FRAME_START = [
 /**
  * The fixed frame: the only part of the system prompt that is not the owner's
  * own words, and nothing derived from a visitor or document reaches it. This
- * one is for "Show sources in answers" on (the default): the `[n]` marker is
- * the only way an answer refers to a source.
+ * one is for "Show sources in answers" set to "Numbered, with a list": the
+ * `[n]` marker is the only way an answer refers to a source.
  */
 export const SAFETY_FRAME = [
   ...FRAME_START,
@@ -79,8 +79,39 @@ export const SAFETY_FRAME = [
 ].join(" ");
 
 /**
- * The frame for "Show sources in answers" off: no markers at all, and the
- * same rule against talking about the sources. Markers that still appear are
+ * The frame for "Link in the text" (the default): the words that name a page
+ * link to it by the source's number, `[the testing guide](2)`, which the
+ * engine turns into a link to that source's page (`sourceLinks.ts`). The
+ * model never writes an address, so none can be mistyped; the recorded
+ * evaluation in `test/fixtures/source-links-eval.json` compares this with
+ * copying them (see `sourceLinks.ts`).
+ *
+ * One form, inline: the reference form asked for before (`[words][2]`) is
+ * Markdown's reference link, and models sometimes finished it the Markdown
+ * way, with definitions (`[1]: https://…`) numbered their own way. The
+ * engine resolves such a link through the answer's own definitions and takes
+ * the definitions out (`sourceLinks.ts`) whatever the prompt says; asking
+ * for the inline form, and saying definitions and addresses are not
+ * written, keeps answers from needing it.
+ * Links anywhere else, and markers, are taken out of the stream.
+ */
+export const SAFETY_FRAME_LINKS = [
+  ...FRAME_START,
+  "Where the answer relies on a source that has a url, turn the few words that name what that page is about",
+  '(such as "the testing guide", "the pricing page" or the name of a feature) into a link written as [those words](n),',
+  "where n is the number of that source; it becomes a link to the page.",
+  "Write every link in exactly that form: never a reference definition such as [1]: https://…, never [those words][n],",
+  "and never a web address, neither as a link nor as plain text.",
+  "Link each source at most once in a paragraph. Link a short phrase, never a whole sentence,",
+  'and never a word such as "here" or "this page".',
+  "A source with no url gets no link.",
+  "Add no citation markers such as [1] and no list of sources.",
+  NO_TALK_ABOUT_SOURCES,
+].join(" ");
+
+/**
+ * The frame for "None": no markers and no links to sources, and the same
+ * rule against talking about the sources. Markers that still appear are
  * taken out of the stream (`citationMarkers.ts`).
  */
 export const SAFETY_FRAME_NO_CITATIONS = [
@@ -90,8 +121,9 @@ export const SAFETY_FRAME_NO_CITATIONS = [
 ].join(" ");
 
 /** The frame an answer uses, by the version's "Show sources in answers". */
-export function safetyFrameFor(showSources: boolean): string {
-  return showSources ? SAFETY_FRAME : SAFETY_FRAME_NO_CITATIONS;
+export function safetyFrameFor(sources: SourcesMode): string {
+  if (sources === "numbered") return SAFETY_FRAME;
+  return sources === "none" ? SAFETY_FRAME_NO_CITATIONS : SAFETY_FRAME_LINKS;
 }
 
 /**
@@ -116,8 +148,8 @@ export function fitsSourceBudget(headingPath: string, text: string): boolean {
 }
 
 export interface BuildPromptInput {
-  /** `showSources` left out means on, the default. */
-  behaviour: Pick<BehaviourConfig, "persona"> & Partial<Pick<BehaviourConfig, "showSources">>;
+  /** `sources` left out means "links", the default. */
+  behaviour: Pick<BehaviourConfig, "persona"> & Partial<Pick<BehaviourConfig, "sources">>;
   chunks: readonly (Pick<ResolvedChunk, "title" | "url" | "text"> &
     Partial<Pick<ResolvedChunk, "headingPath" | "sourceKind">>)[];
   history: readonly LlmMessage[];
@@ -134,7 +166,7 @@ export function buildPrompt(args: BuildPromptInput): LlmRequest {
   // The owner's persona is appended to the frame, not substituted into it: the
   // owner is trusted, but the frame must survive whatever they write.
   const persona = args.behaviour.persona.trim();
-  const frame = safetyFrameFor(args.behaviour.showSources !== false);
+  const frame = safetyFrameFor(args.behaviour.sources ?? "links");
   const system = persona === "" ? frame : `${frame}\n\nThe site owner adds: ${persona}`;
 
   // Sources travel as a user-role message. That is the whole point: a document

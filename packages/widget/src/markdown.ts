@@ -927,8 +927,10 @@ function renderInline(parent: Node, text: string, allowLinks = true, depth = 0):
           const a = document.createElement("a");
           a.className = "solv-md-link";
           a.href = parsed.href;
+          // As a source link under the answer opens: a link in the text
+          // goes to one of the owner's pages the answer came from.
           a.target = "_blank";
-          a.rel = "noopener noreferrer nofollow";
+          a.rel = "noopener noreferrer";
           renderInline(a, label, false, depth + 1);
           parent.appendChild(a);
           pos = linkBounds.closeParen + 1;
@@ -1101,6 +1103,24 @@ function reconcileParagraph(prevEl: HTMLElement, nextEl: HTMLElement): void {
       break;
     }
   }
+}
+
+/** A link at the end of the text that is not complete yet: `[words`, `[words]` or `[words](https://…`. */
+const UNFINISHED_LINK = /!?\[[^[\]\n]*(?:\](?:\([^()\s]*)?)?$/u;
+
+/**
+ * The text to show while an answer is still streaming: all of it but a link
+ * at its end that is not complete yet, which is held until it is (and then
+ * shown as a link) or turns out not to be one. The engine itself sends links
+ * whole; this keeps a half-written one from flashing up as raw Markdown
+ * however the text arrives.
+ */
+export function withoutUnfinishedLink(text: string): string {
+  const match = UNFINISHED_LINK.exec(text);
+  if (match === null) return text;
+  let backslashes = 0;
+  for (let p = match.index - 1; p >= 0 && text[p] === "\\"; p--) backslashes++;
+  return backslashes % 2 === 1 ? text : text.slice(0, match.index);
 }
 
 interface RenderedBlock {

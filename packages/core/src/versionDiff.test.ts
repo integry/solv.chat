@@ -55,7 +55,8 @@ describe("version diff field table", () => {
       c.behaviour.persona = "Warm and brief.";
       c.behaviour.fallbackText = "Sorry, no idea.";
       c.behaviour.suggestedQuestions = ["Price?"];
-      c.behaviour.showSources = false;
+      c.behaviour.sources = "none";
+      c.behaviour.listSources = true;
       c.widget.title = "Help";
       c.widget.accentColor = "#ff0000";
       c.widget.position = "left";
@@ -140,24 +141,52 @@ describe("diffVersionConfigs", () => {
     expect(change).toMatchObject({ kind: "boolean", before: "Off", after: "On" });
   });
 
-  it("names Show sources in answers on Behaviour when it is turned off", () => {
+  it("names Show sources in answers on Behaviour by the choice's words", () => {
     const change = only(
       diffVersionConfigs(
         defaultVersionConfig(),
         config((c) => {
-          c.behaviour.showSources = false;
+          c.behaviour.sources = "none";
         }),
       ),
     );
     expect(change).toMatchObject({
-      path: "behaviour.showSources",
+      path: "behaviour.sources",
       label: "Show sources in answers",
       screen: "Behaviour",
-      kind: "boolean",
-      before: "On",
-      after: "Off",
+      kind: "text",
+      before: "Link in the text",
+      after: "None",
     });
     expect(summarizeChanges([change])).toBe("1 change: show sources in answers");
+    const numbered = only(
+      diffVersionConfigs(
+        defaultVersionConfig(),
+        config((c) => {
+          c.behaviour.sources = "numbered";
+        }),
+      ),
+    );
+    expect(numbered).toMatchObject({ before: "Link in the text", after: "Numbered, with a list" });
+  });
+
+  it("names List sources under answers on Behaviour when it is turned on", () => {
+    const change = only(
+      diffVersionConfigs(
+        defaultVersionConfig(),
+        config((c) => {
+          c.behaviour.listSources = true;
+        }),
+      ),
+    );
+    expect(change).toMatchObject({
+      path: "behaviour.listSources",
+      label: "List sources under answers",
+      screen: "Behaviour",
+      kind: "boolean",
+      before: "Off",
+      after: "On",
+    });
   });
 
   it("lists items added and removed, origins in full", () => {

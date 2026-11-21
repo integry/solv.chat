@@ -1,0 +1,4 @@
+{
+  "//": "The public response of a numbered answer (\"Numbered, with a list\") to the showSources.test.ts question, recorded from the engine before \"Show sources in answers\" had three values. {{messageId}} and {{conversationId}} stand for the ids of the run.",
+  "body": "event: token\ndata: {\"text\":\"Click Forgot Password [\"}\n\nevent: token\ndata: {\"text\":\"1] to reset\"}\n\nevent: token\ndata: {\"text\":\" it [1\"}\n\nevent: token\ndata: {\"text\":\"].\"}\n\nevent: citation\ndata: {\"url\":\"https://site.example/docs/reset\",\"title\":\"Reset Password\"}\n\nevent: done\ndata: {\"messageId\":\"{{messageId}}\",\"conversationId\":\"{{conversationId}}\"}\n\n"
+}

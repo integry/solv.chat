@@ -199,6 +199,83 @@ describe("<solv-chat>", () => {
     expect(restored.querySelector(".solv-citations")).toBeNull();
   });
 
+  it("links words in the answer like source links, holds a link split across tokens until it is whole, and shows no sources block", async () => {
+    const encoder = new TextEncoder();
+    let push: (chunk: string) => void = () => {};
+    let end: () => void = () => {};
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/assistants/pk_test_123")) {
+        // Page help on: a same-site link still opens as today's source links do.
+        return Response.json({
+          title: "Docs Helper",
+          greeting: "Hi there!",
+          actions: { builtins: true, allowedOrigins: [] },
+        });
+      }
+      if (url.endsWith("/v1/chat")) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            push = (chunk) => controller.enqueue(encoder.encode(chunk));
+            end = () => controller.close();
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    const el = mountWidget("pk_test_123");
+    await flushAsync();
+    const root = shadow(el);
+    mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+    mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "How do I test?";
+    mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+    await flushAsync();
+
+    const text = () =>
+      mustQuery<HTMLElement>(root, ".solv-bubble--assistant:last-of-type .solv-bubble-text");
+    const sameSite = `${location.origin}/docs/testing`;
+    push('event: token\ndata: {"text":"Read [the testing"}\n\n');
+    await flushAsync();
+    // Half a link is not shown as raw Markdown.
+    expect(text().textContent).toBe("Read ");
+    push(`event: token\ndata: ${JSON.stringify({ text: ` guide](${sameSite.slice(0, 20)}` })}\n\n`);
+    await flushAsync();
+    expect(text().textContent).toBe("Read ");
+    expect(text().querySelector("a")).toBeNull();
+    push(`event: token\ndata: ${JSON.stringify({ text: `${sameSite.slice(20)}) first.` })}\n\n`);
+    await flushAsync();
+    expect(text().textContent).toBe("Read the testing guide first.");
+    push('event: done\ndata: {"messageId":"msg_1","conversationId":"conv_1"}\n\n');
+    end();
+    await flushAsync();
+
+    const link = mustQuery<HTMLAnchorElement>(text(), "a");
+    expect(link.textContent).toBe("the testing guide");
+    expect(link.href).toBe(sameSite);
+    // The same rules as a source link under the answer.
+    expect(link.target).toBe("_blank");
+    expect(link.rel).toBe("noopener noreferrer");
+    // A click is the browser's own: the widget neither stops it nor handles it.
+    // (The test stops it last, at the window, so the test page stays put.)
+    let preventedBefore: boolean | null = null;
+    const atWindow = (event: Event) => {
+      preventedBefore = event.defaultPrevented;
+      event.preventDefault();
+    };
+    window.addEventListener("click", atWindow);
+    link.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }),
+    );
+    window.removeEventListener("click", atWindow);
+    expect(preventedBefore).toBe(false);
+    expect(root.querySelector(".solv-citations")).toBeNull();
+  });
+
   it("restores conversation for the same assistant key, isolates other keys, and resets when sessionStorage is cleared", async () => {
     const conversationIds: Array<string | undefined> = [];
 

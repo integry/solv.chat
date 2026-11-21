@@ -1273,38 +1273,75 @@ describe("Admin layout regressions (Chromium)", () => {
     }
   }, 90_000);
 
-  it("keeps Show sources in answers on one row, inside the form, at 1280px and 380px", async () => {
+  it("keeps the Show sources in answers choices and List sources inside the form, at 1280px and 380px", async () => {
     for (const width of [1280, 380]) {
-      await openScreen("/admin/behaviour", width, "#behaviour-show-sources");
+      await openScreen("/admin/behaviour", width, "#behaviour-list-sources");
       const box = await cdp.evaluate<{
-        checkboxTop: number;
-        checkboxBottom: number;
-        textTop: number;
-        textBottom: number;
-        labelRight: number;
-        mainRight: number;
         heading: string;
+        legend: string;
+        cards: {
+          title: string;
+          checked: boolean;
+          radioTop: number;
+          radioBottom: number;
+          titleTop: number;
+          titleBottom: number;
+          right: number;
+        }[];
+        listTop: number;
+        listBottom: number;
+        listTextTop: number;
+        listTextBottom: number;
+        listRight: number;
+        mainRight: number;
       }>(`(() => {
-        const input = document.getElementById("behaviour-show-sources");
-        input.scrollIntoView({ block: "center" });
-        const label = input.closest("label");
-        const text = label.querySelector("span").getBoundingClientRect();
-        const check = input.getBoundingClientRect();
-        const group = document.getElementById("behaviour-sources-group-heading");
+        const fieldset = document.querySelector(".sources-choices");
+        fieldset.scrollIntoView({ block: "center" });
+        const cards = [...fieldset.querySelectorAll("label.choice-card")].map((card) => {
+          const radio = card.querySelector('input[type="radio"]').getBoundingClientRect();
+          const title = card.querySelector(".choice-card-title");
+          const titleBox = title.getBoundingClientRect();
+          return {
+            title: title.textContent,
+            checked: card.querySelector("input").checked,
+            radioTop: radio.top, radioBottom: radio.bottom,
+            titleTop: titleBox.top, titleBottom: titleBox.bottom,
+            right: card.getBoundingClientRect().right,
+          };
+        });
+        const list = document.getElementById("behaviour-list-sources");
+        const listLabel = list.closest("label");
+        const listText = listLabel.querySelector("span").getBoundingClientRect();
+        const check = list.getBoundingClientRect();
         return {
-          checkboxTop: check.top, checkboxBottom: check.bottom,
-          textTop: text.top, textBottom: text.bottom,
-          labelRight: label.getBoundingClientRect().right,
+          heading: document.getElementById("behaviour-sources-group-heading").textContent,
+          legend: fieldset.querySelector("legend").textContent,
+          cards,
+          listTop: check.top, listBottom: check.bottom,
+          listTextTop: listText.top, listTextBottom: listText.bottom,
+          listRight: listLabel.getBoundingClientRect().right,
           mainRight: document.querySelector(".shell-main").getBoundingClientRect().right,
-          heading: group.textContent,
         };
       })()`);
       expect(box.heading).toBe("Sources");
-      // The box sits beside its words, and the words fit on one line.
-      expect(box.checkboxBottom).toBeGreaterThan(box.textTop);
-      expect(box.checkboxTop).toBeLessThan(box.textBottom);
-      expect(box.textBottom - box.textTop).toBeLessThan(30);
-      expect(box.labelRight).toBeLessThanOrEqual(box.mainRight);
+      expect(box.legend).toBe("Show sources in answers");
+      expect(box.cards.map((c) => c.title)).toEqual([
+        "Link in the text",
+        "Numbered, with a list",
+        "None",
+      ]);
+      expect(box.cards.map((c) => c.checked)).toEqual([true, false, false]);
+      for (const card of box.cards) {
+        // Each radio sits beside its title, and the card fits inside the form.
+        expect(card.radioBottom, `${card.title} at ${width}px`).toBeGreaterThan(card.titleTop);
+        expect(card.radioTop, `${card.title} at ${width}px`).toBeLessThan(card.titleBottom);
+        expect(card.right, `${card.title} at ${width}px`).toBeLessThanOrEqual(box.mainRight);
+      }
+      // The List sources box sits beside its words, and the words fit on one line.
+      expect(box.listBottom).toBeGreaterThan(box.listTextTop);
+      expect(box.listTop).toBeLessThan(box.listTextBottom);
+      expect(box.listTextBottom - box.listTextTop).toBeLessThan(30);
+      expect(box.listRight).toBeLessThanOrEqual(box.mainRight);
       expect(await horizontalOverflow()).toBe(0);
     }
   }, 30_000);

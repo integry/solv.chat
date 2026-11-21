@@ -1,5 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { type ChatEvent, defaultVersionConfig, parseChatEventLine } from "@solvchat/core";
+import { type ChatEvent, parseChatEventLine } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnswerTraceView } from "../../src/admin/conversations.js";
 import { responseTimeFigures } from "../../src/admin/reports.js";
@@ -15,6 +15,7 @@ import type { KeyProvider } from "../../src/seams/types.js";
 import { fakeEmbedder } from "../fakes/fakeEmbedder.js";
 import { memoryRetriever } from "../fakes/memoryRetriever.js";
 import { directoryResolveOrg, fakeSeams, TEST_ORG_ID } from "../helpers/app.js";
+import { numberedConfig } from "../helpers/config.js";
 
 const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
 const QUESTION = "How does billing work QUESTION_MARKER?";
@@ -189,7 +190,7 @@ describe("chat/trace", () => {
       allowedOrigins: ["https://site.example"],
       createdAt: 1000,
     });
-    const config = defaultVersionConfig();
+    const config = numberedConfig();
     const draft = await tenant.versions.createDraft({
       id: "ver_1",
       assistantId: "ast_1",
@@ -688,7 +689,7 @@ describe("chat/trace", () => {
       assistantId: "ast_1",
       visitorId: "vis_1",
       message: QUESTION,
-      behaviour: defaultVersionConfig().behaviour,
+      behaviour: numberedConfig().behaviour,
     };
 
     it("records a tool round with its count and time, and leaves the tool's output out", async () => {

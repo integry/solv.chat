@@ -137,8 +137,10 @@ from the auth seam and pass it down.
   outcome_confidence (0-1, NULL when the reviewer cannot give one; nothing
   reads it yet). See "Answer review".
   For assistant replies, also citations_shown (1 when the visitor was shown
-  the citations, 0 when the version had "Show sources in answers" off; 1 for
-  rows written before migration 0034). The citations are stored either way.
+  the list of sources under the answer, 0 when the version showed none:
+  "Show sources in answers" on "Link in the text" without "List sources
+  under answers", or "None"; 1 for rows written before migration 0034). The
+  citations are stored either way.
   For visitor questions, topic_id (the question's topic, or NULL: not
   reviewed, or its topic was deleted; indexed on its own, so deleting a topic
   finds its questions without reading every message). See "Topics".
@@ -970,7 +972,9 @@ The Monitor screens read:
      chunks fill the set, best first.
 3. Build the prompt: fixed safety frame, the owner's behaviour fields, retrieved
    chunks with their URLs (capped at 2000 characters each), the last 6 turns.
-   The frame depends on "Show sources in answers" (below).
+   The frame depends on "Show sources in answers" (below). Each source is
+   numbered (`<<<source n`); one with a page has its `url:` line (a written
+   answer has none).
 4. Call the model through the provider interface, streaming. If tools are allowed,
    run the MCP loop: the model asks for a tool, the Worker calls the MCP server,
    the result goes back as untrusted data. Each call's output limit is the
@@ -989,7 +993,8 @@ The Monitor screens read:
    (`CUT_SHORT_LINE`, "That answer was cut short. Ask me to continue."),
    streamed as a last token before the citations and stored with the reply,
    the same after a page-action resume. The answer counts as answered as any
-   other. There is no "show sources" setting, so citations are always sent.
+   other. A link left unfinished at the cut is reduced to its text first (see
+   "Sources in answers"), so no open link is stored or sent.
 6. Persist messages, citations, token counts, cost and the two timings; update
    `usage_daily`. After the `done` event, in the same deferred pipeline, write
    the answer's trace.
@@ -1001,15 +1006,89 @@ The Monitor screens read:
 
 ## Sources in answers
 
-"Show sources in answers" (`behaviour.showSources`, on by default; a version
-stored before it existed reads as on) is a behaviour setting like the others:
-edited on Behaviour, part of the draft and the publish diff, followed by
-visitors once published and by "Try it" and test runs from the draft.
+"Show sources in answers" (`behaviour.sources`) is a behaviour setting like
+the others, one of three choices: edited on Behaviour, part of the draft and
+the publish diff (the Publish dialog and History name it by the choice's
+words), followed by visitors once published and by "Try it" and test runs
+from the draft. "List sources under answers" (`behaviour.listSources`, off
+by default) is a second one, offered with "Link in the text" only.
 
-- **On.** The frame asks for `[n]` markers after the sentences they support,
-  the stream is passed on untouched, and `citation` events follow the text:
-  the public response is exactly what it was before the setting.
-- **Off.** The frame (`SAFETY_FRAME_NO_CITATIONS`) asks for no markers and no
+- **Link in the text** (`links`, the default). Where an answer relies on a
+  page, the words that name it ("the testing guide", "the pricing page", a
+  feature's name) are a Markdown link to that page, at most one per source
+  per paragraph, never a whole sentence nor "here". The frame
+  (`SAFETY_FRAME_LINKS`) has the model refer to a source by its number in
+  one form, an inline link, `[the testing guide](2)`, and says it writes no
+  reference definition (`[1]: https://…`), no `[words][n]` and no address,
+  as a link or as text; the engine (`chat/sourceLinks.ts`) turns each into
+  a link to that source's page. Numbers rather than addresses: a number
+  cannot be mistyped into another page, and it costs a few output
+  characters where an address costs dozens. Inline rather than the
+  reference form (`[the testing guide][2]`) this frame used first: that is
+  Markdown's reference link, and a deployed check saw the model finish it
+  the Markdown way, with definitions numbered its own way after the text,
+  so source numbers sent the words to pages they did not name. The engine
+  does not rely on the prompt for that. A reference link (`[words][label]`,
+  or `[words][]`) goes where the answer's own definition of its label says
+  (labels matched as Markdown matches them), never by the sources' numbers
+  when the answer defines its labels; with no definition anywhere in the
+  answer, a numbered reference can only mean the sources' numbers. Either
+  way the address must pass the rule below, or the link is reduced to its
+  text. Since a definition usually comes after the text, a reference link
+  is held from its "[" until its definition arrives or the stream ends,
+  and the rest of the stream with it. Every definition (on a line of its
+  own, or run into the text as `page.[1]: https://…[2]: https://…`, or a
+  bare `[1]:`) is taken out of what is sent and stored, held while one may
+  still be arriving. An address written out in the text is a link
+  (`[https://…](https://…)`, as is an autolink, which the widget shows as
+  no link) when it is one of the answer's pages, and is otherwise left as
+  text; a link whose words are its own address is always kept, however
+  often the paragraph links that page. The recorded evaluation
+  (`test/fixtures/source-links-eval.json`, 14 questions against two
+  documentation corpora, this repository's docs and sqlite.org, replayed by
+  a test and re-recorded with `scripts/source-links-eval.mjs --record`)
+  answered each question with this frame, with the reference form, and with
+  addresses copied: each way linked 13 correctly and 1 (a written answer's)
+  linked nothing, none had a link removed, and in 13 of 14 answers a link
+  went to the page the question is about (or, for the written answer, no
+  link); numbers spent 60 characters on 15 link targets, references 72 on
+  18, addresses 559 on 16. Over every recorded answer (three or four to each
+  question), the
+  reference form wrote `[words][n]` in 51 of 55 answers, the inline form in
+  none of 42; neither wrote a definition there (the deployed check saw them
+  in 2 of 4 answers to one question). A written answer has no
+  public page: text that relies only on it carries no link. A link survives
+  only when it goes to a page the answer was given (the pages its citations
+  would list, the same rule: not a written answer) or to an address the
+  text of one of those sources contains, a section of either (`#…`) included; every other link
+  (another site, a made-up page, a relative or `mailto:` address, a
+  reference to no source or whose definition goes elsewhere, an image, an
+  autolink) and a
+  second link to the same page in a paragraph is reduced to its text, in the
+  stream and the stored text alike. A link whose words hold another link or
+  a pair of brackets (`[see [the guide]](…)`, `[outer [inner](…)](…)`) is
+  reduced to its words whatever its target, and the links in those words
+  are checked like any other. The rewritten text is read again until that
+  changes nothing, so dropping a link's syntax never leaves an unchecked
+  link made of the text around it (`[x]![](…)(…)` reads `[x](…)` once the
+  image is gone). What was stored before a pause stays as it was, and a
+  link it began (`[words]`, `<https://…`) is not finished after the pause:
+  the rest of that link is dropped. Code (an inline span, a fenced or
+  indented block) and escaped brackets are left alone, found as below.
+  Markers (`[1]`) that still appear are then taken out as for "None". A link
+  is never sent half-written: from a "[" (or "![", or an autolink's "<")
+  that could still become one, the stream is held until it is complete or
+  cannot be one, so nothing sent is taken back; at the end of the stream, a
+  pause or a cut at the output limit, a link left unfinished is reduced to
+  its text. No `citation` event is sent, so the widget shows no sources
+  block, unless "List sources under answers" is on: then the events follow
+  the text as for "Numbered, with a list".
+- **Numbered, with a list** (`numbered`). The frame (`SAFETY_FRAME`) asks for `[n]`
+  markers after the sentences they support, the stream is passed on
+  untouched, and `citation` events follow the text: the public response is
+  exactly what it was before the setting had three values (a test holds it
+  byte for byte against `test/fixtures/numbered-answer.json`).
+- **None** (`none`). The frame (`SAFETY_FRAME_NO_CITATIONS`) asks for no markers and no
   source list. Markers that still appear are taken out in the engine
   (`chat/citationMarkers.ts`), from the streamed tokens and from the stored
   text, so an API client gets the same as the widget: the end of the stream
@@ -1026,15 +1105,31 @@ visitors once published and by "Try it" and test runs from the draft.
   wrote. No `citation` event is sent,
   so the widget shows no sources block. Page actions do not depend on
   citations and work as before.
-- **Kept either way.** Everything the owner sees: the trace, the stored
+- **Migration.** A version stored before the setting had three values has
+  `showSources` instead: on (or absent, its default) reads as "Link in the
+  text", off as "None", with "List sources under answers" off, for every
+  version (draft, published, archived) alike; the next save of the draft
+  writes the new keys. A config file may still give `showSources`; given
+  with `sources`, `sources` wins. So an assistant that had sources on now
+  links in the text and lists no sources until the owner turns the list on.
+- **Kept whatever the setting.** Everything the owner sees: the trace, the stored
   citations, `message_documents` (Reports' "Content used most / never used"
   count the same), and the conversation view, which shows a reply's pages
-  under "Used content" instead of "Sources" when the visitor saw none
-  (`citationsShown: false` on the turn). A test run's "cites" check reads the
-  pages the answer used, and says "Used" instead of "Cited".
-- **No talk about sources.** Both frames tell the model never to write about
+  under "Used content" instead of "Sources" when the visitor saw no list
+  (`citationsShown: false` on the turn). A test run's "cites" check passes
+  when the answer links to the page ("Linked to …"), in every mode (with
+  "Numbered" and "None" the links as the model wrote them, which the
+  visitor gets unchanged), compared on the whole address the link goes to,
+  so a test of a page's section (`#fragment`) passes on a link to that
+  section. An image (`![…](…)`) is no link, nor is a link written in an
+  image's text: the widget shows an image as written, so neither can be
+  followed; else,
+  with a list shown, when the list has it ("Cited"), and with none, when
+  the answer used it ("Used").
+- **No talk about sources.** Every frame tells the model never to write about
   its inputs ("Source 1", "(Source 2)", "the sources say", "according to the
-  provided content"); with sources on, the `[n]` marker is the only reference.
+  provided content"); with numbered sources the `[n]` marker is the only
+  reference, with links the linked words are.
   This rests on the prompt alone: no post-check rewrites such wording, because
   a site's own text can say "source" ("Source 2" may be a product), and the
   sentence around it cannot be cut out without changing what it says.
@@ -1665,7 +1760,10 @@ breaking installed widgets.
 
 An owner writes down questions the assistant must keep getting right. A test is
 a question plus one expectation: the answer cites a given URL, contains a
-phrase, does not contain a phrase, or declines (uses the fallback).
+phrase, does not contain a phrase, or declines (uses the fallback). "Cites" passes when
+the answer links to the URL in its text, or the URL is in its list of sources
+(when one is shown) or among the pages it used (when none is), whatever "Show
+sources in answers" is (see "Sources in answers").
 
 - Tests run against the draft, through the same pipeline as "Try it": no
   conversation is stored and usage is metered. Each answer's trace is kept in
@@ -1749,6 +1847,12 @@ with the visitor check on, Turnstile runs inside a frame served by the
 engine's origin, created only once the visitor starts typing (see "Visitor
 check").
 
+Links in an answer's text (http and https only) open as the source links
+under an answer do: `target="_blank"`, `rel="noopener noreferrer"`, and a
+link to a page on the host site is no different, also with page help on
+(the widget never handles the click; only the `navigate` action moves the
+visitor's own page).
+
 **Panel size.** On a viewport 640px wide or more the panel is
 `min(460px, 100vw − 32px)` by `min(720px, 100vh − 96px)`; narrower, it keeps
 `min(380px, 100vw − 32px)` by `min(560px, 100vh − 96px)`. 460px fits about 44
@@ -1816,15 +1920,16 @@ the one-shot rendering. The same renderer and its rules apply (DOM nodes and
 the visitor has not scrolled up more than 32px; sending a message brings it
 back down.
 
-Nothing on the engine side holds text back: the route writes each event as
-the answer pipeline yields it, the tool loop passes text deltas straight on,
-the marker filter (sources off) holds only a tail that could still be a
-citation marker, and the cut-short line is appended after the last delta. The
-stream is sent with `cache-control: no-cache, no-transform` so nothing on the
-way compresses or regroups it. A measurement through the real route and
-provider parser in workerd is `packages/engine/test/chat/streamTiming.test.ts`;
-the delay before the first visible text is the model's own reasoning, which
-the typing indicator covers.
+The route writes each event as the answer pipeline yields it, and the tool
+loop passes text deltas straight on. In "Link in the text" mode, the pipeline
+holds possible links while it checks and rewrites them (see "Sources in
+answers"). In "None" mode the marker filter holds only a tail that could
+still be a citation marker. The cut-short line is appended after the last
+delta. The stream is sent with `cache-control: no-cache, no-transform` to
+prevent compression or regrouping along the way. A measurement through the
+real route and provider parser in workerd is
+`packages/engine/test/chat/streamTiming.test.ts`. The typing indicator covers
+the wait for visible text, including time the model spends reasoning.
 
 The element's `preview(config)` method (same shape as the public config
 response) shows a config with the panel open and from then on makes no
