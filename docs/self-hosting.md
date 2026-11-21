@@ -297,6 +297,18 @@ cd packages/engine && npx wrangler deploy
 
 No environment variable needs to change. The scheduled sitemap sync adds a cron trigger to `wrangler.jsonc`; `wrangler deploy` installs it, and no source syncs until you set its schedule. Upgrading to this version signs existing admin sessions out once because session cookies are now signed with a key derived from `SOLV_SECRET_KEY`; sign in again after deploying.
 
+The embed works with the same `/widget.js` URL. Browsers can reuse the widget
+and its security check script (`/v1/check/frame.js`) for five minutes before
+checking for an update. Returning visitors get the new script on their first
+load after that window expires. Copies cached before this change can still
+follow their previous limits (up to a day for the widget and an hour for the
+check script).
+
+If you put a CDN in front of the Worker, configure it to honor the scripts'
+`Cache-Control` and `ETag` headers. Keep the five-minute freshness limit and
+revalidate expired copies before serving them. Preserve the response bytes
+so the strong `ETag` stays valid.
+
 ## Not here yet
 
 - The cloud layer: public sign-up, teams and roles, billing, managed model keys, and scheduled email digests. Those live in a separate, closed repository; nothing here needs them.
