@@ -5,6 +5,7 @@ import {
 } from "@solvchat/core";
 import type { Limits, Seams } from "../seams/types.js";
 import { issueVisitorSession, tokenHash } from "../security/visitorSession.js";
+import { scriptAsset } from "../util/scriptAsset.js";
 import { checkLimits, corsHeaders, matchedOrigin } from "./checks.js";
 import { bodyKeyedPreflight, publicAssistant } from "./route.js";
 import {
@@ -313,13 +314,6 @@ export const CHECK_FRAME_SCRIPT = `(() => {
 })();
 `;
 
-export function checkFrameScript(): Response {
-  return new Response(CHECK_FRAME_SCRIPT, {
-    status: 200,
-    headers: {
-      "content-type": "application/javascript; charset=utf-8",
-      "cache-control": "public, max-age=3600",
-      "x-content-type-options": "nosniff",
-    },
-  });
-}
+export const checkFrameScript = scriptAsset(CHECK_FRAME_SCRIPT, {
+  "x-content-type-options": "nosniff",
+});
