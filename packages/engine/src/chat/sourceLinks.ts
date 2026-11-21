@@ -347,11 +347,15 @@ function destinationText(href: string): string {
 export interface LinkScan {
   /** The rewritten text from where the new text starts, up to an unsettled link or the end. */
   out: string;
-  /** The pages the answer links to (before a pause too), by `pageKey`, in order. */
+  /**
+   * The pages the answer links to (before a pause too), by `pageKey`, in
+   * order. An image is no link: it is shown as written, never followed.
+   */
   linked: string[];
   /**
    * The complete addresses the answer's links go to (fragment kept), in
    * order: what a "cites" test compares, where `linked` is the page identity.
+   * As there, an image (and a link in its text) is none.
    */
   destinations: string[];
   /** Links reduced to their text because their target is not one of the answer's pages. */
@@ -386,8 +390,14 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
   let copied = from;
   let range = 0;
 
-  const note = (key: string, href: string) => {
+  /**
+   * A link kept (or already written) to `key`: it counts for the paragraph.
+   * An image counts there too, but is no link to report: neither the widget
+   * nor Markdown makes it one a visitor can follow.
+   */
+  const note = (key: string, href: string, image = false) => {
     paragraph.add(key);
+    if (image) return;
     if (!linked.includes(key)) linked.push(key);
     if (!destinations.includes(href)) destinations.push(href);
   };
@@ -497,17 +507,22 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
     }
     if (i < from) {
       // Already written. A link whose text holds another (or an unfinished
-      // one) is none: the links in its text are read instead.
-      if (construct.nested || construct.target === null) {
+      // one) is none: the links in its text are read instead. An image's
+      // text is not read: the image is shown whole as written (by the widget
+      // as text, by Markdown as a picture), so no link in it can be followed.
+      if (construct.target === null || (construct.nested && !image)) {
         i++;
         continue;
       }
-      // A link there was kept, so it counts for the paragraph.
-      if (resolved !== null) note(resolved[0], resolved[1]);
-      else if ("inline" in construct.target) {
-        const href = httpUrl(construct.target.inline.trim())?.href ?? null;
-        const key = href === null ? null : pageKey(href);
-        if (key !== null && href !== null) note(key, href);
+      // A link there was kept, so it counts for the paragraph (an image
+      // holding a link counts for nothing).
+      if (!construct.nested) {
+        if (resolved !== null) note(resolved[0], resolved[1], image);
+        else if ("inline" in construct.target) {
+          const href = httpUrl(construct.target.inline.trim())?.href ?? null;
+          const key = href === null ? null : pageKey(href);
+          if (key !== null && href !== null) note(key, href, image);
+        }
       }
       i = construct.end;
       continue;
@@ -515,7 +530,8 @@ function scanLinks(whole: string, targets: LinkTargets, from: number, final: boo
     const label = whole.slice(construct.labelStart, construct.labelEnd);
     let replacement: string;
     if (resolved !== null && !construct.nested && !paragraph.has(resolved[0])) {
-      note(resolved[0], resolved[1]);
+      // Kept as an image (its "!" sent before a pause too), it is no link.
+      note(resolved[0], resolved[1], image);
       // An image's "!" written before a pause is already sent.
       const bang = image && start >= from ? "!" : "";
       replacement = `${bang}[${label}](${destinationText(resolved[1])})`;
@@ -582,7 +598,8 @@ export function rewriteSourceLinks(
  * order, read as this module reads links but rewriting nothing: for a reply
  * sent as the model wrote it ("Numbered, with a list", "None"), whose links
  * a "cites" test still counts. A link whose text holds another counts as
- * none, the link inside it as one; code is no link.
+ * none, the link inside it as one; code is no link, and an image (with any
+ * link in its text) is none, as the widget shows it as written.
  */
 export function linkDestinations(text: string): string[] {
   return scanLinks(text, NO_TARGETS, text.length, true).destinations;

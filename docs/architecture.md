@@ -1091,7 +1091,9 @@ by default) is a second one, offered with "Link in the text" only.
   "Numbered" and "None" the links as the model wrote them, which the
   visitor gets unchanged), compared on the whole address the link goes to,
   so a test of a page's section (`#fragment`) passes on a link to that
-  section; else,
+  section. An image (`![…](…)`) is no link, nor is a link written in an
+  image's text: the widget shows an image as written, so neither can be
+  followed; else,
   with a list shown, when the list has it ("Cited"), and with none, when
   the answer used it ("Used").
 - **No talk about sources.** Every frame tells the model never to write about

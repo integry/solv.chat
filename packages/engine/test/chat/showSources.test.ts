@@ -1099,6 +1099,55 @@ describe("chat: Show sources in answers", () => {
       },
     );
 
+    it.each(["links", "numbered", "none"] as const)(
+      "a test run's cites check does not pass on an image (sources set to %s)",
+      async (mode) => {
+        await addSources();
+        await configure(withSources(mode === "links" ? "numbered" : "links"), withSources(mode));
+        // A link may go to the status page (the billing page's text names
+        // it), but no page found is the status page.
+        const STATUS = "https://status.example.net/";
+        for (const [id, url] of [
+          ["tst_1", STATUS],
+          ["tst_2", BILLING.url],
+        ] as const) {
+          await tenant.tests.create({
+            id,
+            assistantId: "ast_1",
+            question: QUESTION,
+            expectation: { kind: "cites", url },
+            createdAt: id === "tst_1" ? 1000 : 1001,
+          });
+        }
+        const run = await runAnswerTests(
+          {
+            orgId: TEST_ORG_ID,
+            tenant,
+            embedder,
+            retriever,
+            provider: numberingProvider(
+              () => `Check ![the status page](${STATUS}), or see [billing](${BILLING.url}).`,
+            ),
+            usage: { record: async () => {} },
+            limits: fakeSeams().limits,
+          },
+          "ast_1",
+        );
+        const byTest = Object.fromEntries(run.results.map((r) => [r.testId, r]));
+        // Kept as the model wrote it, the image is shown as text, not a link.
+        expect(byTest.tst_1?.excerpt).toContain(`![the status page](${STATUS})`);
+        expect(byTest.tst_1).toMatchObject({ outcome: "failed" });
+        expect(byTest.tst_1?.reason).toMatch(
+          /^Did not (cite|use) https:\/\/status\.example\.net\/\./u,
+        );
+        // The link beside it still counts.
+        expect(byTest.tst_2).toMatchObject({
+          outcome: "passed",
+          reason: `Linked to ${BILLING.url}.`,
+        });
+      },
+    );
+
     it.each(["numbered", "none"] as const)(
       "a resumed reply with sources set to %s reports its links from before and after the pause",
       async (mode) => {

@@ -116,6 +116,48 @@ describe("chat/sourceLinks", () => {
     );
   });
 
+  it("reports no image as a link the answer gives, however it was written", () => {
+    // The status page may be linked (pricing's text names it), but it is not
+    // a page the answer was given: only a link to it should count.
+    const IMAGE = `Check ![the status page](${STATUS}).`;
+    const kept = rewriteSourceLinks(IMAGE, TARGETS);
+    expect(kept.text).toBe(IMAGE);
+    expect(kept.destinations).toEqual([]);
+    expect(kept.linked).toEqual([]);
+    for (let a = 1; a < IMAGE.length; a++) {
+      const linker = sourceLinker(TARGETS);
+      linker.push(IMAGE.slice(0, a));
+      linker.push(IMAGE.slice(a));
+      linker.flush();
+      expect(linker.text).toBe(IMAGE);
+      expect(linker.destinations, `cut at ${a}`).toEqual([]);
+    }
+    // Written before a pause, and with only its "!" written before one.
+    expect(rewriteSourceLinks(" More.", TARGETS, IMAGE).destinations).toEqual([]);
+    const split = rewriteSourceLinks(`[the status page](${STATUS}).`, TARGETS, "Check !");
+    expect(split.text).toBe(`[the status page](${STATUS}).`);
+    expect(split.destinations).toEqual([]);
+    // A link is still one: in the paragraph after an image, or after an escaped "!".
+    expect(rewriteSourceLinks(`![chart](${PRICING})\n\nSee [pricing][3].`, TARGETS)).toMatchObject({
+      destinations: [PRICING],
+      linked: [PRICING],
+    });
+    expect(rewriteSourceLinks(`\\![the status page](${STATUS})`, TARGETS).destinations).toEqual([
+      STATUS,
+    ]);
+    // Before a pause, a link in an image's text is shown with the image as
+    // written, so it is none either.
+    expect(
+      rewriteSourceLinks(" More.", TARGETS, `![see [the guide](${TESTING})](${STATUS})`)
+        .destinations,
+    ).toEqual([]);
+    // After one, an image holding a link is reduced to its text, which then
+    // is a link.
+    const nested = rewriteSourceLinks(`![see [the guide][1]](${STATUS})`, TARGETS);
+    expect(nested.text).toBe(`see [the guide](${TESTING})`);
+    expect(nested.destinations).toEqual([TESTING]);
+  });
+
   it("links a source at most once per paragraph, and again in the next one or a new list item", () => {
     expect(
       rewrite(
@@ -417,7 +459,20 @@ describe("chat/sourceLinks", () => {
         `See [the steps](${TESTING}#steps), [pricing][3], [1] and <${STATUS}>.`,
         `Also [mail](mailto:help@example.com), \`[code](${PRICING})\` and ![chart](${PRICING}).`,
       ].join("\n");
-      expect(linkDestinations(text)).toEqual([`${TESTING}#steps`, STATUS, PRICING]);
+      // The image is no link: the widget shows it as written.
+      expect(linkDestinations(text)).toEqual([`${TESTING}#steps`, STATUS]);
+    });
+
+    it("counts no image, nor a link or autolink in an image's text", () => {
+      expect(linkDestinations(`![chart](${PRICING}) and ![status][1].`)).toEqual([]);
+      expect(linkDestinations(`![see [the guide](${TESTING})](${PRICING})`)).toEqual([]);
+      expect(linkDestinations(`![see <${STATUS}>](${PRICING})`)).toEqual([]);
+      // An escaped "!" makes none, so the link after it is one.
+      expect(linkDestinations(`\\![the guide](${TESTING})`)).toEqual([TESTING]);
+      // A link after an image in the same paragraph is one.
+      expect(linkDestinations(`![chart](${PRICING}) and [pricing](${PRICING}).`)).toEqual([
+        PRICING,
+      ]);
     });
 
     it("counts the link inside another link's text, not the outer one", () => {
