@@ -205,6 +205,25 @@ describe("chat/sourceLinks", () => {
     );
   });
 
+  it("keeps an address with parentheses that a source's text contains whole", () => {
+    const API = "https://docs.example.com/api_(v2)";
+    const targets = linkTargets([
+      { url: PRICING, text: `See ${API}. Also (${STATUS}) and ${API}#auth, or ${API}, not more.` },
+    ]);
+    // The complete address survives, written as the page's address.
+    expect(rewriteSourceLinks(`[API documentation](${API})`, targets).text).toBe(
+      "[API documentation](https://docs.example.com/api_%28v2%29)",
+    );
+    expect(rewriteSourceLinks(`[API](${API}#auth)`, targets).text).toBe(
+      "[API](https://docs.example.com/api_%28v2%29#auth)",
+    );
+    // Its cut-off prefix was never supplied or mentioned, so it is rejected.
+    expect(rewriteSourceLinks("[API](https://docs.example.com/api_)", targets).text).toBe("API");
+    // An address in parentheses ends at the closing one, which is not part of it.
+    expect(rewriteSourceLinks(`[status](${STATUS})`, targets).text).toBe(`[status](${STATUS})`);
+    expect(targets.allowed).toEqual(new Set([PRICING, API, STATUS]));
+  });
+
   it("keeps a link's title, and leaves a bracket that is no link as it is", () => {
     expect(rewrite(`[pricing](${PRICING} "Plans")`)).toBe(`[pricing](${PRICING})`);
     expect(rewrite("Press [Enter] then [Save](not a link")).toBe(

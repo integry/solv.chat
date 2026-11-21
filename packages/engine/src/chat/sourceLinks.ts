@@ -68,8 +68,38 @@ export function pageKey(raw: string): string | null {
   return url.href;
 }
 
-/** Addresses written out in a text (`https://…`), without the punctuation after them. */
-const URL_IN_TEXT = /https?:\/\/[^\s<>()[\]"'`]+/gu;
+/** Where an address written out in a text (`https://…`) begins. */
+const URL_START = /https?:\/\//giu;
+/** A character no address written in a text runs across. */
+const URL_STOP = /[\s<>[\]"'`]/u;
+
+/**
+ * The addresses written out in `text`, each read whole: parentheses that open
+ * inside an address belong to it (`https://…/api_(v2)`), one that closes
+ * nothing ends it (`(see https://…/x)`), and the punctuation after it is left
+ * out.
+ */
+function writtenUrls(text: string): string[] {
+  const urls: string[] = [];
+  URL_START.lastIndex = 0;
+  for (let match = URL_START.exec(text); match !== null; match = URL_START.exec(text)) {
+    const start = match.index;
+    let depth = 0;
+    let end = start + match[0].length;
+    for (; end < text.length; end++) {
+      const char = text[end] as string;
+      if (URL_STOP.test(char)) break;
+      if (char === "(") depth++;
+      else if (char === ")") {
+        if (depth === 0) break;
+        depth--;
+      }
+    }
+    urls.push(text.slice(start, end).replace(/[.,;:!?]+$/u, ""));
+    URL_START.lastIndex = end;
+  }
+  return urls;
+}
 
 /**
  * The pages an answer may link to: the pages of the sources it was given, by
@@ -90,8 +120,8 @@ export function linkTargets(
     return httpUrl(chunk.url)?.href ?? null;
   });
   for (const chunk of chunks) {
-    for (const match of chunk.text.matchAll(URL_IN_TEXT)) {
-      const key = pageKey(match[0].replace(/[.,;:!?]+$/u, ""));
+    for (const url of writtenUrls(chunk.text)) {
+      const key = pageKey(url);
       if (key !== null) allowed.add(key);
     }
   }
