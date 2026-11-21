@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CHECK_EXCHANGE_TIMEOUT_MS, CHECK_LOAD_TIMEOUT_MS } from "../src/check.js";
 import "../src/widget.js";
+import { mountWithIntent } from "./support/intent.js";
 
 const ENGINE = location.origin;
 
@@ -87,7 +88,7 @@ function fakeEngine(
 function mount(): { el: HTMLElement; root: ShadowRoot } {
   const el = document.createElement("solv-chat");
   el.setAttribute("assistant", "pk_test_check");
-  document.body.append(el);
+  mountWithIntent(el);
   const root = el.shadowRoot;
   if (!root) throw new Error("no shadow root");
   return { el, root };

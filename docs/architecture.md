@@ -48,8 +48,8 @@ from the auth seam and pass it down.
 
 - `orgs` — id, name.
 - `assistants` — id, org_id, name, public_key (used by the widget), allowed_origins,
-  tried_at and widget_seen_at (first "Try it" question and first widget load on an
-  allowed origin; set once, for the Overview checklist), and content_changed_at
+  tried_at and widget_seen_at (first "Try it" question and first widget
+  configuration request on an allowed origin; set once, for the Overview checklist), and content_changed_at
   (when its searchable content last changed: chunks committed with new
   vectors, documents deleted, a Rebuild queued; see "Index lag").
 - `assistant_versions` — id, assistant_id, state (`draft` | `published` | `archived`),
@@ -204,9 +204,15 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
   `message`. A held-open stream would not survive `navigate`, which replaces
   the page the stream belongs to.
 - `POST /v1/feedback` — thumbs up or down on a message.
-- `GET /v1/assistants/:publicKey` — published widget config (title, colours, launcher label and shortcut,
-  opening mode, greeting, suggested questions, and `visitorCheck: true` when the visitor check runs).
-  No secrets, no prompts.
+- `GET /v1/assistants/:publicKey` — published widget config (title, colours,
+  launcher label and shortcut, opening mode, greeting, suggested questions,
+  and `visitorCheck: true` when the visitor check runs).
+  No secrets, no prompts. The response has an `ETag` for the JSON bytes and
+  `Cache-Control: private, max-age=60, must-revalidate, no-transform`. Both
+  200 and 304 responses vary on `Origin`. Origin and limit checks happen
+  before accepting a validator. The browser can reuse a fresh response for
+  up to one minute after publishing. A tab restoring an open panel from
+  saved configuration asks the browser to revalidate it in the background.
 - `POST /v1/session` — exchanges a Turnstile token for a visitor session (see
   "Visitor check"). Answers 404 when the check is off.
 - `GET /v1/check/frame` — the page the widget frames to run Turnstile on the
@@ -865,8 +871,8 @@ The Monitor screens read:
 - Overview: the four Reports figures for the last 7 UTC days and the 7 before,
   the median time until the answer starts appearing for the same two periods
   (see "Reports"), questions per day, the getting-started checklist (content added, a question
-  tried in "Try it" or a test run, published, widget loaded on an allowed
-  origin or a visitor question received, first visitor question) and what needs
+  tried in "Try it" or a test run, published, widget configuration requested
+  on an allowed origin or a visitor question received, first visitor question) and what needs
   attention (open gaps, failed tests in the latest run, the configuration
   error, sources with documents that failed to index, reported as soon as the
   failure is recorded, and sources with documents still not indexed 15 minutes
@@ -1860,6 +1866,35 @@ with the visitor check on, Turnstile runs inside a frame served by the
 engine's origin, created only after a visitor interaction (see "Visitor
 check").
 
+**First paint.** When the shortcut is unknown, the widget requests the
+public configuration at load. This covers fresh embeds without
+`launcher-shortcut` and lets the first eligible keypress open the chat, even
+if the response is still pending when the visitor presses it. If the embed
+declares the shortcut or the tab has a fresh copy, the first pointer enter,
+focus, touch, or click on the launcher or a marked host trigger starts the
+request. An accepted `open()` or `toggle()` can also start it. All these
+paths share the same request. Loading a fresh embed creates no visitor session
+and writes no conversation or tab configuration.
+
+An open while configuration is pending shows “Loading chat…” with neutral
+colours and disabled input. The frame uses the opening layout when known
+from the embed, the caller's requested mode or the tab. When the layout is
+unknown, a compact loading frame keeps the host page in place. The layout,
+title, greeting, colour and suggestions are applied together before the
+first content paint. A failed request uses the existing defaults and chat
+error handling. After a three-second wait on open, the fallback also lets
+the visitor continue while a stalled request runs. Late settings can update
+that fallback. A late `opensAs` value can take effect on the next open.
+
+A successful response is kept in sessionStorage once the panel is open,
+scoped to the engine and assistant on the embedding origin. The widget can
+use it for up to two minutes after saving it. This covers ordinary
+page-to-page navigation while limiting how long a tab can start from old
+settings. An already-open panel restores that copy in its first frame and
+revalidates in the background. A closed panel starts revalidation on the next launcher or
+host-trigger interaction. Only changed settings update the view. A panel
+left open on one page does not poll for updates.
+
 Links in an answer's text (http and https only) open as the source links
 under an answer do: `target="_blank"`, `rel="noopener noreferrer"`, and a
 link to a page on the host site is no different, also with page help on
@@ -1900,11 +1935,11 @@ narrower page; elements the host fixed to that edge (`position: fixed` or
 offsets them with the custom property (see the embedding notes in
 `docs/self-hosting.md`).
 
-**Opening and restoring.** The widget loads public settings so it can render the
-launcher before the visitor acts. A fresh tab has a closed assistant and writes
-no browser storage or makes any visitor check or chat requests. An open panel
-reopens on navigation in the same tab. The open layout and any choice made with
-the expand/collapse controls are saved with the conversation in sessionStorage.
+**Opening and restoring.** A fresh tab starts with a closed assistant.
+Conversation state is first saved when the visitor opens the panel. The
+open layout and any choice made with the expand or collapse controls are
+saved with the conversation in sessionStorage, so an open panel reopens in
+the same layout on navigation in the tab.
 
 The owner's "Opens as" setting (`widget.opensAs`) defaults to Floating panel
 (`panel`). Side panel (`side`) opens directly beside the page from 900px wide
@@ -1914,28 +1949,36 @@ on later opens in the tab. Manually expanding on a small screen still opens
 the full-screen view.
 
 Page actions (`navigate`, `highlight`, `fill`) work the same while expanded.
-Both controls
-are buttons with a name ("Expand to a side panel", "Collapse to a small
-window"), `aria-controls` on the panel and `aria-expanded` (false, true);
+Both controls are buttons with a name ("Expand to a side panel", "Collapse
+to a small window"), `aria-controls` on the panel and `aria-expanded` (false, true);
 toggling moves focus to the other control, which takes the same place, so
 focus stays in the panel. Escape closes the panel as before (and gives the
 page its width back). The appearing animation is off under
 `prefers-reduced-motion: reduce`.
 
 **Launcher and shortcut.** "Launcher label" (`widget.launcherLabel`) is 1–24
-characters of plain text and defaults to "Chat". The accessible name includes
-the label and the assistant title when they differ. "Keyboard shortcut"
+characters of plain text and defaults to "Chat". A fresh tab copy supplies
+the first label and badge, or the embed can supply them with `launcher-label`
+and `launcher-shortcut`. If the label is unknown, the launcher uses a chat
+icon until configuration arrives. The embed can also supply
+`launcher-position`, `launcher-accent-color` and `opens-as` (`panel` or
+`side`, when side panels are enabled) for the loading view. Published
+settings take over once available, and the accessible name includes the
+label and the assistant title when they differ. "Keyboard shortcut"
 (`widget.keyboardShortcut`) can be None (`none`, the default), `/`, or Ctrl/⌘ K
-(`mod-k`). The widget listens only when a shortcut is configured, and displays
-it on the launcher outside touch-only layouts. A handled key or a key in an
-editable field is left to the host page. The shortcut opens the assistant,
-focuses its input and starts the visitor check when enabled.
+(`mod-k`). The embed accepts the same shortcut values. The widget displays
+the badge outside touch-only layouts. A handled key or a key in an editable
+field is left to the host page. While the shortcut is unknown the widget
+records candidate keys without cancelling their browser action, then opens
+only if a candidate matches the published shortcut. The shortcut opens the
+assistant, focuses its input and starts the visitor check when enabled.
 
 **Host-page API.** Once `solv-chat` is defined, `open({ mode?, focus? })`,
-`close()` and `toggle()` return promises that resolve after configuration loads
-and the requested action finishes. `mode` accepts `panel` or `side`, and
-omitting it uses the visitor's layout preference or the owner's opening
-setting. `focus` defaults to true. A delegated click listener handles
+`close()` and `toggle()` return promises that resolve when the requested
+action finishes. An accepted open shows the loading frame immediately
+when settings are pending. `mode` accepts `panel` or `side`, and omitting it
+uses the visitor's layout preference
+or the owner's opening setting. `focus` defaults to true. A delegated click listener handles
 `data-solv-chat-open` on host elements, including elements added later, with an
 optional `side` or `panel` value. Call `open()` or a `toggle()` that opens from
 a real visitor gesture. The API cannot auto-open on page load. An accepted
@@ -1943,11 +1986,12 @@ API or declarative open counts as interaction for the visitor check.
 
 ```html
 <button type="button" data-solv-chat-open>Ask</button>
-<button type="button" id="ask-in-side-panel">Ask in the side panel</button>
+<button type="button" id="ask-in-side-panel" data-solv-chat-open="side">Ask in the side panel</button>
 <script>
   customElements.whenDefined("solv-chat").then(() => {
     const chat = document.querySelector("solv-chat");
-    document.querySelector("#ask-in-side-panel").addEventListener("click", () => {
+    document.querySelector("#ask-in-side-panel").addEventListener("click", (event) => {
+      event.preventDefault();
       chat.open({ mode: "side", focus: true });
     });
   });

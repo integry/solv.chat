@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderMarkdown, withoutUnfinishedLink } from "../src/markdown.js";
 import "../src/widget.js";
+import { mountWithIntent } from "./support/intent.js";
 
 function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -20,7 +21,7 @@ function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
 function mountWidget(assistant = "pk_md_1"): HTMLElement {
   const el = document.createElement("solv-chat");
   el.setAttribute("assistant", assistant);
-  document.body.append(el);
+  mountWithIntent(el);
   return el;
 }
 

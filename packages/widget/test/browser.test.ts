@@ -184,7 +184,10 @@ fetch("/test/token").then((r) => r.text()).then((token) => {
   it("loads nothing until the visitor types, waits for the check, and ignores other origins", async () => {
     const { cdp } = browser;
     await cdp.send("Page.navigate", { url: `${hostOrigin()}/` });
-    await waitFor(async () => engineHits("/v1/assistants/pk_browser").length > 0, "config read");
+    await waitFor(
+      () => cdp.evaluate<boolean>('!!document.querySelector("solv-chat")?.shadowRoot'),
+      "widget",
+    );
 
     const q = (expr: string) =>
       cdp.evaluate(
@@ -192,7 +195,10 @@ fetch("/test/token").then((r) => r.text()).then((token) => {
       );
     // Opening the panel focuses the input by itself; that is not the visitor.
     await q(`(r.querySelector(".solv-launcher").click(), true)`);
-    await new Promise((r) => setTimeout(r, 500));
+    await waitFor(
+      () => q('r.activeElement === r.querySelector("#solv-input")'),
+      "config and input focus",
+    );
     expect(await q(`r.activeElement === r.querySelector("#solv-input")`)).toBe(true);
     expect(engineHits("/v1/check/frame")).toHaveLength(0);
     expect(await q(`r.querySelectorAll("iframe").length`)).toBe(0);

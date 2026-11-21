@@ -251,6 +251,64 @@ describe("chat/publicConfig", () => {
     });
   });
 
+  it("revalidates the published config only after checking the origin", async () => {
+    const draft = await tenant.versions.createDraft({
+      id: "ver_cache",
+      assistantId: "ast_1",
+      config: defaultVersionConfig(),
+      createdAt: 1000,
+    });
+    await tenant.versions.publishDraft("ast_1", draft.id, "ver_cache_next", 2000);
+    const app = createTestApp();
+    const load = async (origin: string, etag?: string) => {
+      const ctx = createExecutionContext();
+      const headers = new Headers({ origin });
+      if (etag) headers.set("if-none-match", etag);
+      const response = await app.fetch(
+        new Request("https://engine.example/v1/assistants/pk_pub_1", { headers }),
+        env,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      return response;
+    };
+
+    const origin = "https://site.example";
+    const initial = await load(origin);
+    expect(initial.status).toBe(200);
+    expect(initial.headers.get("cache-control")).toBe(
+      "private, max-age=60, must-revalidate, no-transform",
+    );
+    expect(initial.headers.get("vary")).toBe("Origin");
+    const etag = initial.headers.get("etag") ?? "";
+    expect(etag).toMatch(/^"[a-f0-9]{64}"$/);
+
+    const revalidated = await load(origin, `"other", W/${etag}`);
+    expect(revalidated.status).toBe(304);
+    expect(await revalidated.text()).toBe("");
+    for (const header of ["etag", "cache-control", "vary", "access-control-allow-origin"]) {
+      expect(revalidated.headers.get(header)).toBe(initial.headers.get(header));
+    }
+
+    const refused = await load("https://elsewhere.example", etag);
+    expect(refused.status).toBe(403);
+    expect(refused.headers.get("etag")).toBeNull();
+    expect(refused.headers.get("access-control-allow-origin")).toBeNull();
+    expect(refused.headers.get("vary")).toBe("Origin");
+    expect(await refused.json()).toEqual({
+      error: "This assistant is not available on this page.",
+    });
+
+    const config = defaultVersionConfig();
+    config.widget.title = "Newly published";
+    await tenant.versions.updateDraft("ast_1", config);
+    await tenant.versions.publishDraft("ast_1", "ver_cache_next", "ver_after_cache", 3000);
+    const changed = await load(origin, etag);
+    expect(changed.status).toBe(200);
+    expect(changed.headers.get("etag")).not.toBe(etag);
+    expect(await changed.json()).toMatchObject({ title: "Newly published" });
+  });
+
   it("rejects missing or unlisted Origin with 403 before checking limits", async () => {
     const draft = await tenant.versions.createDraft({
       id: "ver_1",

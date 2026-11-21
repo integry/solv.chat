@@ -1389,12 +1389,16 @@ describe("Admin layout regressions (Chromium)", () => {
     async function ask(width: number, question: string): Promise<Answer> {
       await openScreen("/widget-check.html", width, "solv-chat");
       const opened = await cdp.evaluate<boolean>(`(async () => {
+        let opened = false;
         for (let i = 0; i < 100; i++) {
           const root = document.querySelector("solv-chat")?.shadowRoot;
           const launcher = root?.querySelector(".solv-launcher");
-          if (launcher) {
-            launcher.click();
-            const input = root.querySelector("#solv-input");
+          if (launcher && !opened) {
+            if (launcher.getAttribute("aria-expanded") === "false") launcher.click();
+            opened = true;
+          }
+          const input = root?.querySelector("#solv-input");
+          if (opened && input && !input.disabled) {
             input.value = ${JSON.stringify(question)};
             root.querySelector(".solv-form").requestSubmit();
             return true;

@@ -102,6 +102,11 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.solv-launcher svg[hidden],
+.solv-launcher-label:empty {
+  display: none;
+}
+
 .solv-shortcut {
   flex: none;
   padding: 1px 5px;
@@ -146,6 +151,15 @@ textarea:focus-visible {
     width: min(${SIDE_PANEL_WIDTH_PX}px, calc(100vw - 32px));
     height: min(720px, calc(100vh - 96px));
   }
+}
+
+.solv-panel[data-loading] {
+  --solv-accent: var(--solv-muted);
+}
+
+.solv-panel[data-layout-pending] {
+  width: min(320px, calc(100vw - 40px));
+  height: auto;
 }
 
 .solv-panel[hidden] {
@@ -216,7 +230,7 @@ textarea:focus-visible {
     transition: opacity 160ms ease, transform 160ms ease;
   }
 
-  :host([data-layout]) .solv-panel {
+  :host([data-layout]) .solv-panel:not([data-opened-while-loading]) {
     animation: solv-expand 180ms ease-out;
   }
 
@@ -233,7 +247,6 @@ textarea:focus-visible {
   }
 
   .solv-chip,
-  .solv-send,
   .solv-fb-btn {
     transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
   }
@@ -348,6 +361,10 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.solv-messages[hidden] {
+  display: none;
 }
 
 .solv-bubble {
@@ -635,6 +652,10 @@ textarea:focus-visible {
   padding: 10px 12px;
   border-top: 1px solid var(--solv-border);
   background: var(--solv-bg);
+}
+
+.solv-panel[data-loading] .solv-form {
+  margin-top: auto;
 }
 
 .solv-input {

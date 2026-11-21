@@ -272,6 +272,7 @@ document.querySelector("button").onclick = () => {
         ),
       "widget",
     );
+    await q('(r.querySelector(".solv-launcher").dispatchEvent(new Event("pointerenter")), true)');
     // The config has arrived when the title shows it.
     if (!waitForConfig) return;
     await waitFor(
@@ -289,6 +290,9 @@ document.querySelector("button").onclick = () => {
     page_<boolean>("document.documentElement.scrollWidth <= document.documentElement.clientWidth");
 
   const panelHidden = () => q<boolean>('r.querySelector(".solv-panel").hidden');
+  const panelLoading = () =>
+    q<boolean>('r.querySelector(".solv-panel").hasAttribute("data-loading")');
+  const fallbackVisible = async () => !(await panelHidden()) && !(await panelLoading());
   const layout = () => q<string | null>('el.getAttribute("data-layout")');
   const focus = () => q<string | null>("r.activeElement?.id ?? null");
   const pendingResume = () =>
@@ -564,7 +568,8 @@ document.querySelector("button").onclick = () => {
         window.widgetAction = el.open();
       })`);
       await click("#host-ask");
-      expect(await panelHidden()).toBe(true);
+      expect(await panelHidden()).toBe(false);
+      expect(await panelLoading()).toBe(true);
       expect(await page_<number>("sessionStorage.length")).toBe(0);
       release();
       await page_("window.widgetAction");
@@ -600,8 +605,9 @@ document.querySelector("button").onclick = () => {
         );
         await click("#host-ask");
       }
-      expect(await panelHidden()).toBe(true);
-      await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
+      expect(await panelHidden()).toBe(false);
+      expect(await panelLoading()).toBe(true);
+      await waitFor(fallbackVisible, "fallback panel", 4_000);
       expect(await layout()).toBeNull();
       expect(await focus()).toBe("solv-input");
       expect(await q('r.querySelector(".solv-title").textContent')).toBe("Ask a question");
@@ -629,7 +635,7 @@ document.querySelector("button").onclick = () => {
       await open("/host-controls", true, false);
       const response = await waitFor(async () => gatedConfigResponse, "stalled config request");
       await click(".solv-launcher", true);
-      expect(await panelHidden()).toBe(true);
+      expect(await panelLoading()).toBe(true);
 
       configGate = null;
       widgetOptions = { opensAs: "side" };
@@ -658,7 +664,7 @@ document.querySelector("button").onclick = () => {
       await open("/host-controls", true, false);
       await q('document.querySelector("#host-ask").setAttribute("data-solv-chat-open", "")');
       await click("#host-ask");
-      await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
+      await waitFor(fallbackVisible, "fallback panel", 4_000);
       expect(await q('r.querySelector(".solv-title").textContent')).toBe("Ask a question");
       expect(await layout()).toBeNull();
       await q(`(() => {
@@ -756,7 +762,7 @@ document.querySelector("button").onclick = () => {
     try {
       await open("/host-controls?protected-feedback", false, false);
       await click(".solv-launcher", true);
-      await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
+      await waitFor(fallbackVisible, "fallback panel", 4_000);
       await click('.solv-fb-btn[aria-label="Helpful"]', true);
       await waitFor(async () => submissions.length === 1, "feedback refusal");
       expect(submissions[0]).toMatchObject({ path: "/v1/feedback", body: { value: "up" } });
@@ -790,7 +796,7 @@ document.querySelector("button").onclick = () => {
       await viewport(1280, 800);
       await open("/host-controls?stalled-chat-config", true, false);
       await click(".solv-launcher", true);
-      await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
+      await waitFor(fallbackVisible, "fallback panel", 4_000);
       await submit();
       await waitFor(async () => submissions.length === 1, "chat refusal");
       expect(submissions[0]?.body).not.toHaveProperty("session");
@@ -838,7 +844,7 @@ document.querySelector("button").onclick = () => {
     try {
       await open("/host-controls?stalled-feedback-config", false, false);
       await click(".solv-launcher", true);
-      await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
+      await waitFor(fallbackVisible, "fallback panel", 4_000);
       await vote();
       await waitFor(async () => submissions.length === 1, "feedback refusal");
       expect(submissions[0]?.body).not.toHaveProperty("session");

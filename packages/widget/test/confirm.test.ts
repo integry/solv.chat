@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearRegistry, register, runAction } from "../src/actions.js";
 import { askToConfirm, CONFIRM_TIMEOUT_MS } from "../src/confirm.js";
 import "../src/widget.js";
+import { mountWithIntent } from "./support/intent.js";
 
 function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -19,7 +20,7 @@ function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
 function mountWidget(assistant = "pk_confirm_test"): HTMLElement {
   const el = document.createElement("solv-chat");
   el.setAttribute("assistant", assistant);
-  document.body.append(el);
+  mountWithIntent(el);
   return el;
 }
 

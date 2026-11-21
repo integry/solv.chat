@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderMarkdown } from "../src/markdown.js";
 import "../src/widget.js";
+import { mountWithIntent } from "./support/intent.js";
 
 function shadow(el: HTMLElement): ShadowRoot {
   const root = el.shadowRoot;
@@ -61,7 +62,7 @@ function serve(config: Record<string, unknown>, chat?: () => Response): void {
 async function openAndSend(text: string): Promise<{ el: HTMLElement; r: ShadowRoot }> {
   const el = document.createElement("solv-chat");
   el.setAttribute("assistant", "pk_progress");
-  document.body.append(el);
+  mountWithIntent(el);
   await flushAsync();
   const r = shadow(el);
   q<HTMLButtonElement>(r, ".solv-launcher").click();
