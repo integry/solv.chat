@@ -1,8 +1,11 @@
 import {
   type ActionResult,
   CHAT_PROTOCOL_VERSION,
+  CONFIG_LIMITS,
   MAX_CHAT_MESSAGE_LENGTH,
   parseChatEventLine,
+  type WidgetOpenMode,
+  type WidgetShortcut,
 } from "@solvchat/core";
 import {
   listForRequest,
@@ -20,7 +23,7 @@ import {
   setHighlightHost,
   setOnExternalNavigate,
 } from "./builtins.js";
-import { CheckController } from "./check.js";
+import { CheckController, type CheckResult } from "./check.js";
 import { askToConfirm, type ConfirmHandle } from "./confirm.js";
 import { parseSafeHttpUrl, renderMarkdown } from "./markdown.js";
 import { readEventLines } from "./sse.js";
@@ -42,17 +45,32 @@ import {
   styles,
 } from "./styles.js";
 
+// The element's public declarations must also work when the widget is
+// installed by itself, so this shape uses no package imports.
 interface WidgetPublicConfig {
   title: string;
   accentColor: string;
   position: "left" | "right";
+  allowExpand: boolean;
+  opensAs: "panel" | "side";
+  launcherLabel: string;
+  keyboardShortcut: "none" | "/" | "mod-k";
   greeting: string;
   suggestedQuestions: string[];
   actions: BuiltinSettings;
   /** The engine runs the visitor check: every request needs a session. */
   visitorCheck: boolean;
-  /** "Allow expanding to a side panel": the header shows the expand control. */
-  allowExpand: boolean;
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    "solv-chat": SolvChat;
+  }
+}
+
+export interface WidgetOpenOptions {
+  mode?: WidgetPublicConfig["opensAs"];
+  focus?: boolean;
 }
 
 /**
@@ -125,10 +143,19 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
   actions: { enabled: false, allowedOrigins: [] },
   visitorCheck: false,
   allowExpand: true,
+  opensAs: "panel",
+  launcherLabel: "Chat",
+  keyboardShortcut: "none",
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const CONFIG_OPEN_WAIT_MS = 2_000;
+const CONFIG_RECOVERY_WAIT_MS = 2_000;
 const DROPPED_RESUME_TIMEOUT_MS = 5_000;
+
+type ChatStreamEvent = Exclude<ReturnType<typeof parseChatEventLine>, { type: "unknown" }> & {
+  configUnavailable?: true;
+};
 
 const ACTION_WORDING: Record<string, string> = {
   navigate: "Taking you to another page on this site.",
@@ -186,6 +213,20 @@ export function parsePublicConfig(raw: unknown): Partial<WidgetPublicConfig> {
   if (typeof widget.allowExpand === "boolean") {
     out.allowExpand = widget.allowExpand;
   }
+  if (widget.opensAs === "panel" || widget.opensAs === "side") {
+    out.opensAs = widget.opensAs;
+  }
+  const label = typeof widget.launcherLabel === "string" ? widget.launcherLabel.trim() : "";
+  if (label.length > 0 && label.length <= CONFIG_LIMITS.launcherLabel) {
+    out.launcherLabel = label;
+  }
+  if (
+    widget.keyboardShortcut === "none" ||
+    widget.keyboardShortcut === "/" ||
+    widget.keyboardShortcut === "mod-k"
+  ) {
+    out.keyboardShortcut = widget.keyboardShortcut;
+  }
   if (typeof behaviour.greeting === "string" && behaviour.greeting.trim()) {
     out.greeting = behaviour.greeting.trim();
   }
@@ -210,6 +251,44 @@ export function parsePublicConfig(raw: unknown): Partial<WidgetPublicConfig> {
   return out;
 }
 
+const connectedWidgets = new Set<SolvChat>();
+let legacyClick: Event | undefined;
+
+function captureClick(event: Event): void {
+  if (event.isTrusted) legacyClick = event;
+}
+
+function hasUserActivation(): boolean {
+  return navigator.userActivation?.isActive ?? Boolean(legacyClick?.eventPhase);
+}
+
+function openFromHostClick(event: MouseEvent): void {
+  if (!event.isTrusted || event.defaultPrevented || !hasUserActivation()) return;
+  const trigger = event
+    .composedPath()
+    .find(
+      (node): node is Element =>
+        node instanceof Element && node.hasAttribute("data-solv-chat-open"),
+    );
+  if (!trigger) return;
+  const widget = connectedWidgets.values().next().value;
+  if (!widget) return;
+  const mode = trigger.getAttribute("data-solv-chat-open");
+  event.preventDefault();
+  void widget.open(mode === "side" || mode === "panel" ? { mode } : undefined);
+}
+
+function matchesShortcut(event: KeyboardEvent, shortcut: WidgetShortcut): boolean {
+  if (event.altKey || event.isComposing || event.repeat) return false;
+  if (shortcut === "/") return event.key === "/" && !event.ctrlKey && !event.metaKey;
+  return (
+    shortcut === "mod-k" &&
+    !event.shiftKey &&
+    event.key.toLowerCase() === "k" &&
+    event.ctrlKey !== event.metaKey
+  );
+}
+
 /**
  * The `<solv-chat>` custom element. Renders a Shadow DOM chat launcher and
  * dialog panel with streaming SSE responses, citations, feedback, and
@@ -219,6 +298,10 @@ export class SolvChat extends HTMLElement {
   #root = this.attachShadow({ mode: "open" });
   #owner = Symbol();
   #initialized = false;
+  #connection = 0;
+  #configLoading: Promise<void> | null = null;
+  #configOpenWait: Promise<void> | null = null;
+  #configController: AbortController | null = null;
   #open = false;
   #sending = false;
   #abortController: AbortController | null = null;
@@ -233,13 +316,33 @@ export class SolvChat extends HTMLElement {
   #config: WidgetPublicConfig = { ...DEFAULT_CONFIG };
   /** Set by `preview()`: the element then loads and sends nothing. */
   #previewing = false;
-  /** The visitor has focused or typed in the input, or picked a suggestion. */
+  /** An interaction that can start the visitor check has happened. */
   #interacted = false;
   /** Set while the widget itself moves focus to the input, which is not the visitor's doing. */
   #focusingInput = false;
   #check!: CheckController;
-  /** The visitor chose the side panel; remembered with the open conversation. */
   #expanded = false;
+  #preferredMode: WidgetOpenMode | undefined;
+  #onShortcut = (event: KeyboardEvent): void => {
+    if (
+      !event.isTrusted ||
+      event.defaultPrevented ||
+      !matchesShortcut(event, this.#config.keyboardShortcut)
+    )
+      return;
+    if (
+      event
+        .composedPath()
+        .some(
+          (node) =>
+            node instanceof HTMLElement &&
+            (node.isContentEditable || node.matches("input, textarea, select")),
+        )
+    )
+      return;
+    event.preventDefault();
+    this.#openRequested({}, true);
+  };
   #reservation: RootReservation | null = null;
   #wideQuery: MediaQueryList | null = null;
   #onWideChange = (): void => this.#applyLayout();
@@ -250,6 +353,8 @@ export class SolvChat extends HTMLElement {
   #announced = new WeakSet<HTMLDivElement>();
 
   #launcher!: HTMLButtonElement;
+  #launcherLabel!: HTMLSpanElement;
+  #shortcutBadge!: HTMLElement;
   #expandBtn!: HTMLButtonElement;
   #collapseBtn!: HTMLButtonElement;
   #closeBtn!: HTMLButtonElement;
@@ -269,19 +374,43 @@ export class SolvChat extends HTMLElement {
       this.#initialized = true;
     }
     setHighlightHost(this.#root);
+    if (connectedWidgets.size === 0) {
+      if (!navigator.userActivation) window.addEventListener("click", captureClick, true);
+      window.addEventListener("click", openFromHostClick);
+    }
+    connectedWidgets.add(this);
+    const connection = ++this.#connection;
+    const controller = new AbortController();
+    this.#configController = controller;
+    this.#configLoading = this.#loadConfig(connection, controller).finally(() => {
+      if (connection === this.#connection) {
+        this.#configLoading = null;
+        this.#configController = null;
+      }
+    });
+    let timer: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, CONFIG_OPEN_WAIT_MS);
+    });
+    this.#configOpenWait = Promise.race([this.#configLoading, deadline]).finally(() => {
+      clearTimeout(timer);
+      if (connection === this.#connection) this.#configOpenWait = null;
+    });
+    this.#updateLauncher();
+    this.#watchShortcut();
 
     let expiredPending: PendingResume | null = null;
     const assistant = this.#assistant();
     if (assistant) {
-      claimConversation(assistant, this.#owner);
       const saved = loadConversation(assistant);
+      claimConversation(assistant, this.#owner, saved?.tabId);
       if (saved?.pendingResume) {
         if (Date.now() - saved.pendingResume.createdAt > PENDING_RESUME_TTL_MS) {
           expiredPending = saved.pendingResume;
           delete saved.pendingResume;
         }
       }
-      this.#restore(saved ?? { conversationId: null, open: false, turns: [] });
+      this.#restore(saved);
     } else {
       this.#applyLayout();
     }
@@ -294,17 +423,37 @@ export class SolvChat extends HTMLElement {
     if (this.#pendingResume && this.#resumedBubble) {
       const pending = this.#pendingResume;
       const target = this.#resumedBubble;
-      // Consume immediately so a second connect cannot resume the same continuation.
+      for (const widget of connectedWidgets) {
+        if (
+          widget !== this &&
+          widget.#assistant() === assistant &&
+          widget.#pendingResume?.resumeMessageId === pending.resumeMessageId &&
+          widget.#resumedBubble === null
+        ) {
+          widget.#abortController?.abort();
+        }
+      }
+      // Claim synchronously so another widget cannot also restore this turn.
       this.#pendingResume = null;
       this.#resumedBubble = null;
       this.#persist();
       void this.#resumeAfterConfigLoad(pending, target);
-    } else {
-      void this.#loadConfig();
     }
   }
 
   disconnectedCallback(): void {
+    this.#connection++;
+    this.#configController?.abort();
+    this.#configController = null;
+    this.#configLoading = null;
+    this.#configOpenWait = null;
+    connectedWidgets.delete(this);
+    if (connectedWidgets.size === 0) {
+      window.removeEventListener("click", captureClick, true);
+      window.removeEventListener("click", openFromHostClick);
+      legacyClick = undefined;
+    }
+    this.#watchShortcut();
     // A pending promise here would hang the answer; every one of these paths
     // means the visitor did not say yes.
     for (const handle of this.#openConfirms) handle.dismiss();
@@ -513,14 +662,17 @@ export class SolvChat extends HTMLElement {
     launcher.className = "solv-launcher";
     launcher.setAttribute("aria-expanded", "false");
     launcher.setAttribute("aria-controls", "solv-panel");
-    launcher.setAttribute("aria-label", "Open chat");
-    launcher.textContent = "Chat";
+    const launcherLabel = document.createElement("span");
+    launcherLabel.className = "solv-launcher-label";
+    const shortcutBadge = document.createElement("kbd");
+    shortcutBadge.className = "solv-shortcut";
+    shortcutBadge.setAttribute("aria-hidden", "true");
+    launcher.append(launcherLabel, shortcutBadge);
     launcher.addEventListener("click", () => {
-      if (this.#open) {
-        this.#closePanel(true);
-      } else {
-        this.#openPanel(true);
-      }
+      void this.#afterConfig(() => {
+        if (this.#open) this.#closePanel(true);
+        else this.#openRequested({}, false);
+      });
     });
 
     wrap.append(panel, launcher);
@@ -535,47 +687,85 @@ export class SolvChat extends HTMLElement {
     this.#inputEl = input;
     this.#sendBtn = sendBtn;
     this.#launcher = launcher;
+    this.#launcherLabel = launcherLabel;
+    this.#shortcutBadge = shortcutBadge;
     this.#expandBtn = expandBtn;
     this.#collapseBtn = collapseBtn;
     this.#closeBtn = closeBtn;
   }
 
-  /**
-   * Shows `config` (the shape `GET /v1/assistants/:publicKey` returns) with
-   * the panel open, for the admin's live preview. From then on the element
-   * makes no requests: config is not fetched, messages are not sent, and
-   * page actions stay off. Call it again to update what is shown.
-   */
-  preview(config: unknown): void {
+  /** Opens the chat during a user gesture. */
+  open(options: WidgetOpenOptions = {}): Promise<void> {
+    const canOpen = hasUserActivation();
+    return this.#afterConfig(() => {
+      if (canOpen) this.#openRequested(options, true);
+    });
+  }
+
+  close(): Promise<void> {
+    return this.#afterConfig(() => this.#closePanel(this.#root.activeElement !== null));
+  }
+
+  toggle(): Promise<void> {
+    const canOpen = hasUserActivation();
+    return this.#afterConfig(() => {
+      if (this.#open) this.#closePanel(this.#root.activeElement !== null);
+      else if (canOpen) this.#openRequested({}, true);
+    });
+  }
+
+  async #afterConfig(action: () => void): Promise<void> {
+    const connection = this.#connection;
+    if (this.#configOpenWait) await this.#configOpenWait;
+    if (this.isConnected && connection === this.#connection) action();
+  }
+
+  /** Shows public config in the admin preview without requesting or storing anything. */
+  preview(config: unknown, showPanel = true): void {
     this.#previewing = true;
     this.#config = {
       ...DEFAULT_CONFIG,
       ...parsePublicConfig(config),
       actions: { enabled: false, allowedOrigins: [] },
     };
+    this.#open = showPanel;
+    // In the small preview frame, show the column as a full-height panel.
+    this.#expanded = showPanel && this.#config.allowExpand && this.#config.opensAs === "side";
+    this.#panel.hidden = !showPanel;
     this.#applyConfig();
-    if (!this.#open) this.#openPanel(false);
   }
 
-  async #loadConfig(): Promise<void> {
+  async #loadConfig(connection: number, controller: AbortController): Promise<void> {
     const assistant = this.#assistant();
     if (!assistant || this.#previewing) return;
+    const endpoint = this.#endpoint();
+    const { signal } = controller;
     try {
-      const response = await fetch(
-        `${this.#endpoint()}/v1/assistants/${encodeURIComponent(assistant)}`,
-      );
+      const response = await fetch(`${endpoint}/v1/assistants/${encodeURIComponent(assistant)}`, {
+        signal,
+      });
       if (!response.ok) return;
-      const parsed = parsePublicConfig(await response.json());
-      this.#config = { ...this.#config, ...parsed };
+      const value: unknown = await response.json();
+      if (
+        signal.aborted ||
+        connection !== this.#connection ||
+        this.#previewing ||
+        assistant !== this.#assistant() ||
+        endpoint !== this.#endpoint()
+      )
+        return;
+      this.#config = { ...DEFAULT_CONFIG, ...parsePublicConfig(value) };
       this.#applyConfig();
     } catch {
-      // Keep default config if the config endpoint is unreachable.
+      // Keep the current settings if config fails.
     }
   }
 
   #applyConfig(): void {
     this.#titleEl.textContent = this.#config.title;
     this.#greetingEl.textContent = this.#config.greeting;
+    this.#updateLauncher();
+    this.#watchShortcut();
     this.style.setProperty("--solv-accent", this.#config.accentColor);
     if (this.#config.position === "left") {
       this.setAttribute("data-position", "left");
@@ -630,42 +820,91 @@ export class SolvChat extends HTMLElement {
     this.#suggestionsEl.hidden = false;
   }
 
-  #openPanel(moveFocus: boolean): void {
-    this.#dismissedTurn = null;
-    this.#open = true;
-    this.#panel.hidden = false;
-    this.#launcher.setAttribute("aria-expanded", "true");
-    this.#launcher.setAttribute("aria-label", "Close chat");
-    this.#applyLayout();
-    this.#persist();
-    if (moveFocus) {
-      this.#focusInput();
+  #watchShortcut(): void {
+    if (this.isConnected && this.#config.keyboardShortcut !== "none") {
+      window.addEventListener("keydown", this.#onShortcut);
+    } else {
+      window.removeEventListener("keydown", this.#onShortcut);
     }
   }
 
+  #updateLauncher(): void {
+    const { launcherLabel: label, title, keyboardShortcut } = this.#config;
+    this.#launcherLabel.textContent = label;
+    this.#launcher.setAttribute("aria-expanded", String(this.#open));
+    this.#launcher.setAttribute(
+      "aria-label",
+      label.toLowerCase() === title.toLowerCase() ? label : `${label} — ${title}`,
+    );
+    this.#shortcutBadge.hidden = keyboardShortcut === "none";
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+    this.#shortcutBadge.textContent =
+      keyboardShortcut === "mod-k" ? (mac ? "⌘ K" : "Ctrl K") : keyboardShortcut === "/" ? "/" : "";
+    if (keyboardShortcut === "none") this.#launcher.removeAttribute("aria-keyshortcuts");
+    else
+      this.#launcher.setAttribute(
+        "aria-keyshortcuts",
+        keyboardShortcut === "/" ? "/" : "Control+K Meta+K",
+      );
+  }
+
+  #openRequested(options: WidgetOpenOptions, visitorCheck: boolean): void {
+    const { mode, focus = true } = options;
+    let expanded = this.#expanded;
+    if (!this.#open || mode !== undefined) {
+      expanded =
+        this.#config.allowExpand &&
+        (mode === undefined && this.#preferredMode !== undefined
+          ? this.#preferredMode === "side"
+          : (mode ?? this.#config.opensAs) === "side" && this.#isWide());
+    }
+    this.#openPanel(focus, expanded);
+    if (visitorCheck) this.#visitorInteracted();
+  }
+
+  #emit(action: "open" | "close" | "expand" | "collapse"): void {
+    this.dispatchEvent(new Event(`solv-chat:${action}`, { bubbles: true, composed: true }));
+  }
+
+  #openPanel(moveFocus = false, expanded = this.#expanded): void {
+    const wasOpen = this.#open;
+    const wasExpanded = wasOpen && this.#expanded && this.#config.allowExpand;
+    this.#expanded = expanded;
+    this.#dismissedTurn = null;
+    this.#open = true;
+    this.#panel.hidden = false;
+    this.#updateLauncher();
+    this.#applyLayout();
+    this.#persist();
+    if (moveFocus) this.#focusInput();
+    if (!wasOpen) this.#emit("open");
+    const isExpanded = this.#expanded && this.#config.allowExpand;
+    if (this.#open && wasExpanded !== isExpanded) this.#emit(isExpanded ? "expand" : "collapse");
+  }
+
   #closePanel(restoreFocus: boolean): void {
+    if (!this.#open) return;
     for (const handle of this.#openConfirms) handle.dismiss();
     this.#openConfirms.clear();
     this.#dismissedTurn = this.#abortController;
     this.#open = false;
     this.#panel.hidden = true;
-    this.#launcher.setAttribute("aria-expanded", "false");
-    this.#launcher.setAttribute("aria-label", "Open chat");
+    this.#updateLauncher();
     this.#applyLayout();
     this.#persist();
-    if (restoreFocus) {
-      this.#launcher.focus();
-    }
+    if (restoreFocus) this.#launcher.focus();
+    this.#emit("close");
   }
 
   /** Expands to the side panel or collapses back, keeping focus in the panel. */
   #setExpanded(expanded: boolean): void {
     if (!this.#config.allowExpand || !this.#open || this.#expanded === expanded) return;
     this.#expanded = expanded;
+    this.#preferredMode = expanded ? "side" : "panel";
     this.#applyLayout();
     this.#persist();
-    // The control pressed is now hidden; its counterpart sits in the same place.
     (expanded ? this.#collapseBtn : this.#expandBtn).focus();
+    this.#emit(expanded ? "expand" : "collapse");
   }
 
   #isWide(): boolean {
@@ -814,18 +1053,15 @@ export class SolvChat extends HTMLElement {
     }
   }
 
-  #restore(saved: {
-    conversationId: string | null;
-    open: boolean;
-    expanded?: boolean;
-    turns: SavedTurn[];
-    pendingResume?: PendingResume;
-  }): void {
-    this.#conversationId = saved.conversationId;
-    this.#expanded = saved.expanded === true;
-    this.#pendingResume = saved.pendingResume ?? null;
+  #restore(saved: SavedConversation | null): void {
+    this.#conversationId = saved?.conversationId ?? null;
+    this.#expanded = saved?.expanded === true;
+    // Older records store the last layout alone, omitting expanded when it was false.
+    const legacyMode = saved && !saved.tabId ? (saved.expanded ? "side" : "panel") : undefined;
+    this.#preferredMode = saved?.preferredMode ?? legacyMode;
+    this.#pendingResume = saved?.pendingResume ?? null;
     this.#resumedBubble = null;
-    this.#turns = saved.turns.map((turn) => ({
+    this.#turns = (saved?.turns ?? []).map((turn) => ({
       ...turn,
       ...(turn.citations ? { citations: [...turn.citations] } : {}),
       ...(turn.actions ? { actions: turn.actions.map((action) => ({ ...action })) } : {}),
@@ -850,13 +1086,14 @@ export class SolvChat extends HTMLElement {
         }
         const canResume =
           this.#pendingResume !== null &&
-          !turn.error &&
-          turn.messageId === this.#pendingResume.resumeMessageId;
+          turn.messageId === this.#pendingResume.resumeMessageId &&
+          (!turn.error || Boolean(turn.awaiting?.length));
         const unfinished =
           !canResume &&
           !turn.error &&
           (!turn.messageId || (turn.awaiting !== undefined && turn.awaiting.length > 0));
         if (canResume) {
+          delete turn.error;
           this.#resumedBubble = { bubble, textEl, turn };
         } else if (unfinished) {
           delete turn.awaiting;
@@ -879,13 +1116,12 @@ export class SolvChat extends HTMLElement {
       this.#pendingResume = null;
     }
 
-    if (saved.open) {
-      this.#openPanel(false);
+    if (saved?.open) {
+      this.#openPanel();
     } else {
       this.#open = false;
       this.#panel.hidden = true;
-      this.#launcher.setAttribute("aria-expanded", "false");
-      this.#launcher.setAttribute("aria-label", "Open chat");
+      this.#updateLauncher();
       this.#applyLayout();
       if (restoredUnfinished) {
         this.#persist();
@@ -898,12 +1134,14 @@ export class SolvChat extends HTMLElement {
       conversationId: this.#conversationId,
       open: this.#open,
       ...(this.#expanded ? { expanded: true } : {}),
+      ...(this.#preferredMode ? { preferredMode: this.#preferredMode } : {}),
       turns: this.#turns,
       ...(this.#pendingResume ? { pendingResume: this.#pendingResume } : {}),
     };
   }
 
   #persist(): void {
+    if (this.#previewing) return;
     saveConversation(this.#assistant(), this.#snapshot(), this.#owner);
   }
 
@@ -967,7 +1205,7 @@ export class SolvChat extends HTMLElement {
       return false;
     }
     // Opening the panel first: a prompt the visitor cannot see is not consent.
-    if (!this.#open) this.#openPanel(false);
+    if (!this.#open) this.#openPanel();
     const handle = askToConfirm(this.#messagesEl, request, action, () => this.#focusInput());
     this.#openConfirms.add(handle);
     try {
@@ -1039,27 +1277,50 @@ export class SolvChat extends HTMLElement {
     let submitting = false;
 
     const submit = async (value: "up" | "down") => {
-      if (submitting || turn.feedback || !turn.messageId) return;
+      if (submitting || turn.feedback || !turn.messageId || !this.isConnected || this.#previewing)
+        return;
+      const connection = this.#connection;
+      const assistant = this.#assistant();
+      const endpoint = this.#endpoint();
+      const isCurrent = () =>
+        connection === this.#connection &&
+        !this.#previewing &&
+        assistant === this.#assistant() &&
+        endpoint === this.#endpoint();
       submitting = true;
       upBtn.disabled = true;
       downBtn.disabled = true;
       ack.textContent = "";
 
-      try {
-        const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
-        if (session === null) throw new Error("No visitor session");
-        const response = await fetch(`${this.#endpoint()}/v1/feedback`, {
+      const send = (session?: string) =>
+        fetch(`${endpoint}/v1/feedback`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             protocol: CHAT_PROTOCOL_VERSION,
-            assistant: this.#assistant(),
+            assistant,
             visitorId: visitorId(),
             messageId: turn.messageId,
             value,
             ...(session ? { session } : {}),
           }),
         });
+      try {
+        const check = this.#checkRequired() ? await this.#sessionFor() : undefined;
+        if (!isCurrent()) return;
+        if (check?.ok === false) throw new Error("No visitor session");
+        const configLoading = check ? null : this.#configLoading;
+        let response = await send(check?.session);
+        if (!isCurrent()) return;
+        if (configLoading && response.status === 403) {
+          const refusal = await response.json().catch(() => null);
+          if (refusal?.code === "check_required") {
+            const recovered = await this.#recoverVisitorSession(configLoading, isCurrent);
+            if (!isCurrent()) return;
+            if (recovered?.ok) response = await send(recovered.session);
+          }
+        }
+        if (!isCurrent()) return;
         if (!response.ok) {
           throw new Error(`Feedback request failed with status ${response.status}`);
         }
@@ -1070,6 +1331,7 @@ export class SolvChat extends HTMLElement {
         ack.textContent = "Thanks for the feedback.";
         this.#persist();
       } catch {
+        if (!isCurrent()) return;
         upBtn.disabled = false;
         downBtn.disabled = false;
         upBtn.setAttribute("aria-pressed", "false");
@@ -1247,20 +1509,28 @@ export class SolvChat extends HTMLElement {
     renderMarkdown(textEl, entry.turn.text);
   }
 
-  /** Why the last check failed, for the bubble that waited on it. */
-  #checkFailure = "";
-
-  /**
-   * The session to send: undefined when the engine runs no check, null when
-   * the check could not be completed (`#checkFailure` says why).
-   */
-  async #sessionFor(): Promise<string | null | undefined> {
-    if (!this.#checkRequired()) return undefined;
+  #sessionFor(): Promise<CheckResult> {
     this.#interacted = true;
-    const result = await this.#check.ensure();
-    if (result.ok) return result.session;
-    this.#checkFailure = result.message;
-    return null;
+    return this.#check.ensure();
+  }
+
+  async #recoverVisitorSession(
+    configLoading: Promise<void>,
+    isCurrent: () => boolean,
+  ): Promise<CheckResult | undefined> {
+    if (!isCurrent()) return;
+    // Give this refusal its own deadline. The config request can still finish
+    // later and apply settings for future interactions.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, CONFIG_RECOVERY_WAIT_MS);
+    });
+    try {
+      await Promise.race([configLoading, deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (isCurrent() && this.#checkRequired()) return this.#sessionFor();
   }
 
   async #send(message: string, onAccepted?: () => void): Promise<void> {
@@ -1312,14 +1582,6 @@ export class SolvChat extends HTMLElement {
         // reporting request or stream never blocks the visitor's new message.
         void this.#reportDroppedResume(pending, signal);
       }
-      // With the visitor check on, the message waits here, in the same
-      // empty "thinking" bubble, until the check has a session for it.
-      const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
-      if (session !== undefined && signal.aborted) return;
-      if (session === null) {
-        this.#setTurnError(bubble, assistantTurn, this.#checkFailure);
-        return;
-      }
       const requestBody: Record<string, unknown> = {
         // Sent on every request so the engine can refuse a version it does not
         // support instead of guessing what this widget means.
@@ -1328,28 +1590,33 @@ export class SolvChat extends HTMLElement {
         visitorId: visitorId(),
         message: trimmed,
       };
-      if (session) requestBody.session = session;
       if (this.#conversationId !== null) {
         requestBody.conversationId = this.#conversationId;
       }
       if (location.href.startsWith("http://") || location.href.startsWith("https://")) {
         requestBody.pageUrl = location.href;
       }
-      const pageActions = listForRequest();
-      // Omitted when the page registered nothing, so a site that never calls
-      // register sends exactly the phase 1 body.
-      if (pageActions.length > 0) {
-        requestBody.pageActions = pageActions;
-      }
-
-      const response = await fetch(`${this.#endpoint()}/v1/chat`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(requestBody),
-        signal,
-      });
-
-      await this.#consumeStream(response, bubble, textEl, assistantTurn, controller, 0);
+      await this.#consumeStream(
+        (session) => {
+          const pageActions = listForRequest();
+          return fetch(`${this.#endpoint()}/v1/chat`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              ...requestBody,
+              ...(session ? { session } : {}),
+              // A site that registers no actions sends the phase 1 body.
+              ...(pageActions.length > 0 ? { pageActions } : {}),
+            }),
+            signal,
+          });
+        },
+        bubble,
+        textEl,
+        assistantTurn,
+        controller,
+        0,
+      );
     } catch {
       if (!signal.aborted && !assistantTurn.error) {
         delete assistantTurn.awaiting;
@@ -1372,22 +1639,69 @@ export class SolvChat extends HTMLElement {
     }
   }
 
+  async *#chatEvents(
+    send: (session?: string) => Promise<Response>,
+    signal: AbortSignal,
+  ): AsyncGenerator<ChatStreamEvent> {
+    const assistant = this.#assistant();
+    const endpoint = this.#endpoint();
+    const isCurrent = () =>
+      !signal.aborted &&
+      !this.#previewing &&
+      assistant === this.#assistant() &&
+      endpoint === this.#endpoint();
+    // The thinking indicator stays up while configuration or the check is needed.
+    let check = this.#checkRequired() ? await this.#sessionFor() : undefined;
+    let configLoading = check ? null : this.#configLoading;
+    while (isCurrent()) {
+      if (check?.ok === false) {
+        yield { type: "error", message: check.message };
+        return;
+      }
+      const response = await send(check?.session);
+      if (!isCurrent()) return;
+      if (!response.ok || !response.body) {
+        yield { type: "error", message: "Something went wrong. Please try again." };
+        return;
+      }
+      let refusalMessage: string | undefined;
+      for await (const raw of readEventLines(response)) {
+        if (!isCurrent()) return;
+        const event = parseChatEventLine(raw.name, raw.data);
+        // A newer engine can send event types this bundle has never heard of.
+        if (event.type === "unknown") continue;
+        if (configLoading && event.type === "error" && event.code === "check_required") {
+          refusalMessage = event.message;
+          break;
+        }
+        configLoading = null;
+        if (event.type === "error" && event.code === "check_required") this.#check.clear();
+        yield event;
+      }
+      if (!configLoading || refusalMessage === undefined) return;
+      // This refusal precedes all chat work. A single retry is safe once
+      // the delayed config and visitor session are available.
+      check = await this.#recoverVisitorSession(configLoading, isCurrent);
+      if (!isCurrent()) return;
+      if (!check) {
+        yield { type: "error", message: refusalMessage, configUnavailable: true };
+        return;
+      }
+      configLoading = null;
+    }
+  }
+
   async #consumeStream(
-    response: Response,
+    send: (session?: string) => Promise<Response>,
     bubble: HTMLDivElement,
     textEl: HTMLDivElement,
     assistantTurn: SavedTurn,
     controller: AbortController,
     depth: number,
-  ): Promise<void> {
+    onAdmitted?: () => void,
+  ): Promise<"config_unavailable" | undefined> {
     const { signal } = controller;
     if (signal.aborted) return;
-
-    if (!response.ok || !response.body) {
-      delete assistantTurn.awaiting;
-      this.#setTurnError(bubble, assistantTurn, "Something went wrong. Please try again.");
-      return;
-    }
 
     let terminated = false;
     let resumeEvent: {
@@ -1398,13 +1712,12 @@ export class SolvChat extends HTMLElement {
     const pendingActions: RunRequest[] = [];
 
     try {
-      for await (const raw of readEventLines(response)) {
+      for await (const event of this.#chatEvents(send, signal)) {
         if (signal.aborted) break;
-        const event = parseChatEventLine(raw.name, raw.data);
-        // Unknown types are skipped, not an error: a newer engine will send event
-        // types this cached bundle has never heard of, and the only acceptable
-        // behaviour is to keep rendering the ones it knows.
-        if (event.type === "unknown") continue;
+        if (onAdmitted && event.type !== "error") {
+          onAdmitted();
+          onAdmitted = undefined;
+        }
 
         if (event.type === "token") {
           // DOM nodes and textContent only, never raw HTML assignment: the text
@@ -1463,12 +1776,17 @@ export class SolvChat extends HTMLElement {
           terminated = true;
           this.#finishPaint(textEl);
           this.#hideTyping(bubble);
+          const msg = event.message.trim() || "Something went wrong. Please try again.";
+          if (onAdmitted && event.configUnavailable) {
+            // The refusal came before the engine could claim the saved
+            // continuation. Show the error here and let a later page resume it.
+            this.#setTurnError(bubble, assistantTurn, msg);
+            return "config_unavailable";
+          }
           delete assistantTurn.awaiting;
-          if (event.code === "check_required") this.#check.clear();
           // The engine will not take more in this conversation; the next
           // question starts a new one, as the message says.
           if (event.code === "conversation_cap") this.#conversationId = null;
-          const msg = event.message.trim() || "Something went wrong. Please try again.";
           this.#setTurnError(bubble, assistantTurn, msg);
           this.#persist();
         }
@@ -1498,6 +1816,7 @@ export class SolvChat extends HTMLElement {
         depth + 1,
       );
     }
+    return undefined;
   }
 
   async #resumeAfterConfigLoad(
@@ -1513,10 +1832,23 @@ export class SolvChat extends HTMLElement {
     const { signal } = controller;
     // The answer carries on after the page change: say so straight away.
     this.#showTyping(target.bubble);
+    const releasePending = () => {
+      if (this.#pendingResume === pending) {
+        this.#pendingResume = null;
+        this.#persist();
+      }
+    };
+    let keepPending = false;
 
     try {
-      await this.#loadConfig();
+      await this.#configOpenWait;
       if (!this.isConnected || signal.aborted) return;
+      if (this.#configLoading) {
+        // Keep the turn recoverable across navigation if the fallback attempt
+        // still needs to wait for configuration and a visitor session.
+        this.#pendingResume = pending;
+        this.#persist();
+      }
 
       const actionResults =
         pending.navigateCallId && typeof location !== "undefined"
@@ -1531,28 +1863,23 @@ export class SolvChat extends HTMLElement {
             )
           : pending.actionResults;
 
-      const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
-      if (signal.aborted) return;
-      if (session === null) {
-        delete target.turn.awaiting;
-        this.#setTurnError(target.bubble, target.turn, this.#checkFailure);
-        return;
-      }
-      const response = await this.#sendActionResumeRequest(
-        pending.conversationId,
-        pending.resumeMessageId,
-        actionResults,
-        signal,
-        session,
-      );
-      await this.#consumeStream(
-        response,
+      const outcome = await this.#consumeStream(
+        (session) =>
+          this.#sendActionResumeRequest(
+            pending.conversationId,
+            pending.resumeMessageId,
+            actionResults,
+            signal,
+            session,
+          ),
         target.bubble,
         target.textEl,
         target.turn,
         controller,
         pending.depth,
+        releasePending,
       );
+      keepPending = outcome === "config_unavailable";
     } catch {
       if (!signal.aborted && !target.turn.error) {
         delete target.turn.awaiting;
@@ -1570,6 +1897,7 @@ export class SolvChat extends HTMLElement {
         this.#dismissedTurn = null;
       }
       if (!signal.aborted) {
+        if (!keepPending) releasePending();
         this.#persist();
       }
     }
@@ -1777,22 +2105,21 @@ export class SolvChat extends HTMLElement {
       setOnExternalNavigate(null);
     }
 
-    const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
-    if (signal.aborted) return;
-    if (session === null) {
-      delete assistantTurn.awaiting;
-      this.#setTurnError(bubble, assistantTurn, this.#checkFailure);
-      return;
-    }
-    const response = await this.#sendActionResumeRequest(
-      done.conversationId,
-      done.messageId,
-      results,
-      signal,
-      session,
+    await this.#consumeStream(
+      (session) =>
+        this.#sendActionResumeRequest(
+          done.conversationId,
+          done.messageId,
+          results,
+          signal,
+          session,
+        ),
+      bubble,
+      textEl,
+      assistantTurn,
+      controller,
+      depth,
     );
-
-    await this.#consumeStream(response, bubble, textEl, assistantTurn, controller, depth);
   }
 }
 

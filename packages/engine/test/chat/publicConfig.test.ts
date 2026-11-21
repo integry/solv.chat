@@ -147,6 +147,9 @@ describe("chat/publicConfig", () => {
       accentColor: "#112233",
       position: "left",
       allowExpand: false,
+      opensAs: "side",
+      launcherLabel: "Ask the docs",
+      keyboardShortcut: "/",
     };
     base.behaviour = {
       greeting: "Published greeting",
@@ -198,6 +201,9 @@ describe("chat/publicConfig", () => {
       "actions",
       "allowExpand",
       "greeting",
+      "keyboardShortcut",
+      "launcherLabel",
+      "opensAs",
       "position",
       "suggestedQuestions",
       "title",
@@ -207,6 +213,9 @@ describe("chat/publicConfig", () => {
       accentColor: "#112233",
       position: "left",
       allowExpand: false,
+      opensAs: "side",
+      launcherLabel: "Ask the docs",
+      keyboardShortcut: "/",
       greeting: "Published greeting",
       suggestedQuestions: ["How do I start?"],
       actions: {
@@ -230,7 +239,12 @@ describe("chat/publicConfig", () => {
     const body2 = (await res2.json()) as Record<string, unknown>;
     expect(body2.title).toBe("Draft Only Title");
     // The default: the expand control is offered.
-    expect(body2.allowExpand).toBe(true);
+    expect(body2).toMatchObject({
+      allowExpand: true,
+      opensAs: "panel",
+      launcherLabel: "Chat",
+      keyboardShortcut: "none",
+    });
     expect(body2.actions).toEqual({
       builtins: false,
       allowedOrigins: ["https://draft-only.example"],

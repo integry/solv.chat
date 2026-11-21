@@ -138,6 +138,7 @@ describe("parseVersionConfig", () => {
         listSources: false,
       },
       widget: {
+        ...defaultVersionConfig().widget,
         title: "Docs Bot",
         accentColor: "#112233",
         position: "left" as const,
@@ -174,6 +175,35 @@ describe("parseVersionConfig", () => {
     expect(bad.ok).toBe(false);
     if (!bad.ok) {
       expect(bad.errors).toContain("widget.allowExpand: must be true or false");
+    }
+  });
+
+  it("defaults and validates the opening mode, launcher label and keyboard shortcut", () => {
+    const older = parseVersionConfig({ widget: { title: "Docs" } });
+    expect(older.ok && older.value.widget).toMatchObject({
+      opensAs: "panel",
+      launcherLabel: "Chat",
+      keyboardShortcut: "none",
+    });
+    for (const label of ["A", "W".repeat(24)]) {
+      const result = parseVersionConfig({
+        widget: { opensAs: "side", launcherLabel: ` ${label} `, keyboardShortcut: "mod-k" },
+      });
+      expect(result.ok && result.value.widget).toMatchObject({
+        opensAs: "side",
+        launcherLabel: label,
+        keyboardShortcut: "mod-k",
+      });
+    }
+    for (const launcherLabel of [" ", "W".repeat(25)]) {
+      const invalid = parseVersionConfig({
+        widget: { opensAs: "full", launcherLabel, keyboardShortcut: "Enter" },
+      });
+      expect(!invalid.ok && invalid.errors).toEqual([
+        'widget.opensAs: must be "panel" or "side"',
+        "widget.launcherLabel: must be 1 to 24 characters",
+        'widget.keyboardShortcut: must be "none", "/" or "mod-k"',
+      ]);
     }
   });
 

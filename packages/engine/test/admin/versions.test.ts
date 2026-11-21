@@ -438,6 +438,9 @@ describe("admin versions API", () => {
       accentColor: "#112233",
       position: "right",
       allowExpand: true,
+      opensAs: "panel",
+      launcherLabel: "Chat",
+      keyboardShortcut: "none",
     });
     expect(fetched.draft.config.limits.dailyCostCapMicros).toBe(500);
   });

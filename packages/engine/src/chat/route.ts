@@ -965,6 +965,9 @@ export async function publicConfigRoute(
       position: published.config.widget.position,
       // Stored versions from before the setting have no value: on, as the default.
       allowExpand: published.config.widget.allowExpand !== false,
+      opensAs: published.config.widget.opensAs,
+      launcherLabel: published.config.widget.launcherLabel,
+      keyboardShortcut: published.config.widget.keyboardShortcut,
       greeting: published.config.behaviour.greeting,
       suggestedQuestions: [...published.config.behaviour.suggestedQuestions],
       // What the widget needs to gate the built-ins and check a navigate
