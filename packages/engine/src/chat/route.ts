@@ -5,9 +5,11 @@ import {
   type ChatHistoryTurn,
   newId,
   type PageAction,
+  type PageToolServer,
   parseChatRequest,
   parseFeedbackRequest,
   serializeChatEvent,
+  type ToolCredentials,
   type VersionConfig,
 } from "@solvchat/core";
 import { assistantByPublicKey, assistantForMessage, originAllowedInOrg } from "../db/public.js";
@@ -217,6 +219,8 @@ interface StreamAnswerParams {
    * two can never disagree about which version is answering.
    */
   allowedTools: readonly string[];
+  pageToolServers: readonly PageToolServer[] | undefined;
+  toolCredentials?: ToolCredentials | undefined;
   /** The version the behaviour and tools came from, for the answer's trace. */
   version: AnswerTraceContext["version"];
   /** What the answer review is told about the site (name, widget title, greeting, persona). */
@@ -247,6 +251,8 @@ interface StreamResumeParams {
   behaviour: BehaviourConfig;
   /** The published version's tool allow-list, as for a fresh answer. */
   allowedTools: readonly string[];
+  pageToolServers: readonly PageToolServer[] | undefined;
+  toolCredentials?: ToolCredentials | undefined;
   version: AnswerTraceContext["version"];
   site: SiteNames;
   conversationId: string;
@@ -394,6 +400,8 @@ async function resolveAnswerDeps(params: {
   orgId: string;
   assistantId: string;
   allowedTools: readonly string[];
+  pageToolServers: readonly PageToolServer[] | undefined;
+  toolCredentials?: ToolCredentials | undefined;
   version: AnswerTraceContext["version"];
   site: SiteNames;
   pageActions: readonly PageAction[] | undefined;
@@ -415,6 +423,8 @@ async function resolveAnswerDeps(params: {
       tenant: params.tenant,
       secretKey: env.SOLV_SECRET_KEY ?? "",
       fetchImpl: overrides?.fetch,
+      pageServers: params.pageToolServers,
+      credentialContext: params.preview ? { preview: true } : { visitor: params.toolCredentials },
     },
     params.assistantId,
     params.allowedTools,
@@ -663,6 +673,7 @@ export async function adminChatRoute(
     message,
     behaviour: version.config.behaviour,
     allowedTools: version.config.allowedTools,
+    pageToolServers: version.config.pageToolServers,
     version: { id: version.id, state: "draft" },
     site: siteNames(assistant.name, version.config),
     conversationId: parsed.value.conversationId,
@@ -788,6 +799,8 @@ export async function chatRoute(
       visitorId: parsed.value.visitorId,
       behaviour: version.config.behaviour,
       allowedTools: version.config.allowedTools,
+      pageToolServers: version.config.pageToolServers,
+      toolCredentials: parsed.value.toolCredentials,
       version: { id: version.id, state: "published" },
       site: siteNames(assistant.name, version.config),
       conversationId: parsed.value.conversationId ?? "",
@@ -816,6 +829,8 @@ export async function chatRoute(
     message,
     behaviour: version.config.behaviour,
     allowedTools: version.config.allowedTools,
+    pageToolServers: version.config.pageToolServers,
+    toolCredentials: parsed.value.toolCredentials,
     version: { id: version.id, state: "published" },
     site: siteNames(assistant.name, version.config),
     conversationId: parsed.value.conversationId,
@@ -958,6 +973,20 @@ export async function publicConfigRoute(
 
   const visitorCheckOn = (await resolveVisitorCheck(env, seams.visitorCheck)).state === "on";
 
+  const pageServers = published.config.pageToolServers ?? [];
+  const currentServers = pageServers.length > 0 ? await tenant.mcp.listServers(assistant.id) : [];
+  const pageToolServerUrls = [
+    ...new Set(
+      pageServers
+        .filter((page) =>
+          currentServers.some(
+            (server) => server.id === page.serverId && server.enabled && server.url === page.url,
+          ),
+        )
+        .map((page) => page.url),
+    ),
+  ];
+
   const body = JSON.stringify({
     title: published.config.widget.title,
     accentColor: published.config.widget.accentColor,
@@ -979,6 +1008,7 @@ export async function publicConfigRoute(
     // on the first focus or keystroke. Left out otherwise, so an engine
     // without it answers exactly as before.
     ...(visitorCheckOn ? { visitorCheck: true } : {}),
+    ...(pageToolServerUrls.length > 0 ? { pageToolServerUrls } : {}),
   });
   const etag = `"${await sha256Hex(body)}"`;
   const cacheHeaders = {

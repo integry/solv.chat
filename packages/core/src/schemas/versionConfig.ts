@@ -1,6 +1,11 @@
 import { Errors, fail, ok, type Result } from "../result.js";
 import { parseOriginValue } from "./assistant.js";
 import { isPlainObject, readTrimmedString } from "./shared.js";
+import {
+  isToolCredentialHeader,
+  type PageToolServer,
+  toolCredentialUrl,
+} from "./toolCredentials.js";
 
 export type WidgetPosition = "left" | "right";
 export type WidgetOpenMode = "panel" | "side";
@@ -82,6 +87,7 @@ export interface VersionConfig {
   widget: WidgetConfig;
   limits: LimitsConfig;
   allowedTools: string[];
+  pageToolServers?: PageToolServer[];
   actions: ActionsConfig;
 }
 
@@ -307,6 +313,9 @@ function cloneVersionConfig(config: VersionConfig): VersionConfig {
     widget: { ...config.widget },
     limits: { ...config.limits },
     allowedTools: [...config.allowedTools],
+    ...(config.pageToolServers
+      ? { pageToolServers: config.pageToolServers.map((server) => ({ ...server })) }
+      : {}),
     actions: {
       builtins: config.actions.builtins,
       allowedOrigins: [...config.actions.allowedOrigins],
@@ -343,6 +352,33 @@ export function parseVersionConfig(value: unknown, base?: VersionConfig): Result
         else if (!tools.includes(tool)) tools.push(tool);
       });
       config.allowedTools = tools;
+    }
+  }
+
+  if (value.pageToolServers !== undefined) {
+    if (!Array.isArray(value.pageToolServers)) {
+      errors.add("pageToolServers", "must be an array");
+    } else {
+      const servers = new Map<string, PageToolServer>();
+      for (const entry of value.pageToolServers) {
+        if (isPlainObject(entry)) {
+          const serverId = readTrimmedString(entry.serverId, 1, 128);
+          const url = toolCredentialUrl(entry.url);
+          const headerName = entry.headerName;
+          if (serverId && url && isToolCredentialHeader(headerName) && !servers.has(serverId)) {
+            servers.set(serverId, { serverId, url, headerName });
+            continue;
+          }
+        }
+        errors.add("pageToolServers", "has an invalid or duplicate tool server");
+      }
+      if (servers.size > 0) {
+        config.pageToolServers = [...servers.values()].sort((a, b) =>
+          a.serverId.localeCompare(b.serverId),
+        );
+      } else {
+        delete config.pageToolServers;
+      }
     }
   }
 

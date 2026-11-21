@@ -34,7 +34,7 @@ function only(changes: ConfigChange[]): ConfigChange {
 
 describe("version diff field table", () => {
   it("has exactly one entry for every setting a version stores", () => {
-    const schemaPaths = leafPaths(defaultVersionConfig()).sort();
+    const schemaPaths = leafPaths({ ...defaultVersionConfig(), pageToolServers: [] }).sort();
     const tablePaths = VERSION_DIFF_FIELDS.map((f) => f.path).sort();
     expect(tablePaths).toEqual(schemaPaths);
   });
@@ -66,6 +66,9 @@ describe("version diff field table", () => {
       c.widget.keyboardShortcut = "mod-k";
       c.actions.builtins = true;
       c.actions.allowedOrigins = ["https://shop.example.com"];
+      c.pageToolServers = [
+        { serverId: "mcp_1", url: "https://tools.example.com/mcp", headerName: "Authorization" },
+      ];
       c.allowedTools = ["search"];
       c.limits.dailyCostCapMicros = 5_000_000;
     });

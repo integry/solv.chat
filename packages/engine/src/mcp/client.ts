@@ -61,6 +61,13 @@ interface SessionContext {
 }
 
 function authHeaders(target: McpTarget): Record<string, string> {
+  if (target.pageToken !== undefined) {
+    const header = target.headerName ?? "Authorization";
+    return {
+      [header]:
+        header.toLowerCase() === "authorization" ? `Bearer ${target.pageToken}` : target.pageToken,
+    };
+  }
   if (target.authKind !== "static_header") return {};
   if (!target.headerName || !target.headerValue) {
     // Refusing beats calling without the credential: an unauthenticated call
@@ -354,6 +361,8 @@ export async function listTools(
     const seenCursors = new Set<string>();
     let totalRawCount = 0;
     let cursor: string | undefined;
+    const token = target.pageToken;
+    const encodedToken = token === undefined ? undefined : JSON.stringify(token).slice(1, -1);
 
     for (;;) {
       const params = cursor === undefined ? {} : { cursor };
@@ -375,6 +384,9 @@ export async function listTools(
 
       for (const item of raw) {
         if (!isPlainRecord(item)) continue;
+        // Discovery data can be stored and offered to the model. Check for an
+        // echo before fields are clipped to their storage limits.
+        if (encodedToken && JSON.stringify(item).includes(encodedToken)) continue;
         const name = typeof item.name === "string" ? item.name.trim() : "";
         // Same name rule as a page action: a name that could read as prose would
         // let a server write into the tool list the model sees.
@@ -436,8 +448,13 @@ export async function callTool(
       })
       .filter((piece) => piece !== "")
       .join("\n");
-    const capped =
-      text.length > MCP_MAX_TOOL_RESULT_CHARS ? text.slice(0, MCP_MAX_TOOL_RESULT_CHARS) : text;
-    return { content: capped, isError: result.isError === true };
+    // A server can accidentally echo the key it received. Remove it before
+    // this result can reach the model, conversation or any downstream sink.
+    const token = target.pageToken;
+    const safeText = token === undefined ? text : text.replaceAll(token, "[redacted]");
+    return {
+      content: safeText.slice(0, MCP_MAX_TOOL_RESULT_CHARS),
+      isError: result.isError === true,
+    };
   });
 }

@@ -777,6 +777,27 @@ describe("chat schema and protocol", () => {
     }
   });
 
+  it("bounds and validates request tool credentials without echoing invalid input", () => {
+    const request = { protocol: 2, assistant: "pk_test", visitorId: "visitor", message: "Hello" };
+    const url = "https://tools.example/mcp";
+    const valid = parseChatRequest({ ...request, toolCredentials: { [url]: "k".repeat(4096) } });
+    expect(valid).toMatchObject({
+      ok: true,
+      value: { toolCredentials: { [url]: "k".repeat(4096) } },
+    });
+    for (const map of [
+      { [url]: "k".repeat(4097) },
+      { [url]: "fake-key\r\nHeader: injected" },
+      { "http://tools.example/mcp": "fake-key" },
+      { "https://tools.example/mcp?key=bad": "fake-key" },
+      Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`${url}/${i}`, "fake-key"])),
+    ]) {
+      const result = parseChatRequest({ ...request, toolCredentials: map });
+      expect(result.ok).toBe(false);
+      expect(JSON.stringify(result)).not.toContain("fake-key");
+    }
+  });
+
   it("requires resumeMessageId with actionResults, allows absent message, rejects neither, and caps result size", () => {
     const neither = parseChatRequest({
       protocol: 2,

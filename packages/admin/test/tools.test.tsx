@@ -168,6 +168,13 @@ function installFakeServer(options: FakeServerOptions = {}) {
             ? { authKind: body.authKind }
             : {}),
           ...(typeof body.headerName === "string" ? { headerName: body.headerName } : {}),
+          ...(body.credentialSource === "page" || body.credentialSource === "owner"
+            ? { credentialSource: body.credentialSource }
+            : {}),
+          ...(typeof body.pageHeaderName === "string"
+            ? { pageHeaderName: body.pageHeaderName }
+            : {}),
+          ...(typeof body.testKey === "string" ? { hasTestSecret: body.testKey !== "" } : {}),
           hasSecret,
         };
       });
@@ -305,13 +312,35 @@ describe("Tools screen", () => {
     expect(toggle.checked).toBe(false);
   });
 
+  it("saves the page-supplied mode and only asks for a one-time key when no test key is saved", async () => {
+    const fake = installFakeServer({ servers: [makeServer()] });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Tools" }));
+    await screen.findByText("Order lookup");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const card = screen.getByText("Order lookup").closest("li");
+    if (!card) throw new Error("Missing tool server card");
+    const fields = within(card);
+    fireEvent.change(fields.getByLabelText("Where the key comes from"), {
+      target: { value: "page" },
+    });
+    expect(fields.getByLabelText("Header name")).toHaveProperty("value", "Authorization");
+    expect(fields.getByLabelText("Test key (optional)")).toHaveProperty("type", "password");
+    expect(fields.getByText(/when you publish/i)).toBeTruthy();
+    fireEvent.click(fields.getByRole("button", { name: "Save" }));
+    await fields.findByText("Visitor’s key");
+    expect(fake.patches[0]?.body).toEqual({ credentialSource: "page" });
+    fireEvent.click(fields.getByRole("button", { name: "Refresh" }));
+    expect(fields.getByLabelText("One-time key")).toHaveProperty("type", "password");
+  });
+
   it("shows the standing warning whenever a server is listed and names a read-only token", async () => {
     installFakeServer({ servers: [makeServer()] });
     render(<App />);
     fireEvent.click(await screen.findByRole("link", { name: "Tools" }));
 
     const warning = await screen.findByRole("note");
-    expect(warning.textContent).toMatch(/every tool runs with the credential/i);
+    expect(warning.textContent).toMatch(/shared key/i);
     expect(warning.textContent).toMatch(/only read/i);
   });
 

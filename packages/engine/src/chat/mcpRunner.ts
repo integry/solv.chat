@@ -1,3 +1,4 @@
+import type { PageToolServer, ToolCredentials } from "@solvchat/core";
 import type { Tenant } from "../db/tenant.js";
 import { callTool } from "../mcp/client.js";
 import { McpError, type McpTarget } from "../mcp/types.js";
@@ -45,6 +46,9 @@ export interface McpRunnerDeps {
   /** SOLV_SECRET_KEY, from the Worker environment. */
   secretKey: string;
   fetchImpl?: typeof fetch | undefined;
+  pageServers?: readonly PageToolServer[] | undefined;
+  /** Visitor tokens for this request only. Admin paths look up test keys instead. */
+  credentialContext?: { visitor: ToolCredentials | undefined } | { preview: true } | undefined;
 }
 
 /**
@@ -78,9 +82,28 @@ export async function mcpRunnerFor(
     { serverId: string; toolName: string; row: (typeof usable)[number] }
   >();
   const definitions: ToolDefinition[] = [];
+  const pageServers = new Map(deps.pageServers?.map((server) => [server.serverId, server]));
+  const hasTestKey = new Map<string, boolean>();
+  const context = deps.credentialContext;
 
   for (const row of usable) {
     const alias = allocateAlias(row.name, usedNames);
+    const page = pageServers.get(row.serverId);
+    if (page) {
+      if (page.url !== row.url) continue;
+      if (context && "preview" in context) {
+        if (!hasTestKey.has(row.serverId)) {
+          const snapshot = await deps.tenant.mcp.readTargetWithSecretCiphertext(row.serverId);
+          hasTestKey.set(
+            row.serverId,
+            snapshot?.url === page.url && !!snapshot.testSecretCiphertext,
+          );
+        }
+        if (!hasTestKey.get(row.serverId)) continue;
+      } else if (!context?.visitor?.[page.url]) {
+        continue;
+      }
+    }
     aliasTable.set(alias, { serverId: row.serverId, toolName: row.name, row });
     definitions.push({
       name: alias,
@@ -92,6 +115,8 @@ export async function mcpRunnerFor(
     });
   }
 
+  if (definitions.length === 0) return null;
+
   return {
     kind: "mcp",
     definitions,
@@ -102,20 +127,35 @@ export async function mcpRunnerFor(
       }
       const { serverId, toolName, row } = entry;
 
+      const page = pageServers.get(serverId);
       let target: McpTarget;
       try {
+        let token: string | undefined;
+        if (page) {
+          if (deps.credentialContext && "preview" in deps.credentialContext) {
+            const snapshot = await deps.tenant.mcp.readTargetWithSecretCiphertext(serverId);
+            if (snapshot?.url === page.url && snapshot.testSecretCiphertext) {
+              token = await openSecret(deps.secretKey, snapshot.testSecretCiphertext);
+            }
+          } else {
+            token = deps.credentialContext?.visitor?.[page.url];
+          }
+          if (!token) return { content: "That tool is not available right now.", isError: true };
+        }
         target = {
           url: row.url,
           authKind: row.authKind,
-          ...(row.authKind === "static_header"
-            ? {
-                headerName: row.headerName ?? "Authorization",
-                // Opened here, per call, and held only for this request: the
-                // specification says "decrypted only inside the Worker at call
-                // time", and a runner that kept it would widen that window.
-                headerValue: await openCredential(deps, serverId),
-              }
-            : {}),
+          ...(page
+            ? { headerName: page.headerName, pageToken: token }
+            : row.authKind === "static_header"
+              ? {
+                  headerName: row.headerName ?? "Authorization",
+                  // Opened here, per call, and held only for this request: the
+                  // specification says "decrypted only inside the Worker at call
+                  // time", and a runner that kept it would widen that window.
+                  headerValue: await openCredential(deps, serverId),
+                }
+              : {}),
           // Only when the owner switched it on for this server. The ids come
           // from the loop (the stored conversation), never from the model's
           // call or anything the visitor typed.
@@ -129,13 +169,9 @@ export async function mcpRunnerFor(
               }
             : {}),
         };
-      } catch (err) {
+      } catch {
         // Typically SOLV_SECRET_KEY was rotated without re-entering the keys.
-        // The owner needs to know; the visitor gets an answer without the tool.
-        console.error("mcp: stored credential could not be read", {
-          serverId,
-          reason: err instanceof Error ? err.message : "unknown error",
-        });
+        console.error("mcp: stored credential could not be read", { serverId });
         return { content: "That tool is not available right now.", isError: true };
       }
 

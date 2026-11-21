@@ -1,9 +1,20 @@
-import { isPlainObject, newId, parseVersionConfig, type VersionConfig } from "@solvchat/core";
+import {
+  isPlainObject,
+  isToolCredentialHeader,
+  isToolToken,
+  newId,
+  type PageToolServer,
+  parseVersionConfig,
+  type ToolCredentialSource,
+  toolCredentialUrl,
+  type VersionConfig,
+} from "@solvchat/core";
 import type {
   McpAuthKind,
   McpServerTargetSnapshot,
   McpServerWithStatsRow,
   McpToolRow,
+  UpdateMcpServerInput,
 } from "../db/mcp.js";
 import type { Tenant } from "../db/tenant.js";
 import { listTools as listRemoteTools } from "../mcp/client.js";
@@ -32,6 +43,9 @@ export interface McpServerSummary {
   headerName: string | null;
   /** "set" or "not set" on the screen. The value is never returned. */
   hasSecret: boolean;
+  credentialSource?: ToolCredentialSource;
+  pageHeaderName?: string;
+  hasTestSecret?: boolean;
   enabled: boolean;
   /** "Send conversation context": off unless the owner turned it on. */
   sendConversationContext: boolean;
@@ -49,7 +63,10 @@ export interface McpToolView {
   allowed: boolean;
 }
 
-function toServerSummary(row: McpServerWithStatsRow): McpServerSummary {
+function toServerSummary(
+  row: McpServerWithStatsRow,
+  pageServer?: PageToolServer,
+): McpServerSummary {
   return {
     id: row.id,
     assistantId: row.assistantId,
@@ -58,6 +75,13 @@ function toServerSummary(row: McpServerWithStatsRow): McpServerSummary {
     authKind: row.authKind,
     headerName: row.headerName,
     hasSecret: row.hasSecret,
+    ...(pageServer
+      ? {
+          credentialSource: "page",
+          pageHeaderName: pageServer.headerName,
+          hasTestSecret: row.hasTestSecret,
+        }
+      : {}),
     enabled: row.enabled,
     sendConversationContext: row.sendConversationContext,
     createdAt: row.createdAt,
@@ -85,6 +109,9 @@ interface ParsedServerInput {
   headerValue?: string | null;
   enabled?: boolean;
   sendConversationContext?: boolean;
+  credentialSource?: ToolCredentialSource;
+  pageHeaderName?: string;
+  testKey?: string | null;
 }
 
 const RESERVED_HEADER_NAMES = new Set([
@@ -144,7 +171,28 @@ function readServerInput(body: unknown, forCreate: boolean): ParsedServerInput {
     }
   }
 
-  if (forCreate || body.authKind !== undefined) {
+  if (body.credentialSource !== undefined) {
+    if (body.credentialSource === "page" || body.credentialSource === "owner") {
+      parsed.credentialSource = body.credentialSource;
+    } else {
+      errors.push("credentialSource: choose where the key comes from");
+    }
+  }
+  if (body.pageHeaderName !== undefined) {
+    const header = typeof body.pageHeaderName === "string" ? body.pageHeaderName.trim() : null;
+    if (header === "" || isToolCredentialHeader(header)) {
+      parsed.pageHeaderName = header || "Authorization";
+    } else {
+      errors.push("pageHeaderName: enter a valid header name");
+    }
+  }
+  if (body.testKey !== undefined) {
+    if (body.testKey === null || body.testKey === "") parsed.testKey = null;
+    else if (isToolToken(body.testKey)) parsed.testKey = body.testKey;
+    else errors.push("testKey: enter a valid key of up to 4096 characters");
+  }
+
+  if ((forCreate && parsed.credentialSource !== "page") || body.authKind !== undefined) {
     if (body.authKind !== "none" && body.authKind !== "static_header") {
       errors.push('authKind: must be "none" or "static_header"');
     } else {
@@ -224,7 +272,11 @@ function readServerInput(body: unknown, forCreate: boolean): ParsedServerInput {
 async function getServerSummary(deps: McpDeps, serverId: string): Promise<McpServerSummary> {
   const row = await deps.tenant.mcp.getServerWithStats(serverId);
   if (row === null) throw new NotFound("mcp server");
-  return toServerSummary(row);
+  const draft = await deps.tenant.versions.draft(row.assistantId);
+  return toServerSummary(
+    row,
+    draft?.config.pageToolServers?.find((entry) => entry.serverId === row.id),
+  );
 }
 
 /** Lists an assistant's MCP servers with their tool and allowed-tool counts. */
@@ -234,8 +286,14 @@ export async function listMcpServers(
 ): Promise<McpServerSummary[]> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
-  const rows = await tenant.mcp.listServersWithStats(assistantId);
-  return rows.map(toServerSummary);
+  const [rows, draft] = await Promise.all([
+    tenant.mcp.listServersWithStats(assistantId),
+    tenant.versions.draft(assistantId),
+  ]);
+  const pageServers = new Map(
+    draft?.config.pageToolServers?.map((entry) => [entry.serverId, entry]),
+  );
+  return rows.map((row) => toServerSummary(row, pageServers.get(row.id)));
 }
 
 /**
@@ -251,6 +309,16 @@ export async function createMcpServer(
   const assistant = await deps.tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
   const input = readServerInput(body, true);
+  const lookupKey = readLookupKey(body);
+  if (input.credentialSource === "page" && !toolCredentialUrl(input.url)) {
+    throw new BadRequest(["url: enter an HTTPS tool address without a query or fragment"]);
+  }
+  if (
+    input.credentialSource !== "page" &&
+    (input.pageHeaderName !== undefined || input.testKey !== undefined || lookupKey !== undefined)
+  ) {
+    throw new BadRequest(["credentialSource: choose the page as the source for this key"]);
+  }
 
   const authKind = input.authKind ?? "none";
   const server = await deps.tenant.mcp.createServer({
@@ -270,8 +338,25 @@ export async function createMcpServer(
     createdAt: Date.now(),
   });
 
+  if (input.credentialSource === "page") {
+    try {
+      await updateMcpServer(deps, server.id, {
+        credentialSource: "page",
+        pageHeaderName: input.pageHeaderName ?? "Authorization",
+        testKey: input.testKey,
+      });
+    } catch (err) {
+      await deps.tenant.mcp.removeServer(server.id);
+      throw err;
+    }
+  }
+
   try {
-    const tools = await refreshMcpTools(deps, server.id);
+    const tools = await refreshMcpTools(
+      deps,
+      server.id,
+      lookupKey ? { lookupKey, lookupUrl: server.url } : undefined,
+    );
     return { server: await getServerSummary(deps, server.id), tools };
   } catch (err) {
     return {
@@ -318,53 +403,76 @@ export async function updateMcpServer(
         ? await sealSecret(deps.secretKey, input.headerValue)
         : undefined;
 
-  const needsAuthKindCheck = input.authKind === undefined && input.headerName !== undefined;
-  const hasAnyUpdate =
-    input.label !== undefined ||
-    input.url !== undefined ||
-    input.enabled !== undefined ||
-    input.sendConversationContext !== undefined ||
-    input.authKind !== undefined ||
-    input.headerName !== undefined ||
-    secretCiphertext !== undefined;
+  const testSecretCiphertext = input.testKey
+    ? await sealSecret(deps.secretKey, input.testKey)
+    : input.testKey;
 
-  if (!hasAnyUpdate) {
-    return { server: await getServerSummary(deps, serverId) };
-  }
+  let expectedDraftId: string | undefined;
+  for (let attempt = 0; attempt < MAX_DRAFT_UPDATE_ATTEMPTS; attempt++) {
+    const current = attempt === 0 ? existing : await deps.tenant.mcp.getServer(serverId);
+    if (!current) throw new NotFound("mcp server");
+    const draft = await deps.tenant.versions.draft(current.assistantId);
+    if (expectedDraftId !== undefined && draft?.id !== expectedDraftId) {
+      throw new Conflict("The draft changed because it was published. Please try again.");
+    }
+    expectedDraftId = draft?.id;
+    const currentPage = draft?.config.pageToolServers?.find((entry) => entry.serverId === serverId);
+    const usePage = (input.credentialSource ?? (currentPage ? "page" : "owner")) === "page";
+    const url = input.url ?? current.url;
+    if (usePage && !toolCredentialUrl(url)) {
+      throw new BadRequest(["url: enter an HTTPS tool address without a query or fragment"]);
+    }
+    if (!usePage && (input.pageHeaderName !== undefined || input.testKey !== undefined)) {
+      throw new BadRequest(["credentialSource: choose the page as the source for the test key"]);
+    }
+    const nextPage = usePage
+      ? {
+          serverId,
+          url,
+          headerName: input.pageHeaderName ?? currentPage?.headerName ?? "Authorization",
+        }
+      : undefined;
 
-  if (!needsAuthKindCheck) {
-    const headerName = input.authKind === "none" ? null : input.headerName;
-    const updated = await deps.tenant.mcp.updateServer(serverId, {
+    const update: UpdateMcpServerInput = {
       label: input.label,
       url: input.url,
       enabled: input.enabled,
       sendConversationContext: input.sendConversationContext,
       authKind: input.authKind,
-      headerName,
+      headerName:
+        input.authKind === "none" ||
+        (input.headerName !== undefined && current.authKind === "none" && !input.authKind)
+          ? null
+          : input.headerName,
       secretCiphertext,
-    });
-    if (!updated) throw new NotFound("mcp server");
-    return { server: await getServerSummary(deps, serverId) };
-  }
+      testSecretCiphertext,
+      expectedAuthKind:
+        input.authKind === undefined && input.headerName !== undefined
+          ? current.authKind
+          : undefined,
+      expectedUrl: current.url,
+    };
+    // Guard page-related changes against a concurrent edit or publish, including
+    // writes that only change the test key.
+    if (
+      currentPage ||
+      nextPage ||
+      input.credentialSource !== undefined ||
+      (draft && input.url !== undefined)
+    ) {
+      if (!draft) throw new NotFound("assistant draft");
+      const pageToolServers = (draft.config.pageToolServers ?? []).filter(
+        (entry) => entry.serverId !== serverId,
+      );
+      if (nextPage) pageToolServers.push(nextPage);
+      const parsed = parseVersionConfig({ pageToolServers }, draft.config);
+      if (!parsed.ok) throw new BadRequest(parsed.errors);
+      update.draft = { expected: draft, next: parsed.value };
+    }
 
-  let current = existing;
-  for (let attempt = 0; attempt < MAX_DRAFT_UPDATE_ATTEMPTS; attempt++) {
-    const headerName = current.authKind === "none" ? null : input.headerName;
-    const updated = await deps.tenant.mcp.updateServer(serverId, {
-      label: input.label,
-      url: input.url,
-      enabled: input.enabled,
-      sendConversationContext: input.sendConversationContext,
-      headerName,
-      secretCiphertext,
-      expectedAuthKind: current.authKind,
-    });
-    if (updated) {
+    if (await deps.tenant.mcp.updateServer(serverId, update)) {
       return { server: await getServerSummary(deps, serverId) };
     }
-    const fresh = await deps.tenant.mcp.getServer(serverId);
-    if (fresh === null) throw new NotFound("mcp server");
-    current = fresh;
   }
 
   throw new Conflict("The server changed while you were saving. Please try again.");
@@ -417,7 +525,14 @@ export async function deleteMcpServer(
       serverId,
     );
     const removedFromDraftNames = serverAllowedNames.filter((n) => !otherAllowedNames.has(n));
-    const { next, changed } = withoutToolNames(draft.config, removedFromDraftNames);
+    const { next: toolConfig, changed } = withoutToolNames(draft.config, removedFromDraftNames);
+    const next = { ...toolConfig };
+    const pageServers = next.pageToolServers?.filter((entry) => entry.serverId !== serverId);
+    const removedPageServer = pageServers?.length !== next.pageToolServers?.length;
+    if (removedPageServer) {
+      if (pageServers?.length) next.pageToolServers = pageServers;
+      else delete next.pageToolServers;
+    }
 
     const removed = await tenant.mcp.removeServerWithDraft({
       assistantId: server.assistantId,
@@ -426,7 +541,7 @@ export async function deleteMcpServer(
       removedFromDraftNames,
       expectedDraft: draft,
       nextConfig: next,
-      hasDraftChange: changed,
+      hasDraftChange: changed || removedPageServer,
     });
     if (removed) {
       return { deleted: true };
@@ -448,7 +563,8 @@ function targetsEqual(a: McpServerTargetSnapshot, b: McpServerTargetSnapshot): b
     a.url === b.url &&
     a.authKind === b.authKind &&
     a.headerName === b.headerName &&
-    a.secretCiphertext === b.secretCiphertext
+    a.secretCiphertext === b.secretCiphertext &&
+    a.testSecretCiphertext === b.testSecretCiphertext
   );
 }
 
@@ -457,17 +573,54 @@ function targetsEqual(a: McpServerTargetSnapshot, b: McpServerTargetSnapshot): b
  * it no longer offers and reconciles the draft's `allowedTools`. `allowed`
  * survives for tools that are still there.
  */
-export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<McpToolView[]> {
+function readLookupKey(body: unknown): string | undefined {
+  if (!isPlainObject(body) || body.lookupKey === undefined) return undefined;
+  if (!isToolToken(body.lookupKey))
+    throw new BadRequest(["lookupKey: enter a valid key of up to 4096 characters"]);
+  return body.lookupKey;
+}
+
+export async function refreshMcpTools(
+  deps: McpDeps,
+  serverId: string,
+  body?: unknown,
+): Promise<McpToolView[]> {
+  const lookupKey = readLookupKey(body);
+  const lookupUrl = isPlainObject(body) ? toolCredentialUrl(body.lookupUrl) : null;
+  if (lookupKey && lookupUrl === null) {
+    throw new BadRequest(["lookupUrl: enter the exact HTTPS address of this server"]);
+  }
   for (let targetAttempt = 0; targetAttempt < MAX_DRAFT_UPDATE_ATTEMPTS; targetAttempt++) {
     const snapshot = await deps.tenant.mcp.readTargetWithSecretCiphertext(serverId);
     if (snapshot === null) throw new NotFound("mcp server");
 
+    const listingDraft = await deps.tenant.versions.draft(snapshot.assistantId);
+    const pageServer = listingDraft?.config.pageToolServers?.find(
+      (entry) => entry.serverId === serverId,
+    );
+    if (lookupKey !== undefined && !pageServer) {
+      throw new BadRequest(["lookupKey: this server does not use the page's key"]);
+    }
     const target: McpTarget = {
       url: snapshot.url,
       authKind: snapshot.authKind,
       headerName: snapshot.headerName ?? undefined,
     };
-    if (snapshot.authKind === "static_header" && snapshot.secretCiphertext !== null) {
+    if (pageServer) {
+      if (pageServer.url !== snapshot.url || (lookupKey && lookupUrl !== snapshot.url)) {
+        throw new Conflict("The server address changed. Check it and refresh again.");
+      }
+      const token =
+        lookupKey ??
+        (snapshot.testSecretCiphertext !== null
+          ? await openSecret(deps.secretKey, snapshot.testSecretCiphertext)
+          : undefined);
+      if (!token) {
+        throw new McpError("unauthorized", "Enter a one-time key to list this server’s tools.");
+      }
+      target.headerName = pageServer.headerName;
+      target.pageToken = token;
+    } else if (snapshot.authKind === "static_header" && snapshot.secretCiphertext !== null) {
       target.headerValue = await openSecret(deps.secretKey, snapshot.secretCiphertext);
     }
     if (snapshot.sendConversationContext) {
@@ -510,6 +663,13 @@ export async function refreshMcpTools(deps: McpDeps, serverId: string): Promise<
       }
 
       const draft = await deps.tenant.versions.draft(currentTarget.assistantId);
+      const currentPage = draft?.config.pageToolServers?.find(
+        (entry) => entry.serverId === serverId,
+      );
+      if (JSON.stringify(currentPage) !== JSON.stringify(pageServer)) {
+        targetChanged = true;
+        break;
+      }
       if (draft === null) {
         const replaced = await deps.tenant.mcp.replaceServerTools(
           serverId,

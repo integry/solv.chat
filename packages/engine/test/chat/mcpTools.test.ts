@@ -1,6 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { parseChatEventLine } from "@solvchat/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sha256Hex } from "../../src/admin/ingestKeys.js";
 import { createApp } from "../../src/app.js";
 import {
   MAX_TOOL_ALIAS_LENGTH,
@@ -296,6 +297,251 @@ describe("chat/mcpTools", () => {
     await waitOnExecutionContext(ctx);
     return parseSseBody(text);
   }
+
+  it("uses the published visitor key only for its exact target and current request", async () => {
+    const url = "https://mcp.example/rpc";
+    const ownerUrl = "https://owner.example/rpc";
+    const key = "fake-visitor-page-key";
+    const otherKey = "fake-ignored-key";
+    const serverId = "mcp_page";
+    await seedServer(tenantA, {
+      id: serverId,
+      assistantId: "ast_a",
+      url,
+      tools: [{ spec: LOOKUP, allowed: true }],
+    });
+    await seedServer(tenantA, {
+      id: "mcp_owner",
+      assistantId: "ast_a",
+      url: ownerUrl,
+      tools: [{ spec: REFUND, allowed: true }],
+    });
+    const draft = await tenantA.versions.draft("ast_a");
+    if (!draft) throw new Error("Missing draft");
+    await tenantA.versions.updateDraft(
+      "ast_a",
+      {
+        ...draft.config,
+        allowedTools: [LOOKUP.name, REFUND.name],
+        pageToolServers: [{ serverId, url, headerName: "authorization" }],
+      },
+      draft,
+    );
+
+    let echoKey = false;
+    const remote = fakeMcpServer({
+      results: { lookup_order: () => (echoKey ? `Upstream echoed ${key}` : "Order found.") },
+    });
+    const ownerRemote = fakeMcpServer();
+    const seen: LlmRequest[] = [];
+    const call = (name: string) => ({ callId: `call_${name}`, name, input: {} });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const app = createApp(fakeSeams(), {
+      fetch: (input, init) =>
+        String(input) === url ? remote.fetchImpl(input, init) : ownerRemote.fetchImpl(input, init),
+      chat: {
+        embedder,
+        retriever,
+        model: ANTHROPIC_MODELS.fast,
+        provider: scriptedProvider(
+          [
+            { text: "", calls: [call(LOOKUP.name)] },
+            { text: "Before Publish.", calls: [] },
+            { text: "", calls: [call(LOOKUP.name), call(REFUND.name)] },
+            { text: "Order found.", calls: [] },
+            { text: "No matching key.", calls: [] },
+            { text: "No key on the next turn.", calls: [] },
+          ],
+          seen,
+        ),
+      },
+    });
+    const get = (path: string, origin = "https://shop.example") =>
+      app.fetch(
+        new Request(`https://worker.example${path}`, { headers: { origin } }),
+        { ...env, SOLV_SECRET_KEY: SECRET_KEY },
+        createExecutionContext(),
+      );
+    const configPath = "/v1/assistants/pk_shop_a";
+    expect(await (await get(configPath)).json()).not.toHaveProperty("pageToolServerUrls");
+    await askPublic(app, "Lookup", SECRET_KEY, { toolCredentials: { [url]: key } });
+    expect(remote.calls.map((rpc) => rpc.headers.get("authorization"))).toEqual([null, null, null]);
+    remote.calls.length = 0;
+    echoKey = true;
+
+    await tenantA.mcp.updateServer(serverId, {
+      testSecretCiphertext: await sealSecret(SECRET_KEY, "fake-preview-only-key"),
+    });
+    await tenantA.versions.publishDraft("ast_a", draft.id, "ver_page_next", 3000);
+    expect(await (await get(configPath)).json()).toMatchObject({ pageToolServerUrls: [url] });
+    const events = await askPublic(app, "Lookup", SECRET_KEY, {
+      toolCredentials: { [url]: key, [ownerUrl]: otherKey },
+    });
+    expect(remote.calls.map((rpc) => rpc.method)).toEqual([
+      "initialize",
+      "notifications/initialized",
+      "tools/call",
+    ]);
+    expect(remote.calls.map((rpc) => rpc.headers.get("authorization"))).toEqual(
+      Array(3).fill(`Bearer ${key}`),
+    );
+    expect(ownerRemote.calls).toHaveLength(3);
+    expect(ownerRemote.calls.every((rpc) => rpc.headers.get("authorization") === null)).toBe(true);
+    expect(seen[3]?.messages.at(-1)).toMatchObject({
+      role: "tool_results",
+      results: expect.arrayContaining([
+        { callId: "call_lookup_order", content: "Upstream echoed [redacted]", isError: false },
+      ]),
+    });
+
+    const done = events.find((event) => event?.type === "done");
+    if (done?.type !== "done") throw new Error("Expected a completed response");
+    await askPublic(app, "Lookup", SECRET_KEY, {
+      conversationId: done.conversationId,
+      toolCredentials: { [`${url}/`]: key, "https://other.example/rpc": key },
+    });
+    await askPublic(app, "Lookup", SECRET_KEY, { conversationId: done.conversationId });
+    expect(seen.slice(4).map((request) => request.tools?.map((tool) => tool.name))).toEqual([
+      [REFUND.name],
+      [REFUND.name],
+    ]);
+    expect(remote.calls).toHaveLength(3);
+
+    const trace = await get(
+      `/api/admin/conversations/${done.conversationId}/messages/${done.messageId}/trace`,
+    );
+    const report = await get("/api/admin/assistants/ast_a/report");
+    expect(trace.status).toBe(200);
+    expect(report.status).toBe(200);
+    const persisted = [
+      await tenantA.conversations.get(done.conversationId),
+      await tenantA.messages.list(done.conversationId),
+      await trace.json(),
+      await report.json(),
+      await tenantA.mcp.readTargetWithSecretCiphertext(serverId),
+    ];
+    const observed = JSON.stringify({ seen, events, persisted, logs: log.mock.calls });
+    expect(observed).not.toContain(key);
+    expect(observed).not.toContain(otherKey);
+    expect(observed).not.toContain("toolCredentials");
+  });
+
+  it("refuses an MCP redirect even when it stays on the same origin", async () => {
+    const url = "https://mcp.example/rpc";
+    await seedServer(tenantA, {
+      id: "mcp_page",
+      assistantId: "ast_a",
+      url,
+      tools: [{ spec: LOOKUP, allowed: true }],
+    });
+    const fetchImpl = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 307, headers: { location: "/redirected" } }),
+    );
+    const runner = await mcpRunnerFor(
+      {
+        tenant: tenantA,
+        secretKey: SECRET_KEY,
+        fetchImpl,
+        pageServers: [{ serverId: "mcp_page", url, headerName: "X-Visitor-Key" }],
+        credentialContext: { visitor: { [url]: "fake-redirect-key" } },
+      },
+      "ast_a",
+      [LOOKUP.name],
+    );
+    const result = await runner?.run(
+      { name: LOOKUP.name, callId: "call_redirect", input: {} },
+      new AbortController().signal,
+    );
+    expect(result?.isError).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [target, init] = fetchImpl.mock.calls[0] ?? [];
+    expect(String(target)).toBe(url);
+    expect(init?.redirect).toBe("manual");
+    expect(new Headers(init?.headers).get("X-Visitor-Key")).toBe("fake-redirect-key");
+  });
+
+  it("uses only the saved test key in Try it and answer tests", async () => {
+    const url = "https://mcp.example/rpc";
+    const serverId = "mcp_page";
+    const key = "fake-admin-test-key";
+    const ingestKey = "ik_fake_ci_test_key";
+    await tenantA.assistants.setIngestKeyHash("ast_a", await sha256Hex(ingestKey));
+    await seedServer(tenantA, {
+      id: serverId,
+      assistantId: "ast_a",
+      url,
+      tools: [{ spec: LOOKUP, allowed: true }],
+    });
+    const draft = await tenantA.versions.draft("ast_a");
+    if (!draft) throw new Error("Missing draft");
+    await tenantA.versions.updateDraft(
+      "ast_a",
+      {
+        ...draft.config,
+        pageToolServers: [{ serverId, url, headerName: "X-Test-Key" }],
+      },
+      draft,
+    );
+    await tenantA.tests.create({
+      id: "test_lookup",
+      assistantId: "ast_a",
+      question: "Lookup",
+      expectation: { kind: "contains", phrase: "Order" },
+      createdAt: Date.now(),
+    });
+    const remote = fakeMcpServer({ results: { lookup_order: `Order result ${key}` } });
+    const seen: LlmRequest[] = [];
+    const rounds: ScriptRound[] = [
+      { text: "Tools unavailable.", calls: [] },
+      { text: "Tools unavailable.", calls: [] },
+      { text: "Tools unavailable.", calls: [] },
+      ...Array.from({ length: 3 }, () => [
+        { text: "", calls: [{ name: LOOKUP.name, callId: "call_test", input: {} }] },
+        { text: "Order found.", calls: [] },
+      ]).flat(),
+    ];
+    const app = createApp(fakeSeams(), {
+      fetch: remote.fetchImpl,
+      chat: {
+        embedder,
+        retriever,
+        model: ANTHROPIC_MODELS.fast,
+        provider: scriptedProvider(rounds, seen),
+      },
+    });
+    async function runTests(ci = false) {
+      const path = ci ? "/v1/ingest/ast_a/test-runs" : "/api/admin/assistants/ast_a/test-runs";
+      const response = await app.fetch(
+        new Request(`https://worker.example${path}`, {
+          method: "POST",
+          headers: ci
+            ? { authorization: `Bearer ${ingestKey}` }
+            : { origin: "https://worker.example" },
+        }),
+        { ...env, SOLV_SECRET_KEY: SECRET_KEY },
+        createExecutionContext(),
+      );
+      expect(response.status).toBe(ci ? 200 : 201);
+      return await response.json();
+    }
+    await askAdmin(app, "Lookup");
+    expect(await runTests()).toMatchObject({ passed: false });
+    expect(await runTests(true)).toMatchObject({ passed: false });
+    expect(remote.calls).toHaveLength(0);
+    expect(seen.map((request) => request.tools)).toEqual([undefined, undefined, undefined]);
+
+    await tenantA.mcp.updateServer(serverId, {
+      testSecretCiphertext: await sealSecret(SECRET_KEY, key),
+    });
+    const preview = await askAdmin(app, "Lookup");
+    expect(preview.some((event) => event?.type === "tool")).toBe(true);
+    const run = await runTests();
+    expect(run).toMatchObject({ passed: true });
+    const ci = await runTests(true);
+    expect(ci).toMatchObject({ passed: true });
+    expect(remote.calls.map((rpc) => rpc.headers.get("X-Test-Key"))).toEqual(Array(9).fill(key));
+    expect(JSON.stringify({ preview, seen, run, ci })).not.toContain(key);
+  });
 
   it("runs MCP tools end-to-end over /v1/chat, emits mcp tool events, and stores calls without result body", async () => {
     await seedServer(tenantA, {

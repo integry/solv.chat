@@ -165,7 +165,8 @@ from the auth seam and pass it down.
   has no foreign key, so deleting a document keeps the record. See "Reports".
 - `feedback` — message_id, value (`up` | `down`), note.
 - `mcp_servers` — id, assistant_id, label, url, auth_kind (`none` | `static_header`),
-  header_name, secret_ciphertext, enabled, send_conversation_context (default 0;
+  header_name, secret_ciphertext, test_secret_ciphertext (optional encrypted test key),
+  enabled, send_conversation_context (default 0;
   see "Conversation context headers").
 - `mcp_tools` — server_id, name, description, input_schema, allowed (default false).
 - `tests` — id, assistant_id, question, expectation (must-cite URL, must-contain,
@@ -195,7 +196,11 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
   The body also carries a protocol version; the engine refuses a version it does
   not support with an `error` event, and clients ignore event types they do not
   know. Responds with server-sent events: `token`, `citation`, `tool`, `done`,
-  `error` (and `action` from phase 2).
+  `error` (and `action` from phase 2). The optional `toolCredentials` object
+  holds up to 8 raw tokens of up to 4,096 characters each, keyed by the
+  exact HTTPS endpoint URL. It may accompany a new question or continuation.
+  The route hands it only to the per-request MCP runner. Logs, traces,
+  conversations, reports and model requests never receive the field.
 
   An answer that needs a page action pauses rather than waiting on the open
   stream: the engine emits `action` events and then `done` with
@@ -206,7 +211,9 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
 - `POST /v1/feedback` — thumbs up or down on a message.
 - `GET /v1/assistants/:publicKey` — published widget config (title, colours,
   launcher label and shortcut, opening mode, greeting, suggested questions,
-  and `visitorCheck: true` when the visitor check runs).
+  `visitorCheck: true` when the visitor check runs, and `pageToolServerUrls`
+  when the published version has enabled servers that take visitor keys).
+  The widget revalidates the list before sending any held token.
   No secrets, no prompts. The response has an `ETag` for the JSON bytes and
   `Cache-Control: private, max-age=60, must-revalidate, no-transform`. Both
   200 and 304 responses vary on `Origin`. Origin and limit checks happen
@@ -1606,15 +1613,35 @@ stores them with `allowed = false`. Nothing is callable until the owner switches
 a tool on (`allowed = true`) **and** publishes a version whose `allowedTools`
 includes it (the "Try it" pane uses the draft's `allowedTools`).
 
-Every visitor is anonymous, and every tool call runs with the owner's
-credential. The rules that follow from that:
+By default a tool runs with the owner's configured auth (`none` or a static
+header). The admin recommends a read-only token for a shared key. Both owner
+keys and optional test keys are encrypted with `SOLV_SECRET_KEY` (AES-GCM),
+decrypted inside the Worker at call time, and only shown as set or unset.
+
+A server may opt in to a key from the host page. The version's
+`pageToolServers` entries carry the server ID, HTTPS URL and header name
+(default `Authorization`). Draft edits reach visitors on Publish. The URL
+must match the server row exactly, including the origin and path. These are
+public addresses without user info, queries or fragments. A change to the
+server address invalidates older entries and clears the stored test key.
+`Authorization` receives `Bearer <token>` (case-insensitive header name).
+Other headers receive the raw token. MCP requests refuse redirects.
+
+`setToolCredential(url, token)` holds the token in the widget instance's
+memory. Replacement, `null`, and disconnection remove the previous value.
+The widget sends credentials only for URLs in the published public config
+and refuses redirects on credential-bearing chat requests. The MCP runner
+binds a request's token to the matching version entry and server row. The
+server’s tools are omitted for that turn if its token is absent. Direct
+echoes of the token in tool output are redacted before the model receives it.
+
+Listing tools on add or Refresh, Try it, and answer tests use the draft and
+the server’s separate encrypted test key. The tenant-scoped MCP target read
+resolves the test ciphertext alongside the matching endpoint. With no saved
+test key, listing uses an optional one-time key only for that discovery.
+Try it and answer tests omit those tools until a test key is saved.
 
 - Tools are off by default, per tool.
-- The admin shows a standing warning that visitors act with this credential and
-  recommends a read-only token.
-- v1 auth is `none` or a static header. The secret is encrypted with a key from
-  a Worker secret (`SOLV_SECRET_KEY`, AES-GCM), decrypted only inside the Worker at
-  call time, and never returned by any API — the admin shows "set" or "not set".
 - Tool results are untrusted input. They are passed to the model as data, never
   concatenated into the system prompt, and are capped in size.
 - Per-conversation caps on the number of tool calls and on wall time.
@@ -1622,8 +1649,8 @@ credential. The rules that follow from that:
 
 ### Conversation context headers
 
-Because every call comes from the Worker, a server cannot tell visitors apart,
-so one visitor could use up a budget the server shares between all of them.
+When every call carries the same credential, a server needs a separate way
+to track each visitor’s share of a common budget.
 Each server has a "Send conversation context" setting (`sendConversationContext`
 in the admin API and `solv.config.json`, `send_conversation_context` in D1),
 off for existing and new servers. It belongs to the server, not to a version:
@@ -2084,8 +2111,9 @@ Install
   driven by a field table (`VERSION_DIFF_FIELDS`: path, label, screen, kind
   `text` / `longText` / `list` / `colour` / `boolean` / `secret`); a test walks
   the version schema and fails for a setting with no entry. A `secret` setting
-  only ever reads "Credential replaced" (or added, removed), never its value;
-  no version setting is one today, as tool credentials live on the tool server.
+  only ever reads "Credential replaced" (or added, removed). Tool keys stay
+  on the tool server. The page-supplied mode and header are
+  versioned and appear in the Tools changes.
   Origins and tool names are shown in full. A list whose kept items change
   order shows its full old and new order, also when items were added or
   removed. Publish reads the draft from the draft endpoint, not from History.

@@ -112,6 +112,64 @@ describe("<solv-chat>", () => {
     expect(sessionStorage.length).toBe(1); // Only the open conversation.
   });
 
+  it("sends only published page keys, replaces and clears them, and forgets them on removal", async () => {
+    const server = "https://tools.example/mcp";
+    const calls: RequestInit[] = [];
+    let published = [server];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/v1/chat") && init) {
+        calls.push(init);
+        return new Response(
+          sseStream(['event: done\ndata: {"messageId":"msg_1","conversationId":"conv_1"}\n\n']),
+        );
+      }
+      return Response.json({ pageToolServerUrls: published });
+    }) as typeof fetch;
+
+    const el = document.createElement("solv-chat");
+    el.setAttribute("assistant", "pk_test_123");
+    el.setToolCredential(server, "fake-visitor-first");
+    el.setToolCredential("https://tools.example/mcp/other", "fake-unlisted");
+    mountWithIntent(el);
+    await flushAsync();
+    const root = shadow(el);
+    mustQuery<HTMLButtonElement>(root, ".solv-launcher").click();
+    async function ask() {
+      mustQuery<HTMLTextAreaElement>(root, "#solv-input").value = "Where is my order?";
+      mustQuery<HTMLFormElement>(root, ".solv-form").requestSubmit();
+      await flushAsync();
+    }
+    await ask();
+    expect(calls[0]?.redirect).toBe("error");
+    expect(JSON.parse(String(calls[0]?.body)).toolCredentials).toEqual({
+      [server]: "fake-visitor-first",
+    });
+    el.setToolCredential(server, "fake-visitor-replaced");
+    await ask();
+    expect(JSON.parse(String(calls[1]?.body)).toolCredentials).toEqual({
+      [server]: "fake-visitor-replaced",
+    });
+    published = [];
+    await ask();
+    expect(JSON.parse(String(calls[2]?.body))).not.toHaveProperty("toolCredentials");
+    published = [server];
+    el.setToolCredential(server, null);
+    await ask();
+    expect(JSON.parse(String(calls[3]?.body))).not.toHaveProperty("toolCredentials");
+    el.setToolCredential(server, "fake-visitor-disconnected");
+    el.remove();
+    mountWithIntent(el);
+    await flushAsync();
+    await ask();
+    expect(JSON.parse(String(calls[4]?.body))).not.toHaveProperty("toolCredentials");
+    expect(root.textContent).not.toContain("fake-visitor-");
+    for (const storage of [localStorage, sessionStorage]) {
+      for (let i = 0; i < storage.length; i++) {
+        expect(storage.getItem(storage.key(i) ?? "")).not.toContain("fake-visitor-");
+      }
+    }
+  });
+
   it("streams tokens in order, sends CHAT_PROTOCOL_VERSION, ignores unknown events, and renders safe citations", async () => {
     const requests: Array<{ url: string; init?: RequestInit | undefined }> = [];
 

@@ -348,6 +348,8 @@ export async function runAnswerTests(
       tenant: deps.tenant,
       secretKey: deps.secretKey ?? "",
       fetchImpl: deps.fetchImpl,
+      pageServers: draft.config.pageToolServers,
+      credentialContext: { preview: true },
     },
     assistantId,
     draft.config.allowedTools,

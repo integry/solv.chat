@@ -1,8 +1,8 @@
-import type { VersionConfig } from "@solvchat/core";
+import type { McpAuthKind, VersionConfig } from "@solvchat/core";
 import { prepare, prepareInsert, safeJsonObject } from "./sql.js";
 import { expectedVersionConfig, type VersionRow } from "./versions.js";
 
-export type McpAuthKind = "none" | "static_header";
+export type { McpAuthKind } from "@solvchat/core";
 
 interface ServerDbRow {
   id: string;
@@ -13,6 +13,7 @@ interface ServerDbRow {
   auth_kind: McpAuthKind;
   header_name: string | null;
   secret_ciphertext: string | null;
+  test_secret_ciphertext: string | null;
   enabled: number;
   send_conversation_context: number;
   created_at: number;
@@ -56,6 +57,7 @@ export interface McpServerRow {
   authKind: McpAuthKind;
   headerName: string | null;
   hasSecret: boolean;
+  hasTestSecret: boolean;
   enabled: boolean;
   /** Requests to this server carry the `Solv-*` conversation context headers. */
   sendConversationContext: boolean;
@@ -74,6 +76,7 @@ export interface McpServerTargetSnapshot {
   authKind: McpAuthKind;
   headerName: string | null;
   secretCiphertext: string | null;
+  testSecretCiphertext: string | null;
   sendConversationContext: boolean;
 }
 
@@ -128,6 +131,9 @@ export interface UpdateMcpServerInput {
   headerName?: string | null | undefined;
   secretCiphertext?: string | null | undefined;
   expectedAuthKind?: McpAuthKind | undefined;
+  expectedUrl?: string | undefined;
+  testSecretCiphertext?: string | null | undefined;
+  draft?: { expected: VersionRow; next: VersionConfig } | undefined;
 }
 
 export interface UpsertMcpToolInput {
@@ -172,7 +178,7 @@ export interface RemoveServerWithDraftInput {
 }
 
 const SERVER_COLUMNS =
-  "id, org_id, assistant_id, label, url, auth_kind, header_name, secret_ciphertext, enabled, send_conversation_context, created_at";
+  "id, org_id, assistant_id, label, url, auth_kind, header_name, secret_ciphertext, test_secret_ciphertext, enabled, send_conversation_context, created_at";
 const TOOL_COLUMNS = "id, org_id, server_id, name, description, input_schema, allowed";
 
 const mapServer = (row: ServerDbRow): McpServerRow => ({
@@ -184,6 +190,7 @@ const mapServer = (row: ServerDbRow): McpServerRow => ({
   authKind: row.auth_kind,
   headerName: row.header_name,
   hasSecret: row.secret_ciphertext !== null,
+  hasTestSecret: row.test_secret_ciphertext !== null,
   enabled: row.enabled === 1,
   sendConversationContext: row.send_conversation_context === 1,
   createdAt: row.created_at,
@@ -250,18 +257,22 @@ function appendOtherServerAllowedGuards(
 }
 
 function appendTargetMatchGuard(params: unknown[], target: McpServerTargetSnapshot): string {
-  params.push(target.url, target.authKind, target.headerName, target.secretCiphertext);
-  const urlIdx = params.length - 3;
-  const authIdx = params.length - 2;
-  const headerIdx = params.length - 1;
-  const secretIdx = params.length;
+  const urlIdx = params.length + 1;
+  params.push(
+    target.url,
+    target.authKind,
+    target.headerName,
+    target.secretCiphertext,
+    target.testSecretCiphertext,
+  );
   return `EXISTS (
     SELECT 1 FROM mcp_servers
      WHERE org_id = ?1 AND id = ?2
        AND url = ?${urlIdx}
-       AND auth_kind = ?${authIdx}
-       AND header_name IS ?${headerIdx}
-       AND secret_ciphertext IS ?${secretIdx}
+       AND auth_kind = ?${urlIdx + 1}
+       AND header_name IS ?${urlIdx + 2}
+       AND secret_ciphertext IS ?${urlIdx + 3}
+       AND test_secret_ciphertext IS ?${urlIdx + 4}
   )`;
 }
 
@@ -282,7 +293,7 @@ export function mcpFor(db: D1Database, orgId: string) {
       const res = await prepare(
         db,
         `SELECT s.id, s.org_id, s.assistant_id, s.label, s.url, s.auth_kind, s.header_name,
-                s.secret_ciphertext, s.enabled, s.send_conversation_context, s.created_at,
+                s.secret_ciphertext, s.test_secret_ciphertext, s.enabled, s.send_conversation_context, s.created_at,
                 COUNT(t.id) AS tool_count,
                 COALESCE(SUM(t.allowed), 0) AS allowed_count
            FROM mcp_servers s
@@ -310,7 +321,7 @@ export function mcpFor(db: D1Database, orgId: string) {
       const row = await prepare(
         db,
         `SELECT s.id, s.org_id, s.assistant_id, s.label, s.url, s.auth_kind, s.header_name,
-                s.secret_ciphertext, s.enabled, s.send_conversation_context, s.created_at,
+                s.secret_ciphertext, s.test_secret_ciphertext, s.enabled, s.send_conversation_context, s.created_at,
                 COUNT(t.id) AS tool_count,
                 COALESCE(SUM(t.allowed), 0) AS allowed_count
            FROM mcp_servers s
@@ -348,7 +359,7 @@ export function mcpFor(db: D1Database, orgId: string) {
     async readTargetWithSecretCiphertext(id: string): Promise<McpServerTargetSnapshot | null> {
       const row = await prepare(
         db,
-        `SELECT id, assistant_id, url, auth_kind, header_name, secret_ciphertext,
+        `SELECT id, assistant_id, url, auth_kind, header_name, secret_ciphertext, test_secret_ciphertext,
                 send_conversation_context
            FROM mcp_servers
           WHERE org_id = ?1 AND id = ?2`,
@@ -361,6 +372,7 @@ export function mcpFor(db: D1Database, orgId: string) {
           auth_kind: McpAuthKind;
           header_name: string | null;
           secret_ciphertext: string | null;
+          test_secret_ciphertext: string | null;
           send_conversation_context: number;
         }>();
       if (!row) return null;
@@ -371,6 +383,7 @@ export function mcpFor(db: D1Database, orgId: string) {
         authKind: row.auth_kind,
         headerName: row.header_name,
         secretCiphertext: row.secret_ciphertext,
+        testSecretCiphertext: row.test_secret_ciphertext,
         sendConversationContext: row.send_conversation_context === 1,
       };
     },
@@ -421,6 +434,7 @@ export function mcpFor(db: D1Database, orgId: string) {
         authKind: input.authKind,
         headerName,
         hasSecret: input.secretCiphertext !== null,
+        hasTestSecret: false,
         enabled: input.enabled,
         sendConversationContext,
         createdAt: input.createdAt,
@@ -436,7 +450,17 @@ export function mcpFor(db: D1Database, orgId: string) {
       };
 
       if (input.label !== undefined) pushSet("label", input.label);
-      if (input.url !== undefined) pushSet("url", input.url);
+      if (input.url !== undefined) {
+        pushSet("url", input.url);
+        if (input.testSecretCiphertext === undefined) {
+          sets.push(
+            `test_secret_ciphertext = CASE WHEN url = ?${params.length} THEN test_secret_ciphertext END`,
+          );
+        }
+      }
+      if (input.testSecretCiphertext !== undefined) {
+        pushSet("test_secret_ciphertext", input.testSecretCiphertext);
+      }
       if (input.enabled !== undefined) pushSet("enabled", input.enabled ? 1 : 0);
       if (input.sendConversationContext !== undefined) {
         pushSet("send_conversation_context", input.sendConversationContext ? 1 : 0);
@@ -448,13 +472,44 @@ export function mcpFor(db: D1Database, orgId: string) {
       }
 
       if (sets.length === 0) {
-        return (await this.getServer(id)) !== null;
+        if (!input.draft) return (await this.getServer(id)) !== null;
+        sets.push("url = url");
       }
 
       let where = "org_id = ?1 AND id = ?2";
       if (input.expectedAuthKind !== undefined) {
         params.push(input.expectedAuthKind);
         where += ` AND auth_kind = ?${params.length}`;
+      }
+
+      if (input.expectedUrl !== undefined) {
+        params.push(input.expectedUrl);
+        where += ` AND url = ?${params.length}`;
+      }
+      if (input.draft) {
+        const { expected, next } = input.draft;
+        const guardArgs = [
+          expected.assistantId,
+          expected.id,
+          expectedVersionConfig(expected),
+        ] as const;
+        const index = params.length;
+        params.push(...guardArgs);
+        where += ` AND EXISTS (
+          SELECT 1 FROM assistant_versions
+           WHERE org_id = ?1 AND assistant_id = ?${index + 1} AND id = ?${index + 2}
+             AND state = 'draft' AND config = ?${index + 3}
+        )`;
+        const [server, draft] = await db.batch([
+          prepare(db, `UPDATE mcp_servers SET ${sets.join(", ")} WHERE ${where}`).bind(...params),
+          prepare(
+            db,
+            `UPDATE assistant_versions SET config = ?5
+            WHERE org_id = ?1 AND assistant_id = ?2 AND id = ?3 AND config = ?4
+              AND state = 'draft' AND changes() = 1`,
+          ).bind(orgId, ...guardArgs, JSON.stringify(next)),
+        ]);
+        return server?.meta.changes === 1 && draft?.meta.changes === 1;
       }
 
       const res = await prepare(db, `UPDATE mcp_servers SET ${sets.join(", ")} WHERE ${where}`)

@@ -1,3 +1,4 @@
+import { isPlainObject } from "@solvchat/core";
 import { type RunDeps, replaceTests, runAnswerTests } from "../admin/answerTests.js";
 import { BadRequest, Conflict, NotFound, readJsonBody } from "../admin/errors.js";
 import { applyMcpServerSettings, listMcpServerSettings } from "../admin/mcp.js";
@@ -56,11 +57,16 @@ export async function ingestRoutes(
     if (resource === "config") {
       if (request.method === "GET") {
         const draft = await getDraft(tenant, scope.assistantId);
-        return Response.json({ config: draft.config });
+        const { pageToolServers: _pageToolServers, ...config } = draft.config;
+        return Response.json({ config });
       }
       const body = await readJsonBody(request);
+      if (isPlainObject(body) && body.pageToolServers !== undefined) {
+        throw new BadRequest(["pageToolServers: change where keys come from on the Tools screen"]);
+      }
       const draft = await updateDraft(tenant, scope.assistantId, body);
-      return Response.json({ config: draft.config });
+      const { pageToolServers: _pageToolServers, ...config } = draft.config;
+      return Response.json({ config });
     }
 
     if (resource === "tests") {

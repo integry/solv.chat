@@ -1,7 +1,8 @@
-import { type FormEvent, useRef, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, deleteJson, patchJson, postJson } from "../api/client.js";
 import type { McpServerSummary, McpToolView } from "../api/types.js";
 import { useResource } from "../api/useResource.js";
+import { useAssistantMutation } from "../shell/useAssistantMutations.js";
 import { ConfirmDialog } from "../ui/Dialog.js";
 import { EmptyState } from "../ui/EmptyState.js";
 import { ErrorState } from "../ui/ErrorState.js";
@@ -22,9 +23,8 @@ export interface ToolsProps {
 function CredentialWarning() {
   return (
     <p className="warning-banner" role="note">
-      Anyone who chats with your assistant can make it use these tools, and every tool runs with the
-      credential you give here. Use a token that can only read, never one that can change, buy or
-      delete anything.
+      Anyone who chats with your assistant can make it use the tools you allow. For a shared key you
+      enter here, use a token that can only read, never one that can change, buy or delete anything.
     </p>
   );
 }
@@ -40,6 +40,8 @@ function FieldError({ message }: { message: string | undefined }) {
 
 interface CredentialFieldsProps {
   idPrefix: string;
+  pageSupplied: boolean;
+  onPageSuppliedChange: (next: boolean) => void;
   needsCredential: boolean;
   onNeedsCredentialChange: (next: boolean) => void;
   headerName: string;
@@ -53,6 +55,8 @@ interface CredentialFieldsProps {
 
 function CredentialFields({
   idPrefix,
+  pageSupplied,
+  onPageSuppliedChange,
   needsCredential,
   onNeedsCredentialChange,
   headerName,
@@ -68,17 +72,38 @@ function CredentialFields({
 
   return (
     <>
-      <label className="checkbox-label">
-        <input
-          type="checkbox"
-          checked={needsCredential}
+      <div className="field">
+        <label htmlFor={`${idPrefix}-key-source`}>Where the key comes from</label>
+        <select
+          id={`${idPrefix}-key-source`}
+          className="select"
+          value={pageSupplied ? "page" : "owner"}
           disabled={busy}
-          onChange={(e) => onNeedsCredentialChange(e.target.checked)}
-        />
-        <span>This server needs a key</span>
-      </label>
+          onChange={(e) => onPageSuppliedChange(e.target.value === "page")}
+        >
+          <option value="owner">A key I enter here</option>
+          <option value="page">The page supplies each visitor's key</option>
+        </select>
+        {pageSupplied && (
+          <span className="field-hint">
+            The assistant can do whatever each visitor's key allows. Your page must give it a
+            short-lived key for that visitor. This takes effect for visitors when you publish.
+          </span>
+        )}
+      </div>
+      {!pageSupplied && (
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={needsCredential}
+            disabled={busy}
+            onChange={(e) => onNeedsCredentialChange(e.target.checked)}
+          />
+          <span>This server needs a key</span>
+        </label>
+      )}
 
-      {needsCredential && (
+      {(pageSupplied || needsCredential) && (
         <>
           <div className="field">
             <label htmlFor={headerNameId}>Header name</label>
@@ -89,10 +114,14 @@ function CredentialFields({
               disabled={busy}
               onChange={(e) => onHeaderNameChange(e.target.value)}
             />
-            <FieldError message={fieldErrors.headerName} />
+            <FieldError
+              message={pageSupplied ? fieldErrors.pageHeaderName : fieldErrors.headerName}
+            />
           </div>
           <div className="field">
-            <label htmlFor={headerValueId}>{hasExistingSecret ? "New key" : "Key"}</label>
+            <label htmlFor={headerValueId}>
+              {pageSupplied ? "Test key (optional)" : hasExistingSecret ? "New key" : "Key"}
+            </label>
             {/* A password field, never populated from the server: the API does
                 not return the value, and there is nothing to show back. */}
             <input
@@ -105,9 +134,11 @@ function CredentialFields({
               onChange={(e) => onHeaderValueChange(e.target.value)}
             />
             <span className="field-hint">
-              Stored encrypted. It is never shown again, so keep your own copy.
+              {pageSupplied
+                ? "Stored encrypted. Used to list tools, try this assistant and run answer tests."
+                : "Stored encrypted. It is never shown again, so keep your own copy."}
             </span>
-            <FieldError message={fieldErrors.headerValue} />
+            <FieldError message={pageSupplied ? fieldErrors.testKey : fieldErrors.headerValue} />
           </div>
         </>
       )}
@@ -124,6 +155,8 @@ function ServerForm({
 }) {
   const [label, setLabel] = useState("");
   const [url, setUrl] = useState("");
+  const mutation = useAssistantMutation(assistantId);
+  const [pageSupplied, setPageSupplied] = useState(false);
   const [needsCredential, setNeedsCredential] = useState(false);
   const [headerName, setHeaderName] = useState("Authorization");
   const [headerValue, setHeaderValue] = useState("");
@@ -142,17 +175,30 @@ function ServerForm({
     const submittedValue = headerValue;
     setHeaderValue("");
     try {
-      const res = await postJson<{ server: McpServerSummary; refreshError?: string }>(
-        `/api/admin/assistants/${assistantId}/mcp-servers`,
-        {
-          label,
-          url,
-          authKind: needsCredential ? "static_header" : "none",
-          ...(needsCredential ? { headerName, headerValue: submittedValue } : {}),
-        },
+      const saved = await mutation.run("saving", () =>
+        postJson<{ server: McpServerSummary; refreshError?: string }>(
+          `/api/admin/assistants/${assistantId}/mcp-servers`,
+          {
+            label,
+            url,
+            ...(pageSupplied
+              ? {
+                  credentialSource: "page",
+                  pageHeaderName: headerName,
+                  ...(submittedValue ? { testKey: submittedValue } : {}),
+                }
+              : {
+                  authKind: needsCredential ? "static_header" : "none",
+                  ...(needsCredential ? { headerName, headerValue: submittedValue } : {}),
+                }),
+          },
+        ),
       );
+      if (!saved.ran) return;
+      const res = saved.value;
       setLabel("");
       setUrl("");
+      setPageSupplied(false);
       setNeedsCredential(false);
       setHeaderName("Authorization");
       onAdded(res.server, res.refreshError);
@@ -209,6 +255,12 @@ function ServerForm({
 
       <CredentialFields
         idPrefix="tool"
+        pageSupplied={pageSupplied}
+        onPageSuppliedChange={(next) => {
+          setPageSupplied(next);
+          setHeaderName("Authorization");
+          setHeaderValue("");
+        }}
         needsCredential={needsCredential}
         onNeedsCredentialChange={setNeedsCredential}
         headerName={headerName}
@@ -245,18 +297,24 @@ function EditServerForm({
   onSaved: (sessionId: number) => void;
   onCancel: (sessionId: number) => void;
 }) {
+  const mutation = useAssistantMutation(server.assistantId);
   const initialRef = useRef({
+    pageSupplied: server.credentialSource === "page",
     label: server.label,
     url: server.url,
     enabled: server.enabled,
     needsCredential: server.authKind === "static_header",
     headerName: server.headerName ?? "Authorization",
+    pageHeaderName: server.pageHeaderName ?? "Authorization",
   });
   const [label, setLabel] = useState(server.label);
   const [url, setUrl] = useState(server.url);
   const [enabled, setEnabled] = useState(server.enabled);
-  const [needsCredential, setNeedsCredential] = useState(server.authKind === "static_header");
-  const [headerName, setHeaderName] = useState(server.headerName ?? "Authorization");
+  const [pageSupplied, setPageSupplied] = useState(initialRef.current.pageSupplied);
+  const [needsCredential, setNeedsCredential] = useState(initialRef.current.needsCredential);
+  const [headerName, setHeaderName] = useState(
+    pageSupplied ? initialRef.current.pageHeaderName : initialRef.current.headerName,
+  );
   const [headerValue, setHeaderValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -275,7 +333,13 @@ function EditServerForm({
     if (label !== initial.label) patch.label = label;
     if (url !== initial.url) patch.url = url;
     if (enabled !== initial.enabled) patch.enabled = enabled;
-    if (needsCredential !== initial.needsCredential) {
+    if (pageSupplied !== initial.pageSupplied) {
+      patch.credentialSource = pageSupplied ? "page" : "owner";
+    }
+    if (pageSupplied) {
+      if (headerName !== initial.pageHeaderName) patch.pageHeaderName = headerName;
+      if (submittedValue !== "") patch.testKey = submittedValue;
+    } else if (needsCredential !== initial.needsCredential) {
       if (needsCredential) {
         patch.authKind = "static_header";
         patch.headerName = headerName;
@@ -289,8 +353,10 @@ function EditServerForm({
       if (submittedValue !== "") patch.headerValue = submittedValue;
     }
     try {
-      await patchJson(`/api/admin/mcp-servers/${server.id}`, patch);
-      onSaved(sessionId);
+      const saved = await mutation.run("saving", () =>
+        patchJson(`/api/admin/mcp-servers/${server.id}`, patch),
+      );
+      if (saved.ran) onSaved(sessionId);
     } catch (err) {
       if (err instanceof ApiError) {
         setFieldErrors(err.fields);
@@ -310,8 +376,13 @@ function EditServerForm({
     setFormError(null);
     setHeaderValue("");
     try {
-      await patchJson(`/api/admin/mcp-servers/${server.id}`, { headerValue: "" });
-      onSaved(sessionId);
+      const saved = await mutation.run("saving", () =>
+        patchJson(
+          `/api/admin/mcp-servers/${server.id}`,
+          pageSupplied ? { testKey: "" } : { headerValue: "" },
+        ),
+      );
+      if (saved.ran) onSaved(sessionId);
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : "Could not remove the key.");
     } finally {
@@ -359,6 +430,12 @@ function EditServerForm({
 
       <CredentialFields
         idPrefix={editPrefix}
+        pageSupplied={pageSupplied}
+        onPageSuppliedChange={(next) => {
+          setPageSupplied(next);
+          setHeaderName(next ? initialRef.current.pageHeaderName : initialRef.current.headerName);
+          setHeaderValue("");
+        }}
         needsCredential={needsCredential}
         onNeedsCredentialChange={setNeedsCredential}
         headerName={headerName}
@@ -367,7 +444,7 @@ function EditServerForm({
         onHeaderValueChange={setHeaderValue}
         busy={busy}
         fieldErrors={fieldErrors}
-        hasExistingSecret={server.hasSecret}
+        hasExistingSecret={pageSupplied ? server.hasTestSecret === true : server.hasSecret}
       />
 
       {formError && (
@@ -380,14 +457,16 @@ function EditServerForm({
         <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !label || !url}>
           {busy ? "Saving…" : "Save"}
         </button>
-        {server.hasSecret && (
+        {(pageSupplied
+          ? server.credentialSource === "page" && server.hasTestSecret
+          : server.hasSecret) && (
           <button
             type="button"
             className="btn btn-secondary btn-sm"
             disabled={busy}
             onClick={() => void handleRemoveCredential()}
           >
-            Remove credential
+            {pageSupplied ? "Remove test key" : "Remove credential"}
           </button>
         )}
         <button
@@ -560,11 +639,66 @@ function ToolList({
   );
 }
 
+function OneTimeKeyForm({
+  onSubmitKey,
+  onCancel,
+  busy,
+}: {
+  onSubmitKey: (key: string) => void;
+  onCancel: () => void;
+  busy: boolean;
+}) {
+  const [key, setKey] = useState("");
+  return (
+    <form
+      className="switcher-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (busy || !key) return;
+        onSubmitKey(key);
+        setKey("");
+      }}
+    >
+      <div className="field">
+        <label htmlFor="tool-lookup-key">One-time key</label>
+        <input
+          id="tool-lookup-key"
+          type="password"
+          autoComplete="off"
+          value={key}
+          disabled={busy}
+          onChange={(event) => setKey(event.target.value)}
+        />
+        <p className="field-hint">Used to list this server's tools and then discarded.</p>
+      </div>
+      <div className="actions">
+        <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !key}>
+          List tools
+        </button>
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          disabled={busy}
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
 export function Tools({ assistantId }: ToolsProps) {
   const serversRes = useResource<{ servers: McpServerSummary[] }>(
     `/api/admin/assistants/${assistantId}/mcp-servers`,
   );
+  const mutation = useAssistantMutation(assistantId);
+  const { reload } = serversRes;
+  useEffect(() => {
+    if (mutation.tick > 0) reload();
+  }, [mutation.tick, reload]);
   const servers = serversRes.value?.servers ?? [];
+  const [lookupServerId, setLookupServerId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editingSession, setEditingSession] = useState<{
     serverId: string;
@@ -599,12 +733,21 @@ export function Tools({ assistantId }: ToolsProps) {
     );
   }
 
-  async function refresh(serverId: string) {
+  async function refresh(server: McpServerSummary, lookupKey?: string) {
     if (busyId !== null) return;
+    const serverId = server.id;
+    if (server.credentialSource === "page" && !server.hasTestSecret && !lookupKey) {
+      setLookupServerId(serverId);
+      return;
+    }
     setBusyId(serverId);
     setActionError(null);
     try {
-      await postJson(`/api/admin/mcp-servers/${serverId}/refresh`);
+      await postJson(
+        `/api/admin/mcp-servers/${serverId}/refresh`,
+        lookupKey ? { lookupKey, lookupUrl: server.url } : undefined,
+      );
+      setLookupServerId(null);
       setRefreshCounts((prev) => ({ ...prev, [serverId]: (prev[serverId] ?? 0) + 1 }));
       setConnection((prev) => ({ ...prev, [serverId]: { ok: true } }));
       serversRes.reload();
@@ -706,7 +849,13 @@ export function Tools({ assistantId }: ToolsProps) {
                         <StatusBadge tone="danger">Could not connect</StatusBadge>
                       ))}
                     <span className="badge">
-                      {server.hasSecret ? "Credential: set" : "Credential: not set"}
+                      {server.credentialSource === "page"
+                        ? server.hasTestSecret
+                          ? "Visitor’s key · test key set"
+                          : "Visitor’s key"
+                        : server.hasSecret
+                          ? "Credential: set"
+                          : "Credential: not set"}
                     </span>
                     <span className={server.enabled ? "badge badge-published" : "badge"}>
                       {server.enabled ? "Enabled" : "Disabled"}
@@ -728,7 +877,7 @@ export function Tools({ assistantId }: ToolsProps) {
                     type="button"
                     className="btn btn-secondary btn-sm"
                     disabled={busyId === server.id}
-                    onClick={() => void refresh(server.id)}
+                    onClick={() => void refresh(server)}
                   >
                     {busyId === server.id ? "Refreshing…" : "Refresh"}
                   </button>
@@ -781,6 +930,15 @@ export function Tools({ assistantId }: ToolsProps) {
                 </Notice>
               )}
 
+              {lookupServerId === server.id && (
+                <OneTimeKeyForm
+                  key={server.id}
+                  onSubmitKey={(key) => void refresh(server, key)}
+                  onCancel={() => setLookupServerId(null)}
+                  busy={busyId === server.id}
+                />
+              )}
+
               {editingSession?.serverId === server.id && (
                 <EditServerForm
                   key={`${server.id}-${editingSession.sessionId}`}
@@ -824,6 +982,8 @@ export function Tools({ assistantId }: ToolsProps) {
           }
           // Show what was found straight away: the tools, off, ready to switch on.
           setExpandedId(server.id);
+          if (server.credentialSource === "page" && !server.hasTestSecret)
+            setLookupServerId(server.id);
           serversRes.reload();
         }}
       />

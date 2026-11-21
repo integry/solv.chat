@@ -250,15 +250,39 @@ The schedule is driven by the cron trigger in `packages/engine/wrangler.jsonc` (
 
 ## 5. Tools (optional)
 
-Open **Tools** and add an MCP server by URL (Streamable HTTP over `https:`). Every tool on a newly added server starts off, because every tool call runs with the credential you give — a visitor asking a question is what triggers it. **Use a token that can only read.**
+Open **Tools** and add an MCP server by URL (Streamable HTTP over `https:`). Every tool on a newly added server starts off. A visitor's question can trigger any tool you switch on. For a shared key you enter in Tools, **use a token that can only read.**
 
 A tool runs for visitors only when both are true: you switched it on under **Tools**, **and** you clicked **Publish** afterwards. Switching a tool on updates your draft (so you can try it in the "Try it" pane); **Publish** is what reaches visitors.
 
 If the server needs a key, enter the header name it expects and the key value. It is stored encrypted with `SOLV_SECRET_KEY` and never shown again, so keep your own copy. If you rotate `SOLV_SECRET_KEY`, stored tool credentials become unreadable until you re-enter them on the **Tools** screen.
 
+### Use each visitor’s own key
+
+On the server’s card under **Tools**, choose **The page supplies each visitor's key** under **Where the key comes from**. Enter the header your server expects. The default is `Authorization`, which sends `Bearer <token>`. A custom header receives the token as entered. Save and **Publish** to turn the mode on for visitors.
+
+Use the same HTTPS address on the page and in Tools, including its exact origin and path. Use an address without a query or fragment and keep secrets out of the address. Wait for the widget to load, then set the signed-in visitor’s token. Call the method again when you renew the token, and pass `null` when the visitor signs out.
+
+```js
+await customElements.whenDefined("solv-chat");
+const chat = document.querySelector("solv-chat");
+const serverUrl = "https://tools.example.com/mcp";
+
+chat.setToolCredential(serverUrl, visitorToken);
+// On renewal:
+chat.setToolCredential(serverUrl, renewedVisitorToken);
+// On sign-out:
+chat.setToolCredential(serverUrl, null);
+```
+
+The widget holds the token in memory and includes it in chat requests only for a server the published assistant marks as page-supplied. The Worker uses it only for that server’s tool calls during that request and refuses redirects. If the token is missing, the assistant answers without that server’s tools.
+
+Issue short-lived tokens scoped to the visitor and the operations your app intends to allow. The assistant can do whatever the token allows. Keep your own authorization checks on the server and require confirmation for operations that need the visitor’s approval.
+
+Optionally save a **Test key** for tool listing, the **Try it** pane, and answer tests (including **Publish** and `solv test`). The Worker encrypts it with `SOLV_SECRET_KEY` and uses it only for those paths. Without a saved test key, Tools asks for a one-time key to list the tools and discards it afterwards. Try it and answer tests omit that server’s tools until you save a test key.
+
 ### Send conversation context
 
-Every tool call comes from your Worker, so a tool server sees all your visitors as one caller. If the server limits or tracks work per visitor, switch on **Send conversation context** on that server's card under **Tools** (it is off for every server until you do, and takes effect at once; it is not part of Publish). Each request the engine then makes to that server for a visitor's chat (`initialize`, `tools/list` and `tools/call`) carries three headers:
+Every tool call comes from your Worker. With a shared key, the tool server sees your visitors as one caller. If the server limits or tracks work per visitor, switch on **Send conversation context** on that server's card under **Tools** (it is off for every server until you do, and takes effect at once; it is not part of Publish). Each request the engine then makes to that server for a visitor's chat (`initialize`, `tools/list` and `tools/call`) carries three headers:
 
 | Header                 | Value                                                         |
 | ---------------------- | ------------------------------------------------------------- |
