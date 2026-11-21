@@ -96,6 +96,7 @@ describe("solv apply", () => {
         title: "Custom Support",
         accentColor: "#00aa00",
         position: "left" as const,
+        allowExpand: true,
       },
       limits: { dailyCostCapMicros: 500_000 },
       allowedTools: ["search_docs"],

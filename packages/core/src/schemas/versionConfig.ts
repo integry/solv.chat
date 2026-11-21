@@ -38,6 +38,12 @@ export interface WidgetConfig {
   title: string;
   accentColor: string;
   position: WidgetPosition;
+  /**
+   * "Allow expanding to a side panel". On: the panel header has an expand
+   * control that turns the chat into a full-height column beside the page.
+   * Off: the control is not shown.
+   */
+  allowExpand: boolean;
 }
 
 export interface LimitsConfig {
@@ -96,6 +102,8 @@ export const defaultVersionConfig = (): VersionConfig => ({
     title: "Ask a question",
     accentColor: "#2563eb",
     position: "right",
+    // On, so an assistant stored before the setting existed gets the control.
+    allowExpand: true,
   },
   // 0 means no cap, so an owner who never sets one is not locked out.
   limits: { dailyCostCapMicros: 2_000_000 },
@@ -194,6 +202,13 @@ function parseWidgetSection(raw: unknown, target: WidgetConfig, errors: Errors):
       errors.add("widget.position", 'must be "left" or "right"');
     } else {
       target.position = raw.position;
+    }
+  }
+  if (raw.allowExpand !== undefined) {
+    if (typeof raw.allowExpand !== "boolean") {
+      errors.add("widget.allowExpand", "must be true or false");
+    } else {
+      target.allowExpand = raw.allowExpand;
     }
   }
 }

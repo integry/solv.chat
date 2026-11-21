@@ -149,6 +149,30 @@ Other folders are pushed as they always were. Run with `--dry-run` to see each d
 5. In `/admin`, open **Behaviour** (or **Widget**) and click **Publish** so the assistant goes live (Publish promotes your draft — behaviour, widget settings, and any enabled tools — to visitors).
 6. Open **Install**, copy the `<script>` tag, paste it into your site, and ask a question.
 
+### The chat on your page
+
+The chat window is 460 × 720 pixels on a desktop screen (never more than the screen less a small margin) and 380 pixels wide on a phone.
+
+With **Allow expanding to a side panel** on (the default, under **Widget**), visitors can expand the chat into a full-height column on the same side as the chat button. On a screen at least 900 pixels wide your page moves over to make room; on a narrower screen the chat fills the screen and your page is not changed. Turn the setting off and the expand button is not shown.
+
+While the column is open the widget adds three inline styles to your `<html>` element and removes exactly what it added when the visitor collapses or closes the chat, or when the widget is removed from the page (an inline style you set yourself comes back as it was):
+
+- `margin-right` (or `margin-left` for a chat on the left) of the column's width, added to an inline margin you already set;
+- a `max-width` that keeps the page beside the column, within any maximum width you set;
+- `--solv-chat-panel-width`, a CSS custom property holding the column's width (`460px`).
+
+Content in normal flow, including centred layouts, reflows into the narrower page. Elements you fixed to that edge of the screen (a `position: fixed` or `sticky` header, a cookie bar, a "back to top" button) stay where they are and can end up under the column. Move them with the custom property, which is only set while the column is open:
+
+```css
+.site-header {
+  position: fixed;
+  left: 0;
+  right: var(--solv-chat-panel-width, 0px);
+}
+```
+
+For a chat on the left, use the property in `left` instead.
+
 ## Keeping a sitemap source in sync (optional)
 
 A source imported from a sitemap can be read again on a schedule: on **Sources**, set its **Sync** to **Every day** or **Every week** (it is **Off** by default, so nothing changes until you turn it on), or choose **Sync now** to run it at once. The first sync asks before it starts, because it brings in every page the sitemap lists, not only the ones you chose when importing. Each run reads the sitemap again, adds pages that are new, re-fetches pages that may have changed, and removes documents whose page is no longer in the sitemap. Only the pages the sitemap lists are fetched; links are not followed.

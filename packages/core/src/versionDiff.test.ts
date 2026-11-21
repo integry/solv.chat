@@ -60,6 +60,7 @@ describe("version diff field table", () => {
       c.widget.title = "Help";
       c.widget.accentColor = "#ff0000";
       c.widget.position = "left";
+      c.widget.allowExpand = false;
       c.actions.builtins = true;
       c.actions.allowedOrigins = ["https://shop.example.com"];
       c.allowedTools = ["search"];

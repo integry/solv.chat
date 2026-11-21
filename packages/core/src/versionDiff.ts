@@ -102,6 +102,12 @@ export const VERSION_DIFF_FIELDS: readonly DiffField[] = [
     kind: "text",
     format: (value) => POSITION_LABELS[String(value)] ?? String(value),
   },
+  {
+    path: "widget.allowExpand",
+    label: "Allow expanding to a side panel",
+    screen: "Widget",
+    kind: "boolean",
+  },
   { path: "actions.builtins", label: "Help on the page", screen: "Widget", kind: "boolean" },
   {
     path: "actions.allowedOrigins",

@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 export interface WidgetPreviewConfig {
-  widget: { title: string; accentColor: string; position: "left" | "right" };
+  widget: {
+    title: string;
+    accentColor: string;
+    position: "left" | "right";
+    allowExpand: boolean;
+  };
   behaviour: { greeting: string; suggestedQuestions: string[] };
 }
 

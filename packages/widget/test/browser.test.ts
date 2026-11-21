@@ -171,8 +171,8 @@ fetch("/test/token").then((r) => r.text()).then((token) => {
     browser = await launch(chrome as string);
   }, 90_000);
 
-  afterAll(() => {
-    browser?.close();
+  afterAll(async () => {
+    await browser?.close();
     for (const server of servers) server.close();
   });
 

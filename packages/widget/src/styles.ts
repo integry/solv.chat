@@ -1,3 +1,19 @@
+/**
+ * The expanded column's width. 460px: the same as the desktop panel, so an
+ * answer keeps its line breaks when the visitor expands it, and wide enough
+ * for a code line of about 44 characters at the code font's size.
+ */
+export const SIDE_PANEL_WIDTH_PX = 460;
+/**
+ * Below this viewport width expand opens the panel full screen instead of
+ * beside the page: at 900px the page keeps 440px, about the widest phone
+ * layout sites design for; any narrower and the page would be squeezed below
+ * a phone's width while the chat takes the rest.
+ */
+export const SIDE_BY_SIDE_MIN_WIDTH_PX = 900;
+/** Set on the host's root while expanded beside the page, carrying the column's width. */
+export const PANEL_WIDTH_PROPERTY = "--solv-chat-panel-width";
+
 const css = `
 :host {
   --solv-accent: #2563eb;
@@ -97,7 +113,77 @@ textarea:focus-visible {
   overflow: hidden;
 }
 
+/* Desktop size, chosen for answers with a code block and a five-step list:
+   460px wide fits about 44 characters of code per line (34 at 380px), and up
+   to 720px tall shows a five-step list with a short code block whole. Never
+   more than the viewport less the same margins as below; a screen narrower
+   than 640px keeps the size above. */
+@media (min-width: 640px) {
+  .solv-panel {
+    width: min(${SIDE_PANEL_WIDTH_PX}px, calc(100vw - 32px));
+    height: min(720px, calc(100vh - 96px));
+  }
+}
+
 .solv-panel[hidden] {
+  display: none;
+}
+
+/* Expanded: a full-height column on the widget's side, beside the page
+   (the page is narrowed by the same width), or the whole screen when the
+   viewport is too narrow for both. */
+:host([data-layout]) {
+  top: 0;
+  bottom: 0;
+  right: 0;
+}
+
+:host([data-layout][data-position="left"]) {
+  right: auto;
+  left: 0;
+}
+
+:host([data-layout]) .solv-wrap {
+  height: 100%;
+}
+
+:host([data-layout]) .solv-panel {
+  width: ${SIDE_PANEL_WIDTH_PX}px;
+  height: 100vh;
+  height: 100dvh;
+  border-radius: 0;
+  border-top: none;
+  border-bottom: none;
+  border-right: none;
+  box-shadow: none;
+}
+
+:host([data-layout][data-position="left"]) .solv-panel {
+  border-left: none;
+  border-right: 1px solid var(--solv-border);
+}
+
+/* Both edges, so the left-widget rule (right: auto) cannot leave the host
+   sized to its contents. */
+:host([data-layout="full"]),
+:host([data-layout="full"][data-position="left"]) {
+  left: 0;
+  right: 0;
+}
+
+/* The host spans the viewport less any scrollbar, which 100vw would not. */
+:host([data-layout="full"]) .solv-wrap {
+  width: 100%;
+}
+
+:host([data-layout="full"]) .solv-panel {
+  width: 100%;
+  border: none;
+}
+
+.solv-launcher[hidden],
+.solv-expand[hidden],
+.solv-collapse[hidden] {
   display: none;
 }
 
@@ -105,6 +191,22 @@ textarea:focus-visible {
   .solv-panel,
   .solv-launcher {
     transition: opacity 160ms ease, transform 160ms ease;
+  }
+
+  :host([data-layout]) .solv-panel {
+    animation: solv-expand 180ms ease-out;
+  }
+
+  .solv-typing-dot {
+    animation: solv-typing 1.2s ease-in-out infinite;
+  }
+
+  .solv-typing-dot:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+
+  .solv-typing-dot:nth-child(3) {
+    animation-delay: 0.3s;
   }
 
   .solv-chip,
@@ -120,10 +222,54 @@ textarea:focus-visible {
   .solv-chip,
   .solv-send,
   .solv-fb-btn,
-  .solv-confirm {
+  .solv-confirm,
+  .solv-typing-dot {
     transition: none;
     animation: none;
   }
+}
+
+@keyframes solv-expand {
+  from {
+    opacity: 0.6;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes solv-typing {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* The waiting answer: three dots, still when motion is reduced. */
+.solv-typing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 21px;
+}
+
+.solv-bubble-text:not(:empty) + .solv-typing,
+.solv-bubble-text:not(:empty) ~ .solv-typing {
+  margin-top: 6px;
+}
+
+.solv-typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--solv-muted);
+  opacity: 0.6;
 }
 
 .solv-header {
@@ -136,13 +282,21 @@ textarea:focus-visible {
   background: var(--solv-surface);
 }
 
+.solv-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .solv-title {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
 }
 
-.solv-close {
+.solv-close,
+.solv-expand,
+.solv-collapse {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -157,7 +311,9 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
-.solv-close:hover {
+.solv-close:hover,
+.solv-expand:hover,
+.solv-collapse:hover {
   background: var(--solv-border);
   color: var(--solv-text);
 }
