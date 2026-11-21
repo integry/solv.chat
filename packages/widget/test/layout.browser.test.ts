@@ -16,6 +16,7 @@ import { type Browser, findChrome, launch, waitFor } from "./support/chromium.js
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const chrome = findChrome();
+const TEST_SESSION = "vs1.layout-test-session";
 
 const CODE_LINE = "const result = await client.documents.search({ query, limit: 5 });";
 const ANSWER_TOKENS = [
@@ -56,6 +57,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   let stallConfigHeaders = false;
   let gatedConfigResponse: ServerResponse | undefined;
   const engineRequests: string[] = [];
+  const submissions: Array<{ path: string; body: Record<string, unknown> }> = [];
 
   const engineOrigin = () => `http://127.0.0.1:${enginePort}`;
   const hostOrigin = () => `http://127.0.0.1:${hostPort}`;
@@ -126,7 +128,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       }
       res.writeHead(404).end();
     });
-    const engine = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const engine = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? "/", "http://x");
       engineRequests.push(url.pathname);
       const cors = {
@@ -159,13 +161,48 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
         } else res.end(config);
         return;
       }
-      if (url.pathname === "/v1/chat" && req.method === "POST") {
+      if (url.pathname === "/v1/check/frame" && visitorCheck) {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(`<!doctype html><body style="margin:0;height:65px;display:grid;place-items:center">
+<button>Verify</button><script>
+const origin = ${JSON.stringify(hostOrigin())};
+parent.postMessage({ solvCheck: 1, type: "interactive" }, origin);
+document.querySelector("button").onclick = () => {
+  parent.postMessage({ solvCheck: 1, type: "token", token: "test-token" }, origin);
+};
+</script></body>`);
+        return;
+      }
+      if (url.pathname === "/v1/session" && req.method === "POST") {
         req.resume();
+        res
+          .writeHead(200, { "content-type": "application/json", ...cors })
+          .end(JSON.stringify({ session: TEST_SESSION, expiresAt: Date.now() + 3_600_000 }));
+        return;
+      }
+      if (req.method === "POST" && ["/v1/chat", "/v1/feedback"].includes(url.pathname)) {
+        let raw = "";
+        for await (const chunk of req.setEncoding("utf8")) raw += chunk;
+        const body = JSON.parse(raw) as Record<string, unknown>;
+        submissions.push({ path: url.pathname, body });
+        const refused = visitorCheck && body.session !== TEST_SESSION;
+        if (url.pathname === "/v1/feedback") {
+          res
+            .writeHead(refused ? 403 : 200, { "content-type": "application/json", ...cors })
+            .end(JSON.stringify(refused ? { code: "check_required" } : { ok: true }));
+          return;
+        }
         res.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-cache, no-transform",
           ...cors,
         });
+        if (refused) {
+          res.end(
+            'event: error\ndata: {"message":"Complete the security check.","code":"check_required"}\n\n',
+          );
+          return;
+        }
         // The model thinks for a moment, then writes a token every 70 ms.
         if (toolFirst) {
           res.write('event: tool\ndata: {"name":"search_docs","state":"running"}\n\n');
@@ -200,6 +237,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     visitorCheck = false;
     stallConfigHeaders = false;
     gatedConfigResponse = undefined;
+    submissions.length = 0;
   });
 
   afterAll(async () => {
@@ -253,6 +291,34 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   const panelHidden = () => q<boolean>('r.querySelector(".solv-panel").hidden');
   const layout = () => q<string | null>('el.getAttribute("data-layout")');
   const focus = () => q<string | null>("r.activeElement?.id ?? null");
+  const pendingResume = () =>
+    page_<unknown>(`JSON.parse(sessionStorage.getItem("solv-chat-open:pk_layout")).pendingResume`);
+
+  function delayConfig(): () => void {
+    let release = () => {};
+    configGate = new Promise<void>((resolveConfig) => {
+      release = resolveConfig;
+    });
+    return () => {
+      configGate = null;
+      release();
+    };
+  }
+
+  async function savePausedAnswer() {
+    await page_(`sessionStorage.setItem("solv-chat-open:pk_layout", JSON.stringify({
+      conversationId: "cnv_1",
+      open: true,
+      turns: [{ role: "assistant", text: "", messageId: "msg_1", awaiting: ["call_1"] }],
+      pendingResume: {
+        conversationId: "cnv_1",
+        resumeMessageId: "msg_1",
+        actionResults: [{ callId: "call_1", ok: true, result: "{}" }],
+        depth: 1,
+        createdAt: Date.now(),
+      },
+    }))`);
+  }
 
   async function click(selector: string, shadow = false) {
     const bounds = shadow
@@ -276,6 +342,14 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       y,
       clickCount: 1,
     });
+  }
+
+  async function waitForVisitorCheck() {
+    await waitFor(
+      () =>
+        q<boolean>("r.querySelector('.solv-check[data-state=\"interactive\"] iframe') !== null"),
+      "interactive visitor check",
+    );
   }
 
   async function keypress(key: string, code: string, modifiers = 0) {
@@ -530,10 +604,14 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
       expect(await layout()).toBeNull();
       expect(await focus()).toBe("solv-input");
-      // The browser has cancelled the unread request before the server can send its settings.
-      await waitFor(async () => response.destroyed, "config request cancellation", 1_000);
-      release();
       expect(await q('r.querySelector(".solv-title").textContent')).toBe("Ask a question");
+      expect(response.destroyed).toBe(false);
+      release();
+      await waitFor(
+        async () => (await q('r.querySelector(".solv-title").textContent')) === "Late settings",
+        "late settings",
+      );
+      expect(await layout()).toBeNull();
     } finally {
       release();
       configGate = null;
@@ -571,21 +649,46 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     }
   });
 
+  it("recovers the first message submitted from the fallback panel with the visitor check on", async () => {
+    visitorCheck = true;
+    widgetOptions = { title: "Fieldnotes assistant", opensAs: "side" };
+    const release = delayConfig();
+    try {
+      await viewport(1280, 800);
+      await open("/host-controls", true, false);
+      await q('document.querySelector("#host-ask").setAttribute("data-solv-chat-open", "")');
+      await click("#host-ask");
+      await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
+      expect(await q('r.querySelector(".solv-title").textContent')).toBe("Ask a question");
+      expect(await layout()).toBeNull();
+      await q(`(() => {
+        r.querySelector("#solv-input").value = "How do I search my documents?";
+        r.querySelector(".solv-form").requestSubmit();
+      })()`);
+      await waitFor(async () => submissions.length === 1, "chat refusal");
+      expect(submissions[0]?.body).not.toHaveProperty("session");
+      expect(await q('r.querySelector(".solv-check iframe") === null')).toBe(true);
+
+      release();
+      await waitForVisitorCheck();
+      expect(await q('r.querySelector(".solv-title").textContent')).toBe("Fieldnotes assistant");
+      expect(await layout()).toBeNull();
+      expect(submissions).toHaveLength(1);
+      await click(".solv-check iframe", true);
+      await waitFor(async () => submissions.length === 2, "chat with a session");
+      expect(submissions[1]?.body).toEqual({ ...submissions[0]?.body, session: TEST_SESSION });
+      await waitFor(() => q<boolean>('r.querySelector(".solv-feedback") !== null'), "answer");
+      expect(await q('r.querySelectorAll(".solv-bubble--user").length')).toBe(1);
+      expect(await q('r.querySelector(".solv-bubble-error") === null')).toBe(true);
+    } finally {
+      release();
+    }
+  }, 12_000);
+
   it("continues a restored answer when the config response body stalls", async () => {
     await viewport(1280, 800);
     await open("/host-controls");
-    await page_(`sessionStorage.setItem("solv-chat-open:pk_layout", JSON.stringify({
-      conversationId: "cnv_1",
-      open: true,
-      turns: [{ role: "assistant", text: "", messageId: "msg_1", awaiting: ["call_1"] }],
-      pendingResume: {
-        conversationId: "cnv_1",
-        resumeMessageId: "msg_1",
-        actionResults: [{ callId: "call_1", ok: true, result: "{}" }],
-        depth: 1,
-        createdAt: Date.now(),
-      },
-    }))`);
+    await savePausedAnswer();
     // Leave the response incomplete until the restored turn has finished.
     configGate = new Promise<void>(() => {});
     try {
@@ -602,6 +705,77 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       configGate = null;
     }
   });
+
+  it("keeps a restored answer pending across reconnect until it can send its visitor session", async () => {
+    await viewport(1280, 800);
+    await open("/host-controls");
+    await savePausedAnswer();
+    visitorCheck = true;
+    stallConfigHeaders = true;
+    const release = delayConfig();
+    try {
+      await open("/host-controls?protected-resume", false, false);
+      const response = await waitFor(async () => gatedConfigResponse, "first config request");
+      await waitFor(async () => submissions.length === 1, "first resume refusal");
+      expect(await pendingResume()).toMatchObject({ resumeMessageId: "msg_1" });
+
+      await q("(el.remove(), document.body.append(el))");
+      await waitFor(async () => response.destroyed, "disconnected config cancellation");
+      await waitFor(async () => submissions.length === 2, "second resume refusal");
+      expect(await pendingResume()).toMatchObject({ resumeMessageId: "msg_1" });
+
+      release();
+      await waitForVisitorCheck();
+      expect(await pendingResume()).toMatchObject({ resumeMessageId: "msg_1" });
+      await click(".solv-check iframe", true);
+      await waitFor(async () => submissions.length === 3, "resume with a session");
+      expect(submissions.map(({ body }) => body.session)).toEqual([
+        undefined,
+        undefined,
+        TEST_SESSION,
+      ]);
+      expect(submissions[2]?.body).toEqual({ ...submissions[0]?.body, session: TEST_SESSION });
+      await waitFor(
+        () => q<boolean>('r.querySelector(".solv-feedback") !== null'),
+        "restored answer",
+      );
+      expect(await pendingResume()).toBeUndefined();
+    } finally {
+      release();
+    }
+  }, 15_000);
+
+  it("recovers feedback on a restored answer when the visitor-check config arrives late", async () => {
+    await open("/host-controls");
+    await page_(`sessionStorage.setItem("solv-chat-open:pk_layout", JSON.stringify({
+      conversationId: "cnv_1",
+      turns: [{ role: "assistant", text: "Search your docs", messageId: "msg_1" }],
+    }))`);
+    visitorCheck = true;
+    const release = delayConfig();
+    try {
+      await open("/host-controls?protected-feedback", false, false);
+      await click(".solv-launcher", true);
+      await waitFor(async () => !(await panelHidden()), "fallback panel", 4_000);
+      await click('.solv-fb-btn[aria-label="Helpful"]', true);
+      await waitFor(async () => submissions.length === 1, "feedback refusal");
+      expect(submissions[0]).toMatchObject({ path: "/v1/feedback", body: { value: "up" } });
+      expect(submissions[0]?.body).not.toHaveProperty("session");
+
+      release();
+      await waitForVisitorCheck();
+      await click(".solv-check iframe", true);
+      await waitFor(async () => submissions.length === 2, "feedback with a session");
+      expect(submissions[1]?.body).toEqual({ ...submissions[0]?.body, session: TEST_SESSION });
+      await waitFor(
+        async () =>
+          (await q('r.querySelector(".solv-fb-ack").textContent')) === "Thanks for the feedback.",
+        "feedback acknowledgement",
+      );
+    } finally {
+      release();
+    }
+  }, 12_000);
 
   it("respects host text fields and handled shortcuts, and runs the visitor check on the first accepted key", async () => {
     await viewport(1280, 800);

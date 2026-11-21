@@ -23,7 +23,7 @@ import {
   setHighlightHost,
   setOnExternalNavigate,
 } from "./builtins.js";
-import { CheckController } from "./check.js";
+import { CheckController, type CheckResult } from "./check.js";
 import { askToConfirm, type ConfirmHandle } from "./confirm.js";
 import { parseSafeHttpUrl, renderMarkdown } from "./markdown.js";
 import { readEventLines } from "./sse.js";
@@ -149,7 +149,7 @@ const DEFAULT_CONFIG: WidgetPublicConfig = {
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-const CONFIG_TIMEOUT_MS = 2_000;
+const CONFIG_OPEN_WAIT_MS = 2_000;
 const DROPPED_RESUME_TIMEOUT_MS = 5_000;
 
 const ACTION_WORDING: Record<string, string> = {
@@ -295,6 +295,7 @@ export class SolvChat extends HTMLElement {
   #initialized = false;
   #connection = 0;
   #configLoading: Promise<void> | null = null;
+  #configOpenWait: Promise<void> | null = null;
   #configController: AbortController | null = null;
   #open = false;
   #sending = false;
@@ -382,6 +383,14 @@ export class SolvChat extends HTMLElement {
         this.#configController = null;
       }
     });
+    let timer: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, CONFIG_OPEN_WAIT_MS);
+    });
+    this.#configOpenWait = Promise.race([this.#configLoading, deadline]).finally(() => {
+      clearTimeout(timer);
+      if (connection === this.#connection) this.#configOpenWait = null;
+    });
     this.#updateLauncher();
     this.#watchShortcut();
 
@@ -409,7 +418,17 @@ export class SolvChat extends HTMLElement {
     if (this.#pendingResume && this.#resumedBubble) {
       const pending = this.#pendingResume;
       const target = this.#resumedBubble;
-      // Consume immediately so a second connect cannot resume the same continuation.
+      for (const widget of connectedWidgets) {
+        if (
+          widget !== this &&
+          widget.#assistant() === assistant &&
+          widget.#pendingResume?.resumeMessageId === pending.resumeMessageId &&
+          widget.#resumedBubble === null
+        ) {
+          widget.#abortController?.abort();
+        }
+      }
+      // Claim synchronously so another widget cannot also restore this turn.
       this.#pendingResume = null;
       this.#resumedBubble = null;
       this.#persist();
@@ -422,6 +441,7 @@ export class SolvChat extends HTMLElement {
     this.#configController?.abort();
     this.#configController = null;
     this.#configLoading = null;
+    this.#configOpenWait = null;
     connectedWidgets.delete(this);
     if (connectedWidgets.size === 0) {
       window.removeEventListener("click", captureClick, true);
@@ -691,7 +711,7 @@ export class SolvChat extends HTMLElement {
 
   async #afterConfig(action: () => void): Promise<void> {
     const connection = this.#connection;
-    if (this.#configLoading) await this.#configLoading;
+    if (this.#configOpenWait) await this.#configOpenWait;
     if (this.isConnected && connection === this.#connection) action();
   }
 
@@ -713,23 +733,26 @@ export class SolvChat extends HTMLElement {
   async #loadConfig(connection: number, controller: AbortController): Promise<void> {
     const assistant = this.#assistant();
     if (!assistant || this.#previewing) return;
+    const endpoint = this.#endpoint();
     const { signal } = controller;
-    // Aborting fetch also aborts the response body read after headers arrive.
-    const timer = setTimeout(() => controller.abort(), CONFIG_TIMEOUT_MS);
     try {
-      const response = await fetch(
-        `${this.#endpoint()}/v1/assistants/${encodeURIComponent(assistant)}`,
-        { signal },
-      );
+      const response = await fetch(`${endpoint}/v1/assistants/${encodeURIComponent(assistant)}`, {
+        signal,
+      });
       if (!response.ok) return;
       const value: unknown = await response.json();
-      if (signal.aborted || connection !== this.#connection || this.#previewing) return;
+      if (
+        signal.aborted ||
+        connection !== this.#connection ||
+        this.#previewing ||
+        assistant !== this.#assistant() ||
+        endpoint !== this.#endpoint()
+      )
+        return;
       this.#config = { ...DEFAULT_CONFIG, ...parsePublicConfig(value) };
       this.#applyConfig();
     } catch {
-      // Keep the current settings if config fails or times out.
-    } finally {
-      clearTimeout(timer);
+      // Keep the current settings if config fails.
     }
   }
 
@@ -1248,27 +1271,50 @@ export class SolvChat extends HTMLElement {
     let submitting = false;
 
     const submit = async (value: "up" | "down") => {
-      if (submitting || turn.feedback || !turn.messageId) return;
+      if (submitting || turn.feedback || !turn.messageId || !this.isConnected || this.#previewing)
+        return;
+      const connection = this.#connection;
+      const assistant = this.#assistant();
+      const endpoint = this.#endpoint();
+      const isCurrent = () =>
+        connection === this.#connection &&
+        !this.#previewing &&
+        assistant === this.#assistant() &&
+        endpoint === this.#endpoint();
       submitting = true;
       upBtn.disabled = true;
       downBtn.disabled = true;
       ack.textContent = "";
 
-      try {
-        const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
-        if (session === null) throw new Error("No visitor session");
-        const response = await fetch(`${this.#endpoint()}/v1/feedback`, {
+      const send = (session?: string) =>
+        fetch(`${endpoint}/v1/feedback`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             protocol: CHAT_PROTOCOL_VERSION,
-            assistant: this.#assistant(),
+            assistant,
             visitorId: visitorId(),
             messageId: turn.messageId,
             value,
             ...(session ? { session } : {}),
           }),
         });
+      try {
+        const check = this.#checkRequired() ? await this.#sessionFor() : undefined;
+        if (!isCurrent()) return;
+        if (check?.ok === false) throw new Error("No visitor session");
+        const configLoading = check ? null : this.#configLoading;
+        let response = await send(check?.session);
+        if (!isCurrent()) return;
+        if (configLoading && response.status === 403) {
+          const refusal = await response.json().catch(() => null);
+          if (refusal?.code === "check_required") {
+            const recovered = await this.#recoverVisitorSession(configLoading, isCurrent);
+            if (!isCurrent()) return;
+            if (recovered?.ok) response = await send(recovered.session);
+          }
+        }
+        if (!isCurrent()) return;
         if (!response.ok) {
           throw new Error(`Feedback request failed with status ${response.status}`);
         }
@@ -1279,6 +1325,7 @@ export class SolvChat extends HTMLElement {
         ack.textContent = "Thanks for the feedback.";
         this.#persist();
       } catch {
+        if (!isCurrent()) return;
         upBtn.disabled = false;
         downBtn.disabled = false;
         upBtn.setAttribute("aria-pressed", "false");
@@ -1456,20 +1503,18 @@ export class SolvChat extends HTMLElement {
     renderMarkdown(textEl, entry.turn.text);
   }
 
-  /** Why the last check failed, for the bubble that waited on it. */
-  #checkFailure = "";
-
-  /**
-   * The session to send: undefined when the engine runs no check, null when
-   * the check could not be completed (`#checkFailure` says why).
-   */
-  async #sessionFor(): Promise<string | null | undefined> {
-    if (!this.#checkRequired()) return undefined;
+  #sessionFor(): Promise<CheckResult> {
     this.#interacted = true;
-    const result = await this.#check.ensure();
-    if (result.ok) return result.session;
-    this.#checkFailure = result.message;
-    return null;
+    return this.#check.ensure();
+  }
+
+  async #recoverVisitorSession(
+    configLoading: Promise<void>,
+    isCurrent: () => boolean,
+  ): Promise<CheckResult | undefined> {
+    if (!isCurrent()) return;
+    await configLoading;
+    if (isCurrent() && this.#checkRequired()) return this.#sessionFor();
   }
 
   async #send(message: string, onAccepted?: () => void): Promise<void> {
@@ -1521,14 +1566,6 @@ export class SolvChat extends HTMLElement {
         // reporting request or stream never blocks the visitor's new message.
         void this.#reportDroppedResume(pending, signal);
       }
-      // With the visitor check on, the message waits here, in the same
-      // empty "thinking" bubble, until the check has a session for it.
-      const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
-      if (session !== undefined && signal.aborted) return;
-      if (session === null) {
-        this.#setTurnError(bubble, assistantTurn, this.#checkFailure);
-        return;
-      }
       const requestBody: Record<string, unknown> = {
         // Sent on every request so the engine can refuse a version it does not
         // support instead of guessing what this widget means.
@@ -1537,28 +1574,33 @@ export class SolvChat extends HTMLElement {
         visitorId: visitorId(),
         message: trimmed,
       };
-      if (session) requestBody.session = session;
       if (this.#conversationId !== null) {
         requestBody.conversationId = this.#conversationId;
       }
       if (location.href.startsWith("http://") || location.href.startsWith("https://")) {
         requestBody.pageUrl = location.href;
       }
-      const pageActions = listForRequest();
-      // Omitted when the page registered nothing, so a site that never calls
-      // register sends exactly the phase 1 body.
-      if (pageActions.length > 0) {
-        requestBody.pageActions = pageActions;
-      }
-
-      const response = await fetch(`${this.#endpoint()}/v1/chat`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(requestBody),
-        signal,
-      });
-
-      await this.#consumeStream(response, bubble, textEl, assistantTurn, controller, 0);
+      await this.#consumeStream(
+        (session) => {
+          const pageActions = listForRequest();
+          return fetch(`${this.#endpoint()}/v1/chat`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              ...requestBody,
+              ...(session ? { session } : {}),
+              // A site that registers no actions sends the phase 1 body.
+              ...(pageActions.length > 0 ? { pageActions } : {}),
+            }),
+            signal,
+          });
+        },
+        bubble,
+        textEl,
+        assistantTurn,
+        controller,
+        0,
+      );
     } catch {
       if (!signal.aborted && !assistantTurn.error) {
         delete assistantTurn.awaiting;
@@ -1581,22 +1623,69 @@ export class SolvChat extends HTMLElement {
     }
   }
 
+  async *#chatEvents(
+    send: (session?: string) => Promise<Response>,
+    signal: AbortSignal,
+  ): AsyncGenerator<Exclude<ReturnType<typeof parseChatEventLine>, { type: "unknown" }>> {
+    const assistant = this.#assistant();
+    const endpoint = this.#endpoint();
+    const isCurrent = () =>
+      !signal.aborted &&
+      !this.#previewing &&
+      assistant === this.#assistant() &&
+      endpoint === this.#endpoint();
+    // The thinking indicator stays up while configuration or the check is needed.
+    let check = this.#checkRequired() ? await this.#sessionFor() : undefined;
+    let configLoading = check ? null : this.#configLoading;
+    while (isCurrent()) {
+      if (check?.ok === false) {
+        yield { type: "error", message: check.message };
+        return;
+      }
+      const response = await send(check?.session);
+      if (!isCurrent()) return;
+      if (!response.ok || !response.body) {
+        yield { type: "error", message: "Something went wrong. Please try again." };
+        return;
+      }
+      let refusalMessage: string | undefined;
+      for await (const raw of readEventLines(response)) {
+        if (!isCurrent()) return;
+        const event = parseChatEventLine(raw.name, raw.data);
+        // A newer engine can send event types this bundle has never heard of.
+        if (event.type === "unknown") continue;
+        if (configLoading && event.type === "error" && event.code === "check_required") {
+          refusalMessage = event.message;
+          break;
+        }
+        configLoading = null;
+        if (event.type === "error" && event.code === "check_required") this.#check.clear();
+        yield event;
+      }
+      if (!configLoading || refusalMessage === undefined) return;
+      // This refusal precedes all chat work. A single retry is safe once
+      // the delayed config and visitor session are available.
+      check = await this.#recoverVisitorSession(configLoading, isCurrent);
+      if (!isCurrent()) return;
+      if (!check) {
+        yield { type: "error", message: refusalMessage };
+        return;
+      }
+      configLoading = null;
+    }
+  }
+
   async #consumeStream(
-    response: Response,
+    send: (session?: string) => Promise<Response>,
     bubble: HTMLDivElement,
     textEl: HTMLDivElement,
     assistantTurn: SavedTurn,
     controller: AbortController,
     depth: number,
+    onAdmitted?: () => void,
   ): Promise<void> {
     const { signal } = controller;
     if (signal.aborted) return;
-
-    if (!response.ok || !response.body) {
-      delete assistantTurn.awaiting;
-      this.#setTurnError(bubble, assistantTurn, "Something went wrong. Please try again.");
-      return;
-    }
 
     let terminated = false;
     let resumeEvent: {
@@ -1607,13 +1696,12 @@ export class SolvChat extends HTMLElement {
     const pendingActions: RunRequest[] = [];
 
     try {
-      for await (const raw of readEventLines(response)) {
+      for await (const event of this.#chatEvents(send, signal)) {
         if (signal.aborted) break;
-        const event = parseChatEventLine(raw.name, raw.data);
-        // Unknown types are skipped, not an error: a newer engine will send event
-        // types this cached bundle has never heard of, and the only acceptable
-        // behaviour is to keep rendering the ones it knows.
-        if (event.type === "unknown") continue;
+        if (onAdmitted && event.type !== "error") {
+          onAdmitted();
+          onAdmitted = undefined;
+        }
 
         if (event.type === "token") {
           // DOM nodes and textContent only, never raw HTML assignment: the text
@@ -1673,7 +1761,6 @@ export class SolvChat extends HTMLElement {
           this.#finishPaint(textEl);
           this.#hideTyping(bubble);
           delete assistantTurn.awaiting;
-          if (event.code === "check_required") this.#check.clear();
           // The engine will not take more in this conversation; the next
           // question starts a new one, as the message says.
           if (event.code === "conversation_cap") this.#conversationId = null;
@@ -1722,10 +1809,22 @@ export class SolvChat extends HTMLElement {
     const { signal } = controller;
     // The answer carries on after the page change: say so straight away.
     this.#showTyping(target.bubble);
+    const releasePending = () => {
+      if (this.#pendingResume === pending) {
+        this.#pendingResume = null;
+        this.#persist();
+      }
+    };
 
     try {
-      await this.#configLoading;
+      await this.#configOpenWait;
       if (!this.isConnected || signal.aborted) return;
+      if (this.#configLoading) {
+        // Keep the turn recoverable across navigation if the fallback attempt
+        // still needs to wait for configuration and a visitor session.
+        this.#pendingResume = pending;
+        this.#persist();
+      }
 
       const actionResults =
         pending.navigateCallId && typeof location !== "undefined"
@@ -1740,27 +1839,21 @@ export class SolvChat extends HTMLElement {
             )
           : pending.actionResults;
 
-      const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
-      if (signal.aborted) return;
-      if (session === null) {
-        delete target.turn.awaiting;
-        this.#setTurnError(target.bubble, target.turn, this.#checkFailure);
-        return;
-      }
-      const response = await this.#sendActionResumeRequest(
-        pending.conversationId,
-        pending.resumeMessageId,
-        actionResults,
-        signal,
-        session,
-      );
       await this.#consumeStream(
-        response,
+        (session) =>
+          this.#sendActionResumeRequest(
+            pending.conversationId,
+            pending.resumeMessageId,
+            actionResults,
+            signal,
+            session,
+          ),
         target.bubble,
         target.textEl,
         target.turn,
         controller,
         pending.depth,
+        releasePending,
       );
     } catch {
       if (!signal.aborted && !target.turn.error) {
@@ -1779,6 +1872,7 @@ export class SolvChat extends HTMLElement {
         this.#dismissedTurn = null;
       }
       if (!signal.aborted) {
+        releasePending();
         this.#persist();
       }
     }
@@ -1986,22 +2080,21 @@ export class SolvChat extends HTMLElement {
       setOnExternalNavigate(null);
     }
 
-    const session = this.#checkRequired() ? await this.#sessionFor() : undefined;
-    if (signal.aborted) return;
-    if (session === null) {
-      delete assistantTurn.awaiting;
-      this.#setTurnError(bubble, assistantTurn, this.#checkFailure);
-      return;
-    }
-    const response = await this.#sendActionResumeRequest(
-      done.conversationId,
-      done.messageId,
-      results,
-      signal,
-      session,
+    await this.#consumeStream(
+      (session) =>
+        this.#sendActionResumeRequest(
+          done.conversationId,
+          done.messageId,
+          results,
+          signal,
+          session,
+        ),
+      bubble,
+      textEl,
+      assistantTurn,
+      controller,
+      depth,
     );
-
-    await this.#consumeStream(response, bubble, textEl, assistantTurn, controller, depth);
   }
 }
 
