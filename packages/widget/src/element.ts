@@ -70,6 +70,8 @@ interface RootReservation {
   priority: string;
   variableValue: string;
   variablePriority: string;
+  maxWidthValue: string;
+  maxWidthPriority: string;
   /** The root's style attribute before, and its parsed form, to put back byte for byte. */
   styleAttribute: string | null;
   cssText: string;
@@ -699,7 +701,8 @@ export class SolvChat extends HTMLElement {
 
   /**
    * Narrows the host page by the column's width: a margin on the root element
-   * on the widget's side, and the width in a custom property the host can use
+   * on the widget's side, a maximum width so an explicitly sized root narrows
+   * too, and the width in a custom property the host can use
    * to move what it fixed to that edge. What was there is kept to put back.
    */
   #reserveRoom(): void {
@@ -710,6 +713,9 @@ export class SolvChat extends HTMLElement {
     const root = document.documentElement;
     if (!root) return;
     const style = root.style;
+    // Read before anything changes, so the host's own limit is the one kept.
+    const hostMaxWidth =
+      root.ownerDocument.defaultView?.getComputedStyle(root).getPropertyValue("max-width") ?? "";
     const reservation: RootReservation = {
       root,
       property,
@@ -717,6 +723,8 @@ export class SolvChat extends HTMLElement {
       priority: style.getPropertyPriority(property),
       variableValue: style.getPropertyValue(PANEL_WIDTH_PROPERTY),
       variablePriority: style.getPropertyPriority(PANEL_WIDTH_PROPERTY),
+      maxWidthValue: style.getPropertyValue("max-width"),
+      maxWidthPriority: style.getPropertyPriority("max-width"),
       styleAttribute: root.getAttribute("style"),
       cssText: style.cssText,
     };
@@ -729,6 +737,35 @@ export class SolvChat extends HTMLElement {
     }
     style.setProperty(PANEL_WIDTH_PROPERTY, width);
     this.#reservation = reservation;
+    this.#limitRootWidth(root, hostMaxWidth);
+  }
+
+  /**
+   * A margin narrows the root only while its width is automatic; a page that
+   * sets one (`html { width: 100% }`) would stay viewport-wide under the
+   * column. A maximum width of the viewport less the margins (and, for a
+   * content-box root, its padding and border) keeps it beside the column
+   * either way, and still honours a smaller maximum the host set.
+   */
+  #limitRootWidth(root: HTMLElement, hostMaxWidth: string): void {
+    const view = root.ownerDocument.defaultView;
+    if (!view) return;
+    const computed = view.getComputedStyle(root);
+    const px = (name: string): number => {
+      const value = Number.parseFloat(computed.getPropertyValue(name));
+      return Number.isFinite(value) ? value : 0;
+    };
+    let used = px("margin-left") + px("margin-right");
+    if (computed.getPropertyValue("box-sizing") !== "border-box") {
+      used +=
+        px("padding-left") +
+        px("padding-right") +
+        px("border-left-width") +
+        px("border-right-width");
+    }
+    const room = `calc(100% - ${used}px)`;
+    const limit = hostMaxWidth && hostMaxWidth !== "none" ? `min(${hostMaxWidth}, ${room})` : room;
+    root.style.setProperty("max-width", limit, "important");
   }
 
   /** Removes exactly what `#reserveRoom` added. */
@@ -751,6 +788,11 @@ export class SolvChat extends HTMLElement {
       );
     } else {
       style.removeProperty(PANEL_WIDTH_PROPERTY);
+    }
+    if (reservation.maxWidthValue) {
+      style.setProperty("max-width", reservation.maxWidthValue, reservation.maxWidthPriority);
+    } else {
+      style.removeProperty("max-width");
     }
     // Nothing else changed meanwhile: put the attribute back as it was written.
     // Reading it first makes the browser write out the changes above now

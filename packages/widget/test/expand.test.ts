@@ -126,6 +126,25 @@ describe("expanding to a side panel", () => {
     expect(root().getAttribute("style")).toBe(hostStyle);
   });
 
+  it("limits the root's width beside the column, within the host's own maximum, and puts it back", async () => {
+    const hostStyle = "max-width: 900px; width: 100%";
+    root().setAttribute("style", hostStyle);
+    serveConfig({});
+    const el = mountWidget();
+    await flushAsync();
+    const r = shadow(el);
+    q<HTMLButtonElement>(r, ".solv-launcher").click();
+    q<HTMLButtonElement>(r, ".solv-expand").click();
+    const limit = root().style.getPropertyValue("max-width");
+    expect(limit).toMatch(/^min\(900px, calc\(100% - [\d.]+px\)\)$/);
+    expect(limit).toContain("460");
+    expect(root().style.getPropertyPriority("max-width")).toBe("important");
+    expect(root().style.getPropertyValue("width")).toBe("100%");
+
+    q<HTMLButtonElement>(r, ".solv-collapse").click();
+    expect(root().getAttribute("style")).toBe(hostStyle);
+  });
+
   it("closing from the expanded state, by the close button or Escape, restores the page width", async () => {
     serveConfig({});
     const el = mountWidget();

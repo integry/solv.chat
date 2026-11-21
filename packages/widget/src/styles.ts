@@ -163,8 +163,12 @@ textarea:focus-visible {
   border-right: 1px solid var(--solv-border);
 }
 
-:host([data-layout="full"]) {
+/* Both edges, so the left-widget rule (right: auto) cannot leave the host
+   sized to its contents. */
+:host([data-layout="full"]),
+:host([data-layout="full"][data-position="left"]) {
   left: 0;
+  right: 0;
 }
 
 /* The host spans the viewport less any scrollbar, which 100vw would not. */

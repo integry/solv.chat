@@ -46,15 +46,18 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   let enginePort = 0;
   let browser: Browser;
   let preflights = 0;
+  /** Where the engine's config puts the widget for the next page load. */
+  let position: "left" | "right" = "right";
 
   const engineOrigin = () => `http://127.0.0.1:${enginePort}`;
   const hostOrigin = () => `http://127.0.0.1:${hostPort}`;
 
   const page = (
     hostStyle: string,
+    hostCss = "",
   ) => `<!doctype html><html${hostStyle ? ` style="${hostStyle}"` : ""}>
 <head><meta name="viewport" content="width=device-width, initial-scale=1">
-<style>body { margin: 0; font: 16px sans-serif; } #content { padding: 16px; }</style></head>
+<style>body { margin: 0; font: 16px sans-serif; } #content { padding: 16px; } ${hostCss}</style></head>
 <body><main id="content"><h1>Owner's page</h1><p>${"Some documentation text. ".repeat(40)}</p></main>
 <script src="${engineOrigin()}/widget.js"></script>
 <solv-chat assistant="pk_layout"></solv-chat></body></html>`;
@@ -73,7 +76,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       const url = new URL(req.url ?? "/", "http://x");
       if (url.pathname === "/" || url.pathname === "/other") {
         res.writeHead(200, { "content-type": "text/html" });
-        res.end(page(url.searchParams.get("style") ?? ""));
+        res.end(page(url.searchParams.get("style") ?? "", url.searchParams.get("css") ?? ""));
         return;
       }
       res.writeHead(404).end();
@@ -97,7 +100,12 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       }
       if (url.pathname === "/v1/assistants/pk_layout") {
         res.writeHead(200, { "content-type": "application/json", ...cors });
-        res.end(JSON.stringify({ title: "Docs", greeting: "Hi", suggestedQuestions: [] }));
+        res.end(
+          JSON.stringify({
+            widget: { title: "Docs", position },
+            behaviour: { greeting: "Hi", suggestedQuestions: [] },
+          }),
+        );
         return;
       }
       if (url.pathname === "/v1/chat" && req.method === "POST") {
@@ -237,6 +245,64 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     expect((await rect(".solv-panel")).width).toBe(899);
     expect(await page_("document.documentElement.getAttribute('style')")).toBeNull();
   }, 60_000);
+
+  it("a left widget, expanded below 900px, fills the whole screen", async () => {
+    position = "left";
+    try {
+      await viewport(899, 800);
+      await open();
+      await q(
+        `(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click(), true)`,
+      );
+      expect(await q("el.getAttribute('data-layout')")).toBe("full");
+      const inner = await page_<number>("document.documentElement.clientWidth");
+      const host = await q<{ left: number; right: number }>("el.getBoundingClientRect().toJSON()");
+      expect(host.left).toBe(0);
+      expect(host.right).toBe(inner);
+      const panel = await rect(".solv-panel");
+      expect(panel.left).toBe(0);
+      expect(panel.width).toBe(inner);
+      expect(panel.height).toBe(800);
+      expect(await page_("document.documentElement.getAttribute('style')")).toBeNull();
+    } finally {
+      position = "right";
+    }
+  }, 60_000);
+
+  for (const side of ["right", "left"] as const) {
+    it(`a ${side} column narrows a page whose root is sized to 100%`, async () => {
+      position = side;
+      try {
+        await viewport(1280, 800);
+        await open(`/?css=${encodeURIComponent("html { width: 100%; }")}`);
+        await q(
+          `(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click(), true)`,
+        );
+        expect(await q("el.getAttribute('data-layout')")).toBe("side");
+        const inner = await page_<number>("document.documentElement.clientWidth");
+        const content = await page_<{ left: number; right: number }>(
+          "document.getElementById('content').getBoundingClientRect().toJSON()",
+        );
+        const panel = await rect(".solv-panel");
+        if (side === "right") {
+          expect(panel.left).toBe(inner - 460);
+          expect(content.right).toBeLessThanOrEqual(panel.left);
+        } else {
+          expect(panel.right).toBe(460);
+          expect(content.left).toBeGreaterThanOrEqual(panel.right);
+          expect(content.right).toBeLessThanOrEqual(inner);
+        }
+        expect(await noSidewaysScroll()).toBe(true);
+        await q(`(r.querySelector(".solv-collapse").click(), true)`);
+        expect(await page_("document.documentElement.getAttribute('style')")).toBeNull();
+        expect(
+          await page_<number>("document.getElementById('content').getBoundingClientRect().width"),
+        ).toBe(inner);
+      } finally {
+        position = "right";
+      }
+    }, 60_000);
+  }
 
   it("puts the host's own root style back exactly after collapse and after removal", async () => {
     await viewport(1280, 800);
