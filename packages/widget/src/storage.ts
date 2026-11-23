@@ -51,13 +51,117 @@ export interface SavedConversation {
   tabId?: string;
   turns: SavedTurn[];
   pendingResume?: PendingResume;
+  restartNotice?: boolean;
+  tabOnly?: boolean;
   view?: SavedView;
 }
 
 const VISITOR_KEY = "solv-chat-visitor";
 const OPEN_PREFIX = "solv-chat-open:";
 const MAX_SAVED_TURNS = 20;
+const REMEMBER_PREFIX = "solv-chat-conversation:";
+const MIGRATED_PREFIX = "solv-chat-migrated:";
 export const PENDING_RESUME_TTL_MS = 2 * 60 * 1000;
+const CONVERSATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export interface RememberedConversation {
+  raw: string;
+  conversationId: string | null;
+  turns: SavedTurn[];
+  activityAt: number;
+  restartNotice?: boolean;
+  navigationUntil?: number;
+  writerTabId?: string;
+}
+
+export function rememberedKey(assistant: string): string {
+  return REMEMBER_PREFIX + assistant;
+}
+
+export function conversationLocks(): LockManager | undefined {
+  try {
+    return navigator.locks;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Undefined means storage is blocked. Null means there is no current transcript. */
+export function readRemembered(assistant: string): RememberedConversation | null | undefined {
+  try {
+    const key = rememberedKey(assistant);
+    const raw = localStorage.getItem(key);
+    if (raw === null) return null;
+    let record: Omit<RememberedConversation, "raw"> | undefined;
+    try {
+      record = JSON.parse(raw);
+    } catch {
+      // Remove malformed records as well as expired ones.
+    }
+    if (
+      record &&
+      typeof record.activityAt === "number" &&
+      Number.isFinite(record.activityAt) &&
+      Date.now() - record.activityAt < CONVERSATION_TTL_MS &&
+      Array.isArray(record.turns)
+    ) {
+      return { ...record, turns: record.turns.slice(-MAX_SAVED_TURNS), raw };
+    }
+    localStorage.removeItem(key);
+    return null;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeRemembered(
+  assistant: string,
+  saved: SavedConversation,
+  activityAt: number,
+  writerTabId?: string,
+): RememberedConversation | undefined {
+  const record = {
+    conversationId: saved.conversationId,
+    turns: saved.turns.slice(-MAX_SAVED_TURNS),
+    activityAt,
+    ...(writerTabId ? { writerTabId } : {}),
+    ...(saved.restartNotice ? { restartNotice: true } : {}),
+    ...(saved.pendingResume
+      ? { navigationUntil: saved.pendingResume.createdAt + PENDING_RESUME_TTL_MS }
+      : {}),
+  };
+  try {
+    const raw = JSON.stringify(record);
+    localStorage.setItem(MIGRATED_PREFIX + assistant, "1");
+    localStorage.setItem(rememberedKey(assistant), raw);
+    return { ...record, raw };
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveRemembered(
+  assistant: string,
+  saved: SavedConversation,
+  activityAt: number,
+  owner: symbol,
+): RememberedConversation | undefined {
+  const active = activeOwners.get(assistant);
+  if (active?.owner !== owner) return undefined;
+  active.tabId ??= randomId();
+  return writeRemembered(assistant, saved, activityAt, active.tabId);
+}
+
+export function clearRemembered(assistant: string, owner: symbol): boolean {
+  if (activeOwners.get(assistant)?.owner !== owner) return false;
+  try {
+    localStorage.removeItem(rememberedKey(assistant));
+    localStorage.setItem(MIGRATED_PREFIX + assistant, "1");
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const CONFIG_PREFIX = "solv-chat-config:";
 const CONFIG_MAX_AGE_MS = 2 * 60 * 1000;
@@ -116,8 +220,7 @@ function randomId(): string {
 
 /**
  * A random id in localStorage, not a cookie. The specification is explicit:
- * the widget sets no cookies, so there is nothing to consent to and nothing
- * sent to a third party.
+ * the widget sets no cookies.
  */
 export function visitorId(): string {
   try {
@@ -130,19 +233,18 @@ export function visitorId(): string {
   } catch {
     if (fallbackVisitorId === null) {
       fallbackVisitorId = randomId();
+      try {
+        const previous = sessionStorage.getItem(VISITOR_KEY);
+        if (previous) fallbackVisitorId = previous;
+        else sessionStorage.setItem(VISITOR_KEY, fallbackVisitorId);
+      } catch {
+        // Keep one visitor id in memory when both stores are blocked.
+      }
     }
     return fallbackVisitorId;
   }
 }
 
-/**
- * The open conversation, kept per assistant key in sessionStorage.
- *
- * Why sessionStorage: a visitor who follows a link mid-conversation expects to
- * continue, and one returning tomorrow expects a fresh start. sessionStorage
- * draws that line with no expiry logic. Keyed by assistant so two assistants
- * on one site cannot inherit each other's transcript.
- */
 function parsePendingResume(raw: unknown): PendingResume | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
   const record = raw as Record<string, unknown>;
@@ -207,6 +309,8 @@ function parseSavedConversation(parsed: unknown): SavedConversation | null {
       : {}),
     ...(typeof record.tabId === "string" ? { tabId: record.tabId } : {}),
     turns,
+    ...(record.restartNotice === true ? { restartNotice: true } : {}),
+    ...(record.tabOnly === true ? { tabOnly: true } : {}),
     ...(pendingResume ? { pendingResume } : {}),
     ...(view && typeof view.draft === "string"
       ? {
@@ -238,27 +342,76 @@ function copiedFromOpener(key: string, tabId: string | undefined): boolean {
   }
 }
 
-export function loadConversation(assistant: string): SavedConversation | null {
-  if (!assistant) return null;
+export function loadConversation(
+  assistant: string,
+  owner: symbol,
+): {
+  saved: SavedConversation | null;
+  remembered: RememberedConversation | null | undefined;
+} {
+  const key = OPEN_PREFIX + assistant;
+  let saved: SavedConversation | null = null;
   try {
-    const key = `${OPEN_PREFIX}${assistant}`;
+    sessionStorage.removeItem(`solv-chat-session:${assistant}`);
     const raw = sessionStorage.getItem(key);
-    if (raw === null) return null;
-    const saved = parseSavedConversation(JSON.parse(raw));
-    // A same-origin popup starts with a copy of its opener's sessionStorage.
-    // The id is kept for the lifetime of the conversation, even as turns change.
-    if (saved && copiedFromOpener(key, saved.tabId)) {
-      // Discard the copy now, since the opener may be gone on the next load.
+    if (raw !== null) saved = parseSavedConversation(JSON.parse(raw));
+  } catch {
+    // The transcript can still be restored when only tab storage is blocked.
+  }
+
+  let remembered = readRemembered(assistant);
+  if (!conversationLocks() || saved?.tabOnly) remembered = undefined;
+  if (remembered === null && saved && (saved.turns.length > 0 || saved.conversationId)) {
+    try {
+      // A reset or expiry must not bring back a legacy transcript from a
+      // different tab that has been open since before the upgrade.
+      if (localStorage.getItem(MIGRATED_PREFIX + assistant) === null) {
+        remembered = writeRemembered(assistant, saved, Date.now());
+      }
+    } catch {
+      remembered = undefined;
+    }
+  }
+
+  const copied = saved && copiedFromOpener(key, saved.tabId);
+  if (copied) {
+    // Discard the opener's layout, draft and pending action from the copied tab.
+    try {
       sessionStorage.removeItem(key);
       sessionStorage.removeItem(dockKey(assistant));
-      return null;
+    } catch {
+      // The copied state is still ignored.
     }
-    return saved;
-  } catch {
-    // Private-mode quota errors and malformed data both mean "no saved
-    // conversation". A storage failure must never stop the widget opening.
-    return null;
+    saved = null;
   }
+
+  claimConversation(assistant, owner, saved?.tabId);
+  if (remembered !== undefined) {
+    const pending = saved?.pendingResume;
+    const transcript = remembered ?? { conversationId: null, turns: [], restartNotice: false };
+    if (saved || remembered) {
+      saved = {
+        ...saved,
+        conversationId: transcript.conversationId,
+        turns: transcript.turns,
+        restartNotice: transcript.restartNotice === true,
+        open: saved?.open ?? false,
+      };
+      if (
+        pending &&
+        (transcript.conversationId !== pending.conversationId ||
+          !transcript.turns.some(
+            (turn) => turn.messageId === pending.resumeMessageId && turn.awaiting?.length,
+          ))
+      ) {
+        delete saved.pendingResume;
+      }
+      // Strip legacy copies even when the panel is closed. Once reset or
+      // expired, another load must not migrate these turns back into storage.
+      saveConversation(assistant, saved, owner, true);
+    }
+  }
+  return { saved, remembered };
 }
 
 /**
@@ -290,12 +443,18 @@ export function saveConversation(
     sessionStorage.setItem(
       key,
       JSON.stringify({
-        conversationId: saved.conversationId,
+        ...(saved.tabOnly
+          ? {
+              conversationId: saved.conversationId,
+              turns: saved.turns.slice(-MAX_SAVED_TURNS),
+              ...(saved.restartNotice ? { restartNotice: true } : {}),
+              tabOnly: true,
+            }
+          : {}),
         open: saved.open,
         ...(saved.expanded ? { expanded: true } : {}),
         ...(saved.preferredMode ? { preferredMode: saved.preferredMode } : {}),
         tabId: active.tabId,
-        turns: saved.turns.slice(-MAX_SAVED_TURNS),
         ...(saved.pendingResume ? { pendingResume: saved.pendingResume } : {}),
         ...(saved.view ? { view: saved.view } : {}),
       }),

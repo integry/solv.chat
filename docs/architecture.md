@@ -318,8 +318,7 @@ the visitor to act, or it reports an error, the check has failed: the
 waiting message's bubble (or, with none waiting, a notice with **Try again**)
 says "The security check could not be completed. Check your connection, then
 try again." and no request is sent. A continuation after a page action's
-navigation uses the stored session and runs the check only if it has
-expired; the best-effort "visitor moved on" notice never starts one.
+navigation runs a fresh check on the destination page; the best-effort "visitor moved on" notice never starts one.
 
 **Session.** As soon as Turnstile issues a token the widget posts it to
 `POST /v1/session` (`protocol`, `assistant`, `visitorId`, `token`). In order:
@@ -353,18 +352,16 @@ assistant are signed, not written, so a session verifies only for the
 assistant (and so the org) the engine resolved from the request's public key
 and only for the visitor id in the body, and shows a reader nothing else. It
 lasts one hour (`VISITOR_SESSION_TTL_MS`): a Turnstile token lasts 300 s and
-may be redeemed once, so the session must carry a whole visit (some pages,
-several questions) on one check; an hour does, matches the window the
-sessions-per-IP cap counts in, and bounds a session copied from a browser.
-The widget keeps it in `sessionStorage` per assistant, and in memory as
-well, so a page that blocks storage still uses one check for the visit
-(both copies are checked against the assistant, visitor id and expiry, and
-both are forgotten on `check_required`). It renews it with a
-fresh check when it has under a minute left, or after the engine refuses it
-(`check_required`). The exchange, response body included, has 15 s
-(`CHECK_EXCHANGE_TIMEOUT_MS`: the engine's 5 s for `siteverify` and room for
-the network both ways); past that the request is aborted and the check has
-failed as above. An exchange that answers after its check has ended is
+may be redeemed once, so the session carries multiple questions on a page
+through one check. An hour matches the window the sessions-per-IP cap
+counts in and bounds a session copied from a browser.
+The widget keeps the session in memory for the page and checks the assistant,
+visitor id and expiry before use. It renews the session when it has under a
+minute left, and discards it on `check_required`. A new page or tab gets its
+own session on the next send or continuation. The exchange, response body
+included, has a 15 s deadline (`CHECK_EXCHANGE_TIMEOUT_MS`). This gives the
+engine 5 s for `siteverify` and leaves room for the network both ways. At
+the deadline the widget aborts the request and reports that the check failed. An exchange that answers after its check has ended is
 ignored, so it cannot end a later check.
 
 **Owner surfaces are not challenged.** "Try it", test runs and everything
@@ -1886,14 +1883,59 @@ digests belong to the cloud layer.
 
 A custom element, `<solv-chat assistant="pk_...">`, loaded with one script tag.
 No framework, no dependencies, Shadow DOM, one file, under 30 kB gzipped.
-Streams tokens, renders citations as links, restores the open conversation after a
-page change or reload (conversation id, transcript and open state in sessionStorage,
-so it ends with the tab), thumbs up and down, keyboard and
-screen-reader usable, respects `prefers-reduced-motion` and `prefers-color-scheme`.
+Streams tokens, renders citations as links, remembers the conversation across
+tabs and visits, supports thumbs up and down, works with keyboards and
+screen readers, respects `prefers-reduced-motion` and `prefers-color-scheme`.
 It sets no cookies and loads nothing from third parties into the host page:
 with the visitor check on, Turnstile runs inside a frame served by the
 engine's origin, created only after a visitor interaction (see "Visitor
 check").
+
+**Storage.**
+
+On each website origin, the widget keeps a random visitor ID in
+`localStorage` until the browser clears site data. Per assistant key it keeps
+the current conversation ID, the latest 20 turns (including displayed
+citations and feedback), and its last activity time. Sending a message or receiving an answer updates that time.
+Opening the panel, reading the transcript, and voting leave it as it was.
+After 7 days of inactivity the record is removed when the widget for that
+assistant next loads or reads it. On upgrade, a legacy tab transcript is
+moved from `sessionStorage` if the browser has no current transcript. Since
+legacy entries have no timestamp, their inactivity window starts at migration.
+A per-assistant flag in `localStorage` prevents an older tab from migrating
+another legacy copy after the browser transcript has been cleared or expired.
+
+`sessionStorage` keeps each tab's open state, panel layout, draft, scroll
+position and docked first-paint record for the life of the tab. It also
+keeps public configuration and pending page-action continuations, each
+valid for two minutes. A new tab starts closed. The boot script uses its
+existing key and format. If browser storage or the Web Locks API is
+unavailable, the widget uses the tab's storage where possible.
+Tool credentials, Turnstile tokens and visitor-session tokens are held in
+memory.
+
+Tabs read transcript changes through the `storage` event. An exclusive Web
+Lock per assistant covers a send, its streaming reply and any page-action
+round trips. A competing send leaves the draft in place and asks the visitor
+to wait. A page-action navigation reserves the handoff for up to two minutes
+so another tab cannot send between the old page unloading and the new page
+resuming. The pending action data stays in the initiating tab. The existing
+per-tab owner fence prevents a replaced element from writing over its successor.
+See the [Web Locks specification](https://www.w3.org/TR/web-locks/).
+
+**New conversation** (also available as `element.newConversation()`) waits
+for any active reply, clears the browser transcript across tabs, and leaves
+the old conversation on the server for the owner. When the engine starts a
+new conversation because it could not open the remembered ID, the widget
+keeps the current question and reply and says “Your earlier conversation is
+no longer available. A new one has started.”
+
+**Privacy notice wording for site owners**
+
+> Our chat stores a random visitor ID and your recent messages in your browser
+> so you can continue across tabs and visits. The conversation is forgotten
+> after 7 days without a message or reply, and you can clear it sooner by
+> choosing New conversation.
 
 **First paint.** When the shortcut is unknown, the widget requests the
 public configuration at load. This covers fresh embeds without
@@ -1991,7 +2033,7 @@ for hosts that opt in to cross-document view transitions.
 Conversation state is first saved when the visitor opens the panel or the
 host submits a message through `send()`. The open layout and any choice
 made with the expand or collapse controls are
-saved with the conversation in sessionStorage, so an open panel reopens in
+saved with the tab layout in sessionStorage, so an open panel reopens in
 the same layout on navigation in the tab.
 
 The owner's "Opens as" setting (`widget.opensAs`) defaults to Floating panel
@@ -2200,7 +2242,8 @@ Install
   the Content-Security-Policy lines a host site needs (`hostPolicy` on the
   install response: the engine origin in `script-src`, `connect-src` and,
   with the visitor check on, `frame-src`, plus the boot script hash in
-  `script-src`) and, with the check on, what Turnstile receives and that the owner's privacy notice should mention it.
+  `script-src`), privacy notice wording for the 7-day browser transcript, and,
+  with the check on, what Turnstile receives.
   The ingest key and CLI sit in a collapsed "For developers" section. Every
   screen shows a standing warning while the visitor check is off, on test
   keys or half set up (`visitorCheck` on the assistants list).

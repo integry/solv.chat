@@ -80,6 +80,7 @@ export class Cdp {
 
 export interface Browser {
   cdp: Cdp;
+  newTab(): Promise<{ cdp: Cdp; close(): Promise<void> }>;
   /**
    * Closes Chromium and waits for it to exit. Asked to close over DevTools,
    * Chromium ends and reaps its own helper processes; killing it outright
@@ -172,6 +173,21 @@ export async function launch(chromePath: string, extraArgs: string[] = []): Prom
     await cdp.send("Runtime.enable");
     return {
       cdp,
+      async newTab() {
+        const { targetId } = await cdp.send<{ targetId: string }>("Target.createTarget", {
+          url: "about:blank",
+        });
+        const tab = await Cdp.connect(`ws://127.0.0.1:${port}/devtools/page/${targetId}`);
+        await tab.send("Page.enable");
+        await tab.send("Runtime.enable");
+        return {
+          cdp: tab,
+          async close() {
+            tab.close();
+            await cdp.send("Target.closeTarget", { targetId });
+          },
+        };
+      },
       async close() {
         cdp.close();
         await closeGracefully();
