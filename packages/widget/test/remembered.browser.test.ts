@@ -13,6 +13,7 @@ import { type Browser, type Cdp, findChrome, launch, waitFor } from "./support/c
 const root = fileURLToPath(new URL("..", import.meta.url));
 const transcriptKey = "solv-chat-conversation:pk_remembered";
 const tabKey = "solv-chat-open:pk_remembered";
+const sessionKey = "solv-chat-session:pk_remembered";
 const sevenDays = 7 * 24 * 60 * 60 * 1000;
 const chrome = findChrome();
 
@@ -178,15 +179,19 @@ describe.skipIf(chrome === null)("remembered conversation in Chromium", () => {
     await send(first.cdp, "How do I change my workspace name?");
     const stored = await transcript(first.cdp);
     expect(stored?.conversationId).toBeTruthy();
+    expect(await first.cdp.evaluate(`!!sessionStorage.getItem("${sessionKey}")`)).toBe(true);
     expect(
-      await first.cdp.evaluate(
-        `Object.keys(sessionStorage).some(key => key.startsWith("solv-chat-session:"))`,
-      ),
+      await first.cdp.evaluate(`(() => {
+        const { session } = JSON.parse(sessionStorage.getItem("${sessionKey}"));
+        return Object.keys(localStorage).some(key => key.startsWith("solv-chat-session:") ||
+          localStorage.getItem(key).includes(session));
+      })()`),
     ).toBe(false);
     await first.close();
 
     const returning = await tab();
     try {
+      expect(await returning.cdp.evaluate(`sessionStorage.getItem("${sessionKey}")`)).toBeNull();
       expect(await widget(returning.cdp, 'r.querySelector(".solv-panel").hidden')).toBe(true);
       await open(returning.cdp);
       expect(
@@ -194,6 +199,7 @@ describe.skipIf(chrome === null)("remembered conversation in Chromium", () => {
       ).toContain("How do I change my workspace name?");
       await screenshot(returning.cdp, "remembered-conversation.png");
       await send(returning.cdp, "Can I change it from the billing page?");
+      expect(await returning.cdp.evaluate(`!!sessionStorage.getItem("${sessionKey}")`)).toBe(true);
       expect(await transcript(returning.cdp)).toMatchObject({
         conversationId: stored?.conversationId,
       });

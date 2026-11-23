@@ -213,10 +213,12 @@ available to the owner according to the server's retention rules.
 The panel layout, draft, scroll position and docked first paint use
 `sessionStorage` for the life of the tab. Public settings and pending
 page-action continuations use the same storage and are valid for two minutes.
+When the security check is on, the chat saves its visitor session in the tab's
+`sessionStorage` and reuses it across pages in that tab until it needs renewal.
 A new tab starts with the panel closed. If the browser blocks shared storage
 or coordination, the chat uses tab storage where it can.
-The chat holds tool credentials, Turnstile tokens and visitor-session tokens in
-memory, and sets no cookies.
+The chat holds tool credentials and Turnstile tokens in memory and sets no
+cookies.
 
 **Privacy notice wording you can copy**
 

@@ -31,11 +31,17 @@ export const CHECK_EXCHANGE_TIMEOUT_MS = 15_000;
 /** A session this close to expiring is renewed before use rather than sent. */
 export const SESSION_RENEW_MARGIN_MS = 60_000;
 
-interface HeldSession {
-  assistant: string;
+const STORAGE_PREFIX = "solv-chat-session:";
+
+interface StoredSession {
   session: string;
   expiresAt: number;
   visitorId: string;
+}
+
+/** The in-memory copy also names its assistant; storage keys by it instead. */
+interface HeldSession extends StoredSession {
+  assistant: string;
 }
 
 export interface CheckControllerOptions {
@@ -68,28 +74,52 @@ export class CheckController {
   /** Bumped whenever an attempt settles, so a late exchange cannot settle the next one. */
   #attempt = 0;
   #exchangeAbort: AbortController | null = null;
+  /**
+   * The last session issued, kept in memory too, so a page whose storage
+   * throws (a browser policy, say) still serves the whole visit from one
+   * check instead of starting another on every keystroke.
+   */
   #held: HeldSession | null = null;
 
   constructor(opts: CheckControllerOptions) {
     this.#opts = opts;
   }
 
-  /** A session held for this assistant and visitor with enough time left to use. */
+  /**
+   * The stored session, or the one held in memory, when it is for this
+   * assistant and visitor and still good for a while; otherwise null.
+   */
   session(): string | null {
+    const assistant = this.#opts.assistant();
+    if (!assistant) return null;
+    const good = (saved: Partial<StoredSession> | null): saved is StoredSession =>
+      saved !== null &&
+      typeof saved.session === "string" &&
+      typeof saved.expiresAt === "number" &&
+      saved.visitorId === this.#opts.visitorId() &&
+      saved.expiresAt - Date.now() > SESSION_RENEW_MARGIN_MS;
+    try {
+      const raw = sessionStorage.getItem(STORAGE_PREFIX + assistant);
+      const saved = raw ? (JSON.parse(raw) as Partial<StoredSession> | null) : null;
+      if (good(saved)) return saved.session;
+    } catch {
+      // Storage unavailable or unreadable: fall back to the copy in memory.
+    }
     const held = this.#held;
-    return held &&
-      held.assistant === this.#opts.assistant() &&
-      held.visitorId === this.#opts.visitorId() &&
-      held.expiresAt - Date.now() > SESSION_RENEW_MARGIN_MS
-      ? held.session
-      : null;
+    return held !== null && held.assistant === assistant && good(held) ? held.session : null;
   }
 
+  /** Forgets the session, stored and in memory, after the engine refused it. */
   clear(): void {
     this.#held = null;
+    try {
+      sessionStorage.removeItem(STORAGE_PREFIX + this.#opts.assistant());
+    } catch {
+      // Nothing stored.
+    }
   }
 
-  /** Starts the check if no session is held and none is running. */
+  /** Starts the check if no good session is stored and none is running. */
   start(): void {
     void this.#run();
   }
@@ -240,7 +270,17 @@ export class CheckController {
         typeof body.session === "string" &&
         typeof body.expiresAt === "number"
       ) {
-        this.#held = { assistant, visitorId, session: body.session, expiresAt: body.expiresAt };
+        const saved: StoredSession = {
+          session: body.session,
+          expiresAt: body.expiresAt,
+          visitorId,
+        };
+        this.#held = { ...saved, assistant };
+        try {
+          sessionStorage.setItem(STORAGE_PREFIX + assistant, JSON.stringify(saved));
+        } catch {
+          // Storage refused: the copy in memory serves this page.
+        }
         this.#finish({ ok: true, session: body.session });
         return;
       }

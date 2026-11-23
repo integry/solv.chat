@@ -318,7 +318,8 @@ the visitor to act, or it reports an error, the check has failed: the
 waiting message's bubble (or, with none waiting, a notice with **Try again**)
 says "The security check could not be completed. Check your connection, then
 try again." and no request is sent. A continuation after a page action's
-navigation runs a fresh check on the destination page; the best-effort "visitor moved on" notice never starts one.
+navigation reuses a valid tab session and runs the check if none is available.
+The best-effort "visitor moved on" notice never starts a check.
 
 **Session.** As soon as Turnstile issues a token the widget posts it to
 `POST /v1/session` (`protocol`, `assistant`, `visitorId`, `token`). In order:
@@ -352,17 +353,19 @@ assistant are signed, not written, so a session verifies only for the
 assistant (and so the org) the engine resolved from the request's public key
 and only for the visitor id in the body, and shows a reader nothing else. It
 lasts one hour (`VISITOR_SESSION_TTL_MS`): a Turnstile token lasts 300 s and
-may be redeemed once, so the session carries multiple questions on a page
-through one check. An hour matches the window the sessions-per-IP cap
-counts in and bounds a session copied from a browser.
-The widget keeps the session in memory for the page and checks the assistant,
-visitor id and expiry before use. It renews the session when it has under a
-minute left, and discards it on `check_required`. A new page or tab gets its
-own session on the next send or continuation. The exchange, response body
-included, has a 15 s deadline (`CHECK_EXCHANGE_TIMEOUT_MS`). This gives the
-engine 5 s for `siteverify` and leaves room for the network both ways. At
-the deadline the widget aborts the request and reports that the check failed. An exchange that answers after its check has ended is
-ignored, so it cannot end a later check.
+may be redeemed once, so the session carries multiple questions across pages
+in the same tab through one check. An hour matches the window the
+sessions-per-IP cap counts in and bounds a session copied from a browser.
+The widget keeps the session per assistant in the tab's `sessionStorage` and
+uses a copy in memory if storage is unavailable. It checks the assistant,
+visitor id and expiry before use, renews the session when it has a minute or
+less left, and discards both copies on `check_required`. A tab without a valid
+session runs the check on the next qualifying interaction. The exchange,
+response body included, has a 15 s deadline (`CHECK_EXCHANGE_TIMEOUT_MS`).
+This gives the engine 5 s for `siteverify` and leaves room for the network
+both ways. At the deadline the widget aborts the request and reports that
+the check failed. The widget ignores an exchange that answers after its
+check has ended, so it cannot end a later check.
 
 **Owner surfaces are not challenged.** "Try it", test runs and everything
 under `/api/admin/*` use the admin session and are not counted against the
@@ -1907,12 +1910,12 @@ another legacy copy after the browser transcript has been cleared or expired.
 
 `sessionStorage` keeps each tab's open state, panel layout, draft, scroll
 position and docked first-paint record for the life of the tab. It also
-keeps public configuration and pending page-action continuations, each
-valid for two minutes. A new tab starts closed. The boot script uses its
-existing key and format. If browser storage or the Web Locks API is
-unavailable, the widget uses the tab's storage where possible.
-Tool credentials, Turnstile tokens and visitor-session tokens are held in
-memory.
+keeps public configuration and pending page-action continuations for two
+minutes and lets the widget reuse a valid visitor session across page loads.
+A new tab starts closed.
+The boot script uses its existing key and format. If browser storage or the
+Web Locks API is unavailable, the widget uses the tab's storage where possible.
+Tool credentials and Turnstile tokens are held in memory.
 
 Tabs read transcript changes through the `storage` event. An exclusive Web
 Lock per assistant covers a send, its streaming reply and any page-action

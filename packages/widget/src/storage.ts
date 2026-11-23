@@ -352,7 +352,6 @@ export function loadConversation(
   const key = OPEN_PREFIX + assistant;
   let saved: SavedConversation | null = null;
   try {
-    sessionStorage.removeItem(`solv-chat-session:${assistant}`);
     const raw = sessionStorage.getItem(key);
     if (raw !== null) saved = parseSavedConversation(JSON.parse(raw));
   } catch {
