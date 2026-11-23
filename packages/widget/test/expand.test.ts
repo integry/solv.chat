@@ -293,6 +293,7 @@ describe("expanding to a side panel", () => {
     expect(r.querySelector(".solv-expand")).toBeNull();
     expect(r.querySelector(".solv-collapse")).toBeNull();
     expect([...r.querySelectorAll(".solv-header button")].map((b) => b.className)).toEqual([
+      "solv-new",
       "solv-close",
     ]);
     expect(el.hasAttribute("data-layout")).toBe(false);
@@ -326,7 +327,7 @@ describe("expanding to a side panel", () => {
     expect(q<HTMLButtonElement>(shadow(el), ".solv-expand").hidden).toBe(false);
     // Back in the header, before the close button.
     expect([...shadow(el).querySelectorAll(".solv-header button")].map((b) => b.className)).toEqual(
-      ["solv-expand", "solv-collapse", "solv-close"],
+      ["solv-new", "solv-expand", "solv-collapse", "solv-close"],
     );
   });
 });

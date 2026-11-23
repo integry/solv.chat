@@ -961,6 +961,100 @@ describe("<solv-chat>", () => {
     expect(capturedSignal?.aborted).toBe(true);
   });
 
+  it.each([
+    { turn: "send", resetLock: "denied" },
+    { turn: "send", resetLock: "acquired" },
+    { turn: "resumed reply", resetLock: "denied" },
+  ])(
+    "discards a late done from an uncoordinated $turn with reset lock $resetLock",
+    async ({ turn, resetLock }) => {
+      const request = vi.fn().mockRejectedValue(new DOMException("Denied", "SecurityError"));
+      vi.spyOn(navigator, "locks", "get").mockReturnValue({ request, query: vi.fn() });
+      const assistant = "pk_reset_uncoordinated";
+      const tabKey = `solv-chat-open:${assistant}`;
+      if (turn === "resumed reply") {
+        sessionStorage.setItem(
+          tabKey,
+          JSON.stringify({
+            open: true,
+            tabOnly: true,
+            conversationId: "conv_old",
+            turns: [
+              {
+                role: "assistant",
+                text: "Opening the page",
+                messageId: "msg_old",
+                awaiting: ["call_1"],
+              },
+            ],
+            pendingResume: {
+              conversationId: "conv_old",
+              resumeMessageId: "msg_old",
+              actionResults: [{ callId: "call_1", ok: true, result: "{}" }],
+              depth: 1,
+              createdAt: Date.now(),
+            },
+          }),
+        );
+      }
+
+      let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+      let signal: AbortSignal | null | undefined;
+      const chatBodies: Array<{ conversationId?: string; resumeMessageId?: string }> = [];
+      globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+        if (!url.endsWith("/v1/chat")) return Response.json({ title: "Helper" });
+        chatBodies.push(JSON.parse(String(init?.body)));
+        if (chatBodies.length === 1) {
+          signal = init?.signal;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                stream = controller;
+              },
+            }),
+          );
+        }
+        return new Response(
+          sseStream(['event: done\ndata: {"messageId":"msg_new","conversationId":"conv_new"}\n\n']),
+        );
+      }) as typeof fetch;
+
+      const el = mountWidget(assistant);
+      const sending = turn === "send" ? el.send("Old question").catch((error) => error) : undefined;
+      await vi.waitFor(() => expect(stream).toBeDefined());
+      if (turn === "resumed reply") expect(chatBodies[0]?.resumeMessageId).toBe("msg_old");
+      if (resetLock === "acquired") {
+        request.mockImplementationOnce(async (name, _options, run) =>
+          run({ name, mode: "exclusive" }),
+        );
+      }
+
+      await el.newConversation();
+      // Deliver completion even after reset, as if the transport already buffered it.
+      stream?.enqueue(
+        new TextEncoder().encode(
+          'event: done\ndata: {"messageId":"msg_old","conversationId":"conv_old"}\n\n',
+        ),
+      );
+      stream?.close();
+      expect(signal?.aborted).toBe(true);
+      if (sending) expect(await sending).toBeInstanceOf(Error);
+      await vi.waitFor(() =>
+        expect(mustQuery<HTMLButtonElement>(shadow(el), ".solv-send").disabled).toBe(false),
+      );
+      expect(JSON.parse(sessionStorage.getItem(tabKey) ?? "{}")).toMatchObject({
+        conversationId: null,
+        turns: [],
+      });
+      expect(JSON.parse(sessionStorage.getItem(tabKey) ?? "{}")).not.toHaveProperty(
+        "pendingResume",
+      );
+      expect(shadow(el).querySelectorAll(".solv-bubble")).toHaveLength(1); // Greeting only.
+      await el.send("New question");
+      expect(chatBodies[1]).not.toHaveProperty("conversationId");
+    },
+  );
+
   it("allows an element removed mid-stream and re-attached to claim ownership and send again", async () => {
     const encoder = new TextEncoder();
     let streamController1: ReadableStreamDefaultController<Uint8Array> | undefined;

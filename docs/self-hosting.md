@@ -201,6 +201,34 @@ as its own named part of the transition.
 In a single-page app, keep `<solv-chat>` outside the routed region, such as
 in the root layout, so it stays mounted across route changes.
 
+#### What the chat remembers
+
+On your website's origin, the chat uses `localStorage` for a random visitor
+ID that lasts until the browser clears site data. Per assistant, it keeps
+the conversation ID, the last 20 turns with their citations and feedback,
+and the last time a message was sent or an answer received. Visitors can pick up the conversation in another tab or after
+restarting their browser. After 7 days without a message or reply, the widget
+forgets the conversation the next time it loads or reads it. **New
+conversation** clears it from the browser sooner. The server copy remains
+available to the owner according to the server's retention rules.
+
+The panel layout, draft, scroll position and docked first paint use
+`sessionStorage` for the life of the tab. Public settings and pending
+page-action continuations use the same storage and are valid for two minutes.
+When the security check is on, the chat saves its visitor session in the tab's
+`sessionStorage` and reuses it across pages in that tab until it needs renewal.
+A new tab starts with the panel closed. If the browser blocks shared storage
+or coordination, the chat uses tab storage where it can.
+The chat holds tool credentials and Turnstile tokens in memory and sets no
+cookies.
+
+**Privacy notice wording you can copy**
+
+> Our chat stores a random visitor ID and your recent messages in your browser
+> so you can continue across tabs and visits. The conversation is forgotten
+> after 7 days without a message or reply, and you can clear it sooner by
+> choosing New conversation.
+
 #### Set the launcher’s appearance
 
 You can set the launcher’s appearance for its first paint with optional

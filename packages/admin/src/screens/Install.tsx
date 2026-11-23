@@ -104,7 +104,6 @@ function PlatformNotes({ snippet }: { snippet: string }) {
 function SitePolicyNotes({ info }: { info: InstallInfo }) {
   const policy = info.hostPolicy ?? [];
   const checkRuns = info.visitorCheck?.state === "on" || info.visitorCheck?.state === "test_keys";
-  if (policy.length === 0 && !checkRuns) return null;
   return (
     <div className="stack install-policy">
       {policy.length > 0 && (
@@ -127,6 +126,17 @@ function SitePolicyNotes({ info }: { info: InstallInfo }) {
           </ul>
         </section>
       )}
+      <section aria-labelledby="install-storage-heading">
+        <h3 id="install-storage-heading" className="section-heading">
+          Tell visitors what the chat remembers
+        </h3>
+        <p className="muted">
+          You can use this in your privacy notice. Our chat stores a random visitor ID and your
+          recent messages in your browser so you can continue across tabs and visits. The
+          conversation is forgotten after 7 days without a message or reply, and you can clear it
+          sooner by choosing New conversation.
+        </p>
+      </section>
       {checkRuns && (
         <section aria-labelledby="install-privacy-heading">
           <h3 id="install-privacy-heading" className="section-heading">

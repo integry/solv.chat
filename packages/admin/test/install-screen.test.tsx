@@ -72,6 +72,17 @@ describe("Install screen", () => {
     expect(screen.queryByText(/We have seen the widget load on/)).toBeNull();
   });
 
+  it("lists seven-day browser storage in the suggested privacy notice", async () => {
+    installBuildScreensFake();
+    render(<App />);
+    const section = await screen.findByRole("region", {
+      name: "Tell visitors what the chat remembers",
+    });
+    expect(
+      within(section).getByText(/after 7 days without a message or reply/).textContent,
+    ).toContain("choosing New conversation");
+  });
+
   it("keeps platform notes and developer details collapsed until opened", async () => {
     installBuildScreensFake();
     render(<App />);

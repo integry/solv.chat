@@ -317,12 +317,16 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   gap: 2px;
+  flex-shrink: 0;
 }
 
 .solv-title {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .solv-close,
@@ -342,6 +346,19 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
+.solv-new {
+  min-height: 30px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--solv-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.solv-new:hover,
 .solv-close:hover,
 .solv-expand:hover,
 .solv-collapse:hover {
@@ -356,6 +373,12 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.solv-conversation-note {
+  color: var(--solv-muted);
+  font-size: 12px;
+  text-align: center;
 }
 
 .solv-messages[hidden] {

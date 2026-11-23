@@ -41,16 +41,21 @@ import {
 import { parseSafeHttpUrl, renderMarkdown } from "./markdown.js";
 import { readEventLines } from "./sse.js";
 import {
-  claimConversation,
+  clearRemembered,
+  conversationLocks,
   loadConversation,
   loadPublicConfig,
   PENDING_RESUME_TTL_MS,
   type PendingResume,
+  type RememberedConversation,
+  readRemembered,
+  rememberedKey,
   type SavedConversation,
   type SavedTurn,
   saveConversation,
   saveDock,
   savePublicConfig,
+  saveRemembered,
   visitorId,
 } from "./storage.js";
 import { HOLD_BOUND_MS, streamingView } from "./streaming.js";
@@ -302,7 +307,7 @@ function matchesShortcut(event: KeyboardEvent, shortcut: WidgetShortcut): boolea
 /**
  * The `<solv-chat>` custom element. Renders a Shadow DOM chat launcher and
  * dialog panel with streaming SSE responses, citations, feedback, and
- * sessionStorage conversation restore.
+ * browser conversation restore.
  */
 export class SolvChat extends HTMLElement {
   #root = this.attachShadow({ mode: "open" });
@@ -319,6 +324,15 @@ export class SolvChat extends HTMLElement {
   /** Turn controller whose remaining confirmations were dismissed by closing the panel. */
   #dismissedTurn: AbortController | null = null;
   #conversationId: string | null = null;
+  #remembered: RememberedConversation | null | undefined;
+  #activityAt = 0;
+  #writingTranscript = false;
+  #restartNotice = false;
+  #onStorage = (event: StorageEvent): void => {
+    if (!this.#sending && (event.key === null || event.key === rememberedKey(this.#assistant()))) {
+      this.#syncTranscript();
+    }
+  };
   #turns: SavedTurn[] = [];
   #pendingResume: PendingResume | null = null;
   #resumedBubble: { bubble: HTMLDivElement; textEl: HTMLDivElement; turn: SavedTurn } | null = null;
@@ -373,7 +387,11 @@ export class SolvChat extends HTMLElement {
   #restoringView: SavedConversation["view"];
   #onPageHide = (): void => {
     // The navigate action already saved the pending resume and its action note.
-    if (this.#open && !this.#pendingResume && this.#persist(true)) this.#saveDock();
+    if (this.#pendingResume) return;
+    if (this.#writingTranscript && this.#abortController?.signal.aborted === false) {
+      this.#persistTranscript();
+    }
+    if (this.#open && this.#persist(true)) this.#saveDock();
   };
   #wideQuery: MediaQueryList | null = null;
   #onWideChange = (): void => {
@@ -415,6 +433,7 @@ export class SolvChat extends HTMLElement {
     }
     connectedWidgets.add(this);
     window.addEventListener("pagehide", this.#onPageHide);
+    window.addEventListener("storage", this.#onStorage);
     this.#connection++;
     const url = this.#publicConfigUrl();
     if (url !== this.#configUrl) {
@@ -433,8 +452,9 @@ export class SolvChat extends HTMLElement {
     let expiredPending: PendingResume | null = null;
     const assistant = this.#assistant();
     if (assistant) {
-      const saved = loadConversation(assistant);
-      claimConversation(assistant, this.#owner, saved?.tabId);
+      const { saved, remembered } = loadConversation(assistant, this.#owner);
+      this.#remembered = remembered;
+      this.#activityAt = remembered?.activityAt ?? 0;
       if (saved?.pendingResume) {
         if (Date.now() - saved.pendingResume.createdAt > PENDING_RESUME_TTL_MS) {
           expiredPending = saved.pendingResume;
@@ -496,6 +516,7 @@ export class SolvChat extends HTMLElement {
     this.#configOpenWait = undefined;
     this.#configLoading = null;
     window.removeEventListener("pagehide", this.#onPageHide);
+    window.removeEventListener("storage", this.#onStorage);
     connectedWidgets.delete(this);
     if (connectedWidgets.size === 0) {
       window.removeEventListener("click", captureClick, true);
@@ -638,7 +659,13 @@ export class SolvChat extends HTMLElement {
 
     const headerActions = document.createElement("div");
     headerActions.className = "solv-header-actions";
-    headerActions.append(expandBtn, collapseBtn, closeBtn);
+    const newBtn = document.createElement("button");
+    newBtn.type = "button";
+    newBtn.className = "solv-new";
+    newBtn.textContent = "New conversation";
+    newBtn.addEventListener("click", () => void this.newConversation());
+
+    headerActions.append(newBtn, expandBtn, collapseBtn, closeBtn);
 
     header.append(title, headerActions);
 
@@ -801,6 +828,52 @@ export class SolvChat extends HTMLElement {
     if (this.#open) return this.close();
     if (!hasUserActivation() || !this.isConnected) return Promise.resolve();
     return this.#openRequested({}, true);
+  }
+
+  /** Clears the browser transcript, waiting for a coordinated reply to finish. */
+  async newConversation(): Promise<void> {
+    const assistant = this.#assistant();
+    if (!assistant || !this.isConnected || this.#previewing) return;
+    const connection = this.#connection;
+    await this.#withConversationLock(assistant, {}, (lock) => {
+      if (connection !== this.#connection || assistant !== this.#assistant() || this.#previewing)
+        return;
+      // A reply still running here was not covered by this lock, or reset
+      // could not acquire it. Fence that reply before clearing the transcript.
+      this.#abortController?.abort();
+      for (const handle of this.#openConfirms) handle.dismiss();
+      const cleared = clearRemembered(assistant, this.#owner);
+      this.#remembered = cleared && lock && this.#remembered !== undefined ? null : undefined;
+      this.#activityAt = 0;
+      this.#conversationId = null;
+      this.#pendingResume = null;
+      this.#resumedBubble = null;
+      this.#restartNotice = false;
+      this.#turns = [];
+      this.#clearInputError();
+      this.#renderTranscript(false);
+      this.#persist();
+    });
+  }
+
+  async #withConversationLock<T>(
+    assistant: string,
+    options: LockOptions,
+    run: (lock: Lock | null | undefined) => T | Promise<T>,
+  ): Promise<T> {
+    const locks = conversationLocks();
+    if (!locks) return run(undefined);
+    let entered = false;
+    try {
+      return await locks.request(rememberedKey(assistant), options, (lock) => {
+        entered = true;
+        return run(lock);
+      });
+    } catch (error) {
+      if (entered || options.signal?.aborted) throw error;
+      // Storage and Web Locks can be denied independently by browser policy.
+      return run(undefined);
+    }
   }
 
   /** Submits host-page input and returns the complete reply as text. */
@@ -1131,6 +1204,7 @@ export class SolvChat extends HTMLElement {
     const connection = this.#connection;
     const loading = this.#loadConfig();
     const { mode, focus = true } = options;
+    if (!this.#sending) this.#syncTranscript();
     if (!this.#open || mode !== undefined) {
       this.#openingWithConfig = this.#configReady ? null : { mode };
       this.#openPanel(focus, this.#expandedOnOpen(mode) ?? false);
@@ -1315,16 +1389,66 @@ export class SolvChat extends HTMLElement {
     this.#preferredMode = saved?.preferredMode ?? legacyMode;
     this.#pendingResume = saved?.pendingResume ?? null;
     this.#resumedBubble = null;
-    this.#turns = (saved?.turns ?? []).map((turn) => ({
-      ...turn,
-      ...(turn.citations ? { citations: [...turn.citations] } : {}),
-      ...(turn.actions ? { actions: turn.actions.map((action) => ({ ...action })) } : {}),
-      ...(turn.awaiting ? { awaiting: [...turn.awaiting] } : {}),
-    }));
+    this.#turns = saved?.turns ?? [];
+    this.#restartNotice = saved?.restartNotice === true;
+    this.#renderTranscript(
+      this.#remembered === undefined ||
+        this.#pendingResume !== null ||
+        (saved?.tabId !== undefined && saved.tabId === this.#remembered?.writerTabId),
+    );
 
+    const placeholder = document.getElementById(
+      dockKey(this.#assistant()),
+    ) as DockPlaceholder | null;
+    const side = placeholder?.style.left === "0px" ? "left" : "right";
+    if (saved?.open) {
+      // Keep the correct side and title even if the full configuration has expired.
+      if (placeholder && !this.#configReady) {
+        this.#applyLauncherStyle(side, this.#config.accentColor);
+        this.#titleEl.textContent = placeholder.textContent;
+        this.#messagesEl.hidden = false;
+        // The draft stays usable while settings are checked. Sending still
+        // waits for configuration, as it does in the regular loading panel.
+        this.#inputEl.disabled = false;
+      }
+      this.#openPanel();
+      this.#restoreView();
+    } else {
+      this.#open = false;
+      this.#panel.hidden = true;
+      this.#updateLauncher();
+      this.#applyLayout();
+      if (saved && this.#remembered === undefined) this.#persist();
+    }
+    // A stale reservation can survive a failed storage write or a viewport
+    // change between boot and connection. Give the page its width back.
+    if (placeholder?.isConnected && placeholder.rootStyle !== undefined) {
+      placeholder.remove();
+      releaseRoom(side, placeholder.rootStyle);
+    }
+  }
+
+  #restartNote(): HTMLDivElement {
+    const note = document.createElement("div");
+    note.className = "solv-conversation-note";
+    note.textContent = "Your earlier conversation is no longer available. A new one has started.";
+    return note;
+  }
+
+  #renderTranscript(markInterrupted: boolean): void {
+    const scrollTop = this.#messagesEl.scrollTop;
     this.#messagesEl.replaceChildren(this.#greetingEl);
-    let restoredUnfinished = false;
+    if (this.#restartNotice) this.#messagesEl.append(this.#restartNote());
     for (const turn of this.#turns) {
+      if (
+        !markInterrupted &&
+        !this.#pendingResume &&
+        turn.role === "assistant" &&
+        !turn.messageId &&
+        !turn.error &&
+        !turn.text
+      )
+        continue;
       const { bubble, textEl } = this.#appendBubble(turn.role);
       if (turn.role === "assistant") {
         renderMarkdown(textEl, turn.text);
@@ -1349,10 +1473,9 @@ export class SolvChat extends HTMLElement {
         if (canResume) {
           delete turn.error;
           this.#resumedBubble = { bubble, textEl, turn };
-        } else if (unfinished) {
+        } else if (unfinished && markInterrupted) {
           delete turn.awaiting;
           turn.error = RESPONSE_INTERRUPTED;
-          restoredUnfinished = true;
         }
         if (turn.error) {
           this.#renderBubbleError(bubble, turn.error);
@@ -1370,37 +1493,25 @@ export class SolvChat extends HTMLElement {
       this.#pendingResume = null;
     }
 
-    const placeholder = document.getElementById(
-      dockKey(this.#assistant()),
-    ) as DockPlaceholder | null;
-    const side = placeholder?.style.left === "0px" ? "left" : "right";
-    if (saved?.open) {
-      // Keep the correct side and title even if the full configuration has expired.
-      if (placeholder && !this.#configReady) {
-        this.#applyLauncherStyle(side, this.#config.accentColor);
-        this.#titleEl.textContent = placeholder.textContent;
-        this.#messagesEl.hidden = false;
-        // The draft stays usable while settings are checked. Sending still
-        // waits for configuration, as it does in the regular loading panel.
-        this.#inputEl.disabled = false;
-      }
-      this.#openPanel();
-      this.#restoreView();
-    } else {
-      this.#open = false;
-      this.#panel.hidden = true;
-      this.#updateLauncher();
-      this.#applyLayout();
-      if (restoredUnfinished) {
-        this.#persist();
-      }
+    if (!this.#pinned) this.#messagesEl.scrollTop = scrollTop;
+  }
+
+  #syncTranscript(): void {
+    if (this.#remembered === undefined || this.#previewing) return;
+    const latest = readRemembered(this.#assistant());
+    if (latest === undefined) {
+      this.#remembered = undefined;
+      return;
     }
-    // A stale reservation can survive a failed storage write or a viewport
-    // change between boot and connection. Give the page its width back.
-    if (placeholder?.isConnected && placeholder.rootStyle !== undefined) {
-      placeholder.remove();
-      releaseRoom(side, placeholder.rootStyle);
-    }
+    if (latest?.raw === this.#remembered?.raw) return;
+    this.#remembered = latest;
+    this.#activityAt = latest?.activityAt ?? 0;
+    this.#conversationId = latest?.conversationId ?? null;
+    this.#restartNotice = latest?.restartNotice === true;
+    this.#turns = latest?.turns ?? [];
+    this.#pendingResume = null;
+    this.#resumedBubble = null;
+    this.#renderTranscript(false);
   }
 
   #restoreView(): void {
@@ -1419,6 +1530,8 @@ export class SolvChat extends HTMLElement {
       ...(this.#expanded ? { expanded: true } : {}),
       ...(this.#preferredMode ? { preferredMode: this.#preferredMode } : {}),
       turns: this.#turns,
+      ...(this.#restartNotice ? { restartNotice: true } : {}),
+      ...(this.#remembered === undefined ? { tabOnly: true } : {}),
       ...(this.#open
         ? {
             view: this.#restoringView ?? {
@@ -1437,6 +1550,19 @@ export class SolvChat extends HTMLElement {
   #persist(existingOnly = false): boolean {
     if (this.#previewing) return false;
     return saveConversation(this.#assistant(), this.#snapshot(), this.#owner, existingOnly);
+  }
+
+  #persistTranscript(): void {
+    if (this.#previewing) return;
+    if (this.#remembered !== undefined && this.#activityAt > 0) {
+      this.#remembered = saveRemembered(
+        this.#assistant(),
+        this.#snapshot(),
+        this.#activityAt,
+        this.#owner,
+      );
+    }
+    this.#persist();
   }
 
   #appendBubble(role: "user" | "assistant"): { bubble: HTMLDivElement; textEl: HTMLDivElement } {
@@ -1626,6 +1752,19 @@ export class SolvChat extends HTMLElement {
         downBtn.setAttribute("aria-pressed", value === "down" ? "true" : "false");
         ack.textContent = "Thanks for the feedback.";
         this.#persist();
+        if (this.#remembered !== undefined) {
+          await this.#withConversationLock(assistant, {}, (lock) => {
+            if (!lock || !isCurrent() || this.#remembered === undefined) return;
+            this.#syncTranscript();
+            // During a page handoff, leave the snapshot for the resuming tab.
+            if ((this.#remembered?.navigationUntil ?? 0) > Date.now()) return;
+            const reply = this.#turns.find((entry) => entry.messageId === turn.messageId);
+            if (reply) {
+              reply.feedback = value;
+              this.#persistTranscript();
+            }
+          });
+        }
       } catch {
         if (!isCurrent()) return;
         upBtn.disabled = false;
@@ -1867,7 +2006,25 @@ export class SolvChat extends HTMLElement {
         }
         if (!this.#configReady) this.#applyConfig(DEFAULT_CONFIG);
       }
-      return await this.#sendTurn(assistant, trimmed, controller, onAccepted);
+      return await this.#withConversationLock(assistant, { ifAvailable: true }, async (lock) => {
+        if (controller.signal.aborted) return new Error(RESPONSE_INTERRUPTED);
+        if (lock === undefined) this.#remembered = undefined;
+        if (lock) this.#syncTranscript();
+        if (
+          lock === null ||
+          (!this.#pendingResume && (this.#remembered?.navigationUntil ?? 0) > Date.now())
+        ) {
+          const message = "Wait for the reply in your other tab before sending.";
+          if (!options) this.#showInputError(message);
+          return new Error(message);
+        }
+        this.#writingTranscript = true;
+        try {
+          return await this.#sendTurn(assistant, trimmed, controller, onAccepted);
+        } finally {
+          this.#writingTranscript = false;
+        }
+      });
     } catch {
       return new Error(CHAT_FAILED);
     } finally {
@@ -1876,6 +2033,7 @@ export class SolvChat extends HTMLElement {
         this.#sending = false;
         this.#hostSend = false;
         this.#sendBtn.disabled = !this.#configReady;
+        this.#syncTranscript();
       }
       if (this.#dismissedTurn === controller) {
         this.#dismissedTurn = null;
@@ -1912,7 +2070,8 @@ export class SolvChat extends HTMLElement {
     // From the moment it is sent, through the visitor check, until text arrives.
     this.#showTyping(bubble);
     this.#scrollToBottom(true);
-    this.#persist();
+    this.#activityAt = Date.now();
+    this.#persistTranscript();
 
     const { signal } = controller;
 
@@ -1963,7 +2122,8 @@ export class SolvChat extends HTMLElement {
     } finally {
       this.#finishPaint(textEl);
       this.#hideTyping(bubble);
-      if (!signal.aborted) this.#persist();
+      // A page action already saved the handoff with its action note.
+      if (!signal.aborted && !this.#pendingResume) this.#persistTranscript();
     }
     if (assistantTurn.error) return new Error(assistantTurn.error);
     if (signal.aborted || assistantTurn.awaiting?.length || !assistantTurn.messageId) {
@@ -2059,6 +2219,7 @@ export class SolvChat extends HTMLElement {
           // Painted once a frame, holding back a half-written link or list
           // marker for a moment (see `streaming.ts`).
           assistantTurn.text += event.text;
+          this.#activityAt = Date.now();
           this.#queuePaint(textEl, assistantTurn);
         } else if (event.type === "citation") {
           this.#appendCitation(bubble, assistantTurn, event.url, event.title);
@@ -2079,7 +2240,22 @@ export class SolvChat extends HTMLElement {
         } else if (event.type === "done") {
           terminated = true;
           this.#finishPaint(textEl);
+          if (
+            depth === 0 &&
+            this.#remembered !== undefined &&
+            this.#conversationId &&
+            this.#conversationId !== event.conversationId
+          ) {
+            this.#turns = this.#turns.slice(-2);
+            const userBubble = bubble.previousElementSibling;
+            this.#messagesEl.replaceChildren(this.#greetingEl, this.#restartNote());
+            if (userBubble) this.#messagesEl.append(userBubble);
+            this.#messagesEl.append(bubble);
+            this.#restartNotice = true;
+            this.#scrollToBottom();
+          }
           this.#conversationId = event.conversationId;
+          this.#activityAt = Date.now();
           assistantTurn.messageId = event.messageId;
           if (event.awaitingActions && event.awaitingActions.length > 0) {
             if (depth < 5) {
@@ -2087,7 +2263,7 @@ export class SolvChat extends HTMLElement {
               // and the pending calls are persisted so a reload mid-round-trip
               // marks the turn interrupted rather than complete.
               assistantTurn.awaiting = [...event.awaitingActions];
-              this.#persist();
+              this.#persistTranscript();
               resumeEvent = {
                 messageId: event.messageId,
                 conversationId: event.conversationId,
@@ -2098,12 +2274,12 @@ export class SolvChat extends HTMLElement {
               // never mark a paused response complete.
               delete assistantTurn.awaiting;
               this.#markTurnInterrupted(bubble, assistantTurn);
-              this.#persist();
+              this.#persistTranscript();
             }
           } else {
             delete assistantTurn.awaiting;
             this.#appendFeedbackControls(bubble, assistantTurn);
-            this.#persist();
+            this.#persistTranscript();
           }
         } else if (event.type === "error") {
           terminated = true;
@@ -2163,6 +2339,7 @@ export class SolvChat extends HTMLElement {
     this.#sending = true;
     this.#sendBtn.disabled = true;
     const { signal } = controller;
+    const assistant = this.#assistant();
     // The answer carries on after the page change: say so straight away.
     this.#showTyping(target.bubble);
     const releasePending = () => {
@@ -2197,22 +2374,42 @@ export class SolvChat extends HTMLElement {
             )
           : pending.actionResults;
 
-      const outcome = await this.#consumeStream(
-        (session) =>
-          this.#sendActionResumeRequest(
-            pending.conversationId,
-            pending.resumeMessageId,
-            actionResults,
-            signal,
-            session,
-          ),
-        target.bubble,
-        target.textEl,
-        target.turn,
-        controller,
-        pending.depth,
-        releasePending,
-      );
+      const outcome = await this.#withConversationLock(assistant, { signal }, async (lock) => {
+        if (signal.aborted) return;
+        if (lock === undefined) this.#remembered = undefined;
+        const latest = this.#remembered === undefined ? undefined : readRemembered(assistant);
+        if (latest !== undefined && latest?.raw !== this.#remembered?.raw) {
+          // Another tab reset or continued the conversation before this page loaded.
+          this.#syncTranscript();
+          return undefined;
+        }
+        this.#writingTranscript = true;
+        try {
+          const result = await this.#consumeStream(
+            (session) =>
+              this.#sendActionResumeRequest(
+                pending.conversationId,
+                pending.resumeMessageId,
+                actionResults,
+                signal,
+                session,
+              ),
+            target.bubble,
+            target.textEl,
+            target.turn,
+            controller,
+            pending.depth,
+            releasePending,
+          );
+          if (!signal.aborted && (!this.#pendingResume || this.#pendingResume === pending)) {
+            if (result !== "config_unavailable") releasePending();
+            this.#persistTranscript();
+          }
+          return result;
+        } finally {
+          this.#writingTranscript = false;
+        }
+      });
       keepPending = outcome === "config_unavailable";
     } catch {
       if (!signal.aborted && !target.turn.error) {
@@ -2230,7 +2427,7 @@ export class SolvChat extends HTMLElement {
       if (this.#dismissedTurn === controller) {
         this.#dismissedTurn = null;
       }
-      if (!signal.aborted) {
+      if (!signal.aborted && (!this.#pendingResume || this.#pendingResume === pending)) {
         if (!keepPending) releasePending();
         this.#persist();
       }
@@ -2355,6 +2552,7 @@ export class SolvChat extends HTMLElement {
         let navigatedTo: URL | null = null;
         let externalTarget: URL | null = null;
         setBeforeNavigate((target) => {
+          if (signal.aborted) return;
           navigatedTo = target;
           const pendingResults: ActionResult[] = [
             ...results,
@@ -2380,10 +2578,10 @@ export class SolvChat extends HTMLElement {
           if (request.name) {
             if (!assistantTurn.actions) assistantTurn.actions = [];
             assistantTurn.actions.push({ name: request.name, ok: true });
-            this.#persist();
+            this.#persistTranscript();
             assistantTurn.actions.pop();
           } else {
-            this.#persist();
+            this.#persistTranscript();
           }
         });
         setOnExternalNavigate((target) => {

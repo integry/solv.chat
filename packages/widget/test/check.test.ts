@@ -10,6 +10,7 @@ import "../src/widget.js";
 import { mountWithIntent } from "./support/intent.js";
 
 const ENGINE = location.origin;
+const SESSION_KEY = "solv-chat-session:pk_test_check";
 
 function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -200,6 +201,38 @@ describe("visitor check in the widget", () => {
     await flushAsync();
     expect(requests.filter((r) => r.url.endsWith("/v1/session"))).toHaveLength(1);
     expect(requests.filter((r) => r.url.endsWith("/v1/chat"))).toHaveLength(2);
+  });
+
+  it("reuses a valid tab session after navigation without starting a check", async () => {
+    const requests = fakeEngine();
+    const first = mount();
+    await flushAsync();
+    const firstReply = first.el.send("Question on the first page");
+    await flushAsync();
+    fromFrame(mustQuery<HTMLIFrameElement>(first.root, ".solv-check iframe"), {
+      type: "token",
+      token: "XXXX.DUMMY.TOKEN.XXXX",
+    });
+    await firstReply;
+    first.el.remove();
+
+    const next = mount();
+    await flushAsync();
+    const input = mustQuery<HTMLTextAreaElement>(next.root, "#solv-input");
+    input.dispatchEvent(new FocusEvent("focus"));
+    input.value = "Question on the next page";
+    mustQuery<HTMLFormElement>(next.root, ".solv-form").requestSubmit();
+    await flushAsync();
+    expect(next.root.querySelector(".solv-check iframe")).toBeNull();
+
+    expect(requests.filter((r) => r.url.endsWith("/v1/session"))).toHaveLength(1);
+    const chats = requests.filter((r) => r.url.endsWith("/v1/chat"));
+    expect(chats.map((r) => r.body?.session)).toEqual([
+      "vs1.session-for-test",
+      "vs1.session-for-test",
+    ]);
+    expect(sessionStorage.getItem(SESSION_KEY)).toContain("vs1.session-for-test");
+    expect(JSON.stringify(localStorage)).not.toContain("vs1.session-for-test");
   });
 
   describe("when the page blocks sessionStorage", () => {
@@ -526,7 +559,7 @@ describe("visitor check in the widget", () => {
       late[0]?.(Response.json({ session: "vs1.late", expiresAt: Date.now() + 3_600_000 }));
       await vi.advanceTimersByTimeAsync(0);
       expect(root.querySelector(".solv-check iframe")).toBe(frame);
-      expect(sessionStorage.getItem("solv-chat-session:pk_test_check")).toBeNull();
+      expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
 
       // The retry's own token still completes it, and the message goes out with that session.
       input.value = "Hello?";
@@ -614,6 +647,7 @@ describe("visitor check in the widget", () => {
     for (const [i, text] of ["one", "two", "three", "four"].entries()) {
       chatReply = replies[i] ?? "";
       await send(text);
+      if (i === 1) expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
     }
     const chats = requests.filter((r) => r.url.endsWith("/v1/chat"));
     expect(chats.map((r) => r.body?.conversationId)).toEqual([

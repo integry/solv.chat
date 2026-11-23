@@ -337,7 +337,7 @@ document.querySelector("button").onclick = () => {
 
   async function open(path = "/", fresh = true, waitForConfig = true): Promise<void> {
     await browser.cdp.evaluate(
-      `(() => { window.__leaving = true; ${fresh ? "try { sessionStorage.clear(); } catch {}" : ""} })()`,
+      `(() => { window.__leaving = true; ${fresh ? "try { sessionStorage.clear(); localStorage.clear(); } catch {}" : ""} })()`,
     );
     await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}${path}` });
     // The new document, not the one being left.
@@ -973,7 +973,9 @@ document.querySelector("button").onclick = () => {
       expect(await q('r.querySelector(".solv-send").disabled')).toBe(false);
       expect(await pendingResume()).toMatchObject({ resumeMessageId: "msg_1" });
       expect(
-        await page_('JSON.parse(sessionStorage.getItem("solv-chat-open:pk_layout")).turns[0]'),
+        await page_(
+          'JSON.parse(localStorage.getItem("solv-chat-conversation:pk_layout")).turns[0]',
+        ),
       ).toMatchObject({ error: "Complete the security check.", awaiting: ["call_1"] });
       expect(gatedConfigResponse?.writableEnded).toBe(false);
 
