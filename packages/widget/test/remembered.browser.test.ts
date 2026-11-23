@@ -375,9 +375,57 @@ describe.skipIf(chrome === null)("remembered conversation in Chromium", () => {
         );
         await send(cdp, "Can I add a tax ID too?");
         expect(await messageCount(stored.conversationId)).toBe(4);
+        await widget(cdp, "el.newConversation()");
+        expect(await cdp.evaluate(`JSON.parse(sessionStorage.getItem("${tabKey}"))`)).toMatchObject(
+          { conversationId: null, turns: [] },
+        );
       } finally {
         await close();
       }
     },
   );
+
+  it("clears an earlier shared transcript after a quota failure moves the tab to fallback", async () => {
+    const page = await tab();
+    try {
+      await open(page.cdp);
+      await send(page.cdp, "Can I update my billing address?");
+      const shared = await transcript(page.cdp);
+      expect(shared?.conversationId).toBeTruthy();
+      await page.cdp.evaluate(`(() => {
+        const set = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+          if (this === localStorage && key === ${JSON.stringify(transcriptKey)}) {
+            throw new DOMException("Full", "QuotaExceededError");
+          }
+          return set.call(this, key, value);
+        };
+      })()`);
+      await send(page.cdp, "Can I add a tax ID too?");
+      expect(await transcript(page.cdp)).toEqual(shared);
+      expect(
+        await page.cdp.evaluate(`JSON.parse(sessionStorage.getItem("${tabKey}")).tabOnly`),
+      ).toBe(true);
+
+      await widget(page.cdp, 'r.querySelector(".solv-new").click()');
+      await waitFor(
+        () => widget(page.cdp, '!r.querySelector(".solv-bubble--user")'),
+        "reset after quota failure",
+      );
+      expect(await transcript(page.cdp)).toBeNull();
+
+      const returning = await tab();
+      try {
+        await open(returning.cdp);
+        expect(await widget(returning.cdp, 'r.querySelector(".solv-bubble--user") === null')).toBe(
+          true,
+        );
+        await screenshot(returning.cdp, "reset-after-quota.png");
+      } finally {
+        await returning.close();
+      }
+    } finally {
+      await page.close();
+    }
+  });
 });

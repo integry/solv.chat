@@ -388,7 +388,9 @@ export class SolvChat extends HTMLElement {
   #onPageHide = (): void => {
     // The navigate action already saved the pending resume and its action note.
     if (this.#pendingResume) return;
-    if (this.#writingTranscript) this.#persistTranscript();
+    if (this.#writingTranscript && this.#abortController?.signal.aborted === false) {
+      this.#persistTranscript();
+    }
     if (this.#open && this.#persist(true)) this.#saveDock();
   };
   #wideQuery: MediaQueryList | null = null;
@@ -828,17 +830,20 @@ export class SolvChat extends HTMLElement {
     return this.#openRequested({}, true);
   }
 
-  /** Clears the browser transcript after any active reply finishes. */
+  /** Clears the browser transcript, waiting for a coordinated reply to finish. */
   async newConversation(): Promise<void> {
     const assistant = this.#assistant();
     if (!assistant || !this.isConnected || this.#previewing) return;
     const connection = this.#connection;
-    if (!conversationLocks()) this.#abortController?.abort();
-    await this.#withConversationLock(assistant, {}, () => {
-      if (connection !== this.#connection || assistant !== this.#assistant()) return;
-      if (this.#remembered !== undefined) {
-        this.#remembered = clearRemembered(assistant, this.#owner) ? null : undefined;
-      }
+    await this.#withConversationLock(assistant, {}, (lock) => {
+      if (connection !== this.#connection || assistant !== this.#assistant() || this.#previewing)
+        return;
+      // A reply still running here was not covered by this lock, or reset
+      // could not acquire it. Fence that reply before clearing the transcript.
+      this.#abortController?.abort();
+      for (const handle of this.#openConfirms) handle.dismiss();
+      const cleared = clearRemembered(assistant, this.#owner);
+      this.#remembered = cleared && lock && this.#remembered !== undefined ? null : undefined;
       this.#activityAt = 0;
       this.#conversationId = null;
       this.#pendingResume = null;
@@ -854,21 +859,20 @@ export class SolvChat extends HTMLElement {
   async #withConversationLock<T>(
     assistant: string,
     options: LockOptions,
-    run: (available: boolean) => T | Promise<T>,
+    run: (lock: Lock | null | undefined) => T | Promise<T>,
   ): Promise<T> {
     const locks = conversationLocks();
-    if (!locks) return run(true);
+    if (!locks) return run(undefined);
     let entered = false;
     try {
       return await locks.request(rememberedKey(assistant), options, (lock) => {
         entered = true;
-        return run(lock !== null);
+        return run(lock);
       });
     } catch (error) {
       if (entered || options.signal?.aborted) throw error;
       // Storage and Web Locks can be denied independently by browser policy.
-      this.#remembered = undefined;
-      return run(true);
+      return run(undefined);
     }
   }
 
@@ -1749,8 +1753,8 @@ export class SolvChat extends HTMLElement {
         ack.textContent = "Thanks for the feedback.";
         this.#persist();
         if (this.#remembered !== undefined) {
-          await this.#withConversationLock(assistant, {}, () => {
-            if (!isCurrent() || this.#remembered === undefined) return;
+          await this.#withConversationLock(assistant, {}, (lock) => {
+            if (!lock || !isCurrent() || this.#remembered === undefined) return;
             this.#syncTranscript();
             // During a page handoff, leave the snapshot for the resuming tab.
             if ((this.#remembered?.navigationUntil ?? 0) > Date.now()) return;
@@ -2002,28 +2006,25 @@ export class SolvChat extends HTMLElement {
         }
         if (!this.#configReady) this.#applyConfig(DEFAULT_CONFIG);
       }
-      return await this.#withConversationLock(
-        assistant,
-        { ifAvailable: true },
-        async (available) => {
-          if (controller.signal.aborted) return new Error(RESPONSE_INTERRUPTED);
-          if (available) this.#syncTranscript();
-          if (
-            !available ||
-            (!this.#pendingResume && (this.#remembered?.navigationUntil ?? 0) > Date.now())
-          ) {
-            const message = "Wait for the reply in your other tab before sending.";
-            if (!options) this.#showInputError(message);
-            return new Error(message);
-          }
-          this.#writingTranscript = true;
-          try {
-            return await this.#sendTurn(assistant, trimmed, controller, onAccepted);
-          } finally {
-            this.#writingTranscript = false;
-          }
-        },
-      );
+      return await this.#withConversationLock(assistant, { ifAvailable: true }, async (lock) => {
+        if (controller.signal.aborted) return new Error(RESPONSE_INTERRUPTED);
+        if (lock === undefined) this.#remembered = undefined;
+        if (lock) this.#syncTranscript();
+        if (
+          lock === null ||
+          (!this.#pendingResume && (this.#remembered?.navigationUntil ?? 0) > Date.now())
+        ) {
+          const message = "Wait for the reply in your other tab before sending.";
+          if (!options) this.#showInputError(message);
+          return new Error(message);
+        }
+        this.#writingTranscript = true;
+        try {
+          return await this.#sendTurn(assistant, trimmed, controller, onAccepted);
+        } finally {
+          this.#writingTranscript = false;
+        }
+      });
     } catch {
       return new Error(CHAT_FAILED);
     } finally {
@@ -2373,7 +2374,9 @@ export class SolvChat extends HTMLElement {
             )
           : pending.actionResults;
 
-      const outcome = await this.#withConversationLock(assistant, { signal }, async () => {
+      const outcome = await this.#withConversationLock(assistant, { signal }, async (lock) => {
+        if (signal.aborted) return;
+        if (lock === undefined) this.#remembered = undefined;
         const latest = this.#remembered === undefined ? undefined : readRemembered(assistant);
         if (latest !== undefined && latest?.raw !== this.#remembered?.raw) {
           // Another tab reset or continued the conversation before this page loaded.
@@ -2549,6 +2552,7 @@ export class SolvChat extends HTMLElement {
         let navigatedTo: URL | null = null;
         let externalTarget: URL | null = null;
         setBeforeNavigate((target) => {
+          if (signal.aborted) return;
           navigatedTo = target;
           const pendingResults: ActionResult[] = [
             ...results,
