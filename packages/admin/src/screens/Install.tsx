@@ -113,7 +113,8 @@ function SitePolicyNotes({ info }: { info: InstallInfo }) {
             If your site sets a Content-Security-Policy
           </h3>
           <p className="muted">
-            Add these values to your policy. The hash allows the inline script in the snippet.
+            Add these values to your policy. The hash allows the inline script in the snippet. When
+            updating the inline script, update its hash in your policy too.
           </p>
           <ul className="policy-list" aria-label="Content-Security-Policy additions">
             {policy.map((entry) => (

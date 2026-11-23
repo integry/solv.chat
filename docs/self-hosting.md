@@ -160,20 +160,22 @@ same public key as the `assistant` attribute on your `<solv-chat>` tag. Keep
 that tag in `<body>`.
 
 ```html
-<script data-key="pk_...">(()=>{var y="--solv-chat-panel-width";var u=o=>`solv-dock:1:${o}`;function x(o,i,t){let l=o.style,e=getComputedStyle(o),n=e.maxWidth,r=`margin-${i}`,d=l.getPropertyValue(r),s=(p,h)=>l.setProperty(p,h,"important");s(r,t),d&&s(r,`calc(${d} + ${t})`),l.setProperty(y,t);let c=p=>parseFloat(p)||0,a=o.getBoundingClientRect().width,m=`calc(100% - ${(a&&a-c(e.width))+c(e.marginLeft)+c(e.marginRight)}px)`;s("max-width",n&&n!=="none"?`min(${n}, ${m})`:m)}function f(o,i,t=document.documentElement,l){if(t.getAttribute("style")!==l){let e=t.style,n=document.createElement("div").style;n.cssText=i??"";for(let r of[`margin-${o}`,"max-width",y])e.setProperty(r,n.getPropertyValue(r),n.getPropertyPriority(r));if(t.getAttribute("style"),e.cssText!==n.cssText)return}i===null?t.removeAttribute("style"):t.setAttribute("style",i)}try{let o=document,i=u(o.currentScript.dataset.key),t=sessionStorage[i];if(t&&innerWidth>=900){let l;try{l=opener.sessionStorage[i]}catch{}let[e,n,r,d]=JSON.parse(t);if(t!==l&&(e==="left"||e==="right")&&n==="460px"&&typeof d=="string"&&r.match(/^position:fixed;[#a-z0-9:;, -]+$/)){let s=o.createElement("div");s.id=i,s.inert=!0,s.style.cssText=r,s.textContent=d;let c=o.documentElement,a=c.getAttribute("style");s.rootStyle=a,x(c,e,n);let g=c.getAttribute("style");setTimeout(()=>{s.isConnected&&(s.remove(),f(e,a,c,g))},3e3),c.append(s)}}}catch{}})();</script>
+<script data-key="pk_...">(()=>{var f="--solv-chat-panel-width";var h=t=>`solv-dock:1:${t}`;function E(t,i,e){let l=t.style,s=getComputedStyle(t),o=s.maxWidth,r=`margin-${i}`,a=l.getPropertyValue(r),n=(d,m)=>l.setProperty(d,m,"important");n(r,e),a&&n(r,`calc(${a} + ${e})`),l.setProperty(f,e);let c=d=>parseFloat(d)||0,p=t.getBoundingClientRect().width,g=`calc(100% - ${(p&&p-c(s.width))+c(s.marginLeft)+c(s.marginRight)}px)`;n("max-width",o&&o!=="none"?`min(${o}, ${g})`:g)}function S(t,i,e=document.documentElement,l){if(e.getAttribute("style")!==l){let s=e.style,o=document.createElement("div").style;o.cssText=i??"";for(let r of[`margin-${t}`,"max-width",f])s.setProperty(r,o.getPropertyValue(r),o.getPropertyPriority(r));if(e.getAttribute("style"),s.cssText!==o.cssText)return}i===null?e.removeAttribute("style"):e.setAttribute("style",i)}try{let t=document,i=h(t.currentScript.dataset.key),e=sessionStorage[i];if(e&&!t.hidden&&innerWidth>=900){let l;try{l=opener.sessionStorage[i]}catch{}let[s,o,r,a]=JSON.parse(e);if(e!==l&&(s==="left"||s==="right")&&o==="460px"&&typeof a=="string"&&r.match(/^position:fixed;[#a-z0-9:;, -]+$/)){let n=t.createElement("div");n.id=i,n.inert=!0,n.style.cssText=r,n.textContent=a;let c=t.documentElement,p=c.getAttribute("style");n.rootStyle=p,E(c,s,o);let u=c.getAttribute("style");c.append(n);let g=new AbortController,d=()=>{g.abort(),clearTimeout(m),n.isConnected&&(n.remove(),S(s,p,c,u))},m=setTimeout(d,1e4),y={capture:!0,signal:g.signal};t.addEventListener("error",({target:x})=>{x instanceof HTMLScriptElement&&/^https?:\/\/[^/]+\/widget\.js(?:[?#]|$)/.test(x.src)&&d()},y),t.addEventListener("visibilitychange",()=>{t.hidden&&d()},y)}}}catch{}})();</script>
 ```
 
 The engine serves the exact script body at `/boot.js`. The widget package
 publishes it as `@solvchat/widget/boot.js`. Copy the body inline so it can
 run while the head is parsed. For Content-Security-Policy, add
-`'sha256-wKNxb9ISGk0wGMPONDaS6EQcivqaehUe6YFzRCFv+KI='` to `script-src` alongside
+`'sha256-8QbwUUUHZbjoxVNSN60wRYrrruEqb6IWfzqkX38JqcQ='` to `script-src` alongside
 the engine's origin. Keep the script body byte for byte, including whitespace.
 Changing the `data-key` attribute leaves the hash unchanged.
 
 On the next page in the same tab, the script makes room for an already-open
 side panel and shows its heading. The widget replaces that column when it
-connects. If it fails to load, the boot script gives the page its width back
-after three seconds and preserves unrelated changes to the page’s inline styles.
+connects. The boot script gives the page its width back if a `/widget.js`
+script on any HTTP(S) origin fails to load, the page becomes hidden, or ten
+seconds pass before the widget connects. It preserves unrelated changes to
+the page's inline styles.
 
 Request `widget.js` right away while parsing the head when the boot column
 exists. The **Install** snippet puts the existing deferred widget script
@@ -472,6 +474,14 @@ If you put a CDN in front of the Worker, configure it to honor the scripts'
 `Cache-Control` and `ETag` headers. Keep the five-minute freshness limit and
 revalidate expired copies before serving them. Preserve the response bytes
 so the strong `ETag` stays valid.
+
+### Release notes for the inline boot script
+
+When upgrading to the release with the ten-second boot timeout, sites that
+inline the script, including propr.dev, mcptest.io and hosted customers, must
+replace its body and update its Content-Security-Policy hash. Copy both from
+[the inline boot script instructions](#keep-an-open-side-panel-in-place-between-pages)
+or from the **Install** screen after upgrading.
 
 ## Not here yet
 

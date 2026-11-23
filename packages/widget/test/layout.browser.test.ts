@@ -112,7 +112,8 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
 
   const bootPage = (url: URL) => {
     const variant = url.searchParams.get("boot");
-    const delay = process.env.SOLV_DOCK_PREVIEWS ? 2300 : 650;
+    const delay = variant === "slow" ? 5000 : process.env.SOLV_DOCK_PREVIEWS ? 2300 : 650;
+    const script = `<script src="${engineOrigin()}/widget.js?delay=${delay}${variant === "missing" ? "&status=404" : ""}" defer></script>`;
     const key = "pk_layout";
     const title = url.pathname === "/other" ? "API keys" : "Authentication";
     const css = `html{width:100%;transition:margin 300ms}
@@ -131,7 +132,8 @@ p{max-width:90ch}pre{max-width:54ch;overflow:auto;padding:16px;border-radius:8px
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>${title} | Fieldnotes API</title>
 <style>${css}</style>
 ${variant === "no" ? "" : `<script data-key="${key}">${bootJs}</script>`}
-${variant === "storage" ? "" : `<script src="${engineOrigin()}/widget.js?delay=${delay}" defer></script>`}
+${variant === "slow" ? `<script src="${engineOrigin()}/unrelated.js" defer></script>` : ""}
+${variant === "storage" || variant === "no-widget" ? "" : script}
 </head><body><nav><strong>Fieldnotes API</strong> &nbsp; <a href="/?boot=yes">Authentication</a><a href="/other?boot=yes">API keys</a></nav>
 <main id="content"><h1>${title}</h1><p>Use a workspace API key to authenticate requests to the Fieldnotes API. Include it in the Authorization header with each request.</p>
 <h2>Make an authenticated request</h2><pre>GET /v1/documents
@@ -196,6 +198,10 @@ Authorization: Bearer YOUR_API_KEY</pre>
         return;
       }
       if (url.pathname === "/widget.js") {
+        if (url.searchParams.get("status") === "404") {
+          setTimeout(() => res.writeHead(404).end(), 650);
+          return;
+        }
         res.writeHead(200, { "content-type": "application/javascript" });
         const delay = Number(url.searchParams.get("delay"));
         if (delay) setTimeout(() => res.end(widgetJs), delay);
@@ -1473,10 +1479,12 @@ document.querySelector("button").onclick = () => {
         url: `${hostOrigin()}/other?boot=blocked-shorthand`,
       });
       await waitFor(
-        async () => (await bootFrames())?.some((frame) => frame.placeholder),
-        "placeholder before rollback",
+        () =>
+          page_<boolean>(
+            'location.search === "?boot=blocked-shorthand" && document.readyState === "complete"',
+          ),
+        "blocked script error",
       );
-      await waitFor(async () => (await bootFrames()).at(-1)?.width === fullWidth, "rollback", 3500);
       expect(await page_(`document.getElementById("${dockId}")`)).toBeNull();
       expect(await page_('document.documentElement.getAttribute("style")')).toBe(
         "margin:var(--host-margin,0 8px 0 0);background:#f8fafc",
@@ -1486,15 +1494,99 @@ document.querySelector("button").onclick = () => {
     }
   }, 20_000);
 
-  it("preserves host style edits when a blocked widget's boot reservation expires", async () => {
+  it("keeps the column through five seconds of loading and the widget takeover", async () => {
     await viewport(1280, 800);
     await open();
     await q('(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click())');
-    await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=blocked` });
+    const { identifier } = await watchDockFrames();
+    try {
+      await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=slow` });
+      await waitFor(
+        async () => (await bootFrames())?.some((frame) => frame.placeholder),
+        "docked placeholder",
+      );
+      await waitFor(() => page_<boolean>("performance.now() >= 3600"), "past the old cutoff");
+      expect((await bootFrames()).at(-1)?.placeholder).toBe(true);
+      await screenshot("dock-during-slow-load.png");
+      await waitFor(
+        async () => (await bootFrames()).some((frame) => frame.panel),
+        "widget takeover",
+      );
+      const frames = await bootFrames();
+      expect(frames.every((frame) => frame.width === expandedWidth)).toBe(true);
+      expect(frames.at(-1)).toMatchObject({ panel: true, placeholder: false });
+      await screenshot("dock-after-slow-load.png");
+    } finally {
+      await browser.cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
+    }
+  }, 15_000);
+
+  it("releases the reservation within 200 ms of a widget script failure", async () => {
+    await viewport(1280, 800);
+    await open();
+    await q('(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click())');
+    const { identifier } = await browser.cdp.send<{ identifier: string }>(
+      "Page.addScriptToEvaluateOnNewDocument",
+      {
+        source: `document.addEventListener("error", ({ target }) => {
+          if (!target.src?.includes("status=404")) return;
+          const placeholder = document.getElementById("${dockId}");
+          window.hadReservation = !!placeholder;
+          const failedAt = performance.now();
+          new MutationObserver((_, observer) => {
+            if (placeholder?.isConnected) return;
+            window.releaseDelay = performance.now() - failedAt;
+            observer.disconnect();
+          }).observe(document.documentElement, { childList: true });
+        }, true);`,
+      },
+    );
+    try {
+      await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=missing` });
+      await waitFor(
+        () => page_<boolean>("window.releaseDelay !== undefined"),
+        "404 rollback",
+        3000,
+      );
+      expect(await page_("window.hadReservation")).toBe(true);
+      expect(await page_("window.releaseDelay")).toBeLessThan(200);
+      expect(await page_('document.getElementById("content").getBoundingClientRect().width')).toBe(
+        fullWidth,
+      );
+    } finally {
+      await browser.cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
+    }
+  });
+
+  it("releases the reservation when the tab becomes hidden before the widget connects", async () => {
+    await viewport(1280, 800);
+    await open();
+    await q('(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click())');
+    await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=no-widget` });
+    await waitFor(() => page_<boolean>(`!!document.getElementById("${dockId}")`), "placeholder");
+    try {
+      await page_('(window.otherTab = window.open("about:blank"), true)');
+      await waitFor(() => page_<boolean>("document.hidden"), "hidden page", 1500);
+      expect(await page_(`document.getElementById("${dockId}")`)).toBeNull();
+      expect(await page_('document.getElementById("content").getBoundingClientRect().width')).toBe(
+        fullWidth,
+      );
+    } finally {
+      await page_("window.otherTab?.close()");
+      await browser.cdp.send("Page.bringToFront");
+    }
+  });
+
+  it("releases at the hard cap when the widget is never requested and preserves host style edits", async () => {
+    await viewport(1280, 800);
+    await open();
+    await q('(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click())');
+    await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=no-widget` });
+    const requestStart = engineRequests.length;
     await waitFor(
       () =>
         page_<boolean>(`(() => {
-          if (!document.getElementById("${dockId}")) return false;
+          if (location.search !== "?boot=no-widget" || !document.getElementById("${dockId}")) return false;
           const { style } = document.documentElement;
           style.overflow = "hidden";
           style.setProperty("--host-nav-background", "#dbeafe", "important");
@@ -1502,11 +1594,14 @@ document.querySelector("button").onclick = () => {
         })()`),
       "host edits during the boot reservation",
     );
+    await waitFor(() => page_<boolean>("performance.now() >= 9500"), "just before the hard cap");
+    expect(await page_(`!!document.getElementById("${dockId}")`)).toBe(true);
     await waitFor(
       () => page_<boolean>(`!document.getElementById("${dockId}")`),
       "placeholder removed by timeout",
-      3500,
+      2000,
     );
+    expect(engineRequests.slice(requestStart)).not.toContain("/widget.js");
     expect(
       await page_(`(() => {
         const root = document.documentElement;
@@ -1532,8 +1627,7 @@ document.querySelector("button").onclick = () => {
       navBackground: "rgb(219, 234, 254)",
       contentWidth: fullWidth,
     });
-    await screenshot("boot-timeout-preserves-host-theme.png");
-  }, 10_000);
+  }, 15_000);
 
   it("writes the answer progressively, with the indicator first, and code scrolls sideways no more than at 380px", async () => {
     await viewport(1280, 800);

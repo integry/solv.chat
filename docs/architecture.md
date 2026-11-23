@@ -1982,9 +1982,11 @@ The head script applies the same root properties as the widget and inserts
 an inert placeholder with the stored appearance. It skips fresh tabs, narrow
 viewports, copied records from an opener, and unreadable records. It makes no
 requests. The widget claims the root reservation and replaces the placeholder
-in a single task without rewriting the root style. If the placeholder is
-still there after three seconds, the script removes it and restores the root
-style. The placeholder and the dock use `view-transition-name: solv-chat-dock`
+in a single task without rewriting the root style. While the placeholder is
+still there, a captured script load error for `/widget.js` on any HTTP(S)
+origin, a change to hidden, or a ten-second timeout removes it and restores
+the root style. The script skips pages that start hidden. The placeholder
+and the dock use `view-transition-name: solv-chat-dock`
 for hosts that opt in to cross-document view transitions.
 
 **Opening and restoring.** A fresh tab starts with a closed assistant.
