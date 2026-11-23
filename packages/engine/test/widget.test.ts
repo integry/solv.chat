@@ -8,6 +8,7 @@ const CACHE_CONTROL = "public, max-age=300, must-revalidate, no-transform";
 
 describe.each([
   { path: "/widget.js", marker: "solv-chat", contentTypeOptions: null },
+  { path: "/boot.js", marker: "solv-dock:1:", contentTypeOptions: null },
   { path: "/v1/check/frame.js", marker: "solvCheckLoaded", contentTypeOptions: "nosniff" },
 ])("GET $path", ({ path, marker, contentTypeOptions }) => {
   async function load(ifNoneMatch?: string): Promise<Response> {

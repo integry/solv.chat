@@ -226,8 +226,9 @@ Migrations are plain SQL files under `packages/engine/migrations`, applied with
   engine's origin. 404 when the check is off.
 - `GET /v1/check/frame.js` — the public script for that page.
 - `GET /widget.js` — the widget bundle.
+- `GET /boot.js` — the inline first-paint script, also published by the widget package.
 
-Both script URLs are stable and send
+These script URLs are stable and send
 `Cache-Control: public, max-age=300, must-revalidate, no-transform` and a
 strong `ETag` based on the SHA-256 hash of the response bytes. Five minutes
 of freshness keep repeat page views from fetching the script. After that,
@@ -1963,6 +1964,29 @@ narrower page; elements the host fixed to that edge (`position: fixed` or
 offsets them with the custom property (see the embedding notes in
 `docs/self-hosting.md`).
 
+**Docked first paint.** The optional inline head script reads the tab's
+`sessionStorage` entry `solv-dock:1:<assistant public key>`. The key identifies
+the assistant and format version. The JSON value is
+`[side, width, placeholderCss, title, tabId]`. Width is a CSS pixel length such as `"460px"`. The CSS string contains only
+literal placeholder declarations, including the panel surface, header, text,
+and border colours. It contains no conversation data. The widget writes it
+while open alongside the page and removes it on collapse, close, or a switch
+to full-screen. The record lives in the tab on the embedding origin.
+The conversation entry separately keeps the input draft, transcript scroll
+offset (omitted when pinned to the latest message), and whether the input had
+focus. The widget snapshots the current view and streamed transcript on
+`pagehide`. A page action that navigates already saves its continuation and
+action note before leaving.
+
+The head script applies the same root properties as the widget and inserts
+an inert placeholder with the stored appearance. It skips fresh tabs, narrow
+viewports, copied records from an opener, and unreadable records. It makes no
+requests. The widget claims the root reservation and replaces the placeholder
+in a single task without rewriting the root style. If the placeholder is
+still there after three seconds, the script removes it and restores the root
+style. The placeholder and the dock use `view-transition-name: solv-chat-dock`
+for hosts that opt in to cross-document view transitions.
+
 **Opening and restoring.** A fresh tab starts with a closed assistant.
 Conversation state is first saved when the visitor opens the panel or the
 host submits a message through `send()`. The open layout and any choice
@@ -2175,8 +2199,8 @@ Install
   response; a load with no message is not counted). Under the snippet it lists
   the Content-Security-Policy lines a host site needs (`hostPolicy` on the
   install response: the engine origin in `script-src`, `connect-src` and,
-  with the visitor check on, `frame-src`) and, with the check on, what
-  Turnstile receives and that the owner's privacy notice should mention it.
+  with the visitor check on, `frame-src`, plus the boot script hash in
+  `script-src`) and, with the check on, what Turnstile receives and that the owner's privacy notice should mention it.
   The ingest key and CLI sit in a collapsed "For developers" section. Every
   screen shows a standing warning while the visitor check is off, on test
   keys or half set up (`visitorCheck` on the assistants list).

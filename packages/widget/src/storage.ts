@@ -1,4 +1,5 @@
 import type { ActionResult, WidgetOpenMode } from "@solvchat/core";
+import { type DockRecord, dockKey } from "./dock.js";
 
 export interface SavedCitation {
   url: string;
@@ -32,6 +33,13 @@ export interface PendingResume {
   navigateCallId?: string;
 }
 
+interface SavedView {
+  draft: string;
+  /** Omitted when pinned to the latest message. */
+  scrollTop?: number;
+  inputFocused?: boolean;
+}
+
 export interface SavedConversation {
   conversationId: string | null;
   open: boolean;
@@ -43,6 +51,7 @@ export interface SavedConversation {
   tabId?: string;
   turns: SavedTurn[];
   pendingResume?: PendingResume;
+  view?: SavedView;
 }
 
 const VISITOR_KEY = "solv-chat-visitor";
@@ -188,6 +197,7 @@ function parseSavedConversation(parsed: unknown): SavedConversation | null {
   const expanded = record.expanded === true;
   const turns = Array.isArray(record.turns) ? (record.turns as SavedTurn[]) : [];
   const pendingResume = parsePendingResume(record.pendingResume);
+  const view = record.view as Partial<SavedView> | null | undefined;
   return {
     conversationId,
     open,
@@ -198,6 +208,19 @@ function parseSavedConversation(parsed: unknown): SavedConversation | null {
     ...(typeof record.tabId === "string" ? { tabId: record.tabId } : {}),
     turns,
     ...(pendingResume ? { pendingResume } : {}),
+    ...(view && typeof view.draft === "string"
+      ? {
+          view: {
+            draft: view.draft,
+            ...(typeof view.scrollTop === "number" &&
+            Number.isFinite(view.scrollTop) &&
+            view.scrollTop >= 0
+              ? { scrollTop: view.scrollTop }
+              : {}),
+            ...(view.inputFocused === true ? { inputFocused: true } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -227,6 +250,7 @@ export function loadConversation(assistant: string): SavedConversation | null {
     if (saved && copiedFromOpener(key, saved.tabId)) {
       // Discard the copy now, since the opener may be gone on the next load.
       sessionStorage.removeItem(key);
+      sessionStorage.removeItem(dockKey(assistant));
       return null;
     }
     return saved;
@@ -251,13 +275,20 @@ export function claimConversation(assistant: string, owner: symbol, tabId?: stri
  * active instance, capped to the most recent turns so sessionStorage quota
  * is never exhausted by a long session.
  */
-export function saveConversation(assistant: string, saved: SavedConversation, owner: symbol): void {
+export function saveConversation(
+  assistant: string,
+  saved: SavedConversation,
+  owner: symbol,
+  existingOnly = false,
+): boolean {
   const active = activeOwners.get(assistant);
-  if (!assistant || active?.owner !== owner) return;
+  if (!assistant || active?.owner !== owner) return false;
   try {
+    const key = `${OPEN_PREFIX}${assistant}`;
+    if (existingOnly && !sessionStorage.getItem(key)) return false;
     active.tabId ??= randomId();
     sessionStorage.setItem(
-      `${OPEN_PREFIX}${assistant}`,
+      key,
       JSON.stringify({
         conversationId: saved.conversationId,
         open: saved.open,
@@ -266,9 +297,33 @@ export function saveConversation(assistant: string, saved: SavedConversation, ow
         tabId: active.tabId,
         turns: saved.turns.slice(-MAX_SAVED_TURNS),
         ...(saved.pendingResume ? { pendingResume: saved.pendingResume } : {}),
+        ...(saved.view ? { view: saved.view } : {}),
       }),
     );
+    return true;
   } catch {
     // Ignore storage quota or private-mode errors.
+    return false;
+  }
+}
+
+export function saveDock(
+  assistant: string,
+  owner: symbol,
+  dock: [DockRecord[0], DockRecord[1], DockRecord[2], DockRecord[3]] | null,
+): void {
+  const active = activeOwners.get(assistant);
+  if (!assistant || active?.owner !== owner) return;
+  try {
+    const key = dockKey(assistant);
+    const previous = sessionStorage.getItem(key);
+    if (dock && active.tabId) {
+      const next = JSON.stringify([...dock, active.tabId] satisfies DockRecord);
+      if (previous !== next) sessionStorage.setItem(key, next);
+    } else if (!dock && previous !== null) {
+      sessionStorage.removeItem(key);
+    }
+  } catch {
+    // The widget also works without storage.
   }
 }

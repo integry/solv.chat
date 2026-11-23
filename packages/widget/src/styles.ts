@@ -1,26 +1,21 @@
-/**
- * The expanded column's width. 460px: the same as the desktop panel, so an
- * answer keeps its line breaks when the visitor expands it, and wide enough
- * for a code line of about 44 characters at the code font's size.
- */
-export const SIDE_PANEL_WIDTH_PX = 460;
-/**
- * Below this viewport width expand opens the panel full screen instead of
- * beside the page: at 900px the page keeps 440px, about the widest phone
- * layout sites design for; any narrower and the page would be squeezed below
- * a phone's width while the chat takes the rest.
- */
-export const SIDE_BY_SIDE_MIN_WIDTH_PX = 900;
-/** Set on the host's root while expanded beside the page, carrying the column's width. */
-export const PANEL_WIDTH_PROPERTY = "--solv-chat-panel-width";
+import { SIDE_PANEL_WIDTH } from "./dock.js";
+
+const light = ["#ffffff", "#f8fafc", "#e2e8f0", "#0f172a"] as const;
+const dark = ["#0f172a", "#1e293b", "#334155", "#f8fafc"] as const;
+
+export function dockColors(): typeof light | typeof dark {
+  return typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches
+    ? dark
+    : light;
+}
 
 const css = `
 :host {
   --solv-accent: #2563eb;
-  --solv-bg: #ffffff;
-  --solv-surface: #f8fafc;
-  --solv-border: #e2e8f0;
-  --solv-text: #0f172a;
+  --solv-bg: ${light[0]};
+  --solv-surface: ${light[1]};
+  --solv-border: ${light[2]};
+  --solv-text: ${light[3]};
   --solv-muted: #475569;
   --solv-user-bg: var(--solv-accent);
   --solv-user-text: #ffffff;
@@ -46,10 +41,10 @@ const css = `
 
 @media (prefers-color-scheme: dark) {
   :host {
-    --solv-bg: #0f172a;
-    --solv-surface: #1e293b;
-    --solv-border: #334155;
-    --solv-text: #f8fafc;
+    --solv-bg: ${dark[0]};
+    --solv-surface: ${dark[1]};
+    --solv-border: ${dark[2]};
+    --solv-text: ${dark[3]};
     --solv-muted: #94a3b8;
     --solv-error: #f87171;
     --solv-error-bg: #450a0a;
@@ -148,7 +143,7 @@ textarea:focus-visible {
    than 640px keeps the size above. */
 @media (min-width: 640px) {
   .solv-panel {
-    width: min(${SIDE_PANEL_WIDTH_PX}px, calc(100vw - 32px));
+    width: min(${SIDE_PANEL_WIDTH}, calc(100vw - 32px));
     height: min(720px, calc(100vh - 96px));
   }
 }
@@ -185,7 +180,7 @@ textarea:focus-visible {
 }
 
 :host([data-layout]) .solv-panel {
-  width: ${SIDE_PANEL_WIDTH_PX}px;
+  width: ${SIDE_PANEL_WIDTH};
   height: 100vh;
   height: 100dvh;
   border-radius: 0;
@@ -230,7 +225,7 @@ textarea:focus-visible {
     transition: opacity 160ms ease, transform 160ms ease;
   }
 
-  :host([data-layout]) .solv-panel:not([data-opened-while-loading]) {
+  :host([data-layout]) .solv-panel:not([data-opened-while-loading], [data-dock-restored]) {
     animation: solv-expand 180ms ease-out;
   }
 

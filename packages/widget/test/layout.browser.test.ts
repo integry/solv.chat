@@ -6,6 +6,8 @@
  * is intercepted: the page fetches the engine across origins, CORS preflight
  * included, as it does on a live site.
  */
+import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, resolve } from "node:path";
@@ -42,6 +44,7 @@ function listen(server: Server): Promise<number> {
 
 describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () => {
   let widgetJs = "";
+  let bootJs = "";
   const servers: Server[] = [];
   let hostPort = 0;
   let enginePort = 0;
@@ -53,6 +56,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   let toolFirst = false;
   let widgetOptions: Record<string, unknown> = {};
   let visitorCheck = false;
+  let pageActions = false;
   let configGate: Promise<void> | null = null;
   let stallConfigHeaders = false;
   let gatedConfigResponse: ServerResponse | undefined;
@@ -105,7 +109,45 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
 <solv-chat assistant="pk_layout"></solv-chat>
 </body></html>`;
 
+  const bootPage = (url: URL) => {
+    const variant = url.searchParams.get("boot");
+    const delay = process.env.SOLV_DOCK_PREVIEWS ? 2300 : 650;
+    const key = "pk_layout";
+    const title = url.pathname === "/other" ? "API keys" : "Authentication";
+    const css = `html{width:100%;transition:margin 300ms}
+body{margin:0;background:#f8fafc;color:#17253b;font:16px/1.6 system-ui}
+main{box-sizing:border-box;padding:42px clamp(24px,6vw,90px)}
+nav{padding:18px clamp(24px,6vw,90px);background:white;border-bottom:1px solid #dce4ef}
+a{color:#235ba3;margin-right:16px}h1{font-size:36px;line-height:1.15}
+p{max-width:90ch}pre{max-width:54ch;overflow:auto;padding:16px;border-radius:8px;background:#eaf0f8}`;
+    const hash = (value: string) => createHash("sha256").update(value).digest("base64");
+    const rootStyle = "margin-right:8px;background:#f8fafc";
+    const policy = `script-src 'sha256-${hash(bootJs)}' ${variant === "blocked" ? "" : engineOrigin()}; style-src 'unsafe-hashes' 'sha256-${hash(rootStyle)}' 'sha256-${hash(css)}'; connect-src ${engineOrigin()}`;
+    const html = `<!doctype html><html style="${rootStyle}"><head>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>${title} | Fieldnotes API</title>
+<style>${css}</style>
+${variant === "no" ? "" : `<script data-key="${key}">${bootJs}</script>`}
+${variant === "storage" ? "" : `<script src="${engineOrigin()}/widget.js?delay=${delay}" defer></script>`}
+</head><body><nav><strong>Fieldnotes API</strong> &nbsp; <a href="/?boot=yes">Authentication</a><a href="/other?boot=yes">API keys</a></nav>
+<main id="content"><h1>${title}</h1><p>Use a workspace API key to authenticate requests to the Fieldnotes API. Include it in the Authorization header with each request.</p>
+<h2>Make an authenticated request</h2><pre>GET /v1/documents
+Authorization: Bearer YOUR_API_KEY</pre>
+<h2>Rotate a key</h2><p>Create a new key in your workspace settings, then update your application. Revoke the previous key after you confirm the new key works.</p></main>
+<solv-chat assistant="pk_layout" launcher-shortcut="none"></solv-chat></body></html>`;
+    return { html, policy: variant === "storage" ? `sandbox allow-scripts; ${policy}` : policy };
+  };
+
   beforeAll(async () => {
+    const boot = await build({
+      entryPoints: [resolve(ROOT, "src/boot.ts")],
+      bundle: true,
+      format: "iife",
+      minify: true,
+      write: false,
+      target: ["es2022"],
+      tsconfigRaw: { compilerOptions: { alwaysStrict: false } },
+    });
+    bootJs = boot.outputFiles[0]?.text.trimEnd() ?? "";
     const bundle = await build({
       entryPoints: [resolve(ROOT, "src/widget.ts")],
       bundle: true,
@@ -119,6 +161,13 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       const url = new URL(req.url ?? "/", "http://x");
       if (url.pathname === "/host-controls") {
         res.writeHead(200, { "content-type": "text/html" }).end(hostControls());
+        return;
+      }
+      if (url.searchParams.has("boot")) {
+        const { html, policy } = bootPage(url);
+        res
+          .writeHead(200, { "content-type": "text/html", "content-security-policy": policy })
+          .end(html);
         return;
       }
       if (url.pathname === "/" || url.pathname === "/other") {
@@ -144,7 +193,9 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
       }
       if (url.pathname === "/widget.js") {
         res.writeHead(200, { "content-type": "application/javascript" });
-        res.end(widgetJs);
+        const delay = Number(url.searchParams.get("delay"));
+        if (delay) setTimeout(() => res.end(widgetJs), delay);
+        else res.end(widgetJs);
         return;
       }
       if (url.pathname === "/v1/assistants/pk_layout") {
@@ -153,6 +204,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
           widget: { title: "Docs", position, ...widgetOptions },
           behaviour: { greeting: "Hi", suggestedQuestions: [] },
           visitorCheck,
+          actions: { builtins: pageActions, allowedOrigins: [hostOrigin()] },
         });
         if (configGate) {
           gatedConfigResponse = res;
@@ -203,6 +255,13 @@ document.querySelector("button").onclick = () => {
           );
           return;
         }
+        if (body.message === "Open the API keys page") {
+          res.end(
+            'event: action\ndata: {"callId":"call_nav","name":"navigate","input":{"url":"/other?boot=yes"},"confirm":false}\n\n' +
+              'event: done\ndata: {"messageId":"msg_nav","conversationId":"cnv_nav","awaitingActions":["call_nav"]}\n\n',
+          );
+          return;
+        }
         // The model thinks for a moment, then writes a token every 70 ms.
         if (toolFirst) {
           res.write('event: tool\ndata: {"name":"search_docs","state":"running"}\n\n');
@@ -235,6 +294,7 @@ document.querySelector("button").onclick = () => {
   afterEach(() => {
     widgetOptions = {};
     visitorCheck = false;
+    pageActions = false;
     stallConfigHeaders = false;
     gatedConfigResponse = undefined;
     submissions.length = 0;
@@ -1162,6 +1222,252 @@ document.querySelector("button").onclick = () => {
     expect(await page_("getComputedStyle(document.documentElement).marginRight")).toBe("460px");
     expect((await rect(".solv-panel")).height).toBe(800);
   }, 60_000);
+
+  const dockId = "solv-dock:1:pk_layout";
+  const expandedWidth = 812;
+  const fullWidth = 1280;
+  const bootFrames = () =>
+    page_<Array<{ width: number; placeholder: boolean; panel: boolean; launcher: boolean }>>(
+      "window.dockFrames",
+    );
+
+  async function watchDockFrames() {
+    return browser.cdp.send<{ identifier: string }>("Page.addScriptToEvaluateOnNewDocument", {
+      source: `window.dockFrames = [];
+      window.dockStyleChanges = [];
+      window.dockErrors = [];
+      addEventListener("error", (event) => window.dockErrors.push(event.message));
+      const observe = () => new MutationObserver(() => {
+        window.dockStyleChanges.push(document.documentElement.getAttribute("style"));
+      }).observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
+      const tick = () => {
+        const content = document.getElementById("content");
+        if (content) {
+          if (!window.dockFrames.length) observe();
+          const stub = document.getElementById("${dockId}");
+          const widget = document.querySelector("solv-chat");
+          const panel = widget?.shadowRoot?.querySelector(".solv-panel");
+          const launcher = widget?.shadowRoot?.querySelector(".solv-launcher");
+          const column = (el) => {
+            if (!el || getComputedStyle(el).backgroundColor === "rgba(0, 0, 0, 0)") return false;
+            const box = el.getBoundingClientRect();
+            return box.width === 460 && box.top === 0 && box.height === innerHeight &&
+              (box.right === innerWidth || box.left === 0);
+          };
+          window.dockFrames.push({
+            width: content.getBoundingClientRect().width,
+            placeholder: column(stub),
+            panel: column(panel),
+            launcher: !!launcher && getComputedStyle(launcher).display !== "none",
+          });
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);`,
+    });
+  }
+
+  async function screenshot(name: string) {
+    if (!process.env.SOLV_DOCK_PREVIEWS) return;
+    const directory = resolve(ROOT, "../../.propr/previews");
+    mkdirSync(directory, { recursive: true });
+    const { data } = await browser.cdp.send<{ data: string }>("Page.captureScreenshot", {
+      format: "png",
+    });
+    writeFileSync(resolve(directory, name), Buffer.from(data, "base64"));
+  }
+
+  it("reserves the column on every frame of navigation and restores the docked conversation", async () => {
+    await viewport(1280, 800);
+    await open("/?boot=yes");
+    await q('(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click())');
+    // Use the regular send path for a finished answer and a second answer
+    // that is still streaming when this document goes away.
+    await q(
+      `(r.querySelector("#solv-input").value = "How do I search?", r.querySelector("form").requestSubmit())`,
+    );
+    await waitFor(() => q<boolean>('!!r.querySelector(".solv-feedback")'), "completed answer");
+    const question = [
+      "I’m setting up search for a workspace that holds product documentation and release notes.",
+      "How can I limit results to published documents and exclude drafts or archived release notes?",
+      "Can I combine those filters with a date range and then sort the results by relevance?",
+      "We have separate workspaces for staging and production. Is the workspace set on the API key or on each search request?",
+      "Could you show a complete example with pagination and explain how the cursor changes between pages?",
+    ].join("\n\n");
+    await q(
+      `(r.querySelector("#solv-input").value = ${JSON.stringify(question)}, r.querySelector("form").requestSubmit())`,
+    );
+    await waitFor(
+      () =>
+        q<boolean>('r.querySelector(".solv-bubble:last-child").textContent.includes("To search")'),
+      "streaming answer",
+    );
+    await q(`(() => {
+      r.querySelector(".solv-messages").scrollTop = 45;
+      const input = r.querySelector("#solv-input");
+      input.value = "Can I search archived notes?";
+      input.focus();
+    })()`);
+    await waitFor(
+      () => q<boolean>('r.querySelector(".solv-messages").scrollTop === 45'),
+      "scroll position",
+    );
+
+    const { identifier } = await watchDockFrames();
+    try {
+      const engineRequestStart = engineRequests.length;
+      await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=yes` });
+      await waitFor(
+        async () => (await bootFrames())?.some((frame) => frame.placeholder),
+        "placeholder frame",
+      );
+      expect(engineRequests.slice(engineRequestStart)).toContain("/widget.js");
+      expect(await page_(`document.getElementById("${dockId}").textContent`)).toBe("Docs");
+      await screenshot("dock-first-frame.png");
+      await waitFor(
+        async () => (await bootFrames())?.some((frame) => frame.panel),
+        "docked panel frame",
+      );
+      const frames = await bootFrames();
+      expect(frames[0]).toEqual({
+        width: expandedWidth,
+        placeholder: true,
+        panel: false,
+        launcher: false,
+      });
+      expect(
+        frames.every(
+          ({ width, placeholder, panel, launcher }) =>
+            width === expandedWidth && (placeholder || panel) && !launcher,
+        ),
+      ).toBe(true);
+      expect(await page_("window.dockStyleChanges")).toEqual([]);
+      expect(await q("getComputedStyle(el).viewTransitionName")).toBe("solv-chat-dock");
+      expect(await q('getComputedStyle(r.querySelector(".solv-panel")).animationName')).toBe(
+        "none",
+      );
+      expect(await q('r.querySelector("#solv-input").value')).toBe("Can I search archived notes?");
+      expect(await focus()).toBe("solv-input");
+      expect(await q('r.querySelector(".solv-messages").scrollTop')).toBe(45);
+      expect(await q('r.querySelector(".solv-messages").textContent')).toContain(
+        "How do I search?",
+      );
+      expect(await q('r.querySelector(".solv-bubble:last-child").textContent')).toContain(
+        "Response interrupted.",
+      );
+      expect(submissions).toHaveLength(2);
+      await screenshot("dock-restored.png");
+
+      // The control sees the same cross-origin delay and the first full-width
+      // frame, followed by a resize once the widget has loaded.
+      await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=no` });
+      await waitFor(
+        async () => (await bootFrames())?.some((frame) => frame.width === fullWidth),
+        "full-width control",
+      );
+      await screenshot("dock-without-boot.png");
+      await waitFor(
+        async () => (await bootFrames())?.some((frame) => frame.panel),
+        "control panel",
+      );
+      expect((await bootFrames())[0]).toEqual({
+        width: fullWidth,
+        placeholder: false,
+        panel: false,
+        launcher: false,
+      });
+
+      await q('r.querySelector(".solv-collapse").click()');
+      expect(await page_(`sessionStorage.getItem("${dockId}")`)).toBeNull();
+      await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=yes` });
+      await waitFor(
+        async () => (await bootFrames())?.some((frame) => frame.launcher),
+        "collapsed next page",
+      );
+      expect(
+        (await bootFrames()).every((frame) => frame.width === fullWidth && !frame.placeholder),
+      ).toBe(true);
+      await q('r.querySelector(".solv-expand").click()');
+      expect(await page_(`sessionStorage.getItem("${dockId}")`)).toBeTruthy();
+      await q("el.close()");
+      expect(await page_(`sessionStorage.getItem("${dockId}")`)).toBeNull();
+    } finally {
+      await browser.cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
+    }
+  }, 25_000);
+
+  it("continues a paused answer after a page action navigates with the panel docked", async () => {
+    pageActions = true;
+    await viewport(1280, 800);
+    await open("/?boot=yes");
+    await q('(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click())');
+    const { identifier } = await watchDockFrames();
+    try {
+      await q(
+        `(r.querySelector("#solv-input").value = "Open the API keys page", r.querySelector("form").requestSubmit())`,
+      );
+      await waitFor(
+        async () => (await bootFrames())?.some((frame) => frame.placeholder),
+        "page action navigation",
+      );
+      await waitFor(async () => submissions.length === 2, "continued request");
+      expect(submissions[1]?.body).toMatchObject({
+        conversationId: "cnv_nav",
+        resumeMessageId: "msg_nav",
+        actionResults: [{ callId: "call_nav", ok: true }],
+      });
+      expect(submissions[1]?.body).not.toHaveProperty("message");
+      await waitFor(() => q<boolean>('!!r.querySelector(".solv-feedback")'), "continued answer");
+      expect((await bootFrames()).every((frame) => frame.width === expandedWidth)).toBe(true);
+      expect(await pendingResume()).toBeUndefined();
+      expect(await q('r.querySelector(".solv-messages").textContent')).toContain("That is all.");
+    } finally {
+      await browser.cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
+    }
+  }, 15_000);
+
+  it("does nothing for fresh tabs, blocked storage and invalid records, and rolls back if the script is blocked", async () => {
+    await viewport(1280, 800);
+    await open();
+    const { identifier } = await watchDockFrames();
+    try {
+      await open("/other?boot=yes", true, false);
+      expect(
+        (await bootFrames()).every((frame) => frame.width === fullWidth && !frame.placeholder),
+      ).toBe(true);
+      await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/?boot=storage` });
+      await waitFor(async () => (await bootFrames())?.length > 0, "sandbox page frames");
+      expect(await page_("window.dockErrors")).toEqual([]);
+      expect((await bootFrames())[0]?.width).toBe(fullWidth);
+      expect(await page_('document.querySelector("[inert]")')).toBeNull();
+
+      await open();
+      await page_(
+        `sessionStorage.setItem("${dockId}", '["right","460px","position:fixed;background:url(https://invalid.example)", "Invalid"]')`,
+      );
+      await open("/other?boot=yes", false, false);
+      expect(
+        (await bootFrames()).every((frame) => frame.width === fullWidth && !frame.placeholder),
+      ).toBe(true);
+
+      await open();
+      await q(
+        '(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click())',
+      );
+      await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=blocked` });
+      await waitFor(
+        async () => (await bootFrames())?.some((frame) => frame.placeholder),
+        "placeholder before rollback",
+      );
+      await waitFor(async () => (await bootFrames()).at(-1)?.width === fullWidth, "rollback", 3500);
+      expect(await page_(`document.getElementById("${dockId}")`)).toBeNull();
+      expect(await page_('document.documentElement.getAttribute("style")')).toBe(
+        "margin-right:8px;background:#f8fafc",
+      );
+    } finally {
+      await browser.cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
+    }
+  }, 20_000);
 
   it("writes the answer progressively, with the indicator first, and code scrolls sideways no more than at 380px", async () => {
     await viewport(1280, 800);

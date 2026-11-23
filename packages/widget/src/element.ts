@@ -28,6 +28,16 @@ import {
 } from "./builtins.js";
 import { CheckController, type CheckResult } from "./check.js";
 import { askToConfirm, type ConfirmHandle } from "./confirm.js";
+import {
+  DOCK_NAME,
+  type DockPlaceholder,
+  dockKey,
+  releaseRoom,
+  reserveRoom,
+  SIDE_BY_SIDE_MIN_WIDTH_PX,
+  SIDE_PANEL_WIDTH,
+  type Side,
+} from "./dock.js";
 import { parseSafeHttpUrl, renderMarkdown } from "./markdown.js";
 import { readEventLines } from "./sse.js";
 import {
@@ -39,16 +49,12 @@ import {
   type SavedConversation,
   type SavedTurn,
   saveConversation,
+  saveDock,
   savePublicConfig,
   visitorId,
 } from "./storage.js";
 import { HOLD_BOUND_MS, streamingView } from "./streaming.js";
-import {
-  PANEL_WIDTH_PROPERTY,
-  SIDE_BY_SIDE_MIN_WIDTH_PX,
-  SIDE_PANEL_WIDTH_PX,
-  styles,
-} from "./styles.js";
+import { dockColors, styles } from "./styles.js";
 
 // The element's public declarations must also work when the widget is
 // installed by itself, so this shape uses no package imports.
@@ -92,21 +98,6 @@ export interface WidgetSendResult {
  * too narrow for side by side.
  */
 type Layout = "panel" | "side" | "full";
-
-/** What the widget added to the host's root element, and what was there before. */
-interface RootReservation {
-  root: HTMLElement;
-  property: string;
-  value: string;
-  priority: string;
-  variableValue: string;
-  variablePriority: string;
-  maxWidthValue: string;
-  maxWidthPriority: string;
-  /** The root's style attribute before, and its parsed form, to put back byte for byte. */
-  styleAttribute: string | null;
-  cssText: string;
-}
 
 /** The answer text being painted while it streams in. */
 interface LivePaint {
@@ -378,9 +369,17 @@ export class SolvChat extends HTMLElement {
       void this.#openRequested({}, true);
     }
   };
-  #reservation: RootReservation | null = null;
+  #reservation: { side: Side; original: string | null } | null = null;
+  #restoringView: SavedConversation["view"];
+  #onPageHide = (): void => {
+    // The navigate action already saved the pending resume and its action note.
+    if (this.#open && !this.#pendingResume && this.#persist(true)) this.#saveDock();
+  };
   #wideQuery: MediaQueryList | null = null;
-  #onWideChange = (): void => this.#applyLayout();
+  #onWideChange = (): void => {
+    this.#applyLayout();
+    this.#saveDock();
+  };
   /** The visitor has not scrolled up from the newest message. */
   #pinned = true;
   #paints = new Map<HTMLDivElement, LivePaint>();
@@ -415,6 +414,7 @@ export class SolvChat extends HTMLElement {
       window.addEventListener("click", openFromHostClick);
     }
     connectedWidgets.add(this);
+    window.addEventListener("pagehide", this.#onPageHide);
     this.#connection++;
     const url = this.#publicConfigUrl();
     if (url !== this.#configUrl) {
@@ -495,6 +495,7 @@ export class SolvChat extends HTMLElement {
     this.#configRequest = undefined;
     this.#configOpenWait = undefined;
     this.#configLoading = null;
+    window.removeEventListener("pagehide", this.#onPageHide);
     connectedWidgets.delete(this);
     if (connectedWidgets.size === 0) {
       window.removeEventListener("click", captureClick, true);
@@ -1015,6 +1016,10 @@ export class SolvChat extends HTMLElement {
     } else {
       this.#applyLayout();
     }
+    if (this.#open) {
+      this.#restoreView();
+      this.#saveDock();
+    }
     if (!previous && this.#open && this.#root.activeElement === this.#closeBtn) this.#focusInput();
     if (this.#interacted) this.#visitorInteracted();
     const shortcutPressed = this.#pendingShortcuts.has(config.keyboardShortcut);
@@ -1034,7 +1039,7 @@ export class SolvChat extends HTMLElement {
   #focusInput(): void {
     this.#focusingInput = true;
     try {
-      this.#inputEl.focus();
+      this.#inputEl.focus({ preventScroll: true });
     } finally {
       this.#focusingInput = false;
     }
@@ -1156,7 +1161,10 @@ export class SolvChat extends HTMLElement {
     this.#updateLauncher();
     this.#applyLayout();
     this.#saveConfig();
-    if (this.#configReady) this.#persist();
+    if (this.#configReady) {
+      this.#persist();
+      this.#saveDock();
+    }
     if (moveFocus) {
       if (this.#configReady) this.#focusInput();
       else this.#closeBtn.focus();
@@ -1172,10 +1180,12 @@ export class SolvChat extends HTMLElement {
     this.#openConfirms.clear();
     this.#dismissedTurn = this.#abortController;
     this.#open = false;
+    this.#restoringView = undefined;
     this.#panel.hidden = true;
     this.#openingWithConfig = null;
     this.#updateLauncher();
     this.#applyLayout();
+    this.#saveDock();
     this.#persist();
     if (restoreFocus) this.#launcher.focus();
     this.#emit("close");
@@ -1189,6 +1199,7 @@ export class SolvChat extends HTMLElement {
     this.#panel.removeAttribute("data-opened-while-loading");
     this.#applyLayout();
     this.#persist();
+    this.#saveDock();
     (expanded ? this.#collapseBtn : this.#expandBtn).focus();
     this.#emit(expanded ? "expand" : "collapse");
   }
@@ -1225,6 +1236,9 @@ export class SolvChat extends HTMLElement {
     if (layout === "panel") this.removeAttribute("data-layout");
     else this.setAttribute("data-layout", layout);
     this.#launcher.hidden = layout !== "panel";
+    const transitionName = layout === "side" ? DOCK_NAME : "";
+    if (this.style.viewTransitionName !== transitionName)
+      this.style.viewTransitionName = transitionName;
     // With the owner's setting off the controls are not in the panel at all,
     // so nothing announces or focuses them; on, they sit before the close button.
     if (!allow) {
@@ -1245,105 +1259,56 @@ export class SolvChat extends HTMLElement {
    */
   #reserveRoom(): void {
     const side = this.getAttribute("data-position") === "left" ? "left" : "right";
-    const property = `margin-${side}`;
-    if (this.#reservation?.property === property) return;
+    if (this.#reservation?.side === side) return;
     this.#releaseRoom();
+
     const root = document.documentElement;
-    if (!root) return;
-    const style = root.style;
-    // Read before anything changes, so the host's own limit is the one kept.
-    const hostMaxWidth =
-      root.ownerDocument.defaultView?.getComputedStyle(root).getPropertyValue("max-width") ?? "";
-    const reservation: RootReservation = {
-      root,
-      property,
-      value: style.getPropertyValue(property),
-      priority: style.getPropertyPriority(property),
-      variableValue: style.getPropertyValue(PANEL_WIDTH_PROPERTY),
-      variablePriority: style.getPropertyPriority(PANEL_WIDTH_PROPERTY),
-      maxWidthValue: style.getPropertyValue("max-width"),
-      maxWidthPriority: style.getPropertyPriority("max-width"),
-      styleAttribute: root.getAttribute("style"),
-      cssText: style.cssText,
-    };
-    const width = `${SIDE_PANEL_WIDTH_PX}px`;
-    // The host's own margin is kept and the column added to it.
-    if (reservation.value)
-      style.setProperty(property, `calc(${reservation.value} + ${width})`, "important");
-    if (!reservation.value || style.getPropertyValue(property) === reservation.value) {
-      style.setProperty(property, width, "important");
+    const placeholder = document.getElementById(
+      dockKey(this.#assistant()),
+    ) as DockPlaceholder | null;
+    if (placeholder?.rootStyle !== undefined) {
+      const original = placeholder.rootStyle;
+      placeholder.remove();
+      if (placeholder.style[side] === "0px") {
+        this.#panel.setAttribute("data-dock-restored", "");
+        this.#reservation = { side, original };
+        return;
+      }
+      const previousSide = placeholder.style.left === "0px" ? "left" : "right";
+      releaseRoom(previousSide, original);
     }
-    style.setProperty(PANEL_WIDTH_PROPERTY, width);
-    this.#reservation = reservation;
-    this.#limitRootWidth(root, hostMaxWidth);
+
+    this.#reservation = { side, original: root.getAttribute("style") };
+    reserveRoom(root, side, SIDE_PANEL_WIDTH);
   }
 
-  /**
-   * A margin narrows the root only while its width is automatic; a page that
-   * sets one (`html { width: 100% }`) would stay viewport-wide under the
-   * column. A maximum width of the viewport less the margins (and, for a
-   * content-box root, its padding and border) keeps it beside the column
-   * either way, and still honours a smaller maximum the host set.
-   */
-  #limitRootWidth(root: HTMLElement, hostMaxWidth: string): void {
-    const view = root.ownerDocument.defaultView;
-    if (!view) return;
-    const computed = view.getComputedStyle(root);
-    const px = (name: string): number => {
-      const value = Number.parseFloat(computed.getPropertyValue(name));
-      return Number.isFinite(value) ? value : 0;
-    };
-    let used = px("margin-left") + px("margin-right");
-    if (computed.getPropertyValue("box-sizing") !== "border-box") {
-      used +=
-        px("padding-left") +
-        px("padding-right") +
-        px("border-left-width") +
-        px("border-right-width");
-    }
-    const room = `calc(100% - ${used}px)`;
-    const limit = hostMaxWidth && hostMaxWidth !== "none" ? `min(${hostMaxWidth}, ${room})` : room;
-    root.style.setProperty("max-width", limit, "important");
-  }
-
-  /** Removes exactly what `#reserveRoom` added. */
   #releaseRoom(): void {
-    const reservation = this.#reservation;
-    if (reservation === null) return;
+    if (!this.#reservation) return;
+    const { side, original } = this.#reservation;
     this.#reservation = null;
-    const { root } = reservation;
-    const style = root.style;
-    if (reservation.value) {
-      style.setProperty(reservation.property, reservation.value, reservation.priority);
+    this.#panel.removeAttribute("data-dock-restored");
+    releaseRoom(side, original);
+  }
+
+  #saveDock(): void {
+    if (this.#previewing) return;
+    if (this.#open && this.#reservation) {
+      const { side } = this.#reservation;
+      const [background, surface, border, text] = dockColors();
+      const edge = side === "left" ? "right" : "left";
+      // The same 55px header and inner border as the live panel.
+      const css = `position:fixed;z-index:2147483647;top:0;bottom:0;${side}:0;width:${SIDE_PANEL_WIDTH};box-sizing:border-box;border-${edge}:1px solid ${border};background:${background};color:${text};box-shadow:inset 0 54px ${surface},inset 0 55px ${border};font:600 15px system-ui;padding:16px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;pointer-events:none;view-transition-name:${DOCK_NAME}`;
+      saveDock(this.#assistant(), this.#owner, [side, SIDE_PANEL_WIDTH, css, this.#config.title]);
     } else {
-      style.removeProperty(reservation.property);
-    }
-    if (reservation.variableValue) {
-      style.setProperty(
-        PANEL_WIDTH_PROPERTY,
-        reservation.variableValue,
-        reservation.variablePriority,
-      );
-    } else {
-      style.removeProperty(PANEL_WIDTH_PROPERTY);
-    }
-    if (reservation.maxWidthValue) {
-      style.setProperty("max-width", reservation.maxWidthValue, reservation.maxWidthPriority);
-    } else {
-      style.removeProperty("max-width");
-    }
-    // Nothing else changed meanwhile: put the attribute back as it was written.
-    // Reading it first makes the browser write out the changes above now
-    // (Chromium does so lazily), so they cannot land after it is restored.
-    root.getAttribute("style");
-    if (style.cssText === reservation.cssText) {
-      if (reservation.styleAttribute === null) root.removeAttribute("style");
-      else root.setAttribute("style", reservation.styleAttribute);
+      saveDock(this.#assistant(), this.#owner, null);
     }
   }
 
   #restore(saved: SavedConversation | null): void {
     this.#conversationId = saved?.conversationId ?? null;
+    this.#restoringView = saved?.view;
+    this.#inputEl.value = saved?.view?.draft ?? "";
+    this.#pinned = saved?.view?.scrollTop === undefined;
     this.#expanded = saved?.expanded === true;
     // Older records store the last layout alone, omitting expanded when it was false.
     const legacyMode = saved && !saved.tabId ? (saved.expanded ? "side" : "panel") : undefined;
@@ -1405,8 +1370,22 @@ export class SolvChat extends HTMLElement {
       this.#pendingResume = null;
     }
 
+    const placeholder = document.getElementById(
+      dockKey(this.#assistant()),
+    ) as DockPlaceholder | null;
+    const side = placeholder?.style.left === "0px" ? "left" : "right";
     if (saved?.open) {
+      // Keep the correct side and title even if the full configuration has expired.
+      if (placeholder && !this.#configReady) {
+        this.#applyLauncherStyle(side, this.#config.accentColor);
+        this.#titleEl.textContent = placeholder.textContent;
+        this.#messagesEl.hidden = false;
+        // The draft stays usable while settings are checked. Sending still
+        // waits for configuration, as it does in the regular loading panel.
+        this.#inputEl.disabled = false;
+      }
       this.#openPanel();
+      this.#restoreView();
     } else {
       this.#open = false;
       this.#panel.hidden = true;
@@ -1416,6 +1395,21 @@ export class SolvChat extends HTMLElement {
         this.#persist();
       }
     }
+    // A stale reservation can survive a failed storage write or a viewport
+    // change between boot and connection. Give the page its width back.
+    if (placeholder?.isConnected && placeholder.rootStyle !== undefined) {
+      placeholder.remove();
+      releaseRoom(side, placeholder.rootStyle);
+    }
+  }
+
+  #restoreView(): void {
+    if (this.#messagesEl.hidden) return;
+    const view = this.#restoringView;
+    this.#restoringView = undefined;
+    if (view?.scrollTop === undefined) this.#scrollToBottom();
+    else this.#messagesEl.scrollTop = view.scrollTop;
+    if (view?.inputFocused) this.#focusInput();
   }
 
   #snapshot(): SavedConversation {
@@ -1425,13 +1419,24 @@ export class SolvChat extends HTMLElement {
       ...(this.#expanded ? { expanded: true } : {}),
       ...(this.#preferredMode ? { preferredMode: this.#preferredMode } : {}),
       turns: this.#turns,
+      ...(this.#open
+        ? {
+            view: this.#restoringView ?? {
+              draft: this.#inputEl.value,
+              ...(this.#pinned ? {} : { scrollTop: this.#messagesEl.scrollTop }),
+              ...(document.activeElement === this && this.#root.activeElement === this.#inputEl
+                ? { inputFocused: true }
+                : {}),
+            },
+          }
+        : {}),
       ...(this.#pendingResume ? { pendingResume: this.#pendingResume } : {}),
     };
   }
 
-  #persist(): void {
-    if (this.#previewing) return;
-    saveConversation(this.#assistant(), this.#snapshot(), this.#owner);
+  #persist(existingOnly = false): boolean {
+    if (this.#previewing) return false;
+    return saveConversation(this.#assistant(), this.#snapshot(), this.#owner, existingOnly);
   }
 
   #appendBubble(role: "user" | "assistant"): { bubble: HTMLDivElement; textEl: HTMLDivElement } {

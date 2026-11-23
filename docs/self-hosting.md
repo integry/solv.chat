@@ -147,9 +147,59 @@ If the folder is a Docusaurus docs folder, `solv push` finds that from the files
 Other folders are pushed as they always were. Run with `--dry-run` to see each document's URL before pushing.
 
 5. In `/admin`, open **Behaviour** (or **Widget**) and click **Publish** so the assistant goes live (Publish promotes your draft — behaviour, widget settings, and any enabled tools — to visitors).
-6. Open **Install**, copy the `<script>` tag, paste it into your site, and ask a question.
+6. Open **Install**, add the scripts and the chat tag to your site, and ask a question.
 
 ### The chat on your page
+
+#### Keep an open side panel in place between pages
+
+For a site that loads a new document on navigation, put the following inline
+script in `<head>` on every page that shows the assistant, after the viewport
+meta tag and the stylesheets that size your page. Replace `pk_...` with the
+same public key as the `assistant` attribute on your `<solv-chat>` tag. Keep
+that tag in `<body>`.
+
+```html
+<script data-key="pk_...">(()=>{var x="--solv-chat-panel-width";var g=e=>`solv-dock:1:${e}`;function y(e,d,n){let r=e.style,s=getComputedStyle(e),i=s.maxWidth,c=`margin-${d}`,a=r.getPropertyValue(c),t=(p,u)=>r.setProperty(p,u,"important");t(c,n),a&&t(c,`calc(${a} + ${n})`),r.setProperty(x,n);let o=p=>parseFloat(p)||0,l=e.getBoundingClientRect().width,m=`calc(100% - ${(l&&l-o(s.width))+o(s.marginLeft)+o(s.marginRight)}px)`;t("max-width",i&&i!=="none"?`min(${i}, ${m})`:m)}try{let e=document,d=g(e.currentScript.dataset.key),n=sessionStorage[d];if(n&&innerWidth>=900){let r;try{r=opener.sessionStorage[d]}catch{}let[s,i,c,a]=JSON.parse(n);if(n!==r&&(s==="left"||s==="right")&&i==="460px"&&typeof a=="string"&&c.match(/^position:fixed;[#a-z0-9:;, -]+$/)){let t=e.createElement("div");t.id=d,t.inert=!0,t.style.cssText=c,t.textContent=a;let o=e.documentElement,l=o.getAttribute("style");t.rootStyle=l,y(o,s,i),setTimeout(()=>{t.isConnected&&(t.remove(),l===null?o.removeAttribute("style"):o.setAttribute("style",l))},3e3),o.append(t)}}}catch{}})();</script>
+```
+
+The engine serves the exact script body at `/boot.js`. The widget package
+publishes it as `@solvchat/widget/boot.js`. Copy the body inline so it can
+run while the head is parsed. For Content-Security-Policy, add
+`'sha256-riS33mqJmI1tKc+fXVfp3xHqfAw2EdYbM0kkYhurdTk='` to `script-src` alongside
+the engine's origin. Keep the script body byte for byte, including whitespace.
+Changing the `data-key` attribute leaves the hash unchanged.
+
+On the next page in the same tab, the script makes room for an already-open
+side panel and shows its heading. The widget replaces that column when it
+connects. If it fails to load, the boot script gives the page its width back
+after three seconds.
+
+Request `widget.js` right away while parsing the head when the boot column
+exists. The **Install** snippet puts the existing deferred widget script
+directly after the inline script. If your site loads the widget on idle or
+on interaction, make that loader run immediately when
+`document.getElementById("solv-dock:1:" + assistantKey)` returns an element.
+Use the same loader for both paths so the script is requested only once.
+With no docked column, keep your usual loading schedule.
+
+To opt in to cross-document view transitions, add this rule to the
+stylesheets of both pages. Supporting browsers keep the side panel in place
+as its own named part of the transition.
+[Chrome's cross-document view transition guide](https://developer.chrome.com/docs/web-platform/view-transitions/cross-document).
+
+```css
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition {
+    navigation: auto;
+  }
+}
+```
+
+In a single-page app, keep `<solv-chat>` outside the routed region, such as
+in the root layout, so it stays mounted across route changes.
+
+#### Set the launcher’s appearance
 
 You can set the launcher’s appearance for its first paint with optional
 attributes on the embed.

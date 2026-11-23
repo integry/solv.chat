@@ -21,7 +21,8 @@
     ".": {
       "types": "./dist/widget.d.ts",
       "default": "./dist/widget.js"
-    }
+    },
+    "./boot.js": "./dist/boot.js"
   },
   "files": [
     "dist"
