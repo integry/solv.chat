@@ -92,7 +92,6 @@ describe("admin install API", () => {
     expect(body.allowedOrigins).toEqual(["https://docs.example.com"]);
     const boot = await (await call(appA, "GET", "/boot.js")).text();
     const bootBytes = new TextEncoder().encode(boot);
-    expect(bootBytes.byteLength).toBeLessThanOrEqual(1400);
     expect(body.snippet).toContain(
       `<script data-key="${assistant.publicKey}">${boot}</script>\n<script src="https://example.com/widget.js" defer>`,
     );

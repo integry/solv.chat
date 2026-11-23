@@ -11,7 +11,7 @@ try {
   const doc = document;
   const id = dockKey((doc.currentScript as HTMLElement).dataset.key as string);
   const raw = sessionStorage[id];
-  if (raw && innerWidth >= SIDE_BY_SIDE_MIN_WIDTH_PX) {
+  if (raw && !doc.hidden && innerWidth >= SIDE_BY_SIDE_MIN_WIDTH_PX) {
     let copied: string | undefined;
     try {
       copied = opener.sessionStorage[id];
@@ -38,13 +38,38 @@ try {
       panel.rootStyle = original;
       reserveRoom(root, side, width);
       const reserved = root.getAttribute("style");
-      setTimeout(() => {
-        if (panel.isConnected) {
-          panel.remove();
-          releaseRoom(side, original, root, reserved);
-        }
-      }, 3000);
       root.append(panel);
+      const listeners = new AbortController();
+      const release = () => {
+        listeners.abort();
+        clearTimeout(timer);
+        if (!panel.isConnected) return;
+        panel.remove();
+        releaseRoom(side, original, root, reserved);
+      };
+      const timer = setTimeout(release, 10_000);
+      const options = { capture: true, signal: listeners.signal };
+      doc.addEventListener(
+        "error",
+        ({ target }) => {
+          // The inline script has no engine origin. Match the engine's root
+          // script path on any HTTP(S) origin, including versioned URLs.
+          if (
+            target instanceof HTMLScriptElement &&
+            /^https?:\/\/[^/]+\/widget\.js(?:[?#]|$)/.test(target.src)
+          ) {
+            release();
+          }
+        },
+        options,
+      );
+      doc.addEventListener(
+        "visibilitychange",
+        () => {
+          if (doc.hidden) release();
+        },
+        options,
+      );
     }
   }
 } catch {
