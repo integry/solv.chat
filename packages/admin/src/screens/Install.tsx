@@ -46,7 +46,7 @@ function PlatformNotes({ snippet }: { snippet: string }) {
   // Source: https://nextjs.org/docs/app/api-reference/components/script — checked 2026-11-17
   const nextCode = `import Script from "next/script";
 
-// app/layout.tsx, inside <body>:
+// app/layout.tsx, outside the routed content:
 <Script src="${src}" />
 <solv-chat assistant="${publicKey}"></solv-chat>`;
   return (
@@ -54,16 +54,16 @@ function PlatformNotes({ snippet }: { snippet: string }) {
       <details className="disclosure">
         <summary>Plain HTML</summary>
         <p>
-          Paste the snippet just before <code>&lt;/body&gt;</code> on every page that should show
-          the chat. If your pages share a footer file, paste it there once.
+          Add the scripts to <code>&lt;head&gt;</code>, after your stylesheets. Add the{" "}
+          <code>&lt;solv-chat&gt;</code> tag to <code>&lt;body&gt;</code>. Use the same setup on
+          every page that shows the chat.
         </p>
       </details>
       <details className="disclosure">
         <summary>WordPress</summary>
         <p>
-          Use a plugin that adds code to the footer of every page and paste the snippet into it. If
-          you edit your theme instead, paste it just before <code>&lt;/body&gt;</code> in its footer
-          template.
+          Use a plugin that adds code to the head and footer. Put the scripts in the head and the{" "}
+          <code>&lt;solv-chat&gt;</code> tag in the footer.
         </p>
       </details>
       <details className="disclosure">
@@ -72,9 +72,9 @@ function PlatformNotes({ snippet }: { snippet: string }) {
             Source: https://shopify.dev/docs/storefronts/themes/architecture/layouts — checked 2026-11-17 */}
         <p>
           In your Shopify admin, open Online Store, then Themes, and choose Edit code. Open{" "}
-          <code>layout/theme.liquid</code> and paste the snippet just before{" "}
-          <code>&lt;/body&gt;</code>. List your store's address in step 1, and your myshopify.com
-          address too if visitors use it.
+          <code>layout/theme.liquid</code> and add the scripts to <code>&lt;head&gt;</code> and the
+          chat tag to <code>&lt;body&gt;</code>. List your store's address in step 1, and your
+          myshopify.com address too if visitors use it.
         </p>
       </details>
       <details className="disclosure">
@@ -113,7 +113,7 @@ function SitePolicyNotes({ info }: { info: InstallInfo }) {
             If your site sets a Content-Security-Policy
           </h3>
           <p className="muted">
-            Add these to it. Each names this chat's own address only; nothing else needs allowing.
+            Add these values to your policy. The hash allows the inline script in the snippet.
           </p>
           <ul className="policy-list" aria-label="Content-Security-Policy additions">
             {policy.map((entry) => (

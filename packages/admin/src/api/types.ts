@@ -332,7 +332,7 @@ export interface InstallInfo {
   snippet: string;
   /** Page and time of the newest conversation; null until a visitor writes. */
   lastSeen?: { pageUrl: string; at: number } | null;
-  /** Directives a host site's Content-Security-Policy must allow, each naming the engine's origin. */
+  /** Directives a host site's Content-Security-Policy must allow. */
   hostPolicy?: { directive: string; value: string }[];
   visitorCheck?: VisitorCheckStatus;
 }

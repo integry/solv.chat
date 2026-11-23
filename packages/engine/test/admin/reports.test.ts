@@ -1,6 +1,6 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { newId } from "@solvchat/core";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { rangeFor, reportFor, responseTimeFigures } from "../../src/admin/reports.js";
 import { REPORT_TOP_LIMIT } from "../../src/db/reports.js";
 import { forPrincipal } from "../../src/db/tenant.js";
@@ -689,7 +689,9 @@ describe("admin reports API", () => {
         ).bind(newId("msg"), ORG_A, convA, FIXED_NOW),
       ]);
 
-      const res = await call(appForOrg(ORG_A), `/api/admin/assistants/${astA}/report?days=7`);
+      const path = `/api/admin/assistants/${astA}/report?days=7`;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(FIXED_NOW);
+      const res = await call(appForOrg(ORG_A), path).finally(() => clock.mockRestore());
       const body = (await res.json()) as { responseTime: Record<string, unknown> };
       expect(body.responseTime).toMatchObject({
         status: "measured",
@@ -701,7 +703,7 @@ describe("admin reports API", () => {
       });
 
       // Org B asking for org A's assistant gets nothing, and its own figure is its own.
-      const cross = await call(appForOrg(ORG_B), `/api/admin/assistants/${astA}/report?days=7`);
+      const cross = await call(appForOrg(ORG_B), path);
       expect(cross.status).toBe(404);
       expect(await responseTimeFigures(tenantFor(ORG_B), astA, range7)).toMatchObject({
         status: "no_answers",

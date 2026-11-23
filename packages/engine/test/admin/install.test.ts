@@ -85,13 +85,24 @@ describe("admin install API", () => {
       publicKey: string;
       allowedOrigins: string[];
       snippet: string;
+      hostPolicy: { directive: string; value: string }[];
     };
     expect(body.assistantId).toBe(assistant.id);
     expect(body.publicKey).toBe(assistant.publicKey);
     expect(body.allowedOrigins).toEqual(["https://docs.example.com"]);
-    expect(body.snippet).toContain("https://example.com/widget.js");
-    expect(body.snippet).toContain(assistant.publicKey);
-    expect(body.snippet).toContain("<solv-chat");
+    const boot = await (await call(appA, "GET", "/boot.js")).text();
+    const bootBytes = new TextEncoder().encode(boot);
+    expect(bootBytes.byteLength).toBeLessThanOrEqual(1400);
+    expect(body.snippet).toContain(
+      `<script data-key="${assistant.publicKey}">${boot}</script>\n<script src="https://example.com/widget.js" defer>`,
+    );
+    expect(body.snippet).toContain(`<solv-chat assistant="${assistant.publicKey}">`);
+    const digest = await crypto.subtle.digest("SHA-256", bootBytes);
+    const hash = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    expect(body.hostPolicy).toContainEqual({
+      directive: "script-src",
+      value: `https://example.com 'sha256-${hash}'`,
+    });
   });
 
   it("reports the page of the newest conversation as where the widget was last seen, per org", async () => {

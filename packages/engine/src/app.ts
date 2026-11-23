@@ -47,7 +47,7 @@ import {
 import { vectorizeRetriever } from "./providers/retrieval.js";
 import type { Seams } from "./seams/types.js";
 import { scriptAsset } from "./util/scriptAsset.js";
-import { WIDGET_BUNDLE } from "./widgetBundle.js";
+import { WIDGET_BOOT, WIDGET_BUNDLE } from "./widgetBundle.js";
 
 /**
  * Decodes one path segment, or returns null when the percent-encoding is
@@ -64,6 +64,7 @@ function decodeSegment(segment: string): string | null {
 const notFound = (): Response => Response.json({ error: "Not found." }, { status: 404 });
 
 const widgetAsset = scriptAsset(WIDGET_BUNDLE);
+const bootAsset = scriptAsset(WIDGET_BOOT);
 
 export interface Env extends ProviderEnv, ScoreFloorEnv, VisitorCheckEnv {
   DB: D1Database;
@@ -197,6 +198,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
         if (publicKey === null) return notFound();
         return publicConfigRoute(request, env, seams, publicKey);
       }
+      if (request.method === "GET" && url.pathname === "/boot.js") return bootAsset(request);
       if (request.method === "GET" && url.pathname === "/widget.js") {
         return widgetAsset(request);
       }
