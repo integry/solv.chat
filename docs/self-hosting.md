@@ -160,20 +160,20 @@ same public key as the `assistant` attribute on your `<solv-chat>` tag. Keep
 that tag in `<body>`.
 
 ```html
-<script data-key="pk_...">(()=>{var x="--solv-chat-panel-width";var g=e=>`solv-dock:1:${e}`;function y(e,d,n){let r=e.style,s=getComputedStyle(e),i=s.maxWidth,c=`margin-${d}`,a=r.getPropertyValue(c),t=(p,u)=>r.setProperty(p,u,"important");t(c,n),a&&t(c,`calc(${a} + ${n})`),r.setProperty(x,n);let o=p=>parseFloat(p)||0,l=e.getBoundingClientRect().width,m=`calc(100% - ${(l&&l-o(s.width))+o(s.marginLeft)+o(s.marginRight)}px)`;t("max-width",i&&i!=="none"?`min(${i}, ${m})`:m)}try{let e=document,d=g(e.currentScript.dataset.key),n=sessionStorage[d];if(n&&innerWidth>=900){let r;try{r=opener.sessionStorage[d]}catch{}let[s,i,c,a]=JSON.parse(n);if(n!==r&&(s==="left"||s==="right")&&i==="460px"&&typeof a=="string"&&c.match(/^position:fixed;[#a-z0-9:;, -]+$/)){let t=e.createElement("div");t.id=d,t.inert=!0,t.style.cssText=c,t.textContent=a;let o=e.documentElement,l=o.getAttribute("style");t.rootStyle=l,y(o,s,i),setTimeout(()=>{t.isConnected&&(t.remove(),l===null?o.removeAttribute("style"):o.setAttribute("style",l))},3e3),o.append(t)}}}catch{}})();</script>
+<script data-key="pk_...">(()=>{var y="--solv-chat-panel-width";var u=o=>`solv-dock:1:${o}`;function x(o,i,t){let l=o.style,e=getComputedStyle(o),n=e.maxWidth,r=`margin-${i}`,d=l.getPropertyValue(r),s=(p,h)=>l.setProperty(p,h,"important");s(r,t),d&&s(r,`calc(${d} + ${t})`),l.setProperty(y,t);let c=p=>parseFloat(p)||0,a=o.getBoundingClientRect().width,m=`calc(100% - ${(a&&a-c(e.width))+c(e.marginLeft)+c(e.marginRight)}px)`;s("max-width",n&&n!=="none"?`min(${n}, ${m})`:m)}function f(o,i,t=document.documentElement,l){if(t.getAttribute("style")!==l){let e=t.style,n=document.createElement("div").style;n.cssText=i??"";for(let r of[`margin-${o}`,"max-width",y])e.setProperty(r,n.getPropertyValue(r),n.getPropertyPriority(r));if(t.getAttribute("style"),e.cssText!==n.cssText)return}i===null?t.removeAttribute("style"):t.setAttribute("style",i)}try{let o=document,i=u(o.currentScript.dataset.key),t=sessionStorage[i];if(t&&innerWidth>=900){let l;try{l=opener.sessionStorage[i]}catch{}let[e,n,r,d]=JSON.parse(t);if(t!==l&&(e==="left"||e==="right")&&n==="460px"&&typeof d=="string"&&r.match(/^position:fixed;[#a-z0-9:;, -]+$/)){let s=o.createElement("div");s.id=i,s.inert=!0,s.style.cssText=r,s.textContent=d;let c=o.documentElement,a=c.getAttribute("style");s.rootStyle=a,x(c,e,n);let g=c.getAttribute("style");setTimeout(()=>{s.isConnected&&(s.remove(),f(e,a,c,g))},3e3),c.append(s)}}}catch{}})();</script>
 ```
 
 The engine serves the exact script body at `/boot.js`. The widget package
 publishes it as `@solvchat/widget/boot.js`. Copy the body inline so it can
 run while the head is parsed. For Content-Security-Policy, add
-`'sha256-riS33mqJmI1tKc+fXVfp3xHqfAw2EdYbM0kkYhurdTk='` to `script-src` alongside
+`'sha256-wKNxb9ISGk0wGMPONDaS6EQcivqaehUe6YFzRCFv+KI='` to `script-src` alongside
 the engine's origin. Keep the script body byte for byte, including whitespace.
 Changing the `data-key` attribute leaves the hash unchanged.
 
 On the next page in the same tab, the script makes room for an already-open
 side panel and shows its heading. The widget replaces that column when it
 connects. If it fails to load, the boot script gives the page its width back
-after three seconds.
+after three seconds and preserves unrelated changes to the page’s inline styles.
 
 Request `widget.js` right away while parsing the head when the boot column
 exists. The **Install** snippet puts the existing deferred widget script

@@ -2,6 +2,7 @@ import {
   type DockPlaceholder,
   type DockRecord,
   dockKey,
+  releaseRoom,
   reserveRoom,
   SIDE_BY_SIDE_MIN_WIDTH_PX,
 } from "./dock.js";
@@ -36,11 +37,11 @@ try {
       const original = root.getAttribute("style");
       panel.rootStyle = original;
       reserveRoom(root, side, width);
+      const reserved = root.getAttribute("style");
       setTimeout(() => {
         if (panel.isConnected) {
           panel.remove();
-          if (original === null) root.removeAttribute("style");
-          else root.setAttribute("style", original);
+          releaseRoom(side, original, root, reserved);
         }
       }, 3000);
       root.append(panel);

@@ -118,12 +118,15 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
     const css = `html{width:100%;transition:margin 300ms}
 body{margin:0;background:#f8fafc;color:#17253b;font:16px/1.6 system-ui}
 main{box-sizing:border-box;padding:42px clamp(24px,6vw,90px)}
-nav{padding:18px clamp(24px,6vw,90px);background:white;border-bottom:1px solid #dce4ef}
+nav{padding:18px clamp(24px,6vw,90px);background:var(--host-nav-background,white);border-bottom:1px solid #dce4ef}
 a{color:#235ba3;margin-right:16px}h1{font-size:36px;line-height:1.15}
 p{max-width:90ch}pre{max-width:54ch;overflow:auto;padding:16px;border-radius:8px;background:#eaf0f8}`;
     const hash = (value: string) => createHash("sha256").update(value).digest("base64");
-    const rootStyle = "margin-right:8px;background:#f8fafc";
-    const policy = `script-src 'sha256-${hash(bootJs)}' ${variant === "blocked" ? "" : engineOrigin()}; style-src 'unsafe-hashes' 'sha256-${hash(rootStyle)}' 'sha256-${hash(css)}'; connect-src ${engineOrigin()}`;
+    const rootStyle =
+      variant === "blocked-shorthand"
+        ? "margin:var(--host-margin,0 8px 0 0);background:#f8fafc"
+        : "margin-right:8px;background:#f8fafc;--host-nav-background:white";
+    const policy = `script-src 'sha256-${hash(bootJs)}' ${variant?.startsWith("blocked") ? "" : engineOrigin()}; style-src 'unsafe-hashes' 'sha256-${hash(rootStyle)}' 'sha256-${hash(css)}'; connect-src ${engineOrigin()}`;
     const html = `<!doctype html><html style="${rootStyle}"><head>
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>${title} | Fieldnotes API</title>
 <style>${css}</style>
@@ -1466,7 +1469,9 @@ document.querySelector("button").onclick = () => {
       await q(
         '(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click())',
       );
-      await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=blocked` });
+      await browser.cdp.send("Page.navigate", {
+        url: `${hostOrigin()}/other?boot=blocked-shorthand`,
+      });
       await waitFor(
         async () => (await bootFrames())?.some((frame) => frame.placeholder),
         "placeholder before rollback",
@@ -1474,12 +1479,61 @@ document.querySelector("button").onclick = () => {
       await waitFor(async () => (await bootFrames()).at(-1)?.width === fullWidth, "rollback", 3500);
       expect(await page_(`document.getElementById("${dockId}")`)).toBeNull();
       expect(await page_('document.documentElement.getAttribute("style")')).toBe(
-        "margin-right:8px;background:#f8fafc",
+        "margin:var(--host-margin,0 8px 0 0);background:#f8fafc",
       );
     } finally {
       await browser.cdp.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
     }
   }, 20_000);
+
+  it("preserves host style edits when a blocked widget's boot reservation expires", async () => {
+    await viewport(1280, 800);
+    await open();
+    await q('(r.querySelector(".solv-launcher").click(), r.querySelector(".solv-expand").click())');
+    await browser.cdp.send("Page.navigate", { url: `${hostOrigin()}/other?boot=blocked` });
+    await waitFor(
+      () =>
+        page_<boolean>(`(() => {
+          if (!document.getElementById("${dockId}")) return false;
+          const { style } = document.documentElement;
+          style.overflow = "hidden";
+          style.setProperty("--host-nav-background", "#dbeafe", "important");
+          return true;
+        })()`),
+      "host edits during the boot reservation",
+    );
+    await waitFor(
+      () => page_<boolean>(`!document.getElementById("${dockId}")`),
+      "placeholder removed by timeout",
+      3500,
+    );
+    expect(
+      await page_(`(() => {
+        const root = document.documentElement;
+        const { style } = root;
+        return {
+          margin: style.marginRight,
+          maxWidth: style.maxWidth,
+          panelWidth: style.getPropertyValue("--solv-chat-panel-width"),
+          overflow: getComputedStyle(root).overflow,
+          theme: style.getPropertyValue("--host-nav-background"),
+          themePriority: style.getPropertyPriority("--host-nav-background"),
+          navBackground: getComputedStyle(document.querySelector("nav")).backgroundColor,
+          contentWidth: document.getElementById("content").getBoundingClientRect().width,
+        };
+      })()`),
+    ).toEqual({
+      margin: "8px",
+      maxWidth: "",
+      panelWidth: "",
+      overflow: "hidden",
+      theme: "#dbeafe",
+      themePriority: "important",
+      navBackground: "rgb(219, 234, 254)",
+      contentWidth: fullWidth,
+    });
+    await screenshot("boot-timeout-preserves-host-theme.png");
+  }, 10_000);
 
   it("writes the answer progressively, with the indicator first, and code scrolls sideways no more than at 380px", async () => {
     await viewport(1280, 800);

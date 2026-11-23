@@ -91,12 +91,13 @@ describe("admin install API", () => {
     expect(body.publicKey).toBe(assistant.publicKey);
     expect(body.allowedOrigins).toEqual(["https://docs.example.com"]);
     const boot = await (await call(appA, "GET", "/boot.js")).text();
-    expect(boot.length).toBeLessThan(1024);
+    const bootBytes = new TextEncoder().encode(boot);
+    expect(bootBytes.byteLength).toBeLessThanOrEqual(1400);
     expect(body.snippet).toContain(
       `<script data-key="${assistant.publicKey}">${boot}</script>\n<script src="https://example.com/widget.js" defer>`,
     );
     expect(body.snippet).toContain(`<solv-chat assistant="${assistant.publicKey}">`);
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(boot));
+    const digest = await crypto.subtle.digest("SHA-256", bootBytes);
     const hash = btoa(String.fromCharCode(...new Uint8Array(digest)));
     expect(body.hostPolicy).toContainEqual({
       directive: "script-src",

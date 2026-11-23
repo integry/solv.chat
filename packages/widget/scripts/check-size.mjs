@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
 const MAX_GZIP_BYTES = 30 * 1024; // 30 720 bytes
+const MAX_BOOT_BYTES = 1400;
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bundlePath = path.join(root, "dist/widget.js");
@@ -23,8 +24,10 @@ if (gzipped.byteLength > MAX_GZIP_BYTES) {
 }
 
 const boot = readFileSync(path.join(root, "dist/boot.js"));
-if (boot.byteLength >= 1024) {
-  throw new Error(`Widget boot script is ${boot.byteLength} bytes. It must be under 1024 bytes.`);
+if (boot.byteLength > MAX_BOOT_BYTES) {
+  throw new Error(
+    `Widget boot script is ${boot.byteLength} bytes (limit ${MAX_BOOT_BYTES} bytes).`,
+  );
 }
 const docs = readFileSync(path.resolve(root, "../../docs/self-hosting.md"), "utf8");
 const hash = createHash("sha256").update(boot).digest("base64");

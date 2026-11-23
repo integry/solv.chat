@@ -34,17 +34,24 @@ export function reserveRoom(root: HTMLElement, side: Side, width: string): void 
 }
 
 /** Release just our declarations and preserve other host edits. */
-export function releaseRoom(side: Side, original: string | null): void {
-  const root = document.documentElement;
-  const style = root.style;
-  const previous = document.createElement("div").style;
-  previous.cssText = original ?? "";
-  for (const key of [`margin-${side}`, "max-width", PANEL_WIDTH_PROPERTY]) {
-    style.setProperty(key, previous.getPropertyValue(key), previous.getPropertyPriority(key));
+export function releaseRoom(
+  side: Side,
+  original: string | null,
+  root = document.documentElement,
+  reserved?: string | null,
+): void {
+  // The boot script knows exactly what it wrote. If the attribute still
+  // matches, restore the original even if CSSOM cannot round-trip a shorthand.
+  if (root.getAttribute("style") !== reserved) {
+    const style = root.style;
+    const previous = document.createElement("div").style;
+    previous.cssText = original ?? "";
+    for (const key of [`margin-${side}`, "max-width", PANEL_WIDTH_PROPERTY]) {
+      style.setProperty(key, previous.getPropertyValue(key), previous.getPropertyPriority(key));
+    }
+    root.getAttribute("style");
+    if (style.cssText !== previous.cssText) return;
   }
-  root.getAttribute("style");
-  if (style.cssText === previous.cssText) {
-    if (original === null) root.removeAttribute("style");
-    else root.setAttribute("style", original);
-  }
+  if (original === null) root.removeAttribute("style");
+  else root.setAttribute("style", original);
 }
