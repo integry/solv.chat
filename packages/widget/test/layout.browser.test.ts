@@ -54,6 +54,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   let position: "left" | "right" = "right";
   /** The next answer starts with a tool round (searching) before its text. */
   let toolFirst = false;
+  let holdChatStream = false;
   let widgetOptions: Record<string, unknown> = {};
   let visitorCheck = false;
   let pageActions = false;
@@ -262,6 +263,11 @@ document.querySelector("button").onclick = () => {
           );
           return;
         }
+        if (holdChatStream) {
+          // Navigation will close the stream after the first token is visible.
+          res.write(`event: token\ndata: ${JSON.stringify({ text: ANSWER_TOKENS[0] })}\n\n`);
+          return;
+        }
         // The model thinks for a moment, then writes a token every 70 ms.
         if (toolFirst) {
           res.write('event: tool\ndata: {"name":"search_docs","state":"running"}\n\n');
@@ -295,6 +301,7 @@ document.querySelector("button").onclick = () => {
     widgetOptions = {};
     visitorCheck = false;
     pageActions = false;
+    holdChatStream = false;
     stallConfigHeaders = false;
     gatedConfigResponse = undefined;
     submissions.length = 0;
@@ -1294,6 +1301,7 @@ document.querySelector("button").onclick = () => {
       "We have separate workspaces for staging and production. Is the workspace set on the API key or on each search request?",
       "Could you show a complete example with pagination and explain how the cursor changes between pages?",
     ].join("\n\n");
+    holdChatStream = true;
     await q(
       `(r.querySelector("#solv-input").value = ${JSON.stringify(question)}, r.querySelector("form").requestSubmit())`,
     );
@@ -1302,16 +1310,20 @@ document.querySelector("button").onclick = () => {
         q<boolean>('r.querySelector(".solv-bubble:last-child").textContent.includes("To search")'),
       "streaming answer",
     );
-    await q(`(() => {
-      r.querySelector(".solv-messages").scrollTop = 45;
+    // Wait for the scroll event so the widget has stopped following the latest message.
+    const scroll = await q<{ top: number; remaining: number }>(`new Promise((resolve) => {
       const input = r.querySelector("#solv-input");
       input.value = "Can I search archived notes?";
       input.focus();
-    })()`);
-    await waitFor(
-      () => q<boolean>('r.querySelector(".solv-messages").scrollTop === 45'),
-      "scroll position",
-    );
+      const messages = r.querySelector(".solv-messages");
+      messages.addEventListener("scroll", () => resolve({
+        top: messages.scrollTop,
+        remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight,
+      }), { once: true });
+      messages.scrollTop = 45;
+    })`);
+    expect(scroll.top).toBe(45);
+    expect(scroll.remaining).toBeGreaterThan(32);
 
     const { identifier } = await watchDockFrames();
     try {
