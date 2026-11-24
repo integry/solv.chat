@@ -22,6 +22,7 @@ const BUILTIN_ICONS: Record<string, IconName> = {
   tests: "tests",
   install: "install",
   providers: "providers",
+  "operator-access": "tools",
 };
 
 const BUILTIN_IDS = new Set(NAV_ITEMS.map((item) => item.id));

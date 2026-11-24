@@ -2,7 +2,7 @@ import { isPlainObject, newId, parseSourceInput, type RepeatedBlocks } from "@so
 import type { DocumentSummaryRow } from "../db/documents.js";
 import type { SourceRow, SourceWithStatsRow } from "../db/sources.js";
 import type { Tenant } from "../db/tenant.js";
-import { type DeleteDeps, deleteDocuments } from "../ingest/documents.js";
+import { type DeleteDeps, deleteDocuments, removeSourceDocuments } from "../ingest/documents.js";
 import { repeatedBlocksFor } from "../ingest/repeatedSource.js";
 import { BadRequest, NotFound } from "./errors.js";
 import { type SourceSyncStatus, syncStatusFor } from "./sourceSync.js";
@@ -131,6 +131,17 @@ export async function listSourceDocuments(
     offset,
   });
   return { documents, total, limit, offset };
+}
+
+/** Deletes one document, reusing the same cleanup as ingest and source deletion. */
+export async function deleteSourceDocument(
+  deps: DeleteDeps,
+  sourceId: string,
+  documentId: string,
+): Promise<{ deleted: number }> {
+  const document = await deps.tenant.documents.get(documentId);
+  if (document === null || document.sourceId !== sourceId) throw new NotFound("document");
+  return { deleted: await removeSourceDocuments(deps, sourceId, [document]) };
 }
 
 /** Fetches one document's metadata and Markdown body from R2. */

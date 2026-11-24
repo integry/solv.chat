@@ -23,6 +23,7 @@ import { Conversations } from "./screens/Conversations.js";
 import { Gaps } from "./screens/Gaps.js";
 import { Install } from "./screens/Install.js";
 import { Login } from "./screens/Login.js";
+import { OperatorAccess } from "./screens/OperatorAccess.js";
 import { Overview } from "./screens/Overview.js";
 import { OPEN_TRY_IT_EVENT } from "./screens/OverviewParts.js";
 import { Providers } from "./screens/Providers.js";
@@ -51,10 +52,14 @@ import { VisitorCheckNotice } from "./shell/VisitorCheckNotice.js";
 import { ConfirmDialog } from "./ui/Dialog.js";
 import { useFocusTrap, useMediaQuery } from "./ui/focus.js";
 import { Icon } from "./ui/Icon.js";
+import { PageHeader } from "./ui/PageHeader.js";
 import { Skeleton } from "./ui/Skeleton.js";
 import { ToastProvider } from "./ui/Toast.js";
 
-function renderBuiltinScreen(screen: BuiltinScreenId, assistantId: string) {
+function renderBuiltinScreen(
+  screen: Exclude<BuiltinScreenId, "operator-access">,
+  assistantId: string,
+) {
   switch (screen) {
     case "overview":
       return <Overview key={assistantId} assistantId={assistantId} />;
@@ -155,9 +160,11 @@ interface PendingLeave {
 
 function AdminShell({
   config,
+  manageOperatorAccess,
   onSignOut,
 }: {
   config: ResolvedAdminConfig;
+  manageOperatorAccess: boolean;
   onSignOut: () => Promise<void>;
 }) {
   // Set while the owner decides whether to leave a screen with unsaved edits.
@@ -423,7 +430,9 @@ function AdminShell({
   const ExtraScreen =
     screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
   // Host screens registered with `assistantScoped: false` hide the assistant chrome.
-  const assistantChrome = !(ExtraScreen && screen !== null && config.unscopedScreenIds.has(screen));
+  const assistantChrome =
+    screen !== "operator-access" &&
+    !(ExtraScreen && screen !== null && config.unscopedScreenIds.has(screen));
   const HeaderStart = config.headerStart;
   const HeaderEnd = config.headerEnd;
   const currentItem = config.navItems.find((item) => item.id === screen) ?? null;
@@ -657,10 +666,16 @@ function AdminShell({
               />
             ) : screen === null ? (
               <div className="screen">
-                <p className="muted">No screens available.</p>
+                {config.navItems.length === 0 ? (
+                  <p className="muted">No screens available.</p>
+                ) : (
+                  <PageHeader title="Page not found" />
+                )}
               </div>
+            ) : screen === "operator-access" ? (
+              <OperatorAccess manage={manageOperatorAccess} />
             ) : screen === "providers" ? (
-              <Providers />
+              renderBuiltinScreen(screen, "")
             ) : assistantsRes.status === "loading" && assistants.length === 0 ? (
               <Skeleton label="Loading assistants…" lines={4} />
             ) : assistantsRes.status === "error" ? (
@@ -670,7 +685,10 @@ function AdminShell({
             ) : selectedAssistant === null ? (
               <FirstRun onCreated={handleFirstRunCreated} />
             ) : (
-              renderBuiltinScreen(screen as BuiltinScreenId, selectedAssistant.id)
+              renderBuiltinScreen(
+                screen as Exclude<BuiltinScreenId, "operator-access">,
+                selectedAssistant.id,
+              )
             )}
           </main>
 
@@ -709,10 +727,7 @@ function AdminShell({
 }
 
 /** The shell with the providers every screen shares. */
-function AdminShellWithProviders(props: {
-  config: ResolvedAdminConfig;
-  onSignOut: () => Promise<void>;
-}) {
+function AdminShellWithProviders(props: Parameters<typeof AdminShell>[0]) {
   return (
     <ToastProvider>
       <AssistantMutationsProvider>
@@ -734,6 +749,17 @@ export function App({ options, config: preResolved }: AppProps = {}) {
     [preResolved, options],
   );
   const session = useSession(resolved.onSignOut);
+  const operatorEnabled = session.operatorAccess !== undefined;
+  const config = useMemo(
+    () =>
+      operatorEnabled
+        ? resolved
+        : {
+            ...resolved,
+            navItems: resolved.navItems.filter((item) => item.id !== "operator-access"),
+          },
+    [operatorEnabled, resolved],
+  );
 
   if (session.state === "loading") {
     return <p className="loading-screen">Loading…</p>;
@@ -755,5 +781,11 @@ export function App({ options, config: preResolved }: AppProps = {}) {
     );
   }
 
-  return <AdminShellWithProviders config={resolved} onSignOut={session.signOut} />;
+  return (
+    <AdminShellWithProviders
+      config={config}
+      manageOperatorAccess={session.operatorAccess?.manage === true}
+      onSignOut={session.signOut}
+    />
+  );
 }

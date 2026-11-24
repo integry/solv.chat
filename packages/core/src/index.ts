@@ -19,6 +19,7 @@ export {
   type TopicReportRow,
   type TopicsReport,
 } from "./monitor.js";
+export type { OperatorAccessCapabilities } from "./operatorAccess.js";
 export type { RepeatedBlock, RepeatedBlocks } from "./repeated.js";
 export { Errors, fail, ok, type Result } from "./result.js";
 export {

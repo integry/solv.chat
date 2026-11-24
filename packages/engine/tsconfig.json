@@ -3,7 +3,8 @@
   "compilerOptions": {
     "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers"],
     "paths": {
-      "@solvchat/core": ["../core/src/index.ts"]
+      "@solvchat/core": ["../core/src/index.ts"],
+      "@solvchat/cli": ["../cli/src/index.ts"]
     }
   },
   "include": ["src", "test"]

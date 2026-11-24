@@ -1,3 +1,4 @@
+import { selfHostedOperatorAuth } from "../../operator/oauth.js";
 import { deriveKeyBits, SESSION_KEY_INFO } from "../../security/secretBox.js";
 import { constantTimeEqual } from "../../util/crypto.js";
 import type { AuthProvider } from "../types.js";
@@ -113,7 +114,7 @@ export interface PasswordAuthEnv {
 
 /** Single-owner password authentication backed by a signed HttpOnly cookie. */
 export function passwordAuth(env: PasswordAuthEnv, db: D1Database): AuthProvider {
-  return {
+  const auth: AuthProvider = {
     async authenticate(request) {
       if (!env.SOLV_SECRET_KEY) return null;
       const raw = readCookie(request, COOKIE);
@@ -239,4 +240,12 @@ export function passwordAuth(env: PasswordAuthEnv, db: D1Database): AuthProvider
       );
     },
   };
+  auth.operator = selfHostedOperatorAuth(
+    db,
+    SINGLE_ORG_ID,
+    OWNER_USER_ID,
+    auth,
+    env.SOLV_SECRET_KEY,
+  );
+  return auth;
 }

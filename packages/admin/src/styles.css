@@ -3,8 +3,7 @@
  *
  * Design tokens first. Every colour pair used for text meets WCAG AA (4.5:1)
  * on the surface it sits on; borders that identify a control meet 3:1.
- * There is no dark theme: the screens still use a few fixed light colours
- * (badges, banners) that have not all been checked against a dark surface.
+ * The operator access screen defines its own dark palette below.
  */
 :root {
   /* Spacing scale (4px steps). */
@@ -3257,4 +3256,134 @@ a {
 
 .install-policy {
   margin-top: var(--space-3);
+}
+
+/* Operator access uses the shared admin controls with a palette scoped to this screen. */
+@media (prefers-color-scheme: dark) {
+  :root:has(.operator-screen) {
+    color-scheme: dark;
+    --bg: #111827;
+    --surface: #192233;
+    --surface-muted: #263246;
+    --border: #39465a;
+    --border-strong: #8494ad;
+    --text: #f0f4fa;
+    --muted: #b5c2d7;
+    --primary: #9dbbff;
+    --primary-hover: #c4d5ff;
+    --primary-soft: #262f50;
+    --on-primary: #112345;
+    --danger: #ff9da6;
+    --danger-hover: #ffc4cb;
+    --danger-soft: #3a1c2a;
+    --notice: #89e0a3;
+    --warn-bg: #3a2b16;
+    --warn-text: #fadc9a;
+    --disabled-bg: #2a3549;
+    --disabled-text: #a4b1c8;
+    --disabled-border: #39465a;
+    --focus: #a8bdff;
+    --tone-info-bg: #24385c;
+    --tone-info-text: #d4e2ff;
+    --tone-info-border: #536f9f;
+    --tone-warning-bg: #48341c;
+    --tone-warning-text: #ffe0a4;
+    --tone-warning-border: #836847;
+    --tone-danger-border: #98596b;
+    --tone-neutral-bg: #263246;
+    --tone-neutral-text: #d5e2f7;
+    --tone-neutral-border: #536174;
+  }
+}
+
+.operator-screen {
+  max-width: 860px;
+}
+
+.operator-card {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.operator-card h2,
+.operator-card p {
+  margin: 0;
+}
+
+.operator-copy-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+}
+
+.operator-copy-field code {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+}
+
+.operator-token-form {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  width: min(100%, 420px);
+}
+
+.operator-token-form input,
+.operator-token-form select {
+  width: 100%;
+}
+
+.operator-token-form .btn {
+  margin-top: var(--space-2);
+}
+
+.operator-issued {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.operator-issued .operator-copy-field {
+  width: 100%;
+}
+
+.operator-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.operator-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.operator-list-meta {
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 480px) {
+  .operator-list li {
+    grid-template-columns: 1fr auto;
+  }
+
+  .operator-list li > div:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .operator-list .status-badge {
+    justify-self: start;
+  }
 }

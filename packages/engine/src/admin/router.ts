@@ -1,9 +1,10 @@
-import { isPlainObject } from "@solvchat/core";
+import { isPlainObject, type OperatorAccessCapabilities } from "@solvchat/core";
 import type { VisitorCheckStatus } from "../chat/visitorCheck.js";
 import type { Tenant } from "../db/tenant.js";
 import { expectedVersionConfig, type VersionRow } from "../db/versions.js";
 import { type IngestQueueMessage, TooLarge } from "../ingest/documents.js";
 import { plainPageFetcher } from "../ingest/pageFetcher.js";
+import type { RepeatedQueue } from "../ingest/repeatedSource.js";
 import type { SyncStartDeps } from "../ingest/sync.js";
 import { McpError } from "../mcp/types.js";
 import type { EffectiveProviderSettings } from "../providers/config.js";
@@ -65,6 +66,7 @@ import { getSourceSync, readSyncNowBody, syncSourceNow } from "./sourceSync.js";
 import {
   createSource,
   deleteSource,
+  deleteSourceDocument,
   getRepeatedBlocks,
   getSourceDocument,
   listSourceDocuments,
@@ -88,6 +90,11 @@ export interface AdminRouteDeps {
    * absent, the admin says nothing about it.
    */
   visitorCheck?: (() => Promise<VisitorCheckStatus>) | undefined;
+  previewChat?: ((request: Request) => Promise<Response>) | undefined;
+  operatorEnabled?: boolean;
+  operatorAccess?:
+    | ((operation: "list" | "create" | "revoke", input?: unknown) => Promise<Response>)
+    | undefined;
   tenant: Tenant;
   orgId: string;
   docs: Pick<R2Bucket, "get" | "put" | "delete">;
@@ -205,62 +212,117 @@ async function maybeRunTestsBeforePublish(deps: AdminRouteDeps, assistantId: str
   return runAnswerTests(await deps.resolveRunDeps(), assistantId);
 }
 
-async function assistantRoutes(
-  request: Request,
-  url: URL,
-  segments: string[],
-  deps: AdminRouteDeps,
-): Promise<Response> {
-  const { tenant } = deps;
-  const method = request.method;
-
-  if (segments.length === 1) {
-    if (method === "GET") {
-      return Response.json({
-        assistants: await listAssistants(tenant),
-        ...(deps.visitorCheck ? { visitorCheck: await deps.visitorCheck() } : {}),
-      });
-    }
-    if (method === "POST") {
-      const result = await createAssistant(tenant, await readJsonBody(request));
-      return Response.json(result, { status: 201 });
-    }
+function providerAdminDeps(deps: AdminRouteDeps): ProviderAdminDeps {
+  if (!deps.keys || !deps.resolveSettings || !deps.checkConfigError) {
     throw new NotFound();
   }
+  return {
+    tenant: deps.tenant,
+    orgId: deps.orgId,
+    keys: deps.keys,
+    secretKey: deps.secretKey ?? "",
+    envSecretPresence: deps.envSecretPresence ?? {
+      anthropic: false,
+      openai: false,
+      openrouter: false,
+    },
+    fetchImpl: deps.fetchImpl,
+    resolveSettings: deps.resolveSettings,
+    checkConfigError: deps.checkConfigError,
+  };
+}
 
-  const assistantId = segments[1];
-  if (!assistantId) throw new NotFound();
+interface RouteContext {
+  request: Request;
+  url: URL;
+  deps: AdminRouteDeps;
+  params: Record<string, string>;
+}
 
-  if (segments.length === 2) {
-    if (method === "GET") {
-      return Response.json({ assistant: await getAssistant(tenant, assistantId) });
-    }
-    if (method === "PATCH") {
+function route<const Name extends string>(
+  name: Name,
+  method: string,
+  path: string,
+  handle: (context: RouteContext) => Response | Promise<Response>,
+) {
+  return { name, method, path, handle };
+}
+
+/** This registry routes the admin API and is the source of truth for MCP parity. */
+export const adminOperations = [
+  route("list_assistants", "GET", "/assistants", async ({ deps }) => {
+    const { tenant } = deps;
+    const operatorAccess: OperatorAccessCapabilities | undefined = deps.operatorEnabled
+      ? { manage: Boolean(deps.operatorAccess) }
+      : undefined;
+    return Response.json({
+      assistants: await listAssistants(tenant),
+      ...(deps.visitorCheck ? { visitorCheck: await deps.visitorCheck() } : {}),
+      ...(operatorAccess ? { operatorAccess } : {}),
+    });
+  }),
+  route("create_assistant", "POST", "/assistants", async ({ request, deps }) => {
+    const { tenant } = deps;
+    const result = await createAssistant(tenant, await readJsonBody(request));
+    return Response.json(result, { status: 201 });
+  }),
+  route("get_assistant", "GET", "/assistants/:assistantId", async ({ deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    return Response.json({ assistant: await getAssistant(tenant, assistantId) });
+  }),
+  route(
+    "update_assistant",
+    "PATCH",
+    "/assistants/:assistantId",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       const assistant = await updateAssistant(tenant, assistantId, await readJsonBody(request));
       return Response.json({ assistant });
-    }
-    throw new NotFound();
-  }
-
-  if (segments.length === 3) {
-    const action = segments[2];
-    if (action === "ingest-key" && method === "POST") {
+    },
+  ),
+  route(
+    "rotate_ingest_key",
+    "POST",
+    "/assistants/:assistantId/ingest-key",
+    async ({ deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       return Response.json({ ingestKey: await rotateIngestKey(tenant, assistantId) });
-    }
-    if (action === "versions" && method === "GET") {
-      return Response.json({ versions: await listVersions(tenant, assistantId) });
-    }
-    if (action === "draft" && method === "GET") {
-      const draft = await getDraft(tenant, assistantId);
-      // The revision Publish sends back (`expected`), so it publishes only
-      // the draft the owner was shown.
-      return Response.json({ draft, revision: await configRevision(draft) });
-    }
-    if (action === "draft" && method === "PUT") {
+    },
+  ),
+  route("list_versions", "GET", "/assistants/:assistantId/versions", async ({ deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    return Response.json({ versions: await listVersions(tenant, assistantId) });
+  }),
+  route("get_draft", "GET", "/assistants/:assistantId/draft", async ({ deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    const draft = await getDraft(tenant, assistantId);
+    // The revision Publish sends back (`expected`), so it publishes only
+    // the draft the owner was shown.
+    return Response.json({ draft, revision: await configRevision(draft) });
+  }),
+  route(
+    "update_draft",
+    "PUT",
+    "/assistants/:assistantId/draft",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       const draft = await updateDraft(tenant, assistantId, await readJsonBody(request));
       return Response.json({ draft });
-    }
-    if (action === "publish" && method === "POST") {
+    },
+  ),
+  route(
+    "publish_draft",
+    "POST",
+    "/assistants/:assistantId/publish",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       const body =
         request.headers.get("content-length") === "0"
           ? {}
@@ -338,28 +400,60 @@ async function assistantRoutes(
         version,
         ...(run ? { run: { id: run.runId, passed: run.passed } } : {}),
       });
-    }
-    if (action === "sources" && method === "GET") {
-      return Response.json({ sources: await listSources(tenant, assistantId) });
-    }
-    if (action === "content-status" && method === "GET") {
+    },
+  ),
+  route("list_sources", "GET", "/assistants/:assistantId/sources", async ({ deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    return Response.json({ sources: await listSources(tenant, assistantId) });
+  }),
+  route(
+    "get_content_status",
+    "GET",
+    "/assistants/:assistantId/content-status",
+    async ({ deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       return Response.json(await contentStatus(tenant, assistantId));
-    }
-    if (action === "reindex" && method === "GET") {
+    },
+  ),
+  route(
+    "get_reindex_status",
+    "GET",
+    "/assistants/:assistantId/reindex",
+    async ({ deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       return Response.json(await reindexStatus(tenant, assistantId));
-    }
-    if (action === "reindex" && method === "POST") {
-      if (!deps.reindex) throw new NotFound();
-      return Response.json(
-        await reindexAssistant({ tenant, orgId: deps.orgId, ...deps.reindex }, assistantId),
-        { status: 202 },
-      );
-    }
-    if (action === "sources" && method === "POST") {
+    },
+  ),
+  route("start_reindex", "POST", "/assistants/:assistantId/reindex", async ({ deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    if (!deps.reindex) throw new NotFound();
+    return Response.json(
+      await reindexAssistant({ tenant, orgId: deps.orgId, ...deps.reindex }, assistantId),
+      { status: 202 },
+    );
+  }),
+  route(
+    "create_source",
+    "POST",
+    "/assistants/:assistantId/sources",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       const source = await createSource(tenant, assistantId, await readJsonBody(request));
       return Response.json({ source }, { status: 201 });
-    }
-    if (action === "entries" && method === "POST") {
+    },
+  ),
+  route(
+    "create_entry",
+    "POST",
+    "/assistants/:assistantId/entries",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       const fields = readEntryFields(await readJsonBody(request));
       const result = await saveEntry(
         { tenant, docs: deps.docs, queue: deps.queue, publicBaseUrl: deps.publicBaseUrl },
@@ -367,8 +461,15 @@ async function assistantRoutes(
         { assistantId, ...fields },
       );
       return Response.json(result, { status: 201 });
-    }
-    if (action === "sitemap-preview" && method === "POST") {
+    },
+  ),
+  route(
+    "preview_sitemap",
+    "POST",
+    "/assistants/:assistantId/sitemap-preview",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       const assistant = await tenant.assistants.get(assistantId);
       if (assistant === null) throw new NotFound("assistant");
       const body = await readJsonBody(request);
@@ -377,8 +478,15 @@ async function assistantRoutes(
       }
       const urls = await previewSitemap(body.url, deps.fetchImpl);
       return Response.json({ urls });
-    }
-    if (action === "sitemap-import" && method === "POST") {
+    },
+  ),
+  route(
+    "import_sitemap",
+    "POST",
+    "/assistants/:assistantId/sitemap-import",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       const body = await readJsonBody(request);
       if (!isPlainObject(body)) {
         throw new BadRequest(["body: must be a JSON object"]);
@@ -395,24 +503,40 @@ async function assistantRoutes(
         deps.pages ?? plainPageFetcher({ fetch: deps.fetchImpl }),
       );
       return Response.json(result, { status: 201 });
-    }
-    if (action === "conversations" && method === "GET") {
+    },
+  ),
+  route(
+    "list_conversations",
+    "GET",
+    "/assistants/:assistantId/conversations",
+    async ({ url, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       return Response.json(
         await listConversations(tenant, assistantId, {
           ...readPagingParams(url),
           filter: readConversationFilter(url),
         }),
       );
-    }
-    if (action === "gaps" && method === "GET") {
-      return Response.json(
-        await listGaps(tenant, assistantId, {
-          ...readPagingParams(url),
-          openOnly: readGapsOpenOnly(url),
-        }),
-      );
-    }
-    if (action === "answers" && method === "POST") {
+    },
+  ),
+  route("list_gaps", "GET", "/assistants/:assistantId/gaps", async ({ url, deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    return Response.json(
+      await listGaps(tenant, assistantId, {
+        ...readPagingParams(url),
+        openOnly: readGapsOpenOnly(url),
+      }),
+    );
+  }),
+  route(
+    "write_answer",
+    "POST",
+    "/assistants/:assistantId/answers",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       const fields = readAnswerFields(await readJsonBody(request));
       const result = await writeTheRightAnswer(
         { tenant, docs: deps.docs, queue: deps.queue, publicBaseUrl: deps.publicBaseUrl },
@@ -420,163 +544,227 @@ async function assistantRoutes(
         { assistantId, ...fields },
       );
       return Response.json(result, { status: 201 });
-    }
-    if (action === "overview" && method === "GET") {
-      return Response.json(
-        await overviewFor(tenant, assistantId, {
-          costUnit: deps.costUnit,
-          resolveSettings: deps.resolveSettings,
-          checkConfigError: deps.checkConfigError,
-        }),
-      );
-    }
-    if (action === "report" && method === "GET") {
-      return Response.json(
-        await reportFor(tenant, assistantId, parseReportDays(url.searchParams.get("days"))),
-      );
-    }
-    if (action === "topics" && method === "GET") {
-      return Response.json(await listTopics(tenant, assistantId));
-    }
-    if (action === "install" && method === "GET") {
+    },
+  ),
+  route("get_overview", "GET", "/assistants/:assistantId/overview", async ({ deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    return Response.json(
+      await overviewFor(tenant, assistantId, {
+        costUnit: deps.costUnit,
+        resolveSettings: deps.resolveSettings,
+        checkConfigError: deps.checkConfigError,
+      }),
+    );
+  }),
+  route("get_report", "GET", "/assistants/:assistantId/report", async ({ url, deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    return Response.json(
+      await reportFor(tenant, assistantId, parseReportDays(url.searchParams.get("days"))),
+    );
+  }),
+  route("list_topics", "GET", "/assistants/:assistantId/topics", async ({ deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    return Response.json(await listTopics(tenant, assistantId));
+  }),
+  route(
+    "get_install_snippet",
+    "GET",
+    "/assistants/:assistantId/install",
+    async ({ deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       return Response.json(
         await getInstallInfo(tenant, assistantId, deps.publicBaseUrl, await deps.visitorCheck?.()),
       );
-    }
-    if (action === "mcp-servers" && method === "GET") {
+    },
+  ),
+  route(
+    "list_tool_servers",
+    "GET",
+    "/assistants/:assistantId/mcp-servers",
+    async ({ deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       return Response.json({ servers: await listMcpServers(tenant, assistantId) });
-    }
-    if (action === "mcp-servers" && method === "POST") {
+    },
+  ),
+  route(
+    "add_tool_server",
+    "POST",
+    "/assistants/:assistantId/mcp-servers",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
       const result = await createMcpServer(mcpDeps(deps), assistantId, await readJsonBody(request));
       return Response.json(result, { status: 201 });
-    }
-    if (action === "tests" && method === "GET") {
-      return Response.json({ tests: await listTests(tenant, assistantId) });
-    }
-    if (action === "tests" && method === "POST") {
+    },
+  ),
+  route("list_tests", "GET", "/assistants/:assistantId/tests", async ({ deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    return Response.json({ tests: await listTests(tenant, assistantId) });
+  }),
+  route(
+    "create_test",
+    "POST",
+    "/assistants/:assistantId/tests",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       const test = await createTest(tenant, assistantId, await readJsonBody(request));
       return Response.json({ test }, { status: 201 });
+    },
+  ),
+  route("list_test_runs", "GET", "/assistants/:assistantId/test-runs", async ({ deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    const { tenant } = deps;
+    return Response.json({ runs: await listTestRuns(tenant, assistantId) });
+  }),
+  route("run_tests", "POST", "/assistants/:assistantId/test-runs", async ({ deps, params }) => {
+    const assistantId = params.assistantId ?? "";
+    if (!deps.resolveRunDeps) {
+      throw new Error("Answer test runner is not configured.");
     }
-    if (action === "test-runs" && method === "GET") {
-      return Response.json({ runs: await listTestRuns(tenant, assistantId) });
-    }
-    if (action === "test-runs" && method === "POST") {
-      if (!deps.resolveRunDeps) {
-        throw new Error("Answer test runner is not configured.");
-      }
-      const { draft: _draft, ...run } = await runAnswerTests(
-        await deps.resolveRunDeps(),
-        assistantId,
-      );
-      return Response.json(run, { status: 201 });
-    }
-    throw new NotFound();
-  }
-
-  // `topics/:topicId` (rename, delete) and `topics/:topicId/merge`.
-  // `assistants/:id/preview-traces/:traceId`: how a "Try it" or test-run answer was made.
-  if (
-    segments.length === 4 &&
-    segments[2] === "preview-traces" &&
-    segments[3] &&
-    method === "GET"
-  ) {
-    return Response.json(await getPreviewTrace(tenant, assistantId, segments[3]));
-  }
-  if (segments[2] === "topics" && segments[3]) {
-    const topicId = segments[3];
-    if (segments.length === 4 && method === "PATCH") {
+    const { draft: _draft, ...run } = await runAnswerTests(
+      await deps.resolveRunDeps(),
+      assistantId,
+    );
+    return Response.json(run, { status: 201 });
+  }),
+  route(
+    "get_preview_trace",
+    "GET",
+    "/assistants/:assistantId/preview-traces/:traceId",
+    async ({ deps, params }) => {
+      const { assistantId = "", traceId = "" } = params;
+      const { tenant } = deps;
+      return Response.json(await getPreviewTrace(tenant, assistantId, traceId));
+    },
+  ),
+  route(
+    "rename_topic",
+    "PATCH",
+    "/assistants/:assistantId/topics/:topicId",
+    async ({ request, deps, params }) => {
+      const { assistantId = "", topicId = "" } = params;
+      const { tenant } = deps;
       return Response.json(
         await renameTopic(tenant, assistantId, topicId, await readJsonBody(request)),
       );
-    }
-    if (segments.length === 4 && method === "DELETE") {
+    },
+  ),
+  route(
+    "delete_topic",
+    "DELETE",
+    "/assistants/:assistantId/topics/:topicId",
+    async ({ deps, params }) => {
+      const { assistantId = "", topicId = "" } = params;
+      const { tenant } = deps;
       return Response.json(await deleteTopic(tenant, assistantId, topicId));
-    }
-    if (segments.length === 5 && segments[4] === "merge" && method === "POST") {
+    },
+  ),
+  route(
+    "merge_topic",
+    "POST",
+    "/assistants/:assistantId/topics/:topicId/merge",
+    async ({ request, deps, params }) => {
+      const { assistantId = "", topicId = "" } = params;
+      const { tenant } = deps;
       return Response.json(
         await mergeTopic(tenant, assistantId, topicId, await readJsonBody(request)),
       );
-    }
-    throw new NotFound();
-  }
-
-  if (segments.length === 4 && segments[2] === "gaps" && method === "POST") {
-    // "Dismiss" and its "Undo"; both name the gap group by its question.
-    if (segments[3] === "dismiss") {
+    },
+  ),
+  route(
+    "dismiss_gap",
+    "POST",
+    "/assistants/:assistantId/gaps/dismiss",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       return Response.json(await dismissGap(tenant, assistantId, await readJsonBody(request)));
-    }
-    if (segments[3] === "restore") {
+    },
+  ),
+  route(
+    "restore_gap",
+    "POST",
+    "/assistants/:assistantId/gaps/restore",
+    async ({ request, deps, params }) => {
+      const assistantId = params.assistantId ?? "";
+      const { tenant } = deps;
       return Response.json(await restoreGap(tenant, assistantId, await readJsonBody(request)));
-    }
-    throw new NotFound();
-  }
-
-  if (
-    segments.length === 5 &&
-    segments[2] === "versions" &&
-    segments[3] &&
-    segments[4] === "rollback" &&
-    method === "POST"
-  ) {
-    const version = await rollbackTo(tenant, assistantId, segments[3]);
-    return Response.json({ version });
-  }
-
-  throw new NotFound();
-}
-
-async function sourceRoutes(
-  request: Request,
-  url: URL,
-  segments: string[],
-  deps: AdminRouteDeps,
-): Promise<Response> {
-  const { tenant } = deps;
-  const method = request.method;
-  const sourceId = segments[1];
-  if (!sourceId) throw new NotFound();
-
-  if (segments.length === 2) {
-    if (method === "PATCH") {
-      const source = await updateSource(tenant, sourceId, await readJsonBody(request));
-      return Response.json({ source });
-    }
-    if (method === "DELETE") {
-      return Response.json(
-        await deleteSource({ tenant, docs: deps.docs, retriever: deps.retriever }, sourceId),
-      );
-    }
-    throw new NotFound();
-  }
-
-  if (segments.length === 3) {
-    const sub = segments[2];
-    if (sub === "documents" && method === "GET") {
-      return Response.json(await listSourceDocuments(tenant, sourceId, readPagingParams(url)));
-    }
-    if (sub === "repeated-blocks" && method === "GET") {
+    },
+  ),
+  route(
+    "rollback_version",
+    "POST",
+    "/assistants/:assistantId/versions/:versionId/rollback",
+    async ({ deps, params }) => {
+      const { assistantId = "", versionId = "" } = params;
+      const { tenant } = deps;
+      const version = await rollbackTo(tenant, assistantId, versionId);
+      return Response.json({ version });
+    },
+  ),
+  route("update_source", "PATCH", "/sources/:sourceId", async ({ request, deps, params }) => {
+    const sourceId = params.sourceId ?? "";
+    const { tenant } = deps;
+    const source = await updateSource(tenant, sourceId, await readJsonBody(request));
+    return Response.json({ source });
+  }),
+  route("delete_source", "DELETE", "/sources/:sourceId", async ({ deps, params }) => {
+    const sourceId = params.sourceId ?? "";
+    const { tenant } = deps;
+    return Response.json(
+      await deleteSource({ tenant, docs: deps.docs, retriever: deps.retriever }, sourceId),
+    );
+  }),
+  route("list_documents", "GET", "/sources/:sourceId/documents", async ({ url, deps, params }) => {
+    const sourceId = params.sourceId ?? "";
+    const { tenant } = deps;
+    return Response.json(await listSourceDocuments(tenant, sourceId, readPagingParams(url)));
+  }),
+  route(
+    "get_repeated_blocks",
+    "GET",
+    "/sources/:sourceId/repeated-blocks",
+    async ({ deps, params }) => {
+      const sourceId = params.sourceId ?? "";
+      const { tenant } = deps;
       return Response.json(await getRepeatedBlocks(tenant, deps.docs, sourceId));
-    }
-    if (sub === "sync" && method === "GET") {
-      return Response.json({ sync: await getSourceSync(tenant, sourceId) });
-    }
-    if (sub === "sync" && method === "POST") {
-      if (!deps.syncStart) throw new NotFound();
-      return Response.json(
-        {
-          sync: await syncSourceNow(
-            deps.syncStart,
-            tenant,
-            deps.orgId,
-            sourceId,
-            await readSyncNowBody(request),
-          ),
-        },
-        { status: 202 },
-      );
-    }
-    if (sub === "entries" && method === "POST") {
+    },
+  ),
+  route("get_sync_status", "GET", "/sources/:sourceId/sync", async ({ deps, params }) => {
+    const sourceId = params.sourceId ?? "";
+    const { tenant } = deps;
+    return Response.json({ sync: await getSourceSync(tenant, sourceId) });
+  }),
+  route("start_sync", "POST", "/sources/:sourceId/sync", async ({ request, deps, params }) => {
+    const sourceId = params.sourceId ?? "";
+    const { tenant } = deps;
+    if (!deps.syncStart) throw new NotFound();
+    return Response.json(
+      {
+        sync: await syncSourceNow(
+          deps.syncStart,
+          tenant,
+          deps.orgId,
+          sourceId,
+          await readSyncNowBody(request),
+        ),
+      },
+      { status: 202 },
+    );
+  }),
+  route(
+    "create_source_entry",
+    "POST",
+    "/sources/:sourceId/entries",
+    async ({ request, deps, params }) => {
+      const sourceId = params.sourceId ?? "";
+      const { tenant } = deps;
       const source = await tenant.sources.get(sourceId);
       if (source === null) throw new NotFound("source");
       const fields = readEntryFields(await readJsonBody(request));
@@ -586,176 +774,194 @@ async function sourceRoutes(
         { assistantId: source.assistantId, sourceId, ...fields },
       );
       return Response.json(result, { status: 201 });
-    }
-    throw new NotFound();
-  }
-
-  if (segments.length === 4) {
-    const sub = segments[2];
-    const docId = segments[3];
-    if (!docId) throw new NotFound();
-
-    if (sub === "documents" && method === "GET") {
-      return Response.json(await getSourceDocument(tenant, deps.docs, sourceId, docId));
-    }
-    if (sub === "entries" && method === "PUT") {
+    },
+  ),
+  route(
+    "get_document",
+    "GET",
+    "/sources/:sourceId/documents/:documentId",
+    async ({ deps, params }) => {
+      const { sourceId = "", documentId = "" } = params;
+      const { tenant } = deps;
+      return Response.json(await getSourceDocument(tenant, deps.docs, sourceId, documentId));
+    },
+  ),
+  route(
+    "delete_document",
+    "DELETE",
+    "/sources/:sourceId/documents/:documentId",
+    async ({ deps, params }) => {
+      const { sourceId = "", documentId = "" } = params;
+      return Response.json(
+        await deleteSourceDocument(
+          {
+            tenant: deps.tenant,
+            docs: deps.docs,
+            retriever: deps.retriever,
+            repeated: { queue: deps.queue as unknown as RepeatedQueue, orgId: deps.orgId },
+          },
+          sourceId,
+          documentId,
+        ),
+      );
+    },
+  ),
+  route(
+    "update_entry",
+    "PUT",
+    "/sources/:sourceId/entries/:documentId",
+    async ({ request, deps, params }) => {
+      const { sourceId = "", documentId = "" } = params;
+      const { tenant } = deps;
       const source = await tenant.sources.get(sourceId);
       if (source === null) throw new NotFound("source");
       const fields = readEntryFields(await readJsonBody(request));
       const result = await saveEntry(
         { tenant, docs: deps.docs, queue: deps.queue, publicBaseUrl: deps.publicBaseUrl },
         { orgId: deps.orgId },
-        { assistantId: source.assistantId, sourceId, documentId: docId, ...fields },
+        { assistantId: source.assistantId, sourceId, documentId: documentId, ...fields },
       );
       return Response.json(result);
-    }
-  }
-
-  throw new NotFound();
-}
-
-async function conversationRoutes(
-  request: Request,
-  segments: string[],
-  deps: AdminRouteDeps,
-): Promise<Response> {
-  const conversationId = segments[1];
-  if (!conversationId || request.method !== "GET") throw new NotFound();
-  if (segments.length === 2) {
+    },
+  ),
+  route("get_conversation", "GET", "/conversations/:conversationId", async ({ deps, params }) => {
+    const conversationId = params.conversationId ?? "";
     return Response.json(await getConversation(deps.tenant, conversationId));
-  }
-  // `conversations/:id/messages/:messageId/trace`: how one answer was made.
-  if (
-    segments.length === 5 &&
-    segments[2] === "messages" &&
-    segments[3] &&
-    segments[4] === "trace"
-  ) {
-    return Response.json(await getAnswerTrace(deps.tenant, conversationId, segments[3]));
-  }
-  throw new NotFound();
-}
-
-async function mcpServerRoutes(
-  request: Request,
-  segments: string[],
-  deps: AdminRouteDeps,
-): Promise<Response> {
-  const method = request.method;
-  const serverId = segments[1];
-  if (!serverId) throw new NotFound();
-
-  if (segments.length === 2) {
-    if (method === "PATCH") {
+  }),
+  route(
+    "get_answer_trace",
+    "GET",
+    "/conversations/:conversationId/messages/:messageId/trace",
+    async ({ deps, params }) => {
+      const { conversationId = "", messageId = "" } = params;
+      return Response.json(await getAnswerTrace(deps.tenant, conversationId, messageId));
+    },
+  ),
+  route(
+    "update_tool_server",
+    "PATCH",
+    "/mcp-servers/:serverId",
+    async ({ request, deps, params }) => {
+      const serverId = params.serverId ?? "";
       return Response.json(
         await updateMcpServer(mcpDeps(deps), serverId, await readJsonBody(request)),
       );
-    }
-    if (method === "DELETE") {
-      return Response.json(await deleteMcpServer(deps.tenant, serverId));
-    }
-    throw new NotFound();
-  }
-
-  if (segments.length === 3) {
-    const sub = segments[2];
-    if (sub === "refresh" && method === "POST") {
+    },
+  ),
+  route("remove_tool_server", "DELETE", "/mcp-servers/:serverId", async ({ deps, params }) => {
+    const serverId = params.serverId ?? "";
+    return Response.json(await deleteMcpServer(deps.tenant, serverId));
+  }),
+  route(
+    "refresh_tools",
+    "POST",
+    "/mcp-servers/:serverId/refresh",
+    async ({ request, deps, params }) => {
+      const serverId = params.serverId ?? "";
       const body = request.body === null ? undefined : await readJsonBody(request);
       const tools = await refreshMcpTools(mcpDeps(deps), serverId, body);
       return Response.json({ tools });
-    }
-    if (sub === "tools" && method === "GET") {
-      return Response.json({ tools: await listMcpTools(deps.tenant, serverId) });
-    }
-    throw new NotFound();
-  }
-
-  if (segments.length === 4 && segments[2] === "tools" && segments[3] && method === "PATCH") {
-    return Response.json(
-      await setMcpToolAllowed(deps.tenant, serverId, segments[3], await readJsonBody(request)),
-    );
-  }
-
-  throw new NotFound();
-}
-
-function providerAdminDeps(deps: AdminRouteDeps): ProviderAdminDeps {
-  if (!deps.keys || !deps.resolveSettings || !deps.checkConfigError) {
-    throw new NotFound();
-  }
-  return {
-    tenant: deps.tenant,
-    orgId: deps.orgId,
-    keys: deps.keys,
-    secretKey: deps.secretKey ?? "",
-    envSecretPresence: deps.envSecretPresence ?? {
-      anthropic: false,
-      openai: false,
-      openrouter: false,
     },
-    fetchImpl: deps.fetchImpl,
-    resolveSettings: deps.resolveSettings,
-    checkConfigError: deps.checkConfigError,
-  };
-}
-
-async function providerRoutes(
-  request: Request,
-  segments: string[],
-  deps: AdminRouteDeps,
-): Promise<Response> {
-  const method = request.method;
-  const pDeps = providerAdminDeps(deps);
-
-  if (segments.length === 1) {
-    if (method === "GET") {
-      return Response.json(await getProviderSettingsView(pDeps));
-    }
-    if (method === "PUT") {
-      return Response.json(await updateProviderSettings(pDeps, await readJsonBody(request)));
-    }
-    throw new NotFound();
-  }
-
-  if (segments[1] === "keys") {
-    const provider = parseProviderName(segments[2]);
+  ),
+  route("list_tools", "GET", "/mcp-servers/:serverId/tools", async ({ deps, params }) => {
+    const serverId = params.serverId ?? "";
+    return Response.json({ tools: await listMcpTools(deps.tenant, serverId) });
+  }),
+  route(
+    "set_tool_allowed",
+    "PATCH",
+    "/mcp-servers/:serverId/tools/:toolId",
+    async ({ request, deps, params }) => {
+      const { serverId = "", toolId = "" } = params;
+      return Response.json(
+        await setMcpToolAllowed(deps.tenant, serverId, toolId, await readJsonBody(request)),
+      );
+    },
+  ),
+  route("get_provider_settings", "GET", "/providers", async ({ deps }) => {
+    const pDeps = providerAdminDeps(deps);
+    return Response.json(await getProviderSettingsView(pDeps));
+  }),
+  route("update_provider_settings", "PUT", "/providers", async ({ request, deps }) => {
+    const pDeps = providerAdminDeps(deps);
+    return Response.json(await updateProviderSettings(pDeps, await readJsonBody(request)));
+  }),
+  route(
+    "set_provider_key",
+    "PUT",
+    "/providers/keys/:provider",
+    async ({ request, deps, params }) => {
+      const pDeps = providerAdminDeps(deps);
+      const provider = parseProviderName(params.provider);
+      if (!provider) throw new NotFound();
+      return Response.json(await setProviderKey(pDeps, provider, await readJsonBody(request)));
+    },
+  ),
+  route("remove_provider_key", "DELETE", "/providers/keys/:provider", async ({ deps, params }) => {
+    const pDeps = providerAdminDeps(deps);
+    const provider = parseProviderName(params.provider);
     if (!provider) throw new NotFound();
-
-    if (segments.length === 3) {
-      if (method === "PUT") {
-        return Response.json(await setProviderKey(pDeps, provider, await readJsonBody(request)));
-      }
-      if (method === "DELETE") {
-        return Response.json(await removeProviderKey(pDeps, provider));
-      }
-      throw new NotFound();
-    }
-
-    if (segments.length === 4 && segments[3] === "test" && method === "POST") {
-      return testProviderKey(pDeps, provider);
-    }
-  }
-
-  throw new NotFound();
-}
-
-async function testRoutes(
-  request: Request,
-  segments: string[],
-  deps: AdminRouteDeps,
-): Promise<Response> {
-  const method = request.method;
-  const testId = segments[1];
-  if (!testId || segments.length !== 2) throw new NotFound();
-
-  if (method === "PATCH") {
+    return Response.json(await removeProviderKey(pDeps, provider));
+  }),
+  route("test_provider_key", "POST", "/providers/keys/:provider/test", ({ deps, params }) => {
+    const pDeps = providerAdminDeps(deps);
+    const provider = parseProviderName(params.provider);
+    if (!provider) throw new NotFound();
+    return testProviderKey(pDeps, provider);
+  }),
+  route("update_test", "PATCH", "/tests/:testId", async ({ request, deps, params }) => {
+    const testId = params.testId ?? "";
     const test = await updateTest(deps.tenant, testId, await readJsonBody(request));
     return Response.json({ test });
-  }
-  if (method === "DELETE") {
+  }),
+  route("delete_test", "DELETE", "/tests/:testId", async ({ deps, params }) => {
+    const testId = params.testId ?? "";
     return Response.json(await deleteTest(deps.tenant, testId));
+  }),
+  route("preview_answer", "POST", "/chat", ({ request, deps }) => {
+    if (!deps.previewChat) throw new NotFound();
+    return deps.previewChat(request);
+  }),
+  route("list_operator_access", "GET", "/operator-tokens", ({ deps }) => {
+    if (!deps.operatorAccess) throw new NotFound();
+    return deps.operatorAccess("list");
+  }),
+  route("create_personal_token", "POST", "/operator-tokens", async ({ request, deps }) => {
+    if (!deps.operatorAccess) throw new NotFound();
+    return deps.operatorAccess("create", await readJsonBody(request));
+  }),
+  route("revoke_operator_access", "DELETE", "/operator-tokens/:tokenId", ({ params, deps }) => {
+    if (!deps.operatorAccess) throw new NotFound();
+    return deps.operatorAccess("revoke", params.tokenId);
+  }),
+] as const;
+
+export type AdminOperationName = (typeof adminOperations)[number]["name"];
+
+export function matchAdminOperation(method: string, pathname: string) {
+  if (!pathname.startsWith("/api/admin/")) return null;
+  const segments = pathname.slice("/api/admin".length).split("/");
+  for (const operation of adminOperations) {
+    if (operation.method !== method) continue;
+    const pattern = operation.path.split("/");
+    if (pattern.length !== segments.length) continue;
+    const params: Record<string, string> = {};
+    if (
+      pattern.every((part, index) => {
+        const segment = segments[index] ?? "";
+        if (!part.startsWith(":")) return part === segment;
+        if (!segment) return false;
+        try {
+          params[part.slice(1)] = decodeURIComponent(segment);
+          return true;
+        } catch {
+          return false;
+        }
+      })
+    )
+      return { operation, params };
   }
-  throw new NotFound();
+  return null;
 }
 
 /** Dispatches authenticated `/api/admin/*` requests with a tenant-scoped handle. */
@@ -764,15 +970,17 @@ export async function adminRoutes(
   url: URL,
   deps: AdminRouteDeps,
 ): Promise<Response> {
-  const segments = url.pathname.replace(/^\/api\/admin\//, "").split("/");
+  const match = matchAdminOperation(request.method, url.pathname);
+  if (!match) return Response.json({ error: "Not found." }, { status: 404 });
+  return runAdminOperation(match.operation, { request, url, deps, params: match.params });
+}
+
+export async function runAdminOperation(
+  operation: (typeof adminOperations)[number],
+  context: RouteContext,
+): Promise<Response> {
   try {
-    if (segments[0] === "assistants") return await assistantRoutes(request, url, segments, deps);
-    if (segments[0] === "sources") return await sourceRoutes(request, url, segments, deps);
-    if (segments[0] === "conversations") return await conversationRoutes(request, segments, deps);
-    if (segments[0] === "mcp-servers") return await mcpServerRoutes(request, segments, deps);
-    if (segments[0] === "providers") return await providerRoutes(request, segments, deps);
-    if (segments[0] === "tests") return await testRoutes(request, segments, deps);
-    return Response.json({ error: "Not found." }, { status: 404 });
+    return await operation.handle(context);
   } catch (error) {
     // Mapped here, once: a handler building its own responses would eventually
     // leak an internal message into an owner's screen.

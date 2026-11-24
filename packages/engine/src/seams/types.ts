@@ -28,7 +28,37 @@ export type ScopeClaim =
   | { kind: "preflight"; origin: string }
   | { kind: "queued_ingest"; orgId: string };
 
+export type OperatorScope = "read" | "full";
+
+export interface OperatorPrincipal {
+  principal: Principal;
+  scope: OperatorScope;
+  /** The grant or personal token used for this request. */
+  credentialId?: string | undefined;
+}
+
+export interface OperatorAuth {
+  /** Validate a bearer credential and its audience, and apply current org and role checks. */
+  authenticate(request: Request, resource: string): Promise<OperatorPrincipal | null>;
+  checkCall?(principal: OperatorPrincipal): Promise<boolean>;
+  /** Absolute protected resource metadata URI for the bearer challenge. */
+  metadataUrl(resource: string): string;
+  /** Optional discovery, sign-in, token and revocation endpoints owned by the host. */
+  handle?(request: Request): Promise<Response | null>;
+  /** Hosts can provide their own access management for the signed-in principal. */
+  manage?(
+    principal: Principal,
+    operation: "list" | "create" | "revoke",
+    resource: string,
+    input?: unknown,
+    credentialId?: string,
+  ): Promise<Response>;
+}
+
 export interface AuthProvider {
+  operator?: OperatorAuth | undefined;
+  /** Optional host policy checked before both the admin route and its MCP equivalent. */
+  authorizeAdmin?(principal: Principal, operation: string): boolean | Promise<boolean>;
   /**
    * Returns null rather than throwing so one router branch answers 401 for
    * every admin route in one place.

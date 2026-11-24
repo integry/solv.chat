@@ -1,9 +1,9 @@
-import { isPlainObject } from "@solvchat/core";
+import { isPlainObject, parseVersionConfig } from "@solvchat/core";
 import { type RunDeps, replaceTests, runAnswerTests } from "../admin/answerTests.js";
 import { BadRequest, Conflict, NotFound, readJsonBody } from "../admin/errors.js";
 import { applyMcpServerSettings, listMcpServerSettings } from "../admin/mcp.js";
 import { getDraft, updateDraft } from "../admin/versions.js";
-import { forIngestScope, type Tenant } from "../db/tenant.js";
+import { forIngestScope, type IngestScope, type Tenant } from "../db/tenant.js";
 import type { Retriever } from "../providers/retrieval.js";
 import type { AuthProvider, Limits } from "../seams/types.js";
 import { ingestScopeFor } from "./auth.js";
@@ -46,6 +46,30 @@ export async function ingestRoutes(
     return Response.json({ error: "Unauthorized." }, { status: 401 });
   }
 
+  return scopedIngestRoutes(request, scope, resource, deps);
+}
+
+export function validateIngestDraft(
+  body: unknown,
+  current?: Awaited<ReturnType<typeof getDraft>>["config"],
+) {
+  const parsed = parseVersionConfig(body, current);
+  if (!parsed.ok) throw new BadRequest(parsed.errors);
+  rejectPageToolServers(body);
+}
+
+function rejectPageToolServers(body: unknown) {
+  if (isPlainObject(body) && body.pageToolServers !== undefined) {
+    throw new BadRequest(["pageToolServers: change where keys come from on the Tools screen"]);
+  }
+}
+
+export async function scopedIngestRoutes(
+  request: Request,
+  scope: IngestScope,
+  resource: IngestResource,
+  deps: Omit<IngestRouteDeps, "auth">,
+): Promise<Response> {
   const limit = await deps.limits.check(scope.orgId, scope.assistantId, { kind: "ingest" });
   if (!limit.ok) {
     return Response.json({ error: "Ingest limit exceeded." }, { status: 429 });
@@ -61,9 +85,7 @@ export async function ingestRoutes(
         return Response.json({ config });
       }
       const body = await readJsonBody(request);
-      if (isPlainObject(body) && body.pageToolServers !== undefined) {
-        throw new BadRequest(["pageToolServers: change where keys come from on the Tools screen"]);
-      }
+      rejectPageToolServers(body);
       const draft = await updateDraft(tenant, scope.assistantId, body);
       const { pageToolServers: _pageToolServers, ...config } = draft.config;
       return Response.json({ config });

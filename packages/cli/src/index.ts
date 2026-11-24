@@ -7,6 +7,7 @@ import { test } from "./test.js";
 export { type ApplyOptions, apply, diffConfig } from "./apply.js";
 export {
   APPLY_HELP,
+  CLI_COMMANDS,
   type ParsedCommand,
   PUSH_HELP,
   parseCliArgs,

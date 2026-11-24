@@ -703,7 +703,7 @@ describe("admin app", () => {
     expect(screen.queryByText("Bad link")).toBeNull();
   });
 
-  it("exposes accessible navigation with the specification's nine items and no model/key settings", async () => {
+  it("exposes ordered, accessible admin navigation", async () => {
     installFakeServer({ signedIn: true });
     render(<App />);
 

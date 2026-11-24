@@ -465,7 +465,7 @@ describe("defaultScreen", () => {
   });
 });
 
-const FIRST_RUN_SCREENS = NAV_ITEMS.filter((item) => item.id !== "providers");
+const FIRST_RUN_SCREENS = NAV_ITEMS.filter((item) => item.section !== "Settings");
 
 describe("first-run state", () => {
   it.each(FIRST_RUN_SCREENS.map((item) => [item.id, item.path]))(
