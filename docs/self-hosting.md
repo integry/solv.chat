@@ -201,6 +201,43 @@ as its own named part of the transition.
 In a single-page app, keep `<solv-chat>` outside the routed region, such as
 in the root layout, so it stays mounted across route changes.
 
+The browser draws the document scrollbar at the viewport edge. If your site
+already scrolls its content in an inner container, size that container to
+the page column so its scrollbar sits beside a right-hand side panel. For
+example, if `.main-content` is your page's only scroll container:
+
+```html
+<main class="main-content">…</main>
+<solv-chat assistant="pk_..."></solv-chat>
+```
+
+```css
+body {
+  margin: 0;
+}
+
+.main-content {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
+}
+```
+
+Load the layout CSS before the boot script. The container's percentage width
+follows the page width that the boot script and widget reserve. Keep the
+widget outside the scrolling container. If you use a grid or flex layout
+with a separate header, let the scroll container take the remaining width
+and height, and set its minimum width and height to zero.
+
+On phones, the chat input uses the browser's bottom safe-area inset. If your
+page already lays out edge to edge with `viewport-fit=cover` in its viewport
+meta tag, this padding also clears the home indicator. With the default
+viewport fit, the browser insets the page itself.
+See [WebKit's safe-area guide](https://webkit.org/blog/7929/designing-websites-for-iphone-x/).
+
 #### What the chat remembers
 
 On your website's origin, the chat uses `localStorage` for a random visitor

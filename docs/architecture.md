@@ -2036,6 +2036,12 @@ characters of a code line (34 at 380px), so a code block scrolls sideways less
 than before for the same content, and 720px shows a five-step list with a
 short code block without scrolling.
 
+Starter questions appear directly below the greeting in the scrollable
+thread. An empty thread starts at the greeting even when the questions
+overflow. A conversation with messages hides the questions, and **New
+conversation** brings them back. The composer stays below the scrollable
+area and adds the browser's bottom safe-area inset to its bottom padding.
+
 **Side panel.** With the owner's "Allow expanding to a side panel" on (the
 default; `widget.allowExpand` in the version config and the public config),
 the panel header has an expand control and, once expanded, a collapse control
@@ -2062,6 +2068,10 @@ narrower page; elements the host fixed to that edge (`position: fixed` or
 `sticky` bars) are not moved and may sit under the column unless the host
 offsets them with the custom property (see the embedding notes in
 `docs/self-hosting.md`).
+
+The widget leaves host scrolling in place. A right-hand dock has an outer
+border to distinguish it from the document scrollbar at the viewport edge.
+Hosts with an inner scroll container can size it to the narrowed page column.
 
 **Docked first paint.** The optional inline head script reads the tab's
 `sessionStorage` entry `solv-dock:1:<assistant public key>`. The key identifies

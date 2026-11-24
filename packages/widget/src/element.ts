@@ -687,11 +687,11 @@ export class SolvChat extends HTMLElement {
     const greeting = document.createElement("div");
     greeting.className = "solv-bubble solv-bubble--assistant";
 
-    messages.append(greeting);
-
     const suggestions = document.createElement("div");
     suggestions.className = "solv-suggestions";
+    suggestions.setAttribute("aria-live", "off");
     suggestions.hidden = true;
+    messages.append(greeting, suggestions);
 
     const inputError = document.createElement("div");
     inputError.className = "solv-input-error";
@@ -775,7 +775,7 @@ export class SolvChat extends HTMLElement {
           : "light",
     });
 
-    panel.append(header, messages, suggestions, inputError, checkHost, form);
+    panel.append(header, messages, inputError, checkHost, form);
 
     const launcher = document.createElement("button");
     launcher.type = "button";
@@ -1482,7 +1482,7 @@ export class SolvChat extends HTMLElement {
 
   #renderTranscript(markInterrupted: boolean): void {
     const scrollTop = this.#messagesEl.scrollTop;
-    this.#messagesEl.replaceChildren(this.#greetingEl);
+    this.#messagesEl.replaceChildren(this.#greetingEl, this.#suggestionsEl);
     if (this.#restartNotice) this.#messagesEl.append(this.#restartNote());
     for (const turn of this.#turns) {
       if (
@@ -1538,7 +1538,8 @@ export class SolvChat extends HTMLElement {
       this.#pendingResume = null;
     }
 
-    if (!this.#pinned) this.#messagesEl.scrollTop = scrollTop;
+    if (this.#turns.length === 0) this.#messagesEl.scrollTop = 0;
+    else if (!this.#pinned) this.#messagesEl.scrollTop = scrollTop;
   }
 
   #syncTranscript(): void {
@@ -1874,7 +1875,8 @@ export class SolvChat extends HTMLElement {
    */
   #scrollToBottom(force = false): void {
     if (force) this.#pinned = true;
-    if (!this.#pinned) return;
+    // An empty thread starts at the greeting, even if the questions overflow.
+    if (!this.#pinned || this.#turns.length === 0) return;
     this.#messagesEl.scrollTop = this.#messagesEl.scrollHeight;
   }
 
@@ -2293,7 +2295,11 @@ export class SolvChat extends HTMLElement {
           ) {
             this.#turns = this.#turns.slice(-2);
             const userBubble = bubble.previousElementSibling;
-            this.#messagesEl.replaceChildren(this.#greetingEl, this.#restartNote());
+            this.#messagesEl.replaceChildren(
+              this.#greetingEl,
+              this.#suggestionsEl,
+              this.#restartNote(),
+            );
             if (userBubble) this.#messagesEl.append(userBubble);
             this.#messagesEl.append(bubble);
             this.#restartNotice = true;
