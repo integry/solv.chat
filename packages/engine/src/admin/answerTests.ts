@@ -274,6 +274,21 @@ export async function replaceTests(
 ): Promise<{ created: number; removed: number; tests: TestRow[] }> {
   const assistant = await tenant.assistants.get(assistantId);
   if (assistant === null) throw new NotFound("assistant");
+  const parsedItems = validateTestReplacement(body);
+  const baseNow = Date.now();
+  return tenant.tests.replaceAll(
+    assistantId,
+    parsedItems.map((item, index) => ({
+      id: newId("tst"),
+      question: item.question,
+      expectation: item.expectation,
+      createdAt: baseNow + index,
+    })),
+  );
+}
+
+/** Validates a full test declaration before any writes. */
+export function validateTestReplacement(body: unknown) {
   if (!isPlainObject(body)) {
     throw new BadRequest(["body: must be a JSON object"]);
   }
@@ -303,16 +318,7 @@ export async function replaceTests(
     throw new BadRequest(errors);
   }
 
-  const baseNow = Date.now();
-  return tenant.tests.replaceAll(
-    assistantId,
-    parsedItems.map((item, index) => ({
-      id: newId("tst"),
-      question: item.question,
-      expectation: item.expectation,
-      createdAt: baseNow + index,
-    })),
-  );
+  return parsedItems;
 }
 
 /** Lists recent test runs for an assistant, newest first. */

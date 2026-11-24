@@ -282,7 +282,7 @@ describe("grouped navigation", () => {
       ["Monitor", ["Overview", "Reports", "Conversations", "Gaps"]],
       ["Build", ["Sources", "Behaviour", "Tools", "Widget", "Tests"]],
       ["Go live", ["Install"]],
-      ["Settings", ["Providers", "Help"]],
+      ["Settings", ["Providers", "MCP access", "Help"]],
       ["Account", ["Billing"]],
     ]);
 

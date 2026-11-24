@@ -9,6 +9,7 @@ export default defineWorkersConfig(async () => {
     resolve: {
       alias: {
         "@solvchat/core": path.join(__dirname, "../core/src/index.ts"),
+        "@solvchat/cli": path.join(__dirname, "../cli/src/index.ts"),
       },
     },
     test: {
@@ -20,6 +21,8 @@ export default defineWorkersConfig(async () => {
           miniflare: {
             bindings: {
               TEST_MIGRATIONS: migrations,
+              SOLV_ADMIN_PASSWORD: "fixture-admin-password",
+              SOLV_SECRET_KEY: "fixture-operator-signing-key",
             },
           },
         },

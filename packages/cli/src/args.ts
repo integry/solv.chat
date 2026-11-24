@@ -309,6 +309,11 @@ function parseTestArgs(args: string[], env: Record<string, string | undefined>):
   return { kind: "test", options };
 }
 
+const commandParsers = { push: parsePushArgs, apply: parseApplyArgs, test: parseTestArgs };
+
+/** The commands executable through the CLI parser. Help is a flag. */
+export const CLI_COMMANDS = Object.keys(commandParsers) as (keyof typeof commandParsers)[];
+
 /**
  * Parses CLI arguments using `node:util` `parseArgs` and reads credentials from
  * environment variables without exposing them as flags.
@@ -321,14 +326,8 @@ export function parseCliArgs(
   if (!command || command === "--help" || command === "-h") {
     return { kind: "help", topic: "root" };
   }
-  if (command === "push") {
-    return parsePushArgs(rest, env);
-  }
-  if (command === "apply") {
-    return parseApplyArgs(rest, env);
-  }
-  if (command === "test") {
-    return parseTestArgs(rest, env);
+  if (Object.hasOwn(commandParsers, command)) {
+    return commandParsers[command as keyof typeof commandParsers](rest, env);
   }
   throw new CliError(`Unknown command: ${command}. Run 'solv --help' for usage.`);
 }

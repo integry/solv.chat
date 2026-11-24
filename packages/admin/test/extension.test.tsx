@@ -162,10 +162,10 @@ describe("admin extension point", () => {
     const nav = screen.getByRole("navigation", { name: "Primary" });
     const links = Array.from(nav.querySelectorAll("a"));
     expect(links.map((a) => a.textContent)).toEqual(NAV_ITEMS.map((item) => item.label));
-    // Each assistant screen names the assistant on show; Providers is the organisation's.
+    // The organisation's screens open without an assistant in the address.
     expect(links.map((a) => a.getAttribute("href"))).toEqual(
       NAV_ITEMS.map((item) =>
-        item.id === "providers" ? item.path : `${item.path}?assistant=ast_1`,
+        item.section === "Settings" ? item.path : `${item.path}?assistant=ast_1`,
       ),
     );
     const sectionLabels = Array.from(nav.querySelectorAll("h2.nav-section-label")).map(
@@ -318,7 +318,7 @@ describe("admin extension point", () => {
     });
 
     expect(screen.queryByRole("link", { name: "Providers" })).toBeNull();
-    expect(screen.queryByText("Settings")).toBeNull();
+    expect(screen.getByRole("link", { name: "MCP access" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Providers" })).toBeNull();
   });
 

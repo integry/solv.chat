@@ -16,12 +16,12 @@ Cloudflare: one Worker, D1, Vectorize, R2 and Queues.
 
 ## Open core and cloud
 
-| Lives here (Apache 2.0)            | Lives in the closed cloud repo   |
-| ---------------------------------- | -------------------------------- |
-| Chat engine, retrieval, MCP client | Sign-up and login for the public |
-| Embeddable widget                  | Teams and roles                  |
-| Ingest CLI and GitHub Action       | Billing and usage metering       |
-| Multi-assistant admin              | Managed model keys               |
+| Lives here (Apache 2.0)                                | Lives in the closed cloud repo   |
+| ------------------------------------------------------ | -------------------------------- |
+| Chat engine, retrieval, MCP client and operator server | Sign-up and login for the public |
+| Embeddable widget                                      | Teams and roles                  |
+| Ingest CLI and GitHub Action                           | Billing and usage metering       |
+| Multi-assistant admin                                  | Managed model keys               |
 
 The engine must run complete for a self-hoster with their own provider keys.
 The cloud layer plugs in through the seams listed under "Extension seams"; it
@@ -186,6 +186,13 @@ from the auth seam and pass it down.
 - `visitor_counters` — org_id, assistant_id, counter (`visitor_day` | `ip_day` |
   `ip_sessions_hour`), subject (an HMAC of the visitor id or IP, never the value),
   window_start, hits: the per-visitor caps. See "Visitor check".
+
+- `operator_grants` — org-scoped personal access and OAuth grants. Includes
+  principal, audience, scope, client and expiry, last use, hashes of active
+  credentials, and the parent credential for delegated personal tokens.
+  Revoking a parent cascades to its delegated tokens.
+- `operator_spent_refresh` — org-scoped hashes of used refresh tokens, retained
+  for the lifetime of their grant so replay can revoke the connection.
 
 Migrations are plain SQL files under `packages/engine/migrations`, applied with
 `wrangler d1 migrations`.
@@ -960,6 +967,44 @@ The Monitor screens read:
   (checked like a proposed name; 409 when another topic has it);
   `POST …/topics/:topicId/merge` takes `{ into }` (a topic id); `DELETE
   …/topics/:topicId`. A topic of another assistant or org is 404.
+
+## Operator MCP server
+
+`/mcp` is a separate Streamable HTTP server using revision `2025-11-25`.
+`packages/engine/src/mcp/` remains the outbound MCP client assistants use.
+The operator endpoint answers with JSON, offers no server-initiated stream,
+and carries no MCP session state between requests. A supplied Origin must
+match the instance origin. The endpoint never uses the widget's CORS policy.
+
+The admin operation registry in `admin/router.ts` owns dispatch for
+authenticated admin API actions. Each operator tool supplies a schema and
+passes its arguments into that same handler, using a tenant built from the
+authenticated principal. CLI tools reuse the authorized ingest operations
+for applying configuration, pushing/pruning Markdown, and replacing and
+running declared tests. Configuration apply checks the draft, declared tests,
+and declared tool-server settings before its first write, like the CLI.
+Publishing remains a separate operation. The parity tests check the registry
+and CLI parser for coverage and compare calls through MCP and the existing HTTP
+APIs. Sign-in, sign-out and static assets are browser plumbing.
+
+An embedder mounts the server through `createApp` by providing
+`AuthProvider.operator`. Its bearer authenticator returns the current
+principal and scope after checking the token audience, organization and role.
+`AuthProvider.authorizeAdmin` is the same operation-level policy check for
+admin and operator calls. The host may serve discovery and OAuth endpoints
+itself or delegate them via `OperatorAuth.handle`. It can provide its own
+token management via `OperatorAuth.manage`. The open password seam supplies
+its implementation with admin-session consent, PKCE S256, public client
+registration and client ID metadata documents, and hashed credentials with
+refresh and revocation. The hosted service owns its sign-in, token and org
+policy and may mount its hosted-only tools through `AppOptions.operatorTools`. The host can
+rate-limit calls through `OperatorAuth.checkCall` or at its ingress.
+
+The existing one-time ingest key responses and newly issued personal tokens
+carry credentials only on issuance. Tool-server credentials and provider keys
+are write-only. The server filters tool discovery by scope and enforces the
+same boundary again on invocation. The client is responsible for reviewing
+tool calls and treating returned conversation and document text as data.
 
 ## Answering a message
 

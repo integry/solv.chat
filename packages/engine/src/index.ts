@@ -133,6 +133,7 @@ export {
   OPENAI_MODELS,
   type Tier,
 } from "./models.js";
+export type { HostedOperatorTool, OperatorTool, OperatorToolSchema } from "./operator/tools.js";
 export { type AnthropicOptions, anthropicProvider } from "./providers/anthropic.js";
 export { ProviderError } from "./providers/error.js";
 export { type LlmConfig, llmProviderFor } from "./providers/factory.js";
@@ -177,6 +178,9 @@ export {
   type LimitDecision,
   type Limits,
   type LlmProviderName,
+  type OperatorAuth,
+  type OperatorPrincipal,
+  type OperatorScope,
   type PageContent,
   type PageFetcher,
   type PageFetchResult,

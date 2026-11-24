@@ -515,3 +515,49 @@ or from the **Install** screen after upgrading.
 
 - The cloud layer: public sign-up, teams and roles, billing, managed model keys, and scheduled email digests. Those live in a separate, closed repository; nothing here needs them.
 - A crawler that follows links. Content is pushed with `solv push`, imported from a sitemap (once, or again daily or weekly; see "Keeping a sitemap source in sync"), or written by hand under **Sources**. Only pages a sitemap lists are ever fetched.
+
+## Operator MCP server
+
+Open **Settings → MCP access** in the admin. Its connection URL ends in
+`/mcp`. MCP clients can manage assistants, drafts, publishing, content,
+tool servers, provider settings and tests. They can also review reports,
+conversations, feedback, traces, gaps and topics. The server supports the
+effects of `solv apply`, `solv test` and `solv push`.
+
+For Claude Code, copy the command from the screen or run:
+
+```sh
+claude mcp add --transport http solv-chat https://your-instance.example/mcp
+```
+
+Open `/mcp` inside Claude Code to sign in. In Claude Desktop or claude.ai,
+add a custom connector using the same URL and choose to sign in. The
+instance must be reachable from Anthropic over public HTTPS on port 443.
+If the client's published identity cannot be fetched, choose **Register
+automatically** in the connector settings. Sign in with the admin password,
+review the client name and requested access, and choose whether to connect.
+
+For CI or a client that sends its own headers, create a personal access token
+on the same admin screen. Copy it when it is issued and store it in your
+client's secret store. Send it as `Authorization: Bearer <token>`. Claude Code
+also accepts `--header "Authorization: Bearer ${SOLV_MCP_TOKEN}"` on its
+`claude mcp add` command. Keep the actual token out of shared configuration
+and commit history. CLI ingest keys still work with `solv` and do not provide
+operator MCP access.
+
+Use **Read only** access for analysis. **Full access** lets the client make
+changes such as publishing a draft, deleting content, and rotating keys.
+A client acting for you can use every operation that you grant it. Review
+its actions before letting it make changes. **Active access** shows each
+token or OAuth connection and when it was last used. Revoke an entry there
+to disconnect it immediately. OAuth access tokens expire after 15 minutes
+and the client can refresh them for up to 30 days from consent. Personal
+tokens stay active until revoked, subject to the lifetime of any credential
+that created them.
+
+When pushing several batches, send every batch first, then call
+`prune_pushed_documents` with the complete list of external IDs to keep.
+Use the batch's `prune` switch only when that single batch is the entire source.
+
+Sources: https://code.claude.com/docs/en/mcp#option-1-add-a-remote-http-server
+and https://claude.com/docs/connectors/building/authentication.

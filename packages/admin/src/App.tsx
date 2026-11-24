@@ -23,6 +23,7 @@ import { Conversations } from "./screens/Conversations.js";
 import { Gaps } from "./screens/Gaps.js";
 import { Install } from "./screens/Install.js";
 import { Login } from "./screens/Login.js";
+import { OperatorAccess } from "./screens/OperatorAccess.js";
 import { Overview } from "./screens/Overview.js";
 import { OPEN_TRY_IT_EVENT } from "./screens/OverviewParts.js";
 import { Providers } from "./screens/Providers.js";
@@ -78,6 +79,8 @@ function renderBuiltinScreen(screen: BuiltinScreenId, assistantId: string) {
       return <Install key={assistantId} assistantId={assistantId} />;
     case "providers":
       return <Providers />;
+    case "operator-access":
+      return <OperatorAccess />;
   }
 }
 
@@ -423,7 +426,9 @@ function AdminShell({
   const ExtraScreen =
     screen !== null && config.extraScreenIds.has(screen) ? config.extraScreens[screen] : undefined;
   // Host screens registered with `assistantScoped: false` hide the assistant chrome.
-  const assistantChrome = !(ExtraScreen && screen !== null && config.unscopedScreenIds.has(screen));
+  const assistantChrome =
+    screen !== "operator-access" &&
+    !(ExtraScreen && screen !== null && config.unscopedScreenIds.has(screen));
   const HeaderStart = config.headerStart;
   const HeaderEnd = config.headerEnd;
   const currentItem = config.navItems.find((item) => item.id === screen) ?? null;
@@ -659,8 +664,8 @@ function AdminShell({
               <div className="screen">
                 <p className="muted">No screens available.</p>
               </div>
-            ) : screen === "providers" ? (
-              <Providers />
+            ) : screen === "providers" || screen === "operator-access" ? (
+              renderBuiltinScreen(screen, "")
             ) : assistantsRes.status === "loading" && assistants.length === 0 ? (
               <Skeleton label="Loading assistants…" lines={4} />
             ) : assistantsRes.status === "error" ? (

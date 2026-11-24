@@ -20,7 +20,8 @@ export type BuiltinScreenId =
   | "widget"
   | "tests"
   | "install"
-  | "providers";
+  | "providers"
+  | "operator-access";
 
 export type ScreenId = BuiltinScreenId;
 
@@ -54,6 +55,12 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "tests", label: "Tests", path: "/admin/tests", section: "Build" },
   { id: "install", label: "Install", path: "/admin/install", section: "Go live" },
   { id: "providers", label: "Providers", path: "/admin/providers", section: "Settings" },
+  {
+    id: "operator-access",
+    label: "MCP access",
+    path: "/admin/operator-access",
+    section: "Settings",
+  },
 ];
 
 /** "How is it doing" screens: the Try it pane starts closed here. */
@@ -65,7 +72,7 @@ export const MONITOR_SCREENS: ReadonlySet<string> = new Set([
 ]);
 
 /** Built-in screens for the whole organisation rather than one assistant. */
-const ORG_SCREENS: ReadonlySet<string> = new Set(["providers"]);
+const ORG_SCREENS: ReadonlySet<string> = new Set(["providers", "operator-access"]);
 
 /**
  * Where a sidebar item leads: a built-in assistant screen names the assistant

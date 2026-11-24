@@ -525,7 +525,7 @@ export async function followToFinalUrl(
  * the streamed byte count, or the optional `signal` deadline is exceeded.
  */
 export async function readCapped(
-  response: Response,
+  response: Pick<Response, "headers" | "body" | "arrayBuffer">,
   maxBytes: number,
   signal?: AbortSignal,
 ): Promise<string> {

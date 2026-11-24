@@ -272,6 +272,7 @@ describe("Tools screen", () => {
       "Tests",
       "Install",
       "Providers",
+      "MCP access",
     ]);
 
     fireEvent.click(screen.getByRole("link", { name: "Tools" }));

@@ -938,7 +938,7 @@ describe("admin phase 1 screens", () => {
     expect(await screen.findByText("Copied.")).toBeTruthy();
   });
 
-  it("exposes all nine navigation items in order and keyboard-reachable links", async () => {
+  it("exposes the navigation items in order with keyboard-reachable links", async () => {
     installFakeServer();
     render(<App />);
 
@@ -956,6 +956,7 @@ describe("admin phase 1 screens", () => {
       "Tests",
       "Install",
       "Providers",
+      "MCP access",
     ]);
     for (const link of links) {
       expect(link.getAttribute("href")).toMatch(/^\/admin\//);

@@ -1,6 +1,6 @@
 import { adminAsset } from "./admin/assets.js";
 import type { ReindexDeps } from "./admin/reindex.js";
-import { adminRoutes } from "./admin/router.js";
+import { type AdminRouteDeps, adminRoutes, matchAdminOperation } from "./admin/router.js";
 import { type ReviewCatchUpResult, runReviewCatchUp } from "./chat/reviewCatchUp.js";
 import {
   adminChatRoute,
@@ -38,6 +38,12 @@ import {
   type SyncCaps,
   type SyncQueue,
 } from "./ingest/sync.js";
+import { operatorMcp } from "./operator/server.js";
+import {
+  allowsAdminOperation,
+  type HostedOperatorTool,
+  mountOperatorTools,
+} from "./operator/tools.js";
 import {
   checkLlmConfigError,
   embedderFor,
@@ -45,7 +51,7 @@ import {
   resolveProviderSettings,
 } from "./providers/config.js";
 import { vectorizeRetriever } from "./providers/retrieval.js";
-import type { Seams } from "./seams/types.js";
+import type { OperatorPrincipal, Principal, Seams } from "./seams/types.js";
 import { scriptAsset } from "./util/scriptAsset.js";
 import { WIDGET_BOOT, WIDGET_BUNDLE } from "./widgetBundle.js";
 
@@ -65,6 +71,7 @@ const notFound = (): Response => Response.json({ error: "Not found." }, { status
 
 const widgetAsset = scriptAsset(WIDGET_BUNDLE);
 const bootAsset = scriptAsset(WIDGET_BOOT);
+const defaultOperatorCatalog = mountOperatorTools();
 
 export interface Env extends ProviderEnv, ScoreFloorEnv, VisitorCheckEnv {
   DB: D1Database;
@@ -115,6 +122,8 @@ export interface RunDueSyncsOptions {
 
 export interface AppOptions {
   chat?: ChatRouteOverrides | undefined;
+  /** Additional operator tools owned by the embedding service. */
+  operatorTools?: readonly HostedOperatorTool[] | undefined;
   fetch?: typeof fetch | undefined;
   /** Lower the engine's sync caps for every source; the Limits seam may lower them further per run. */
   sync?: SyncCaps | undefined;
@@ -122,6 +131,9 @@ export interface AppOptions {
 
 /** Creates the Worker fetch and queue handlers wired to the given extension seams. */
 export function createApp(seams: Seams, options?: AppOptions): App {
+  const operatorCatalog = options?.operatorTools?.length
+    ? mountOperatorTools(options.operatorTools)
+    : defaultOperatorCatalog;
   const chatOverrides: ChatRouteOverrides | undefined =
     options?.fetch && !options.chat?.fetch
       ? { ...options.chat, fetch: options.fetch }
@@ -215,50 +227,34 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           keys: seams.keys,
         };
       };
-      const ingestMatch =
-        /^\/v1\/ingest\/([^/]+)\/(documents|config|tests|test-runs|mcp-servers)$/.exec(
-          url.pathname,
-        );
-      if (ingestMatch?.[1] && ingestMatch[2]) {
-        const assistantId = decodeSegment(ingestMatch[1]);
-        if (assistantId === null) return notFound();
-        return ingestRoutes(request, assistantId, ingestMatch[2] as IngestResource, {
-          db: env.DB,
-          docs: env.DOCS,
-          queue: env.INGEST_QUEUE,
-          retriever: vectorizeRetriever(env.VECTORS),
-          limits: seams.limits,
-          auth: seams.auth,
-          resolveRunDeps,
-        });
-      }
-      if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
-        if (request.method !== "GET" && request.method !== "HEAD") {
-          const origin = request.headers.get("origin");
-          if (origin !== url.origin) {
-            return Response.json({ error: "Forbidden." }, { status: 403 });
-          }
-        }
-      }
-      if (request.method === "POST" && url.pathname === "/api/admin/login") {
-        return seams.auth.login(request);
-      }
-      if (request.method === "POST" && url.pathname === "/api/admin/logout") {
-        return seams.auth.logout(request);
-      }
-      // One gate for the whole admin surface: resolve the principal here and
-      // hand down a Tenant, so no handler can read a row without the filter.
-      if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
-        const principal = await seams.auth.authenticate(request);
-        if (principal === null) return Response.json({ error: "Sign in first." }, { status: 401 });
-        if (url.pathname === "/api/admin/chat") {
-          return adminChatRoute(request, env, seams, ctx, principal, chatOverrides);
-        }
+      const ingestDeps = {
+        db: env.DB,
+        docs: env.DOCS,
+        queue: env.INGEST_QUEUE,
+        retriever: vectorizeRetriever(env.VECTORS),
+        limits: seams.limits,
+        resolveRunDeps,
+      };
+      const resource = `${url.origin}/mcp`;
+      const operatorAuth = seams.auth.operator;
+      const adminDeps = (principal: Principal, operator?: OperatorPrincipal): AdminRouteDeps => {
         const tenant = forPrincipal(env.DB, principal);
-        return adminRoutes(request, url, {
+        return {
           visitorCheck: async () =>
             visitorCheckStatus(await resolveVisitorCheck(env, seams.visitorCheck)),
           tenant,
+          previewChat: (preview) =>
+            adminChatRoute(preview, env, seams, ctx, principal, chatOverrides),
+          operatorAccess: operatorAuth?.manage
+            ? (operation, input) =>
+                operatorAuth.manage?.(
+                  principal,
+                  operation,
+                  resource,
+                  input,
+                  operator?.credentialId,
+                ) ?? Promise.resolve(notFound())
+            : undefined,
           orgId: principal.orgId,
           docs: env.DOCS,
           queue: env.INGEST_QUEUE,
@@ -290,7 +286,53 @@ export function createApp(seams: Seams, options?: AppOptions): App {
             fetchImpl: options?.fetch,
             caps: options?.sync,
           },
+        };
+      };
+
+      if (url.pathname === "/mcp") {
+        return operatorMcp(request, seams.auth, resource, operatorCatalog, (operator) => ({
+          admin: adminDeps(operator.principal, operator),
+          ingest: ingestDeps,
+        }));
+      }
+      const oauth = await seams.auth.operator?.handle?.(request);
+      if (oauth) return oauth;
+      const ingestMatch =
+        /^\/v1\/ingest\/([^/]+)\/(documents|config|tests|test-runs|mcp-servers)$/.exec(
+          url.pathname,
+        );
+      if (ingestMatch?.[1] && ingestMatch[2]) {
+        const assistantId = decodeSegment(ingestMatch[1]);
+        if (assistantId === null) return notFound();
+        return ingestRoutes(request, assistantId, ingestMatch[2] as IngestResource, {
+          ...ingestDeps,
+          auth: seams.auth,
         });
+      }
+      if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          const origin = request.headers.get("origin");
+          if (origin !== url.origin) {
+            return Response.json({ error: "Forbidden." }, { status: 403 });
+          }
+        }
+      }
+      if (request.method === "POST" && url.pathname === "/api/admin/login") {
+        return seams.auth.login(request);
+      }
+      if (request.method === "POST" && url.pathname === "/api/admin/logout") {
+        return seams.auth.logout(request);
+      }
+      // One gate for the whole admin surface: resolve the principal here and
+      // hand down a Tenant, so no handler can read a row without the filter.
+      if (url.pathname === "/api/admin" || url.pathname.startsWith("/api/admin/")) {
+        const principal = await seams.auth.authenticate(request);
+        if (principal === null) return Response.json({ error: "Sign in first." }, { status: 401 });
+        const route = matchAdminOperation(request.method, url.pathname);
+        if (route && !(await allowsAdminOperation(seams.auth, principal, route.operation.name))) {
+          return Response.json({ error: "Access denied." }, { status: 403 });
+        }
+        return adminRoutes(request, url, adminDeps(principal));
       }
       if (
         (request.method === "GET" || request.method === "HEAD") &&
