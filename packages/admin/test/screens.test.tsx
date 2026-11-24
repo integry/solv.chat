@@ -956,7 +956,6 @@ describe("admin phase 1 screens", () => {
       "Tests",
       "Install",
       "Providers",
-      "MCP access",
     ]);
     for (const link of links) {
       expect(link.getAttribute("href")).toMatch(/^\/admin\//);

@@ -1000,6 +1000,12 @@ refresh and revocation. The hosted service owns its sign-in, token and org
 policy and may mount its hosted-only tools through `AppOptions.operatorTools`. The host can
 rate-limit calls through `OperatorAuth.checkCall` or at its ingress.
 
+The admin reads operator availability from its startup request,
+`GET /api/admin/assistants`. The response includes `operatorAccess: { manage: boolean }` when
+`AuthProvider.operator` is present. Without it, the sidebar omits **MCP access**
+and `/admin/operator-access` shows **Page not found**. The token and connected
+client sections appear only when `OperatorAuth.manage` is available.
+
 The existing one-time ingest key responses and newly issued personal tokens
 carry credentials only on issuance. Tool-server credentials and provider keys
 are write-only. The server filters tool discovery by scope and enforces the
@@ -2340,8 +2346,8 @@ Options accepted by `mountAdmin`:
   `/admin/…`, an optional `section` heading and an optional decorative `icon`).
   Built-in screens are grouped as _Monitor_ (Overview, Reports, Conversations,
   Gaps), _Build_ (Sources, Behaviour, Tools, Widget, Tests), _Go live_ (Install)
-  and _Settings_ (Providers); an item naming one of those joins it, other
-  sections follow the built-in ones.
+  and _Settings_ (Providers, MCP access when available). An item naming one of
+  those sections joins it. Other sections follow the built-in ones.
 - `extraScreens` — map from those ids to React components rendered in the main
   area with `{ assistant, assistantId, api }` (the same-origin API helpers used
   by built-in screens).
@@ -2361,7 +2367,8 @@ Options accepted by `mountAdmin`:
   renders it even when no assistant exists.
 - `defaultScreen` — the screen `/admin/` and unknown admin paths land on (a
   visible built-in id or an extra nav item id; default Overview). Unknown or
-  hidden ids throw at mount time.
+  hidden ids throw at mount time. If the configured default is MCP access
+  and the engine leaves it unavailable, the admin uses its normal fallback.
 
 The shell shows the selected assistant's publish state next to the switcher:
 "Live" (the saved draft is what visitors get), "Unpublished changes" or "Not

@@ -518,9 +518,11 @@ or from the **Install** screen after upgrading.
 
 ## Operator MCP server
 
-Open **Settings → MCP access** in the admin. Its connection URL ends in
-`/mcp`. MCP clients can manage assistants, drafts, publishing, content,
-tool servers, provider settings and tests. They can also review reports,
+The standard self-hosted engine offers operator access under **Settings → MCP
+access** in the admin. An embedded engine shows this screen when its host
+enables operator MCP. The connection URL ends in `/mcp`. MCP clients can
+manage assistants, drafts, publishing, content, tool servers, provider settings
+and tests. They can also review reports,
 conversations, feedback, traces, gaps and topics. The server supports the
 effects of `solv apply`, `solv test` and `solv push`.
 
@@ -537,9 +539,10 @@ If the client's published identity cannot be fetched, choose **Register
 automatically** in the connector settings. Sign in with the admin password,
 review the client name and requested access, and choose whether to connect.
 
-For CI or a client that sends its own headers, create a personal access token
-on the same admin screen. Copy it when it is issued and store it in your
-client's secret store. Send it as `Authorization: Bearer <token>`. Claude Code
+For CI or a client that sends its own headers, use **Personal access tokens**
+on the same admin screen when your engine offers token management. Copy the
+token when it is issued and store it in your client's secret store.
+Send it as `Authorization: Bearer <token>`. Claude Code
 also accepts `--header "Authorization: Bearer ${SOLV_MCP_TOKEN}"` on its
 `claude mcp add` command. Keep the actual token out of shared configuration
 and commit history. CLI ingest keys still work with `solv` and do not provide

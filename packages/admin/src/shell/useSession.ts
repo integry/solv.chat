@@ -1,11 +1,12 @@
+import type { OperatorAccessCapabilities } from "@solvchat/core";
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, getJson, logoutRequest, subscribeUnauthorized } from "../api/client.js";
-import type { Assistant } from "../api/types.js";
 
 export type SessionState = "loading" | "signed-in" | "signed-out" | "unavailable";
 
 export interface UseSessionResult {
   state: SessionState;
+  operatorAccess: OperatorAccessCapabilities | undefined;
   refresh: () => void;
   signOut: () => Promise<void>;
 }
@@ -18,6 +19,7 @@ export interface UseSessionResult {
  */
 export function useSession(customSignOut?: () => void | Promise<void>): UseSessionResult {
   const [state, setState] = useState<SessionState>("loading");
+  const [operatorAccess, setOperatorAccess] = useState<OperatorAccessCapabilities>();
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
@@ -31,9 +33,13 @@ export function useSession(customSignOut?: () => void | Promise<void>): UseSessi
     const controller = new AbortController();
     setState("loading");
 
-    getJson<{ assistants: Assistant[] }>("/api/admin/assistants", controller.signal)
-      .then(() => {
+    getJson<{ operatorAccess?: OperatorAccessCapabilities }>(
+      "/api/admin/assistants",
+      controller.signal,
+    )
+      .then((data) => {
         if (!controller.signal.aborted) {
+          setOperatorAccess(data.operatorAccess);
           setState("signed-in");
         }
       })
@@ -61,5 +67,5 @@ export function useSession(customSignOut?: () => void | Promise<void>): UseSessi
     setState("signed-out");
   }, [customSignOut]);
 
-  return { state, refresh, signOut };
+  return { state, operatorAccess, refresh, signOut };
 }

@@ -1,3 +1,4 @@
+import type { OperatorAccessCapabilities } from "@solvchat/core";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,7 +24,13 @@ function makeAssistant(id: string, name: string): Assistant {
   };
 }
 
-function installMockFetch(options: { signedIn?: boolean; assistants?: Assistant[] } = {}) {
+function installMockFetch(
+  options: {
+    signedIn?: boolean;
+    assistants?: Assistant[];
+    operatorAccess?: OperatorAccessCapabilities;
+  } = {},
+) {
   let signedIn = options.signedIn ?? true;
   const assistants = options.assistants ?? [makeAssistant("ast_1", "Docs Bot")];
   let forceNext401 = false;
@@ -39,7 +46,17 @@ function installMockFetch(options: { signedIn?: boolean; assistants?: Assistant[
     }
 
     if (path === "/api/admin/assistants") {
-      return Response.json({ assistants });
+      return Response.json({ assistants, operatorAccess: options.operatorAccess });
+    }
+
+    if (path === "/api/admin/operator-tokens") {
+      return options.operatorAccess?.manage
+        ? Response.json({ access: [] })
+        : Response.json({ error: "Not found." }, { status: 404 });
+    }
+
+    if (path.endsWith("/install")) {
+      return Response.json({ allowedOrigins: [], snippet: "" });
     }
 
     if (path.endsWith("/overview")) {
@@ -152,7 +169,7 @@ describe("admin extension point", () => {
   });
 
   it("mounts with no options and renders identical navigation and routes", async () => {
-    installMockFetch();
+    installMockFetch({ operatorAccess: { manage: true } });
     mountIntoDom();
 
     await waitFor(() => {
@@ -172,6 +189,43 @@ describe("admin extension point", () => {
       (el) => el.textContent,
     );
     expect(sectionLabels).toEqual(["Monitor", "Build", "Go live", "Settings"]);
+  });
+
+  it("omits MCP access for an embedding host without operator auth", async () => {
+    const { fetchMock } = installMockFetch();
+    window.history.replaceState(null, "", "/admin/operator-access");
+    mountIntoDom({ signIn: CustomSignIn });
+
+    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "MCP access" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "MCP access" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("link", { name: "Install" }));
+    expect(await screen.findByText("Tell visitors what the chat remembers")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "MCP access" })).toBeNull();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/admin/operator-"))).toBe(
+      false,
+    );
+  });
+
+  it.each([false, true])("shows MCP access with token management set to %s", async (manage) => {
+    const { fetchMock } = installMockFetch({ assistants: [], operatorAccess: { manage } });
+    mountIntoDom();
+
+    fireEvent.click(await screen.findByRole("link", { name: "MCP access" }));
+    expect(await screen.findByRole("heading", { name: "MCP access" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/admin/operator-access");
+    expect(screen.getByRole("button", { name: "Copy Connector URL" })).toBeTruthy();
+    if (manage) {
+      expect(screen.getByRole("heading", { name: "Personal access tokens" })).toBeTruthy();
+      expect(await screen.findByText("No tokens or connected clients yet.")).toBeTruthy();
+    } else {
+      expect(screen.queryByRole("heading", { name: "Personal access tokens" })).toBeNull();
+      expect(screen.queryByRole("heading", { name: "Active access" })).toBeNull();
+    }
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/admin/operator-"))).toBe(
+      manage,
+    );
   });
 
   it("adds an extra nav item in the given section, routes to it, and passes props", async () => {
@@ -306,7 +360,7 @@ describe("admin extension point", () => {
   });
 
   it("hideScreens removes the nav item and its route", async () => {
-    installMockFetch();
+    installMockFetch({ operatorAccess: { manage: true } });
     window.history.replaceState(null, "", "/admin/providers");
 
     mountIntoDom({

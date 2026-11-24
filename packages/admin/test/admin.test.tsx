@@ -721,7 +721,6 @@ describe("admin app", () => {
       "Tests",
       "Install",
       "Providers",
-      "MCP access",
     ]);
 
     for (const link of links) {

@@ -38,6 +38,8 @@ export interface NavItem {
 /** Built-in sidebar groups, in order. Host sections are listed after them. */
 export const NAV_GROUPS = ["Monitor", "Build", "Go live", "Settings"] as const;
 
+const OPERATOR_ACCESS_PATH = "/admin/operator-access";
+
 export const NAV_ITEMS: readonly NavItem[] = [
   { id: "overview", label: "Overview", path: "/admin/overview", section: "Monitor" },
   { id: "reports", label: "Reports", path: "/admin/reports", section: "Monitor" },
@@ -58,7 +60,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   {
     id: "operator-access",
     label: "MCP access",
-    path: "/admin/operator-access",
+    path: OPERATOR_ACCESS_PATH,
     section: "Settings",
   },
 ];
@@ -110,7 +112,7 @@ export function matchScreen(
         : first.id;
   if (normalized === "/admin" || normalized === "/") return fallback;
   const found = navItems.find((item) => item.path === normalized);
-  return found ? found.id : fallback;
+  return found ? found.id : normalized === OPERATOR_ACCESS_PATH ? null : fallback;
 }
 
 /**

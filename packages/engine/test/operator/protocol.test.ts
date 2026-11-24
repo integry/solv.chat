@@ -1,4 +1,4 @@
-import { env, fetchMock, SELF } from "cloudflare:test";
+import { createExecutionContext, env, fetchMock, SELF } from "cloudflare:test";
 import {
   type OAuthClientProvider,
   UnauthorizedError,
@@ -12,6 +12,7 @@ import type {
 import { describe, expect, it } from "vitest";
 import { SINGLE_ORG_ID } from "../../src/seams/open/passwordAuth.js";
 import { sha256Hex } from "../../src/util/crypto.js";
+import { createTestApp } from "../helpers/app.js";
 
 const ORIGIN = "https://operator.example";
 const RESOURCE = `${ORIGIN}/mcp`;
@@ -59,7 +60,44 @@ function rawMcp(
   });
 }
 
+describe("operator access in an embedding host", () => {
+  it.each([false, true])(
+    "advertises an operator auth seam only if present (%s)",
+    async (enabled) => {
+      const app = createTestApp({
+        auth: {
+          operator: enabled
+            ? {
+                authenticate: async () => null,
+                metadataUrl: () => `${ORIGIN}/metadata`,
+              }
+            : undefined,
+        },
+      });
+      const request = (path: string) =>
+        app.fetch(new Request(ORIGIN + path), env, createExecutionContext());
+      const startup = await request("/api/admin/assistants");
+      expect(startup.status).toBe(200);
+      const data = await startup.json();
+      if (enabled) {
+        expect(data).toMatchObject({ operatorAccess: { manage: false } });
+      } else {
+        expect(data).not.toHaveProperty("operatorAccess");
+      }
+      expect((await request("/api/admin/operator-tokens")).status).toBe(404);
+      expect((await request("/mcp")).status).toBe(enabled ? 401 : 404);
+    },
+  );
+});
+
 describe("operator MCP protocol in the open Worker", () => {
+  it("advertises operator access and token management in admin startup", async () => {
+    const cookie = await adminCookie();
+    expect(await (await admin("/assistants", cookie)).json()).toMatchObject({
+      operatorAccess: { manage: true },
+    });
+  });
+
   it("initializes with the SDK, paginates, calls a tool, and distinguishes transport and tool errors", async () => {
     const cookie = await adminCookie();
     const { token, id } = await personalToken(cookie, "full");

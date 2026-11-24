@@ -29,7 +29,32 @@ function CopyField({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function OperatorAccess() {
+export function OperatorAccess({ manage }: { manage: boolean }) {
+  const endpoint = `${window.location.origin}/mcp`;
+  // https://code.claude.com/docs/en/mcp#option-1-add-a-remote-http-server
+  const claude = `claude mcp add --transport http solv-chat '${endpoint}'`;
+
+  return (
+    <div className="screen operator-screen">
+      <PageHeader
+        title="MCP access"
+        description="Connect a client to manage solv.chat or review its activity."
+      />
+      <section className="card operator-card" aria-labelledby="mcp-connect">
+        <h2 id="mcp-connect">Connect an MCP client</h2>
+        <p className="muted">
+          Use the connection URL in Claude Desktop or claude.ai, or run the command in Claude Code.
+          Sign in with your admin password and review the access request.
+        </p>
+        <CopyField label="Connector URL" value={endpoint} />
+        <CopyField label="Claude Code command" value={claude} />
+      </section>
+      {manage && <OperatorTokenManagement />}
+    </div>
+  );
+}
+
+function OperatorTokenManagement() {
   const access = useResource<{ access: Access[] }>(ACCESS_PATH);
   const [name, setName] = useState("");
   const [scope, setScope] = useState<Scope>("read");
@@ -38,9 +63,6 @@ export function OperatorAccess() {
   const [error, setError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<Access | null>(null);
   const [revokeError, setRevokeError] = useState<string | null>(null);
-  const endpoint = `${window.location.origin}/mcp`;
-  // https://code.claude.com/docs/en/mcp#option-1-add-a-remote-http-server
-  const claude = `claude mcp add --transport http solv-chat '${endpoint}'`;
 
   async function createToken(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -75,21 +97,7 @@ export function OperatorAccess() {
   }
 
   return (
-    <div className="screen operator-screen">
-      <PageHeader
-        title="MCP access"
-        description="Connect a client to manage solv.chat or review its activity."
-      />
-      <section className="card operator-card" aria-labelledby="mcp-connect">
-        <h2 id="mcp-connect">Connect an MCP client</h2>
-        <p className="muted">
-          Use the connection URL in Claude Desktop or claude.ai, or run the command in Claude Code.
-          Sign in with your admin password and review the access request.
-        </p>
-        <CopyField label="Connector URL" value={endpoint} />
-        <CopyField label="Claude Code command" value={claude} />
-      </section>
-
+    <>
       <section className="card operator-card" aria-labelledby="mcp-personal-tokens">
         <h2 id="mcp-personal-tokens">Personal access tokens</h2>
         <p className="muted">
@@ -209,6 +217,6 @@ export function OperatorAccess() {
           setRevokeError(null);
         }}
       />
-    </div>
+    </>
   );
 }

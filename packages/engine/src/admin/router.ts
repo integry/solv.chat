@@ -1,4 +1,4 @@
-import { isPlainObject } from "@solvchat/core";
+import { isPlainObject, type OperatorAccessCapabilities } from "@solvchat/core";
 import type { VisitorCheckStatus } from "../chat/visitorCheck.js";
 import type { Tenant } from "../db/tenant.js";
 import { expectedVersionConfig, type VersionRow } from "../db/versions.js";
@@ -91,6 +91,7 @@ export interface AdminRouteDeps {
    */
   visitorCheck?: (() => Promise<VisitorCheckStatus>) | undefined;
   previewChat?: ((request: Request) => Promise<Response>) | undefined;
+  operatorEnabled?: boolean;
   operatorAccess?:
     | ((operation: "list" | "create" | "revoke", input?: unknown) => Promise<Response>)
     | undefined;
@@ -251,9 +252,13 @@ function route<const Name extends string>(
 export const adminOperations = [
   route("list_assistants", "GET", "/assistants", async ({ deps }) => {
     const { tenant } = deps;
+    const operatorAccess: OperatorAccessCapabilities | undefined = deps.operatorEnabled
+      ? { manage: Boolean(deps.operatorAccess) }
+      : undefined;
     return Response.json({
       assistants: await listAssistants(tenant),
       ...(deps.visitorCheck ? { visitorCheck: await deps.visitorCheck() } : {}),
+      ...(operatorAccess ? { operatorAccess } : {}),
     });
   }),
   route("create_assistant", "POST", "/assistants", async ({ request, deps }) => {

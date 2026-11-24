@@ -245,6 +245,7 @@ export function createApp(seams: Seams, options?: AppOptions): App {
           tenant,
           previewChat: (preview) =>
             adminChatRoute(preview, env, seams, ctx, principal, chatOverrides),
+          operatorEnabled: Boolean(operatorAuth),
           operatorAccess: operatorAuth?.manage
             ? (operation, input) =>
                 operatorAuth.manage?.(
