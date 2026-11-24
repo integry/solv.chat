@@ -55,10 +55,104 @@ describe("expanding to a side panel", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    vi.useRealTimers();
     vi.restoreAllMocks();
     document.body.replaceChildren();
     root().removeAttribute("style");
   });
+
+  it.each([
+    { hint: "side", interaction: "none", finalLayout: "side" },
+    { hint: "", interaction: "none", finalLayout: "side" },
+    { hint: "", interaction: "focus expand", finalLayout: "side" },
+    { hint: "side", interaction: "collapse", finalLayout: null },
+    { hint: "", interaction: "expand and collapse", finalLayout: null },
+    { hint: "", interaction: "resize", finalLayout: null },
+    { hint: "", interaction: "close and reopen", finalLayout: null },
+  ])(
+    "applies late side settings with hint '$hint' and interaction '$interaction'",
+    async ({ hint, interaction, finalLayout }) => {
+      vi.useFakeTimers();
+      let respond!: (response: Response) => void;
+      const settings = new Promise<Response>((resolve) => {
+        respond = resolve;
+      });
+      globalThis.fetch = vi.fn(() => settings);
+      sessionStorage.setItem(
+        "solv-chat-open:pk_expand",
+        JSON.stringify({
+          conversationId: "conv_previous",
+          open: false,
+          tabId: "previous-tab",
+          tabOnly: true,
+          turns: [{ role: "user", text: "Where are the trail maps?" }],
+        }),
+      );
+      const el = document.createElement("solv-chat");
+      el.setAttribute("assistant", "pk_expand");
+      if (hint) {
+        el.setAttribute("opens-as", hint);
+        el.setAttribute("launcher-label", "Gear help");
+        el.setAttribute("launcher-position", "left");
+        el.setAttribute("launcher-accent-color", "#126146");
+        el.setAttribute("launcher-shortcut", "/");
+      }
+      document.body.append(el);
+      const r = shadow(el);
+      const launcher = q<HTMLButtonElement>(r, ".solv-launcher");
+      const input = q<HTMLTextAreaElement>(r, ".solv-input");
+      const title = q<HTMLElement>(r, ".solv-title");
+      const layout = () => el.getAttribute("data-layout");
+      launcher.click();
+      expect(layout()).toBe(hint || null);
+      expect(input.disabled).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(layout()).toBe(hint || null);
+      expect(title.textContent).toBe("Ask a question");
+      expect(r.activeElement).toBe(input);
+      if (hint) {
+        expect(launcher.textContent).toBe("Gear help/");
+        expect(launcher.getAttribute("aria-keyshortcuts")).toBe("/");
+        expect(el.style.getPropertyValue("--solv-accent")).toBe("#126146");
+        expect(root().style.getPropertyValue("margin-left")).toBe("460px");
+      }
+      if (interaction === "expand and collapse") q<HTMLButtonElement>(r, ".solv-expand").click();
+      if (interaction.includes("collapse")) q<HTMLButtonElement>(r, ".solv-collapse").click();
+      if (interaction === "resize") {
+        happy.setViewport({ width: 899, height: 800 });
+        await vi.advanceTimersByTimeAsync(0);
+        happy.setViewport({ width: 1280, height: 800 });
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      if (interaction === "close and reopen") {
+        q<HTMLButtonElement>(r, ".solv-close").click();
+        launcher.click();
+      }
+      input.focus();
+      input.value = "An unsent follow-up";
+      input.setSelectionRange(3, 8);
+      if (interaction === "focus expand") q<HTMLButtonElement>(r, ".solv-expand").focus();
+      const previousMessage = q(r, ".solv-bubble--user");
+      respond(
+        Response.json({
+          title: "Trail Shop Help",
+          opensAs: "side",
+          position: "left",
+          launcherLabel: "Trail chat",
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(layout()).toBe(finalLayout);
+      expect(title.textContent).toBe("Trail Shop Help");
+      expect(launcher.textContent).toBe("Trail chat");
+      expect(r.activeElement).toBe(interaction === "focus expand" ? q(r, ".solv-collapse") : input);
+      expect(input.value).toBe("An unsent follow-up");
+      expect([input.selectionStart, input.selectionEnd]).toEqual([3, 8]);
+      expect(q(r, ".solv-bubble--user")).toBe(previousMessage);
+      expect(previousMessage.textContent).toBe("Where are the trail maps?");
+    },
+  );
 
   it("expands beside the page, narrows the page by the column, and collapses back exactly", async () => {
     serveConfig({ title: "Docs" });

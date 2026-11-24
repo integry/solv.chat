@@ -348,7 +348,8 @@ export class SolvChat extends HTMLElement {
   #configUrl: string | undefined;
   #triggerEvents: AbortController | undefined;
   #reloadConfigOnConnect = false;
-  #openingWithConfig: { mode: WidgetOpenMode | undefined } | null = null;
+  /** The published opening mode can still take effect after a timeout. */
+  #openingWithConfig: { mode: WidgetOpenMode | undefined; resized?: boolean } | null = null;
   #pendingShortcuts = new Set<WidgetShortcut>();
   /** Set by `preview()`: the element then loads and sends nothing. */
   #previewing = false;
@@ -395,6 +396,10 @@ export class SolvChat extends HTMLElement {
   };
   #wideQuery: MediaQueryList | null = null;
   #onWideChange = (): void => {
+    if (this.#openingWithConfig) {
+      if (this.#configReady) this.#openingWithConfig = null;
+      else this.#openingWithConfig.resized = true;
+    }
     this.#applyLayout();
     this.#saveDock();
   };
@@ -975,7 +980,7 @@ export class SolvChat extends HTMLElement {
     }
     const url = this.#configUrl;
     if (!url) {
-      this.#applyConfig(DEFAULT_CONFIG);
+      this.#applyFallbackConfig();
       return Promise.resolve();
     }
     // Let the browser attach its own validator, avoiding a CORS preflight.
@@ -1003,18 +1008,40 @@ export class SolvChat extends HTMLElement {
         if (!isCurrent()) return;
         this.#configNeedsSaving = true;
         if (this.#open) this.#saveConfig();
+        return;
       }
     } catch {
       // An unreachable endpoint follows the same fallback as a refused read.
     }
-    if (isCurrent() && !this.#configReady) this.#applyConfig(DEFAULT_CONFIG);
+    if (!isCurrent()) return;
+    if (!this.#configReady) this.#applyFallbackConfig();
+    else if (this.#openingWithConfig) {
+      this.#openingWithConfig = null;
+      this.#applyLayout();
+    }
+  }
+
+  #firstPaintConfig(): WidgetPublicConfig {
+    const accent = this.getAttribute("launcher-accent-color")?.trim();
+    return {
+      ...DEFAULT_CONFIG,
+      opensAs: this.getAttribute("opens-as") === "side" ? "side" : "panel",
+      launcherLabel: this.getAttribute("launcher-label")?.trim() || DEFAULT_CONFIG.launcherLabel,
+      position: this.getAttribute("launcher-position") === "left" ? "left" : "right",
+      accentColor: accent && HEX_COLOR_RE.test(accent) ? accent : DEFAULT_CONFIG.accentColor,
+      keyboardShortcut: this.#keyboardShortcut() ?? DEFAULT_CONFIG.keyboardShortcut,
+    };
+  }
+
+  #applyFallbackConfig(waitingForResponse = false): void {
+    this.#applyConfig(this.#firstPaintConfig(), waitingForResponse);
   }
 
   #showLoading(): void {
     this.#configReady = false;
     this.#configMissing = false;
     this.#configNeedsSaving = false;
-    this.#config = DEFAULT_CONFIG;
+    this.#config = this.#firstPaintConfig();
     this.#panel.setAttribute("data-loading", "");
     this.#titleEl.textContent = "Loading chat…";
     this.#messagesEl.hidden = true;
@@ -1022,11 +1049,7 @@ export class SolvChat extends HTMLElement {
     this.#inputEl.placeholder = "";
     this.#inputEl.disabled = true;
     this.#sendBtn.disabled = true;
-    const accent = this.getAttribute("launcher-accent-color")?.trim();
-    this.#applyLauncherStyle(
-      this.getAttribute("launcher-position") === "left" ? "left" : "right",
-      accent && HEX_COLOR_RE.test(accent) ? accent : DEFAULT_CONFIG.accentColor,
-    );
+    this.#applyLauncherStyle(this.#config.position, this.#config.accentColor);
     this.#updateLauncher();
     this.#watchShortcut();
     this.#applyLayout();
@@ -1056,9 +1079,15 @@ export class SolvChat extends HTMLElement {
     }
   }
 
-  #applyConfig(config: WidgetPublicConfig): void {
+  #applyConfig(config: WidgetPublicConfig, waitingForResponse = false): void {
+    const opening = this.#openingWithConfig;
+    this.#openingWithConfig = waitingForResponse && !opening?.resized ? opening : null;
     const previous = this.#configReady ? this.#config : null;
-    if (previous && JSON.stringify(previous) === JSON.stringify(config)) return;
+    if (previous && JSON.stringify(previous) === JSON.stringify(config)) {
+      if (opening) this.#applyLayout();
+      return;
+    }
+    const focused = opening && previous ? this.#root.activeElement : null;
     this.#config = config;
     this.#configReady = true;
     this.#updateLauncher();
@@ -1082,10 +1111,8 @@ export class SolvChat extends HTMLElement {
     ) {
       this.#renderSuggestions();
     }
-    if (this.#openingWithConfig) {
-      const { mode } = this.#openingWithConfig;
-      this.#openingWithConfig = null;
-      this.#openPanel(false, this.#expandedOnOpen(mode) ?? false);
+    if (opening) {
+      this.#openPanel(false, this.#expandedOnOpen(opening.mode) ?? false);
     } else {
       this.#applyLayout();
     }
@@ -1094,6 +1121,22 @@ export class SolvChat extends HTMLElement {
       this.#saveDock();
     }
     if (!previous && this.#open && this.#root.activeElement === this.#closeBtn) this.#focusInput();
+    else if (
+      opening &&
+      this.#open &&
+      focused instanceof HTMLElement &&
+      (!focused.isConnected || focused.hidden)
+    ) {
+      const layoutButton = this.#expanded ? this.#collapseBtn : this.#expandBtn;
+      if (
+        (focused === this.#expandBtn || focused === this.#collapseBtn) &&
+        layoutButton.isConnected
+      ) {
+        layoutButton.focus({ preventScroll: true });
+      } else {
+        this.#focusInput();
+      }
+    }
     if (this.#interacted) this.#visitorInteracted();
     const shortcutPressed = this.#pendingShortcuts.has(config.keyboardShortcut);
     this.#pendingShortcuts.clear();
@@ -1216,7 +1259,7 @@ export class SolvChat extends HTMLElement {
     this.#configOpenWait ??= this.#waitForConfig(loading, CONFIG_OPEN_WAIT_MS);
     await this.#configOpenWait;
     if (this.isConnected && connection === this.#connection && this.#open && !this.#configReady) {
-      this.#applyConfig(DEFAULT_CONFIG);
+      this.#applyFallbackConfig(true);
     }
   }
 
@@ -1268,6 +1311,7 @@ export class SolvChat extends HTMLElement {
   /** Expands to the side panel or collapses back, keeping focus in the panel. */
   #setExpanded(expanded: boolean): void {
     if (!this.#config.allowExpand || !this.#open || this.#expanded === expanded) return;
+    this.#openingWithConfig = null;
     this.#expanded = expanded;
     this.#preferredMode = expanded ? "side" : "panel";
     this.#panel.removeAttribute("data-opened-while-loading");
@@ -1300,7 +1344,8 @@ export class SolvChat extends HTMLElement {
     if (!this.#initialized) return;
     const allow = this.#configReady && this.#config.allowExpand;
     const opening = this.#openingWithConfig;
-    const expanded = opening ? this.#expandedOnOpen(opening.mode) : this.#expanded;
+    const expanded =
+      opening && !this.#configReady ? this.#expandedOnOpen(opening.mode) : this.#expanded;
     const wanted = this.#open && expanded === true && (allow || !this.#configReady);
     this.#panel.toggleAttribute("data-layout-pending", this.#open && expanded === undefined);
     const layout: Layout = wanted ? (this.#isWide() ? "side" : "full") : "panel";
@@ -2004,7 +2049,7 @@ export class SolvChat extends HTMLElement {
         if (this.#previewing || this.#configMissing || assistant !== this.#assistant()) {
           return new Error(ASSISTANT_UNAVAILABLE);
         }
-        if (!this.#configReady) this.#applyConfig(DEFAULT_CONFIG);
+        if (!this.#configReady) this.#applyFallbackConfig(true);
       }
       return await this.#withConversationLock(assistant, { ifAvailable: true }, async (lock) => {
         if (controller.signal.aborted) return new Error(RESPONSE_INTERRUPTED);
@@ -2353,7 +2398,7 @@ export class SolvChat extends HTMLElement {
     try {
       await this.#waitForConfig(this.#loadConfig(), CONFIG_RESUME_WAIT_MS);
       if (!this.isConnected || signal.aborted) return;
-      if (!this.#configReady) this.#applyConfig(DEFAULT_CONFIG);
+      if (!this.#configReady) this.#applyFallbackConfig(true);
       if (this.#configLoading) {
         // Keep the turn recoverable across navigation if the fallback attempt
         // still needs to wait for configuration and a visitor session.

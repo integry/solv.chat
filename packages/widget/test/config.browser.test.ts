@@ -99,6 +99,7 @@ describe.skipIf(chrome === null)("published configuration in Chromium", () => {
         res.writeHead(404).end();
         return;
       }
+      const hasSideHint = key === "pk_slow" || key === "pk_side_timeout";
       res.writeHead(200, { "content-type": "text/html" });
       res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -115,8 +116,8 @@ button { font: inherit; padding: 8px 14px; }
         req.url?.split("?")[0]?.endsWith("/bare")
           ? ""
           : `launcher-label="Gear help" launcher-position="left" launcher-accent-color="#126146"
-  launcher-shortcut="${key === "pk_slow" ? "/" : "none"}"
-  ${key === "pk_slow" ? 'opens-as="side"' : ""}`
+  launcher-shortcut="${hasSideHint ? "/" : "none"}"
+  ${hasSideHint ? 'opens-as="side"' : ""}`
       }></solv-chat>
 </body></html>`);
     });
@@ -135,6 +136,7 @@ button { font: inherit; padding: 8px 14px; }
     await browser.cdp.send("Page.addScriptToEvaluateOnNewDocument", {
       source: `
         window.framesSeen = [];
+        window.hiddenPanelFrames = 0;
         window.launcherFrames = [];
         function sample() {
           const widget = document.querySelector("solv-chat");
@@ -173,6 +175,8 @@ button { font: inherit; padding: 8px 14px; }
             if (JSON.stringify(frame) !== JSON.stringify(window.framesSeen.at(-1))) {
               window.framesSeen.push(frame);
             }
+          } else if (window.framesSeen.length > 0) {
+            window.hiddenPanelFrames++;
           }
           requestAnimationFrame(sample);
         }
@@ -272,6 +276,45 @@ button { font: inherit; padding: 8px 14px; }
     expect(content[0]?.text).toContain(CONFIG.suggestedQuestions[0]);
     expect(hits(key)).toHaveLength(1);
     await capture("widget-published.png");
+  }, 15_000);
+
+  it("keeps every frame docked through the settings timeout and late response", async () => {
+    const key = "pk_side_timeout";
+    config = { ...CONFIG, launcherLabel: "Gear help", keyboardShortcut: "/", opensAs: "side" };
+    let release = () => {};
+    configGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await navigate(`/${key}/first`);
+      await evaluate(`${launcher}.click()`);
+      await showTitle("Loading chat…");
+      await showTitle("Ask a question");
+      expect((await frames()).at(-1)).toMatchObject({
+        accent: CONFIG.accentColor,
+        inputDisabled: false,
+      });
+      await capture("widget-docked-timeout.png");
+
+      release();
+      await showTitle(CONFIG.title);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const seen = await frames();
+      expect(seen.map(({ title }) => title)).toEqual([
+        "Loading chat…",
+        "Ask a question",
+        CONFIG.title,
+      ]);
+      for (const frame of seen) {
+        expect(frame).toMatchObject({ layout: "side", bounds: [0, 0, 460, 860], hostLeft: 460 });
+      }
+      expect(await evaluate("window.hiddenPanelFrames")).toBe(0);
+      expect(hits(key)).toHaveLength(1);
+      await capture("widget-docked-late-settings.png");
+    } finally {
+      configGate = undefined;
+      release();
+    }
   }, 15_000);
 
   it("honours the first keypress on a fresh embed without attributes, even during the config read", async () => {

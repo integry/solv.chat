@@ -693,7 +693,7 @@ document.querySelector("button").onclick = () => {
         async () => (await q('r.querySelector(".solv-title").textContent')) === "Late settings",
         "late settings",
       );
-      expect(await layout()).toBeNull();
+      expect(await layout()).toBe("side");
     } finally {
       release();
       configGate = null;
@@ -754,7 +754,7 @@ document.querySelector("button").onclick = () => {
       release();
       await waitForVisitorCheck();
       expect(await q('r.querySelector(".solv-title").textContent')).toBe("Fieldnotes assistant");
-      expect(await layout()).toBeNull();
+      expect(await layout()).toBe("side");
       expect(submissions).toHaveLength(1);
       await click(".solv-check iframe", true);
       await waitFor(async () => submissions.length === 2, "chat with a session");

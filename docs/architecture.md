@@ -1955,10 +1955,13 @@ colours and disabled input. The frame uses the opening layout when known
 from the embed, the caller's requested mode or the tab. When the layout is
 unknown, a compact loading frame keeps the host page in place. The layout,
 title, greeting, colour and suggestions are applied together before the
-first content paint. A failed request uses the existing defaults and chat
-error handling. After a three-second wait on open, the fallback also lets
-the visitor continue while a stalled request runs. Late settings can update
-that fallback. A late `opensAs` value can take effect on the next open.
+first content paint. A failed request uses the defaults with the embed's
+first-paint attributes and the existing chat error handling. After a
+three-second wait on open, the same fallback lets the visitor continue
+while the request runs. Published settings apply when they arrive. The open
+panel adopts the published opening mode if the visitor has left the layout
+alone. Expanding, collapsing, closing or resizing across the side-panel
+breakpoint leaves the visitor's current layout choice in effect.
 
 A successful response is kept in sessionStorage once the panel is open,
 scoped to the engine and assistant on the embedding origin. The widget can
