@@ -195,6 +195,11 @@ textarea:focus-visible {
   border-right: 1px solid var(--solv-border);
 }
 
+/* Separate the dock from the viewport scrollbar on document-scrolling sites. */
+:host([data-layout="side"]:not([data-position="left"])) .solv-panel {
+  border-right: 1px solid var(--solv-border);
+}
+
 /* Both edges, so the left-widget rule (right: auto) cannot leave the host
    sized to its contents. */
 :host([data-layout="full"]),
@@ -622,9 +627,10 @@ textarea:focus-visible {
 
 .solv-suggestions {
   display: flex;
+  flex: none;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 0 14px 10px;
+  margin-block-start: 2px;
 }
 
 .solv-suggestions[hidden] {
@@ -632,6 +638,7 @@ textarea:focus-visible {
 }
 
 .solv-chip {
+  min-width: 0;
   padding: 6px 10px;
   border: 1px solid var(--solv-border);
   border-radius: 9999px;
@@ -640,7 +647,8 @@ textarea:focus-visible {
   font: inherit;
   font-size: 12px;
   cursor: pointer;
-  text-align: left;
+  text-align: start;
+  overflow-wrap: anywhere;
 }
 
 .solv-chip:hover {
@@ -667,7 +675,8 @@ textarea:focus-visible {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 12px 12px 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--solv-border);
   background: var(--solv-bg);
 }

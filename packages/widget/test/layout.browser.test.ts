@@ -56,6 +56,7 @@ describe.skipIf(chrome === null)("panel layout and streaming in Chromium", () =>
   let toolFirst = false;
   let holdChatStream = false;
   let widgetOptions: Record<string, unknown> = {};
+  let suggestedQuestions: string[] = [];
   let visitorCheck = false;
   let pageActions = false;
   let configGate: Promise<void> | null = null;
@@ -212,7 +213,7 @@ Authorization: Bearer YOUR_API_KEY</pre>
         res.writeHead(200, { "content-type": "application/json", ...cors });
         const config = JSON.stringify({
           widget: { title: "Docs", position, ...widgetOptions },
-          behaviour: { greeting: "Hi", suggestedQuestions: [] },
+          behaviour: { greeting: "Hi", suggestedQuestions },
           visitorCheck,
           actions: { builtins: pageActions, allowedOrigins: [hostOrigin()] },
         });
@@ -308,6 +309,7 @@ document.querySelector("button").onclick = () => {
 
   afterEach(() => {
     widgetOptions = {};
+    suggestedQuestions = [];
     visitorCheck = false;
     pageActions = false;
     holdChatStream = false;
@@ -373,6 +375,73 @@ document.querySelector("button").onclick = () => {
   const focus = () => q<string | null>("r.activeElement?.id ?? null");
   const pendingResume = () =>
     page_<unknown>(`JSON.parse(sessionStorage.getItem("solv-chat-open:pk_layout")).pendingResume`);
+
+  it("shows starter questions under the greeting, hides them on send and restore, and brings them back on reset", async () => {
+    await viewport(1440, 900);
+    widgetOptions = { opensAs: "side" };
+    suggestedQuestions = ["How do I search?", "Where are my API keys?"];
+    await open();
+    await q('r.querySelector(".solv-launcher").click()');
+    expect(await layout()).toBe("side");
+    expect(
+      await q(`(() => {
+        const messages = r.querySelector(".solv-messages");
+        const suggestions = messages.firstElementChild.nextElementSibling;
+        return Array.from(suggestions.querySelectorAll("button"), (button) => button.textContent);
+      })()`),
+    ).toEqual(suggestedQuestions);
+    const greeting = await rect(".solv-bubble--assistant");
+    const chip = await rect(".solv-chip");
+    expect(Math.abs(chip.top - greeting.bottom - 12)).toBeLessThanOrEqual(2);
+    const panel = await rect(".solv-panel");
+    const input = await rect(".solv-input");
+    expect(panel.bottom - input.bottom).toBe(16);
+    expect((await rect(".solv-send")).bottom).toBe(input.bottom);
+
+    await click(".solv-chip", true);
+    await waitFor(
+      () => q<boolean>('r.querySelector(".solv-suggestions").hidden'),
+      "hidden starter questions",
+    );
+    await waitFor(() => q<boolean>('!!r.querySelector(".solv-feedback")'), "answer done");
+    await open("/other", false);
+    expect(await q('r.querySelector(".solv-suggestions").hidden')).toBe(true);
+    await click(".solv-new", true);
+    await waitFor(
+      () => q<boolean>('!r.querySelector(".solv-suggestions").hidden'),
+      "reset starter questions",
+    );
+    expect(await q('r.querySelectorAll(".solv-chip").length')).toBe(suggestedQuestions.length);
+  });
+
+  it("keeps the greeting in view with overflowing, wrapping RTL starter questions", async () => {
+    await viewport(380, 800);
+    suggestedQuestions = Array.from(
+      { length: 8 },
+      (_, index) => `${index + 1}. ${"كيف أبحث في مستندات مساحة العمل؟ ".repeat(5)}`,
+    );
+    const release = delayConfig();
+    try {
+      await open("/?css=html%7Bdirection%3Artl%7D", true, false);
+      await q('r.querySelector(".solv-launcher").click()');
+    } finally {
+      release();
+    }
+    await waitFor(() => q<boolean>('!!r.querySelector(".solv-chip")'), "starter questions");
+    expect(await q('r.querySelectorAll(".solv-chip").length')).toBe(8);
+    expect(await q('getComputedStyle(r.querySelector(".solv-chip")).direction')).toBe("rtl");
+    expect(
+      await q(`(() => {
+        const { scrollWidth, clientWidth, scrollHeight, clientHeight, scrollTop } =
+          r.querySelector(".solv-messages");
+        return scrollWidth === clientWidth && scrollHeight > clientHeight && scrollTop === 0;
+      })()`),
+    ).toBe(true);
+    const input = await rect(".solv-input");
+    await q('(r.querySelector(".solv-chip:last-child").scrollIntoView(), true)');
+    expect(await q('r.querySelector(".solv-messages").scrollTop')).toBeGreaterThan(0);
+    expect(await rect(".solv-input")).toEqual(input);
+  });
 
   function delayConfig(): () => void {
     let release = () => {};
