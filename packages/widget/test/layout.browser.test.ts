@@ -394,9 +394,15 @@ document.querySelector("button").onclick = () => {
     const chip = await rect(".solv-chip");
     expect(Math.abs(chip.top - greeting.bottom - 12)).toBeLessThanOrEqual(2);
     const panel = await rect(".solv-panel");
+    const form = await rect(".solv-form");
+    const formBorderTop = await q<number>('r.querySelector(".solv-form").clientTop');
     const input = await rect(".solv-input");
-    expect(panel.bottom - input.bottom).toBe(16);
-    expect((await rect(".solv-send")).bottom).toBe(input.bottom);
+    const send = await rect(".solv-send");
+    expect(Math.abs(panel.bottom - input.bottom - 24)).toBeLessThanOrEqual(2);
+    expect(Math.abs(input.top - form.top - formBorderTop - 16)).toBeLessThanOrEqual(2);
+    expect(input.left - form.left).toBe(16);
+    expect(form.right - send.right).toBe(16);
+    expect(send.bottom).toBe(input.bottom);
 
     await click(".solv-chip", true);
     await waitFor(

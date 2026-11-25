@@ -675,8 +675,8 @@ textarea:focus-visible {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  padding: 12px 12px 16px;
-  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  padding: 16px 16px 24px;
+  padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--solv-border);
   background: var(--solv-bg);
 }
